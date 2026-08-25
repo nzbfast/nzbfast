@@ -69,7 +69,7 @@
     enkele as bespaarde was ongeveer 2 procent - een statistisch gelijkspel, binnen de eigen
     spreiding van run tot run van die client - en op schijf verplaatste elk van hen minstens tweemaal zoveel bytes
     voor een byte-identiek resultaat. Zoals uitgeleverd hield nzbfast ook het minste geheugen vast van
-    elke gemeten client, op elke fixture, met een factor 2.0x tot 4.5x tegenover de
+    elke gemeten client, op elke fixture, met een factor 2,0x tot 4,5x tegenover de
     naaste concurrent.</p>
     <p><b>Welke bent u?</b></p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
@@ -200,7 +200,7 @@
     6,5 GB op de schone fixture - hetzelfde cijfer dat NZBGet en SABnzbd voor zichzelf opgeven.
     Het slechtste geval dat we kennen is een opzettelijk hernummerde geobfusceerde
     post, waar het omzeilen van de door elkaar gehusselde nummering één extra artikel per
-    stuurbeweging kost: gemeten op 1,10-1.20x het minimale plan op beide zulke vormen die we konden
+    stuurbeweging kost: gemeten op 1,10-1,20x het minimale plan op beide zulke vormen die we konden
     bouwen. De cellen van 7,2 en 37,8 GB van rustnzb zijn zijn
     eigen overschot, met een waarschuwing in zijn log op twee etappes.</p>
     <p class="note" style="text-align:start"><b>Wat de geheugenkolom betekent bij
@@ -251,15 +251,15 @@
     binnen 18% op de klok en lopen we 4,4% voor op de naaste concurrent; bij 500 Mbit opent
     het gat naar 14,7%; bij de gigabit- en 10 GbE-snelheden in de tabellen erboven en eronder
     opent het verder. Snelheidsverschillen groeien met de lijn. De resourcekolommen wachten niet
-    op een snelle lijn: bij elke gemeten snelheid hield elke concurrent minstens 3.9x het
+    op een snelle lijn: bij elke gemeten snelheid hield elke concurrent minstens 3,9x het
     geheugen vast, besteedde meer processor, en verplaatste ongeveer tweemaal de schijfbytes voor hetzelfde
     byte-identieke bestand.</p>
     <p><b>De verbindingsregelaar verdient zichzelf terug op trage lijnen, en de eigen dropteller van de shaper zegt waarom.</b>
     Standaardinstellingen hielden 25 verbindingen aan waar elke concurrent honderden liet
     lopen; dezelfde binary met de regelaar uit liep er 360. Minder stromen door een
-    vaste wachtrij betekent minder verlies en minder opnieuw versturen: de shaper registreerde ongeveer 4,200
-    drops per beperkte etappe tegenover ongeveer 155,000 onbeperkt bij 500 Mbit, en de beperkte arm
-    was sneller, 4.2x lichter op geheugen en 1.3x lichter op CPU dan onze eigen houding met 360 sockets.
+    vaste wachtrij betekent minder verlies en minder opnieuw versturen: de shaper registreerde ongeveer 4.200
+    drops per beperkte etappe tegenover ongeveer 155.000 onbeperkt bij 500 Mbit, en de beperkte arm
+    was sneller, 4,2x lichter op geheugen en 1,3x lichter op CPU dan onze eigen houding met 360 sockets.
     Meer verbindingen is niet meer snelheid; onder een gigabit is het meetbaar het
     tegenovergestelde.</p>
     <p class="note" style="text-align:start"><b>Gemeten 24 augustus 2026</b>, medianen van
@@ -296,8 +296,8 @@
     </table></div>
     <p><b>Het schijfverhaal op zijn grootste schaal tot nu toe.</b> Onze piek op schijf tijdens de taak is
     70,8 GiB - ONDER de output van 76,6 GB, omdat de staart van de payload nog binnenkomt
-    terwijl de kop al definitief is - en de totale schijf-I/O is 1.00x de payload. De concurrenten
-    verplaatsen 2.5x tot 6.0x de bytes voor hetzelfde bestand. En de snelste arm houdt ongeveer 8,7 Gbps vol,
+    terwijl de kop al definitief is - en de totale schijf-I/O is 1,00x de payload. De concurrenten
+    verplaatsen 2,5x tot 6,0x de bytes voor hetzelfde bestand. En de snelste arm houdt ongeveer 8,7 Gbps vol,
     <em>inclusief</em> in-stream verificatie en extractie; op het moment dat de downloadbalk vol staat, is het
     bestand klaar.</p>
     <p class="note" style="text-align:start">&sup1; Elke client op deze pagina wordt geracet op zijn gedocumenteerde beste instellingen, en op een
@@ -305,7 +305,7 @@
     haalt - dezelfde afstelling van één instelling die we elke concurrent geven (SABnzbd zijn
     pipelining, NZBGet zijn artikelcache). Vijftig is geen handicap: een sweep over zes tredes
     op dezelfde fixture vond het plafond identiek van 50 verbindingen helemaal tot aan de
-    accountmaxima van 360, terwijl de processorkosten over dat bereik met 2.3x stijgen voor
+    accountmaxima van 360, terwijl de processorkosten over dat bereik met 2,3x stijgen voor
     niets, dus de maxima leveren niets op dat deze tabel zou laten zien. De rij met 50 verbindingen werd
     daarna opnieuw gemeten met volledige driehernemingskwaliteit dezelfde dag, op dezelfde
     machine, tegen dezelfde uitvoerchecksum: 70 / 70 / 70 s, alle drie byte-gecontroleerd.
@@ -319,7 +319,7 @@
     opslag die bijna alles opnieuw leest en opnieuw wegschrijft naarmate de taak groeit - het
     superlineaire patroon dat onze geïnstrumenteerde rondes van juli maten, nog steeds aanwezig op de
     huidige build. &sup3; rustnzb 1.4.5 voltooit byte-correct en zijn kosten zitten in
-    processortijd en netwerk: ongeveer 2,444 CPU-seconden tegen een klok van 869 s over alle
+    processortijd en netwerk: ongeveer 2.444 CPU-seconden tegen een klok van 869 s over alle
     drie herhalingen, en 86,9 GB opgehaald waar het gretige plan 77,2 is (het haalt de volledige
     herstelset onvoorwaardelijk op). Gemeten 24 augustus 2026, medianen van drie, elke
     build actueel; herneming 3 voor de drie snelste armen liep ~40 minuten na de rest
@@ -344,8 +344,8 @@
     drie, beide clients actueel. Newsbin draaide op zijn eigen geconfigureerde maxima aan
     verbindingen per server - 360 sockets tegen onze 50 - en zijn tijden sluiten de 90 seconden
     zettijd uit die onze testbank wacht voordat een bekeken client als klaar wordt verklaard, dus de
-    vergelijking leunt tweemaal zijn kant op en het resultaat blijft toch staan: 4.5x de klok,
-    12x de CPU-seconden, en 1.9x het geheugen voor hetzelfde bestand. Geen van beide kanten is
+    vergelijking leunt tweemaal zijn kant op en het resultaat blijft toch staan: 4,5x de klok,
+    12x de CPU-seconden, en 1,9x het geheugen voor hetzelfde bestand. Geen van beide kanten is
     hier schijfgebonden - de arm met één doorgang heeft ongeveer 0,73 GB/s van de 0,99 van de schijf nodig,
     en Newsbin haalt gemiddeld een derde daarvan terwijl het bijna vier processorkernen acht minuten lang
     bezet houdt - dus het gat is de client, niet de hardware. Beide clients haalden dezelfde
@@ -367,7 +367,7 @@
     maar het <b>wachtwoord</b>: ongeveer een derde van de bytes heeft er een nodig om überhaupt
     uitvoer te produceren, welke client u ook draait. De momentopname van juli blijft hieronder staan als de
     momentopname die het is.</p>
-    <p>Voor de telling van juli bekeken we 890,852 releases, 1,6 miljoen bestanden en
+    <p>Voor de telling van juli bekeken we 890.852 releases, 1,6 miljoen bestanden en
     79,6&nbsp;TB over de twee drukste film- en tv-groepen, haalden toen de archiefkoppen van
     duizend echte posts op en lazen ze om te bevestigen wat de bestandsnamen alleen suggereerden.
     Geteld per <b>byte</b> in plaats van per post, omdat een miljoen kleine bestanden minder
@@ -433,9 +433,9 @@
     seconden elk kosten, terwijl de download op nul staat. nzbfast stopt met vragen: zodra de
     herstelgegevens die al binnen zijn dekken wat nog ontbreekt, herstelt het meteen
     in plaats van de gang af te maken. Dat is de tweede rij - dezelfde binary met dat
-    gedrag uitgeschakeld is 1.4x tot 2.3x trager afhankelijk van de schade - en de ronde
+    gedrag uitgeschakeld is 1,4x tot 2,3x trager afhankelijk van de schade - en de ronde
     verifieerde dat het mechanisme op elke ingeschakelde etappe inschakelde en nooit op een uitgeschakelde.
-    Tegen de naaste concurrent is de marge 2.4x tot 2.7x, zonder overlap in een van de
+    Tegen de naaste concurrent is de marge 2,4x tot 2,7x, zonder overlap in een van de
     negen herhalingsparen.</p>
     <p><b>Schijf is waar de marge het breedst is, en het is niet de herstelkunstgreep.</b> Elke
     voltooiende arm produceerde hetzelfde bestand van 6,48 GB; de onze verplaatste 6,2-6,8 GB aan schijf-I/O
@@ -445,14 +445,14 @@
     <p class="note" style="text-align:start">&sup1; De drie etappes van SABnzbd bij de zwaarste
     schade liepen 43, 41 en 60 s - een echte spreiding op identieke invoer, dus het gemiddelde wordt
     opgegeven met het bereik vermeld. &sup2; rustnzb 1.4.5 leverde elke etappe byte-correct,
-    en zijn kosten zitten in processortijd eerder dan in betrouwbaarheid: ongeveer 1,620
+    en zijn kosten zitten in processortijd eerder dan in betrouwbaarheid: ongeveer 1.620
     CPU-seconden tegen een klok van 107 s bij de zwaarste schade - ruwweg vijftien kernen
     bezet gedurende de hele etappe - waar dezelfde herstelde uitvoer ons ongeveer 50
     CPU-seconden kost. &sup3; Weaver verplaatste 1,5 GB en 4,9 GB van de 6,5 binnen onze afkapgrens van
     20 minuten op de twee zwaarste schadeniveaus - hetzelfde niet-klaarkomen in alle drie de rondes die
     het geracet hebben, op drie afzonderlijke nachten; de afkapgrens is de onze en het niet-klaarkomen
     is het resultaat. Bij 5 dode artikelen voltooide het correct alle drie de keren. Zijn
-    processorkosten daar zijn een eigen verhaal: ongeveer 2,325 CPU-seconden voor de etappe van 194 s,
+    processorkosten daar zijn een eigen verhaal: ongeveer 2.325 CPU-seconden voor de etappe van 194 s,
     tegen onze 20.</p>
     <p class="note" style="text-align:start">Gemeten 24 augustus 2026, alle builds
     actueel: nzbfast v1.2.2 (de releasetag zelf), NZBGet 26.3-testing (build van 20 augustus),
@@ -512,12 +512,12 @@
     <p><b>De klem geracet tegen de eigen knoppen van het veld.</b> Op de fixture van 34 GB (23
     augustus 2026, 1 Gbit-machine, vijf providers, 30 van de 30 etappes byte-correct), verdubbelde het
     houden van NZBGet aan een gelijkwaardige cacheklem meer dan zijn CPU (215,5 naar 453,0
-    CPU-seconden, 2.10x) om een besparing van 52% op zijn piekgeheugen te kopen, en de klem van SABnzbd was
+    CPU-seconden, 2,10x) om een besparing van 52% op zijn piekgeheugen te kopen, en de klem van SABnzbd was
     bijna gratis maar bereikte maar een deel van zijn voetafdruk. De cache-instelling van rustnzb was
     decoratief in de geracete build, en Weaver heeft helemaal geen geheugenknop, dus beide liepen
     ongeklemd als referentiekolommen in plaats van beoordeeld te worden op een budget dat ze niet kunnen
     aanhouden. Onze eigen kant van die ronde is vervangen door de v1.2.2-ladder hierboven, die
-    hetzelfde zegt op 2.5x de omvang: het budget is nooit de bindende beperking,
+    hetzelfde zegt op 2,5x de omvang: het budget is nooit de bindende beperking,
     omdat one-pass zo weinig vasthoudt om mee te beginnen.</p>
   </div>
 </section>
@@ -562,7 +562,7 @@
     geen mislukte taak. &sup1; De kolom van Weaver bij de grote fixture is onopgelost om een reden
     die niets met schijf te maken heeft: twee van zijn drie etappes stagneerden bij enkele MB/s met meer
     dan 60 GB nog vrij en haalden de afkapgrens van 40 minuten van de ronde, terwijl de
-    derde correct voltooide bij dezelfde ~2.25x die het nodig heeft op de kleine taak. Een stagnatie is geen
+    derde correct voltooide bij dezelfde ~2,25x die het nodig heeft op de kleine taak. Een stagnatie is geen
     vrije-ruimteoordeel, dus we markeren de cel als onopgelost in plaats van hem op een van beide manieren te
     scoren.</p>
   </div>
@@ -574,31 +574,31 @@
     <h2>Uw schijf bepaalt uw snelheidslimiet</h2>
     <p class="lead"><b>Voor elke schijf is de lijnsnelheid die u kunt volhouden door download,
     verificatie en uitpakken heen het werkelijke tempo van de schijf gedeeld door de I/O-vermenigvuldigingsfactor
-    van de client.</b> De kostentabellen hierboven meten de onze op ongeveer 1.0x - elke byte
-    gaat ongeveer één keer over de schijf - en elke concurrent op 2.0x tot 3.0x voor byte-identieke
+    van de client.</b> De kostentabellen hierboven meten de onze op ongeveer 1,0x - elke byte
+    gaat ongeveer één keer over de schijf - en elke concurrent op 2,0x tot 3,0x voor byte-identieke
     output. Dus dezelfde schijf houdt onder nzbfast twee- tot driemaal de lijnsnelheid vol
     die hij onder een stagingclient zou volhouden. De rekenkunde, met de vermenigvuldigingsfactoren
     genomen uit de gemeten tabellen hierboven:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>lijn</th><th>payloadtempo</th><th>schijf nodig bij onze ~1.0x</th><th>bij 2.2x</th><th>bij 3.0x</th></tr></thead>
+      <thead><tr><th>lijn</th><th>payloadtempo</th><th>schijf nodig bij onze ~1.0x</th><th>bij 2,2x</th><th>bij 3,0x</th></tr></thead>
       <tbody>
         <tr><td>100 Mbit</td><td class="num">12,5 MB/s</td><td class="win num">~13 MB/s</td><td class="num">~28 MB/s</td><td class="num">~38 MB/s</td></tr>
         <tr><td>1 Gbit</td><td class="num">125 MB/s</td><td class="win num">~130 MB/s</td><td class="num">~275 MB/s</td><td class="num">~375 MB/s</td></tr>
-        <tr><td>5 Gbit</td><td class="num">625 MB/s</td><td class="win num">~650 MB/s</td><td class="num">~1,400 MB/s</td><td class="num">~1,900 MB/s</td></tr>
+        <tr><td>5 Gbit</td><td class="num">625 MB/s</td><td class="win num">~650 MB/s</td><td class="num">~1.400 MB/s</td><td class="num">~1.900 MB/s</td></tr>
         <tr><td>10 Gbit</td><td class="num">1,25 GB/s</td><td class="win num">~1,3 GB/s</td><td class="num">~2,75 GB/s</td><td class="num">~3,75 GB/s</td></tr>
       </tbody>
     </table></div>
     <p>Zet die kolommen tegenover wat schijven werkelijk volhouden. Een NAS-schijf van 5400/5900 rpm
     houdt ruwweg 100-140 MB/s aan op zijn buitenste sporen, aftakelend naar 80-100 naarmate hij
-    vult - dus gigabit ligt op de traagste klasse al op de rand bij 1.0x, wat we ronduit
+    vult - dus gigabit ligt op de traagste klasse al op de rand bij 1,0x, wat we ronduit
     zeggen, en buiten bereik bij 2-3x. Een schijf van 7200 rpm houdt ruwweg
-    160-220 MB/s aan. De ~550 MB/s van een SATA-SSD plafonneert een 2.2x-client bij bijna 2 Gbit en draagt
-    ongeveer 3,5-4 Gbit bij 1.0x. SMR-schijven, jarenlang verkocht voor NAS-behuizingen, zijn het
+    160-220 MB/s aan. De ~550 MB/s van een SATA-SSD plafonneert een 2,2x-client bij bijna 2 Gbit en draagt
+    ongeveer 3,5-4 Gbit bij 1,0x. SMR-schijven, jarenlang verkocht voor NAS-behuizingen, zijn het
     ergste geval voor precies het stagingpatroon: aanhoudend schrijven met terugleesacties kan
     instorten tot tientallen MB/s zodra de reshingling-cache van de schijf uitgeput raakt. En een
     multi-gig-lijn is dezelfde muur, hoger op: 10 Gbit bij een 2-3x-vermenigvuldigingsfactor eist
     2,75-3,75 GB/s <em>aanhoudend</em>, voorbij elke SATA-schijf en voorbij veel NVMe-schijven
-    zodra een grote taak hun snelle cachezone voorbijloopt, terwijl bij 1.0x een SSD van
+    zodra een grote taak hun snelle cachezone voorbijloopt, terwijl bij 1,0x een SSD van
     ~2 GB/s de lijnsnelheid bijhoudt met ruimte over.</p>
     <p><b>Gemeten in plaats van beweerd, op een gedrosselde schijf.</b> We beperkten een schijf tot
     150 MB/s - een tempo van de klasse 5400 rpm - en draaiden dezelfde download tweemaal: eenmaal one-pass,
@@ -606,8 +606,8 @@
     one-pass-arm hield de 1 Gbit-lijn bij op 109,9 MB/s, 0,2% onder zijn eigen ongedrosselde tempo;
     het stagingpatroon zakte naar 59,0 MB/s, 54% van de lijn. Parametrisch geveegd zonder
     lijnlimiet nam de one-pass-arm 97% van wat de schijf ook maar bood bij elke grens
-    (290,7 MB/s van een grens van 300 MB/s, 145,6 van 150) bij een gemeten 1,00-1.03x schijf-I/O,
-    en het stagingpatroon nam 47-48% bij een gemeten 3.02x - de verhouding constant
+    (290,7 MB/s van een grens van 300 MB/s, 145,6 van 150) bij een gemeten 1,00-1,03x schijf-I/O,
+    en het stagingpatroon nam 47-48% bij een gemeten 3,02x - de verhouding constant
     over de grenzen heen, wat de rekenkunde hierboven is teruggevonden als een meting. 32 etappes,
     elke output byte-gecontroleerd.</p>
     <p><b>En eenmaal op echte hardware, ongedrosseld.</b> De traagste schijf in onze testvloot
@@ -618,8 +618,8 @@
     vloot - wat de rechterbovencel van de tabel hierboven is die op een echte schijf landt in
     plaats van een gedrosselde. En het snelle uiteinde van de vloot sluit het argument van de andere kant af:
     dezelfde taak van 87 GB, volledig tempo op 10 GbE, is klaar in dezelfde 70-71 seconden op een
-    schijf van 1,24 GB/s en op een van 5,97 GB/s - een 4.8x snellere schijf verplaatst de klok met
-    nul, omdat bij een 1.0x-vermenigvuldigingsfactor de lijn allang op is voordat de schijf dat is. Voor een
+    schijf van 1,24 GB/s en op een van 5,97 GB/s - een 4,8x snellere schijf verplaatst de klok met
+    nul, omdat bij een 1,0x-vermenigvuldigingsfactor de lijn allang op is voordat de schijf dat is. Voor een
     stagingclient zijn die twee schijven verschillende werelden.</p>
     <p class="note" style="text-align:start"><b>Wat die opstelling wel en niet is.</b> De
     schijf werd beperkt met een I/O-controller van het besturingssysteem binnen een virtuele machine
@@ -725,7 +725,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Alle zeven vormen zijn van ons, op het minimum en
-    op de mediaan, 1.16x tot 4.29x tegen unrar. Deze tijden zijn niet vergelijkbaar cel voor cel
+    op de mediaan, 1,16x tot 4,29x tegen unrar. Deze tijden zijn niet vergelijkbaar cel voor cel
     met de bredere tabel hieronder - de testbank is herzien sinds de rondes van die tabel
     en de rondetellingen verschillen - lees dus elke tabel tegen zichzelf.
     De bredere tabel behoudt zijn eigen data's en zijn veld van zes gereedschappen, en zijn nzbfast-kolom
@@ -783,18 +783,18 @@
 
     <p class="note" style="text-align:start"><b>Eén keuze die genoemd moet worden.</b> De archieven zijn ingepakt met de compressor vastgezet op vier draden. RAR's blokindeling volgt anders het aantal kernen van de machine die het archief inpakte, zodat een machine met 32 kernen en een met 20 kernen uit dezelfde invoer verschillende bytes maken en de machines niet meer vergelijkbaar zijn. Vastzetten maakt het extractiecorpus overal byte voor byte gelijk, wat het doel is, maar het beperkt ook hoeveel van het decoderen parallel kan lopen - daarom hebben we de twee nauwste vormen, toen ze nog verliezen waren, opnieuw geracet tegen archieven ingepakt met alle 32 draden, om te controleren of het vastzetten niet de oorzaak was. Dat was het niet: solid ging van 4,2% achterstand naar 2,4% en het woordenboek van 128 MiB van 6,6% naar 6,3%, dezelfde volgorde in beide gevallen. Beide zijn nu winst op het vastgezette corpus, met een ruimere marge dan die controle zou kunnen verklaren.</p>
 
-    <p class="note" style="text-align:start"><b>Waarom er geen RAR4-rij is, en wat er met die posts gebeurt.</b> Elke vorm hierboven is RAR5 of RAR7, wat is wat usenet tegenwoordig plaatst. Oudere RAR4-archieven duiken nog steeds op, en dezelfde engine leest ze, inclusief de gecomprimeerde en met wachtwoord beveiligde vormen, in dezelfde enkele doorgang als de nieuwere, in plaats van de volumes eerst naar schijf te schrijven en ze daarna uit te pakken. Ze krijgen hier geen rij omdat de officiële <code>rar</code> 7.23 geen RAR4 meer kan maken, dus er is geen neutraal corpus om het veld op te racen; dat werk wordt in plaats daarvan getoetst aan archieven geschreven door WinRAR 3,00, byte voor byte tegen unrar.</p>
+    <p class="note" style="text-align:start"><b>Waarom er geen RAR4-rij is, en wat er met die posts gebeurt.</b> Elke vorm hierboven is RAR5 of RAR7, wat is wat usenet tegenwoordig plaatst. Oudere RAR4-archieven duiken nog steeds op, en dezelfde engine leest ze, inclusief de gecomprimeerde en met wachtwoord beveiligde vormen, in dezelfde enkele doorgang als de nieuwere, in plaats van de volumes eerst naar schijf te schrijven en ze daarna uit te pakken. Ze krijgen hier geen rij omdat de officiële <code>rar</code> 7.23 geen RAR4 meer kan maken, dus er is geen neutraal corpus om het veld op te racen; dat werk wordt in plaats daarvan getoetst aan archieven geschreven door WinRAR 3.00, byte voor byte tegen unrar.</p>
 
     <h3 style="margin:44px 0 4px">PAR2-verificatie en -herstel: set van 1 GiB, vier schadeniveaus</h3>
     <p class="note" style="text-align:start;margin-top:6px">Corpus: 1 GiB willekeurige payload ingepakt in store-modus in 21 RAR-volumes, dan twee PAR2-sets bij 10% redundantie, één met blokken van 1 MiB en één met 64 KiB, dan vaste schadekaarten. Elke run gebruikt hetzelfde protocol: verse kopie, het hele corpus één keer lezen om de cache op te warmen, dan de tijd opnemen. Beste van drie afgewisselde rondes; elk hersteld volume wordt op elke ronde vergeleken met de ongeschonden set. Lager is beter.</p>
 
-    <p class="note" style="text-align:start"><b>Een correctie over het corpus, omdat een eerdere versie van deze pagina te veel beweerde.</b> We zeiden dat elke machine een byte-identiek corpus draaide, gecontroleerd met een hash. De hash van elk volume van elke set berekenen laat zien dat dat klopt voor de 32-core desktop en de Windows-laptop, die exact overeenkomen, en niet voor de 20-core desktop, die een andere willekeurige trekking van dezelfde vorm bevat: dezelfde 21 volumes met dezelfde groottes, dezelfde twee blokgroottes, en schade geverifieerd op dezelfde 3, 101 en 1,500 blokken verdeeld over hetzelfde aantal bestanden. Elk cijfer binnen een rij is nog steeds gemeten op bytes die elk gereedschap in die rij deelt, wat is waar elke vergelijking op rust. Maar de rijen zijn geen vier blikken op één invoer, en omdat het karakter van de payload ongeveer 7% waard is voor het scannen van één concurrent, is dat het zeggen waard in plaats van het glad te strijken.</p>
+    <p class="note" style="text-align:start"><b>Een correctie over het corpus, omdat een eerdere versie van deze pagina te veel beweerde.</b> We zeiden dat elke machine een byte-identiek corpus draaide, gecontroleerd met een hash. De hash van elk volume van elke set berekenen laat zien dat dat klopt voor de 32-core desktop en de Windows-laptop, die exact overeenkomen, en niet voor de 20-core desktop, die een andere willekeurige trekking van dezelfde vorm bevat: dezelfde 21 volumes met dezelfde groottes, dezelfde twee blokgroottes, en schade geverifieerd op dezelfde 3, 101 en 1.500 blokken verdeeld over hetzelfde aantal bestanden. Elk cijfer binnen een rij is nog steeds gemeten op bytes die elk gereedschap in die rij deelt, wat is waar elke vergelijking op rust. Maar de rijen zijn geen vier blikken op één invoer, en omdat het karakter van de payload ongeveer 7% waard is voor het scannen van één concurrent, is dat het zeggen waard in plaats van het glad te strijken.</p>
 
     <p class="note" style="text-align:start"><b>Welke par2 welke is.</b> De originele <code>par2cmdline</code> is de referentie-implementatie waar iedereen van is afgeleid. <code>par2cmdline-turbo</code> is de fork die de hand-geschreven SIMD-Galoisveldkernels van <b>ParPar</b> meebrengt: dat is precies wat "turbo" betekent, en dat is waarom turbo, in plaats van het origineel, het gereedschap is dat de moeite waard is om tegen te meten. Beide turbo-kolommen hieronder draaien diezelfde ParPar-kernels. Wat ze scheidt is niet de rekenkunde maar de build en de vlaggen.</p>
 
     <p class="note" style="text-align:start"><b>Bevestigd op de uitgeleverde build tegen de actuele concurrent, 24 augustus 2026.</b> Deze tabellen werden gemeten voordat 1.2.2 werd gesneden en voordat <code>par2cmdline-turbo</code> 1.5.0 uitbracht (20 augustus 2026), dus de kolom met 20 cores werd opnieuw geracet op beide: onze releasebuild 1.2.2 tegen turbo 1.5.0, drie afgewisselde rondes per etappe, elk hersteld bestand vergeleken met de ongeschonden set. Alle vier etappes reproduceren - de onze 0,18 / 0,30 / 0,75 / 2,02 tegen de 0,19 / 0,33 / 0,74 / 2,07 hier afgedrukt, en turbo 1.5.0 landt binnen een paar procent van de build in de tabel op elke etappe en beide configuraties. De cellen blijven staan zoals gepubliceerd; de andere drie machines behouden hun eigen data's.</p>
 
-    <p class="note" style="text-align:start"><b>De concurrentie verschijnt dus tweemaal, en één van die kolommen is zijn beste geval eerder dan zijn standaard.</b> De releasebinary die u zou downloaden is gecompileerd voor een generieke basis-cpu en hasht maar een paar bestanden tegelijk; dezelfde bron voor de werkelijke host-cpu bouwen en <code>-T16</code> meegeven laat het de instructies gebruiken die die machine echt heeft en zestien bestanden tegelijk hashen. Op de laptop is dat tot 2.6x waard, volledig uit build en vlaggen. Beoordeel ons op de afgestelde kolom, wat de moeilijkere vergelijking is; de kolom zoals uitgeleverd is wat iemand die het downloadt werkelijk ervaart. <code>par2cmdline</code> is het origineel, versie 1.2.0, uit bron gebouwd op elke machine. <code>rarpar</code> is Weaver's eigen PAR2-implementatie, uit bron gebouwd met zijn Metal-GPU-backend ingeschakeld. De <code>par2j</code> van MultiPar is alleen Windows, dus die verschijnt alleen op de rijen van de Windows-laptop. De M5 Max-rijen racen de twee gereedschappen met actuele macOS-arm64-builds naast de twee turbo-kolommen; <code>par2cmdline</code> klassiek werd op die machine niet geracet.</p>
+    <p class="note" style="text-align:start"><b>De concurrentie verschijnt dus tweemaal, en één van die kolommen is zijn beste geval eerder dan zijn standaard.</b> De releasebinary die u zou downloaden is gecompileerd voor een generieke basis-cpu en hasht maar een paar bestanden tegelijk; dezelfde bron voor de werkelijke host-cpu bouwen en <code>-T16</code> meegeven laat het de instructies gebruiken die die machine echt heeft en zestien bestanden tegelijk hashen. Op de laptop is dat tot 2,6x waard, volledig uit build en vlaggen. Beoordeel ons op de afgestelde kolom, wat de moeilijkere vergelijking is; de kolom zoals uitgeleverd is wat iemand die het downloadt werkelijk ervaart. <code>par2cmdline</code> is het origineel, versie 1.2.0, uit bron gebouwd op elke machine. <code>rarpar</code> is Weaver's eigen PAR2-implementatie, uit bron gebouwd met zijn Metal-GPU-backend ingeschakeld. De <code>par2j</code> van MultiPar is alleen Windows, dus die verschijnt alleen op de rijen van de Windows-laptop. De M5 Max-rijen racen de twee gereedschappen met actuele macOS-arm64-builds naast de twee turbo-kolommen; <code>par2cmdline</code> klassiek werd op die machine niet geracet.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>seconden, set van 1 GiB</th><th>desktop, 32 cores</th><th>desktop, 20 cores</th><th>laptop, 14 cores</th><th>laptop, M5 Max</th></tr></thead>
@@ -834,16 +834,16 @@
 
     <p class="note" style="text-align:start"><b>Het origineel staat weer in de tabel, en het is de moeite waard te zien waarom de fork bestaat.</b> Een eerdere versie van deze pagina liet de kolom <code>par2cmdline</code> weg op grond dat hij trager was dan al het andere in de ronde, wat waar is en geen goede genoeg reden: het is de implementatie waar bijna elk ander gereedschap van is afgeleid, en lezers verdienen de baseline in plaats van onze bewering erover. Op het zwaarste schadeniveau kost het ongeveer 69 s waar de SIMD-fork 3,2 s neemt en wij 3,1 s nemen. Die factor twintig is het hele argument voor de hand-geschreven Galoisveldkernels, en het is hetzelfde argument dat we maken voor de onze.</p>
 
-    <p class="note" style="text-align:start"><b>Lichte schade is het geval dat ertoe doet.</b> Een handjevol mislukte artikelen is veel typischer dan 101 dode blokken, en niets zoals 1,500. Het meeste van een licht herstel is helemaal geen Reed-Solomon-wiskunde, het is het lezen en MD5'en van een gigabyte, en daarom volgt de rij met 3 blokken de rij met de schone verificatie eerder dan de herstelrijen.</p>
+    <p class="note" style="text-align:start"><b>Lichte schade is het geval dat ertoe doet.</b> Een handjevol mislukte artikelen is veel typischer dan 101 dode blokken, en niets zoals 1.500. Het meeste van een licht herstel is helemaal geen Reed-Solomon-wiskunde, het is het lezen en MD5'en van een gigabyte, en daarom volgt de rij met 3 blokken de rij met de schone verificatie eerder dan de herstelrijen.</p>
 
-    <p class="note" style="text-align:start"><b>Het zwaarste schadeniveau is een ander soort werk, en het krijgt een ander algoritme.</b> Dat laatste niveau beschadigt 1,500 blokken over alle 21 volumes en verbruikt ongeveer 91% van de herstelgegevens, waar de Reed-Solomon-rekenkunde, eerder dan hashen of schijf, bijna al het werk wordt. De uitgeleverde build berekent de zwaarste herstellingen nu met een getaltheoretische transformatie in plaats van de klassieke Galoisveldvouwing - dezelfde wiskunde, geëvalueerd in een vorm die veel beter schaalt bij hoge blokaantallen: 2,7× voor op de afgestelde build op de 20-core desktop, en op de Windows-laptop 2,7× voor op de afgestelde build en 2,2× voor op MultiPar. Lichte schade loopt nog steeds via het klassieke pad, wat is waarom de andere niveaus nauwelijks bewogen: de transformatie loont pas boven ongeveer 512 beschadigde blokken, dus daaronder gebruikt de verdeler hem niet.</p>
+    <p class="note" style="text-align:start"><b>Het zwaarste schadeniveau is een ander soort werk, en het krijgt een ander algoritme.</b> Dat laatste niveau beschadigt 1.500 blokken over alle 21 volumes en verbruikt ongeveer 91% van de herstelgegevens, waar de Reed-Solomon-rekenkunde, eerder dan hashen of schijf, bijna al het werk wordt. De uitgeleverde build berekent de zwaarste herstellingen nu met een getaltheoretische transformatie in plaats van de klassieke Galoisveldvouwing - dezelfde wiskunde, geëvalueerd in een vorm die veel beter schaalt bij hoge blokaantallen: 2,7× voor op de afgestelde build op de 20-core desktop, en op de Windows-laptop 2,7× voor op de afgestelde build en 2,2× voor op MultiPar. Lichte schade loopt nog steeds via het klassieke pad, wat is waarom de andere niveaus nauwelijks bewogen: de transformatie loont pas boven ongeveer 512 beschadigde blokken, dus daaronder gebruikt de verdeler hem niet.</p>
 
     <p class="note" style="text-align:start"><b>Een sneller pad is het alleen waard te hebben als het nooit fout kan zijn.</b> Beide paden berekenen dezelfde grootheid en zijn per constructie bit-identiek, en elk herstel op deze pagina werd getoetst aan de herbouwde bestanden die overeenkwamen met de ongeschonden set: 228 getimede herstellingen over de machines in deze ronde, nul mismatches. De uitgeleverde build vertrouwt niet op dat trackrecord. Elk herstel verifieert zijn eigen uitvoer tegen de bestandshashes, en één dat zou falen zou automatisch worden overgedaan met het klassieke pad, de afwijking loggen, en het klassieke pad aanhouden voor de rest van die run. De instelling staat in het dashboard als <b>Fast PAR mode</b> voor wie het liever helemaal niet heeft, en machines met te weinig geheugen ervoor wijzen het uit zichzelf af in plaats van te proberen en te falen. Opnieuw gemeten op 2 augustus op de actuele build: de twee desktops landen binnen een paar procent van deze tabel, en met <b>Fast PAR mode</b> uitgeschakeld valt de 20-core desktop terug op precies de tragere tijd van het klassieke pad, wat zegt dat de winst de methode is en niet de omstandigheden.</p>
 
     <p class="note" style="text-align:start"><b>De kolom van de Windows-laptop had een correctie nodig, en die gaat tegen ons.</b> Windows verplaatst aanhoudend achtergrondwerk na een paar seconden naar de efficiëntiekernen. Onze daemon meldt zich daar bij het opstarten voor af en geen van de andere gereedschappen kan dat, dus publiceerde een eerdere versie van deze pagina hun gedrosselde tijden alsof het hun eigen tijden waren. Diezelfde machine opnieuw draaien met elk gereedschap op hoge prioriteit verplaatst het hele veld: op het zwaarste schadeniveau gaat <code>par2-turbo</code> van 22,4 s naar 6,41 en <code>rarpar</code> van 59,2 s naar 14,4, en voor één versie van deze pagina veranderde dat de kolom van winst voor ons naar een verlies. De hele laptopkolom wordt nu zo gemeten - de correctie blijft staan ook al is de rij sindsdien teruggewonnen door de algoritmewijziging hierboven, omdat de tijden van het veld op die machine alleen eerlijk zijn met de drossel opgeheven.</p>
 
     <h3 style="margin:44px 0 4px">RAR-herstelrecords: herstellen zonder PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">Wanneer PAR2 de schade niet kan dekken, is het herstelrecord in het RAR-bestand zelf de laatste verdedigingslinie. Tot 1.0.8 faalde het onze op elk archief boven ongeveer 13 MB, dus deze etappe kon helemaal niet gereden worden. Schade is drie gaten van 3,000 byte op 20%, 50% en 80% door het beschermde gebied heen. Beide gereedschappen produceerden uitvoer die byte-identiek was aan het ongeschonden bestand, en de onze is byte-identiek aan wat <code>rar r</code> zelf schrijft. Beste van drie, 32-core desktop, beide gereedschappen samen opnieuw geracet op 2 augustus.</p>
+    <p class="note" style="text-align:start;margin-top:6px">Wanneer PAR2 de schade niet kan dekken, is het herstelrecord in het RAR-bestand zelf de laatste verdedigingslinie. Tot 1.0.8 faalde het onze op elk archief boven ongeveer 13 MB, dus deze etappe kon helemaal niet gereden worden. Schade is drie gaten van 3.000 byte op 20%, 50% en 80% door het beschermde gebied heen. Beide gereedschappen produceerden uitvoer die byte-identiek was aan het ongeschonden bestand, en de onze is byte-identiek aan wat <code>rar r</code> zelf schrijft. Beste van drie, 32-core desktop, beide gereedschappen samen opnieuw geracet op 2 augustus.</p>
     <div class="tblwrap"><table>
       <thead><tr><th></th><th>16 MB</th><th>32 MB</th><th>128 MB</th><th>512 MB</th><th>2 GB</th></tr></thead>
       <tbody>
@@ -871,7 +871,7 @@
     <p class="note" style="text-align:start">Deze etappe bestaat omdat Weaver's <code>rarpar</code> precies dit implementeert en vroeg om erop gemeten te worden. Het won comfortabel toen we het voor het eerst publiceerden, en we publiceerden het toen om die reden.</p>
     <p class="note" style="text-align:start">De bestandsmatching was nooit de kostenpost, wat de moeite waard is om vast te leggen omdat het de voor de hand liggende verdachte was: herstelvolumes dragen geen bestandsnamen, dus we identificeren welke slots overleefden door elk volume op schijf te checksummen in plaats van te vertrouwen op hoe ze heten, en tegen een onbeschadigde set, waar matching het enige is dat gebeurt, neemt de hele pas 0,18 s.</p>
 
-    <p class="note" style="text-align:start"><b>Wat er nog meer verschoof, en waar dat niet zichtbaar is.</b> Nog twee engine-wijzigingen landden die deze corpora niet kunnen zien, hier genoemd zodat de cijfers hierboven niet als het hele verhaal worden gelezen: RAR5-archieven met tienduizenden leden lossen elk lid één keer op in plaats van de lijst per werker te doorlopen, wat 3× minder processortijd is bij 40,000 leden; en de RAR1.3-bitlezer werkt een woord tegelijk, wat 2× is. Geen van beide verschijnt hierboven, omdat de vormen hier 400 leden hebben en geen RAR1.3.</p>
+    <p class="note" style="text-align:start"><b>Wat er nog meer verschoof, en waar dat niet zichtbaar is.</b> Nog twee engine-wijzigingen landden die deze corpora niet kunnen zien, hier genoemd zodat de cijfers hierboven niet als het hele verhaal worden gelezen: RAR5-archieven met tienduizenden leden lossen elk lid één keer op in plaats van de lijst per werker te doorlopen, wat 3× minder processortijd is bij 40.000 leden; en de RAR1.3-bitlezer werkt een woord tegelijk, wat 2× is. Geen van beide verschijnt hierboven, omdat de vormen hier 400 leden hebben en geen RAR1.3.</p>
 
     <p class="note" style="text-align:start"><b>Wat we bewust niet doen:</b> we
     <i>maken</i> nooit PAR2 aan. Een downloader heeft daar geen reden toe, en ParPar bezit die etappe. We kopen ook snelheid met geheugen op beide engines: extractie piekt rond 240 MB tegen de 41 MB van unrar, en verificatie rond 126 MB tegen de 7 MB van turbo, omdat dit de inline engines zijn die meerijden met een lopende download in plaats van zelfstandige eenmalige runs. De vorm met het woordenboek van 128 MiB is de ergste ervan, bij ongeveer 304 MB tegen de 139 MB van unrar. <b>De zwaarste herstelling kost nu ook geheugen:</b>
@@ -912,11 +912,11 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Direct uitpakken materialiseert eerst nog steeds de volumes:
     2× schrijven en 2× schijf. ⁵ rustnzb 1.4.5 levert elke fixture byte-correct in de ronde van 23 augustus
-    2026, en zijn gemeten schijf-I/O daar is ongeveer 2.1x de payload - dus het staget de
+    2026, en zijn gemeten schijf-I/O daar is ongeveer 2,1x de payload - dus het staget de
     volumes en pakt uit na de download in plaats van in-stream te extraheren (zie <a
     href="#cost">de kostentabellen</a>). Zijn oudere builds (1.3.4-1.3.9) leverden geobfusceerde
     volumes gemarkeerd als "Completed" zonder uit te pakken; die fout is stroomopwaarts gerepareerd in 1.4.5.
-    ⁶ GPL-3,0-or-later.
+    ⁶ GPL-3.0-or-later.
     ⁷ Weaver 0.7.8, de nieuwste uitgeleverde binary, identiteit bewezen via hash (de gepubliceerde release-
     tarball's sha256 en de binary erin komen allebei overeen met wat we racen); zijn gemeten rijen komen
     uit de kostenronde van 23 augustus, zijn vermogenscellen gemarkeerd "-" zijn functies die we niet hebben
@@ -926,7 +926,7 @@
     hier vermeld omdat mensen ernaar vragen, niet omdat ze meedingen op snelheid.</p>
     <p class="note" style="text-align:start">⁸ macOS start een programma met een limiet van 256 open
     bestanden, en een volledige set verbindingen over meerdere servers kan daar voorbij gaan. nzbfast verhoogt zijn eigen
-    limiet bij het opstarten op macOS en Linux: het vraagt om 65,536, stapt af tot het systeem akkoord gaat,
+    limiet bij het opstarten op macOS en Linux: het vraagt om 65.536, stapt af tot het systeem akkoord gaat,
     gaat nooit boven de harde limiet van het systeem, en gaat verder met wat het had als elke stap
     wordt geweigerd. Windows heeft geen limiet van dit soort per proces. De andere kolommen zijn <b>niet
     beoordeeld</b> eerder dan bevestigde afwezigheden: we hebben de opstartcode van geen enkele andere client gelezen.

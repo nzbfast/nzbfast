@@ -204,7 +204,7 @@
     6,5 GB beim sauberen Testfall - dieselbe Zahl, die NZBGet und SABnzbd für sich selbst angeben.
     Der schlimmste uns bekannte Fall ist ein absichtlich umnummerierter verschleierter Post, bei
     dem das Umsteuern um die verwürfelte Nummerierung einen zusätzlichen Artikel pro Steuerung kostet:
-    gemessen bei 1,10-1.20x des minimalen Plans bei beiden Formen, die wir bauen konnten. rustnzbs
+    gemessen bei 1,10-1,20x des minimalen Plans bei beiden Formen, die wir bauen konnten. rustnzbs
     Zellen von 7,2 und 37,8 GB sind sein
     eigener Überschuss, mit einer Warnung in seinem Log bei zwei Etappen.</p>
     <p class="note" style="text-align:start"><b>Was die Speicherspalte bei Werkseinstellungen
@@ -262,8 +262,8 @@
     Drop-Zähler des Shapers sagt warum.</b> Die Werkseinstellungen hielten 25 Verbindungen, wo jeder
     Konkurrent Hunderte fuhr; dasselbe Binary mit abgeschaltetem Regler fuhr 360. Weniger Flüsse
     durch eine feste Warteschlange bedeuten weniger Verlust und weniger erneutes Senden: der Shaper
-    verzeichnete etwa 4,200 Drops je gedeckelter Etappe gegen etwa 155,000 ungedeckelte bei 500 Mbit,
-    und der gedeckelte Arm war schneller, 4.2x leichter beim Speicher und 1.3x leichter bei der CPU
+    verzeichnete etwa 4.200 Drops je gedeckelter Etappe gegen etwa 155.000 ungedeckelte bei 500 Mbit,
+    und der gedeckelte Arm war schneller, 4,2x leichter beim Speicher und 1,3x leichter bei der CPU
     als unsere eigene 360-Socket-Haltung. Mehr Verbindungen bedeutet nicht mehr Geschwindigkeit;
     unterhalb eines Gigabits ist messbar das Gegenteil der Fall.</p>
     <p class="note" style="text-align:start"><b>Gemessen am 24. August 2026</b>, Mediane
@@ -323,7 +323,7 @@
     verschlüsselter Speicher fast alles erneut liest und erneut schreibt, während der Job wächst - das
     überlineare Muster, das unsere instrumentierten Julirunden gemessen haben und das auf dem aktuellen
     Build noch besteht. &sup3; rustnzb 1.4.5 schließt byte-korrekt ab, und seine Kosten liegen bei
-    Prozessorzeit und Leitung: etwa 2,444 CPU-Sekunden gegen eine Uhrzeit von 869 s über alle drei
+    Prozessorzeit und Leitung: etwa 2.444 CPU-Sekunden gegen eine Uhrzeit von 869 s über alle drei
     Wiederholungen hinweg, und 86,9 GB geladen, wo der sparsame Plan bei 77,2 liegt (es lädt den
     vollständigen Wiederherstellungssatz bedingungslos). Gemessen am 24. August 2026, Mediane aus
     drei Läufen, alle Builds aktuell; Wiederholung 3 der drei schnellsten Arme lief ~40 Minuten nach dem
@@ -371,7 +371,7 @@
     sondern das <b>Passwort</b>: etwa ein Drittel der Bytes braucht eines, um überhaupt eine Ausgabe zu
     erzeugen, egal welchen Client Sie fahren. Die Julimomentaufnahme bleibt unten stehen, als die
     Momentaufnahme, die sie ist.</p>
-    <p>Für die Julizählung sahen wir uns 890,852 Releases, 1,6 Millionen Dateien und
+    <p>Für die Julizählung sahen wir uns 890.852 Releases, 1,6 Millionen Dateien und
     79,6&nbsp;TB über die zwei geschäftigsten Film- und TV-Gruppen an, holten dann die Archivheader
     von tausend echten Posts und lasen sie, um zu bestätigen, was die Dateinamen nur andeuteten.
     Gezählt nach <b>Bytes</b> statt nach Post, weil eine Million winziger Dateien weniger zählen als
@@ -433,9 +433,9 @@
     Sekunden dauern, während der Download bei null steht. nzbfast hört auf zu fragen: sobald die
     bereits vorhandenen Wiederherstellungsdaten das noch Fehlende abdecken, repariert es sofort,
     statt den Durchlauf zu Ende zu führen. Das ist die zweite Zeile - dasselbe Binary mit diesem
-    abgeschalteten Verhalten ist je nach Schaden 1.4x bis 2.3x langsamer -, und die Runde bestätigte,
+    abgeschalteten Verhalten ist je nach Schaden 1,4x bis 2,3x langsamer -, und die Runde bestätigte,
     dass der Mechanismus bei jeder aktivierten Etappe griff und nie bei einer deaktivierten. Gegen den
-    nächsten Konkurrenten beträgt der Abstand 2.4x bis 2.7x, ohne Überlappung in einem der neun
+    nächsten Konkurrenten beträgt der Abstand 2,4x bis 2,7x, ohne Überlappung in einem der neun
     Wiederholungspaare.</p>
     <p><b>Bei der Platte ist der Abstand am größten, und das liegt nicht am Reparaturtrick.</b>
     Jeder abschließende Arm erzeugte dieselbe 6,48-GB-Datei; unserer bewegte dafür 6,2-6,8 GB
@@ -445,14 +445,14 @@
     <p class="note" style="text-align:start">&sup1; SABnzbds drei Läufe beim schwersten Schaden
     liefen 43, 41 und 60 s - eine echte Streuung bei identischen Eingaben, daher wird der Mittelwert
     mit der genannten Spanne angegeben. &sup2; rustnzb 1.4.5 lieferte jede Etappe byte-korrekt,
-    und seine Kosten liegen bei der Prozessorzeit statt bei der Zuverlässigkeit: etwa 1,620
+    und seine Kosten liegen bei der Prozessorzeit statt bei der Zuverlässigkeit: etwa 1.620
     CPU-Sekunden gegen eine Uhrzeit von 107 s beim schwersten Schaden - rund fünfzehn Kerne die
     ganze Etappe über beschäftigt -, wo dieselbe reparierte Ausgabe uns etwa 50
     CPU-Sekunden kostet. &sup3; Weaver bewegte 1,5 GB und 4,9 GB der 6,5 innerhalb unseres
     20-Minuten-Limits bei den beiden schwereren Schadstufen - dasselbe Nicht-fertig-Werden in allen
     drei Runden, die es je bestritten hat, an drei verschiedenen Abenden; das Limit ist unseres,
     das Nicht-fertig-Werden ist das Ergebnis. Bei 5 toten Artikeln schloss es alle drei Male korrekt
-    ab. Seine Prozessorkosten dort sind eine eigene Geschichte: etwa 2,325 CPU-Sekunden für die
+    ab. Seine Prozessorkosten dort sind eine eigene Geschichte: etwa 2.325 CPU-Sekunden für die
     194-s-Etappe, gegen unsere 20.</p>
     <p class="note" style="text-align:start">Gemessen am 24. August 2026, alle Builds
     aktuell: nzbfast v1.2.2 (der Release-Tag selbst), NZBGet 26.3-testing (Build vom 20. August),
@@ -522,7 +522,7 @@
     <p><b>Der Deckel angetreten gegen die eigenen Regler des Feldes.</b> Beim 34-GB-Testfall
     (23. August 2026, 1-Gbit-Maschine, fünf Provider, 30 von 30 Etappen byte-korrekt) verdoppelte
     das Halten von NZBGet auf einen gleichwertigen Cache-Deckel mehr als seine CPU (215,5 auf
-    453,0 CPU-Sekunden, 2.10x), um einen Rückgang seines Spitzenspeichers um 52 % zu erkaufen, und
+    453,0 CPU-Sekunden, 2,10x), um einen Rückgang seines Spitzenspeichers um 52 % zu erkaufen, und
     SABnzbds Deckel war nahezu kostenlos, erreichte aber nur einen Teil seines Fußabdrucks. rustnzbs
     Cache-Einstellung war im getesteten Build dekorativ, und Weaver hat gar keinen Speicherregler, sodass
     beide ungedeckelt als Referenzspalten liefen, statt gegen ein Budget bewertet zu werden, das sie
@@ -584,13 +584,13 @@
     <h2>Ihre Platte setzt Ihr Tempolimit</h2>
     <p class="lead"><b>Für jedes Laufwerk ist die Leitungsgeschwindigkeit, die Sie durch Download,
     Prüfung und Entpacken durchhalten können, die tatsächliche Rate des Laufwerks geteilt durch den
-    E/A-Multiplikator des Clients.</b> Die Kostentabellen oben messen unseren bei etwa 1.0x - jedes
-    Byte durchläuft die Platte etwa einmal - und jeden Konkurrenten bei 2.0x bis 3.0x für
+    E/A-Multiplikator des Clients.</b> Die Kostentabellen oben messen unseren bei etwa 1,0x - jedes
+    Byte durchläuft die Platte etwa einmal - und jeden Konkurrenten bei 2,0x bis 3,0x für
     byte-identische Ausgabe. Dasselbe Laufwerk hält unter nzbfast also die zwei- bis dreifache
     Leitungsgeschwindigkeit durch, die es unter einem bühnengebundenen Client halten würde. Die
     Arithmetik, mit den Multiplikatoren aus den gemessenen Tabellen oben:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>Leitung</th><th>Nutzlastrate</th><th>Platte nötig bei unseren ~1.0x</th><th>bei 2.2x</th><th>bei 3.0x</th></tr></thead>
+      <thead><tr><th>Leitung</th><th>Nutzlastrate</th><th>Platte nötig bei unseren ~1.0x</th><th>bei 2,2x</th><th>bei 3,0x</th></tr></thead>
       <tbody>
         <tr><td>100 Mbit</td><td class="num">12,5 MB/s</td><td class="win num">~13 MB/s</td><td class="num">~28 MB/s</td><td class="num">~38 MB/s</td></tr>
         <tr><td>1 Gbit</td><td class="num">125 MB/s</td><td class="win num">~130 MB/s</td><td class="num">~275 MB/s</td><td class="num">~375 MB/s</td></tr>
@@ -600,15 +600,15 @@
     </table></div>
     <p>Setzen Sie diese Spalten in Bezug zu dem, was Laufwerke tatsächlich durchhalten. Eine
     5400/5900-U/min-NAS-Platte hält auf ihren äußeren Spuren etwa 100-140 MB/s, absackend Richtung
-    80-100, während sie sich füllt - Gigabit ist bei der langsamsten Klasse also schon bei 1.0x
+    80-100, während sie sich füllt - Gigabit ist bei der langsamsten Klasse also schon bei 1,0x
     grenzwertig, was wir offen sagen, und bei 2-3x unerreichbar. Eine 7200-U/min-Platte hält etwa
-    160-220 MB/s. Die ~550 MB/s einer SATA-SSD deckeln einen 2.2x-Client bei nahe 2 Gbit und tragen
-    bei 1.0x etwa 3,5-4 Gbit. SMR-Platten, seit Jahren in NAS-Gehäuse verkauft, sind der schlimmste
+    160-220 MB/s. Die ~550 MB/s einer SATA-SSD deckeln einen 2,2x-Client bei nahe 2 Gbit und tragen
+    bei 1,0x etwa 3,5-4 Gbit. SMR-Platten, seit Jahren in NAS-Gehäuse verkauft, sind der schlimmste
     Fall speziell für das bühnengebundene Muster: anhaltendes Schreiben mit Rücklesen kann auf zehn
     MB/s einbrechen, sobald der Reshingling-Cache der Platte erschöpft ist. Und eine Multi-Gig-Leitung
     ist dieselbe Wand weiter oben: 10 Gbit bei einem 2-3x-Multiplikator verlangt
     <em>anhaltende</em> 2,75-3,75 GB/s, vorbei an jeder SATA-Platte und vorbei an vielen NVMe-Laufwerken,
-    sobald ein großer Job ihre schnelle Cache-Zone überholt, während bei 1.0x eine ~2-GB/s-SSD mit
+    sobald ein großer Job ihre schnelle Cache-Zone überholt, während bei 1,0x eine ~2-GB/s-SSD mit
     Leitungsgeschwindigkeit und Raum übrig mithält.</p>
     <p><b>Gemessen statt behauptet, auf einer gedrosselten Platte.</b> Wir haben eine Platte auf
     150 MB/s gedeckelt - eine Rate der 5400-U/min-Klasse - und denselben Download zweimal gefahren:
@@ -617,8 +617,8 @@
     unter seiner eigenen ungedeckelten Rate; das bühnengebundene Muster fiel auf 59,0 MB/s, 54 % der
     Leitung. Parametrisch durchgefahren, ohne Leitungslimit, nahm der Ein-Durchgang-Arm 97 % dessen,
     was die Platte bei jedem Deckel bot (290,7 MB/s eines 300-MB/s-Deckels, 145,6 von 150) bei
-    gemessenen 1,00-1.03x Geräte-E/A, und das bühnengebundene Muster nahm 47-48 % bei gemessenen
-    3.02x - das Verhältnis über die Deckel hinweg konstant, was die Arithmetik oben als Messung
+    gemessenen 1,00-1,03x Geräte-E/A, und das bühnengebundene Muster nahm 47-48 % bei gemessenen
+    3,02x - das Verhältnis über die Deckel hinweg konstant, was die Arithmetik oben als Messung
     reproduziert. 32 Etappen, jede Ausgabe byte-geprüft.</p>
     <p><b>Und einmal auf echter Hardware, ungedrosselt.</b> Die langsamste Platte in unserer
     Testflotte ist eine TLC-Systemplatte auf einer nativen Windows-10-GbE-Maschine, die 0,99 GB/s an
@@ -629,7 +629,7 @@
     echten statt einer gedrosselten Platte landet. Und das schnelle Ende der Flotte schließt das
     Argument von der anderen Seite: derselbe 87-GB-Job, mit voller Rate bei 10 GbE, wird in denselben
     70-71 Sekunden fertig auf einer 1,24-GB/s-Platte wie auf einer 5,97-GB/s-Platte - eine
-    4.8x schnellere Platte bewegt die Wanduhrzeit um null, weil bei einem 1.0x-Multiplikator der
+    4,8x schnellere Platte bewegt die Wanduhrzeit um null, weil bei einem 1,0x-Multiplikator der
     Leitung lange vor der Platte die Puste ausgeht. Für einen bühnengebundenen Client sind diese
     beiden Platten verschiedene Welten.</p>
     <p class="note" style="text-align:start"><b>Was diese Anlage ist und was nicht.</b> Die
@@ -738,7 +738,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Alle sieben Formen gehen an uns, sowohl beim Minimum als
-    auch beim Median, 1.16x bis 4.29x gegen unrar. Diese Zeiten sind nicht Zelle für Zelle mit der
+    auch beim Median, 1,16x bis 4,29x gegen unrar. Diese Zeiten sind nicht Zelle für Zelle mit der
     breiteren Tabelle unten vergleichbar - der Testrahmen wurde seit deren Runden überarbeitet, und die
     Rundenzahlen unterscheiden sich -, lesen Sie also jede Tabelle für sich. Die breitere Tabelle behält
     ihre eigenen Daten und ihr Sechs-Werkzeuge-Feld, und ihre nzbfast-Spalte beschreibt die Engine, die
@@ -800,18 +800,18 @@
 
     <p class="note" style="text-align:start"><b>Eine Entscheidung, die es wert ist, genannt zu werden.</b> Die Archive werden mit dem Kompressor fest auf vier Threads gepackt. Der Blocksplit von RAR folgt sonst der Kernzahl der packenden Maschine, sodass eine 32-Kern-Maschine und eine 20-Kern-Maschine aus derselben Eingabe verschiedene Bytes erzeugen und die Maschinen nicht mehr vergleichbar sind. Das Fixieren macht den Extraktionskorpus überall byte-identisch, das ist der Sinn, deckelt aber auch, wie viel vom Decodieren parallel laufen kann - als also die beiden nächstliegenden Formen Verluste waren, traten wir erneut gegen Archive an, die mit allen 32 Threads gepackt waren, um zu prüfen, dass nicht das Fixieren die Ursache war. War es nicht: solid rückte von 4,2 % Rückstand auf 2,4 % Rückstand, und das 128-MiB-Wörterbuch von 6,6 % auf 6,3 %, dieselbe Reihenfolge so oder so. Beide sind auf dem fixierten Korpus jetzt Siege, mit größerem Abstand, als diese Prüfung erklären könnte.</p>
 
-    <p class="note" style="text-align:start"><b>Warum es keine RAR4-Zeile gibt, und was mit diesen Posts passiert.</b> Jede Form oben ist RAR5 oder RAR7, was Usenet heute postet. Ältere RAR4-Archive tauchen immer noch auf, und dieselbe Engine liest sie, komprimierte und passwortgeschützte Formen eingeschlossen, in demselben einzigen Durchgang wie die neueren, statt die Volumes auf die Platte zu schreiben und sie danach zu entpacken. Sie bekommen hier keine Zeile, weil das offizielle <code>rar</code> 7.23 kein RAR4 mehr erzeugen kann, es gibt also keinen neutralen Korpus, um das Feld antreten zu lassen; diese Arbeit wird stattdessen gegen von WinRAR 3,00 geschriebene Archive geprüft, byte für byte gegen unrar.</p>
+    <p class="note" style="text-align:start"><b>Warum es keine RAR4-Zeile gibt, und was mit diesen Posts passiert.</b> Jede Form oben ist RAR5 oder RAR7, was Usenet heute postet. Ältere RAR4-Archive tauchen immer noch auf, und dieselbe Engine liest sie, komprimierte und passwortgeschützte Formen eingeschlossen, in demselben einzigen Durchgang wie die neueren, statt die Volumes auf die Platte zu schreiben und sie danach zu entpacken. Sie bekommen hier keine Zeile, weil das offizielle <code>rar</code> 7.23 kein RAR4 mehr erzeugen kann, es gibt also keinen neutralen Korpus, um das Feld antreten zu lassen; diese Arbeit wird stattdessen gegen von WinRAR 3.00 geschriebene Archive geprüft, byte für byte gegen unrar.</p>
 
     <h3 style="margin:44px 0 4px">PAR2-Prüfung und -Reparatur: 1-GiB-Satz, vier Schadstufen</h3>
     <p class="note" style="text-align:start;margin-top:6px">Korpus: 1 GiB Zufalls-Nutzlast, store-gepackt in 21 RAR-Volumes, dann zwei PAR2-Sätze bei 10 % Redundanz, einer mit 1-MiB-Blöcken und einer mit 64 KiB, dann feste Schadenskarten. Jeder Lauf nutzt dasselbe Protokoll: frische Kopie, den ganzen Korpus einmal lesen, um den Cache aufzuwärmen, dann messen. Bester von drei verschränkten Runden; jedes reparierte Volume wird bei jeder Runde gegen den unversehrten Satz geprüft. Niedriger ist besser.</p>
 
-    <p class="note" style="text-align:start"><b>Eine Korrektur zum Korpus, weil eine frühere Version dieser Seite ihn überzeichnet hatte.</b> Wir sagten, jede Maschine fährt einen byte-identischen, per Hash geprüften Korpus. Jedes Volume jedes Satzes zu hashen zeigt, dass das für den 32-Kern-Desktop und den Windows-Laptop stimmt, die exakt übereinstimmen, und nicht für den 20-Kern-Desktop, der einen anderen Zufallszug derselben Form hält: dieselben 21 Volumes in denselben Größen, dieselben zwei Blockgrößen, und der Schaden bei denselben 3, 101 und 1,500 Blöcken geprüft, verteilt über dieselbe Anzahl Dateien. Jede Zahl innerhalb einer Zeile ist noch immer an Bytes gemessen, die jedes Werkzeug in dieser Zeile teilt, worauf jeder Vergleich beruht. Aber die Zeilen sind nicht vier Ansichten einer Eingabe, und da der Charakter der Nutzlast einem Konkurrenten beim Scannen etwa 7 % wert ist, lohnt es sich, das zu sagen, statt es zu übertünchen.</p>
+    <p class="note" style="text-align:start"><b>Eine Korrektur zum Korpus, weil eine frühere Version dieser Seite ihn überzeichnet hatte.</b> Wir sagten, jede Maschine fährt einen byte-identischen, per Hash geprüften Korpus. Jedes Volume jedes Satzes zu hashen zeigt, dass das für den 32-Kern-Desktop und den Windows-Laptop stimmt, die exakt übereinstimmen, und nicht für den 20-Kern-Desktop, der einen anderen Zufallszug derselben Form hält: dieselben 21 Volumes in denselben Größen, dieselben zwei Blockgrößen, und der Schaden bei denselben 3, 101 und 1.500 Blöcken geprüft, verteilt über dieselbe Anzahl Dateien. Jede Zahl innerhalb einer Zeile ist noch immer an Bytes gemessen, die jedes Werkzeug in dieser Zeile teilt, worauf jeder Vergleich beruht. Aber die Zeilen sind nicht vier Ansichten einer Eingabe, und da der Charakter der Nutzlast einem Konkurrenten beim Scannen etwa 7 % wert ist, lohnt es sich, das zu sagen, statt es zu übertünchen.</p>
 
     <p class="note" style="text-align:start"><b>Welches par2 welches ist.</b> Das ursprüngliche <code>par2cmdline</code> ist die Referenzimplementierung, von der jeder andere abgeleitet ist. <code>par2cmdline-turbo</code> ist der Fork, der <b>ParPars</b> handgeschriebene SIMD-Galoisfeld-Kernel mitbringt: genau das bedeutet „turbo", und deshalb ist turbo, statt des Originals, das Werkzeug, das es wert ist, gegen uns gemessen zu werden. Beide Turbo-Spalten unten laufen mit denselben ParPar-Kernen. Was sie trennt, ist nicht die Arithmetik, sondern der Build und die Flags.</p>
 
     <p class="note" style="text-align:start"><b>Am 24. August 2026 auf dem ausgelieferten Build gegen den aktuellen Konkurrenten bestätigt.</b> Diese Tabellen wurden gemessen, bevor 1.2.2 geschnitten wurde und bevor <code>par2cmdline-turbo</code> 1.5.0 veröffentlichte (20. August 2026), also trat die 20-Kern-Spalte erneut gegen beide an: unser 1.2.2-Release-Build gegen turbo 1.5.0, drei verschränkte Runden je Etappe, jede reparierte Datei gegen den unversehrten Satz geprüft. Alle vier Etappen reproduzieren sich - unsere 0,18 / 0,30 / 0,75 / 2,02 gegen die hier gedruckten 0,19 / 0,33 / 0,74 / 2,07, und turbo 1.5.0 landet bei jeder Etappe und beiden Konfigurationen innerhalb weniger Prozent vom Build in der Tabelle. Die Zellen bleiben wie veröffentlicht stehen; die anderen drei Maschinen behalten ihre eigenen Daten.</p>
 
-    <p class="note" style="text-align:start"><b>Die Konkurrenz erscheint also zweimal, und eine dieser Spalten ist ihr Best-Case statt ihre Voreinstellung.</b> Das Release-Binary, das Sie herunterladen würden, ist für eine generische Baseline-CPU kompiliert und hasht nur ein paar Dateien gleichzeitig; dieselbe Quelle für die tatsächliche Host-CPU zu bauen und <code>-T16</code> zu übergeben, lässt es die Instruktionen nutzen, die diese Maschine wirklich hat, und sechzehn Dateien gleichzeitig hashen. Auf dem Laptop ist das bis zu 2.6x wert, allein von Build und Flags. Beurteilen Sie uns anhand der abgestimmten Spalte, das ist der härtere Vergleich; die Spalte „wie ausgeliefert" ist das, was jemand erlebt, der es herunterlädt. <code>par2cmdline</code> ist das Original, Version 1.2.0, auf jeder Maschine aus dem Quelltext gebaut. <code>rarpar</code> ist Weavers eigene PAR2-Implementierung, aus dem Quelltext mit aktiviertem Metal-GPU-Backend gebaut. MultiPars <code>par2j</code> ist Windows-only, es erscheint also nur in den Windows-Laptop-Zeilen. Die M5-Max-Zeilen lassen die beiden Werkzeuge mit aktuellen macOS-arm64-Builds neben den beiden Turbo-Spalten antreten; das klassische <code>par2cmdline</code> trat auf dieser Maschine nicht an.</p>
+    <p class="note" style="text-align:start"><b>Die Konkurrenz erscheint also zweimal, und eine dieser Spalten ist ihr Best-Case statt ihre Voreinstellung.</b> Das Release-Binary, das Sie herunterladen würden, ist für eine generische Baseline-CPU kompiliert und hasht nur ein paar Dateien gleichzeitig; dieselbe Quelle für die tatsächliche Host-CPU zu bauen und <code>-T16</code> zu übergeben, lässt es die Instruktionen nutzen, die diese Maschine wirklich hat, und sechzehn Dateien gleichzeitig hashen. Auf dem Laptop ist das bis zu 2,6x wert, allein von Build und Flags. Beurteilen Sie uns anhand der abgestimmten Spalte, das ist der härtere Vergleich; die Spalte „wie ausgeliefert" ist das, was jemand erlebt, der es herunterlädt. <code>par2cmdline</code> ist das Original, Version 1.2.0, auf jeder Maschine aus dem Quelltext gebaut. <code>rarpar</code> ist Weavers eigene PAR2-Implementierung, aus dem Quelltext mit aktiviertem Metal-GPU-Backend gebaut. MultiPars <code>par2j</code> ist Windows-only, es erscheint also nur in den Windows-Laptop-Zeilen. Die M5-Max-Zeilen lassen die beiden Werkzeuge mit aktuellen macOS-arm64-Builds neben den beiden Turbo-Spalten antreten; das klassische <code>par2cmdline</code> trat auf dieser Maschine nicht an.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>Sekunden, 1-GiB-Satz</th><th>Desktop, 32 Kerne</th><th>Desktop, 20 Kerne</th><th>Laptop, 14 Kerne</th><th>Laptop, M5 Max</th></tr></thead>
@@ -851,16 +851,16 @@
 
     <p class="note" style="text-align:start"><b>Das Original ist zurück in der Tabelle, und es lohnt sich zu sehen, warum der Fork existiert.</b> Eine frühere Version dieser Seite ließ die Spalte <code>par2cmdline</code> weg, mit der Begründung, sie sei langsamer als alles andere in der Runde, was stimmt und kein guter genug Grund ist: es ist die Implementierung, von der fast jedes andere Werkzeug abstammt, und Leser verdienen die Baseline statt unserer Behauptung darüber. Auf der schwersten Schadstufe braucht es etwa 69 s, wo der SIMD-Fork 3,2 s braucht und wir 3,1 s. Dieser Faktor zwanzig ist das ganze Argument für die handgeschriebenen Galoisfeld-Kernel, und es ist dasselbe Argument, das wir für unsere machen.</p>
 
-    <p class="note" style="text-align:start"><b>Leichter Schaden ist der Fall, der zählt.</b> Eine Handvoll ausgefallener Artikel ist weit typischer als 101 tote Blöcke, und nichts wie 1,500. Der größte Teil einer leichten Reparatur ist gar nicht die Reed-Solomon-Mathematik, sondern das Lesen und MD5-Bilden eines Gigabytes, weshalb die 3-Block-Zeile eher der sauberen Prüfzeile folgt als den Reparaturzeilen.</p>
+    <p class="note" style="text-align:start"><b>Leichter Schaden ist der Fall, der zählt.</b> Eine Handvoll ausgefallener Artikel ist weit typischer als 101 tote Blöcke, und nichts wie 1.500. Der größte Teil einer leichten Reparatur ist gar nicht die Reed-Solomon-Mathematik, sondern das Lesen und MD5-Bilden eines Gigabytes, weshalb die 3-Block-Zeile eher der sauberen Prüfzeile folgt als den Reparaturzeilen.</p>
 
-    <p class="note" style="text-align:start"><b>Die schwerste Schadstufe ist eine andere Art Arbeit, und sie bekommt einen anderen Algorithmus.</b> Diese letzte Stufe beschädigt 1,500 Blöcke über alle 21 Volumes hinweg und verbraucht etwa 91 % der Wiederherstellungsdaten, das ist der Punkt, an dem die Reed-Solomon-Arithmetik statt Hashing oder Platte fast die ganze Arbeit ausmacht. Der ausgelieferte Build berechnet die schwersten Reparaturen mit einer zahlentheoretischen Transformation statt der klassischen Galoisfeld-Faltung - dieselbe Mathematik, in einer Form ausgewertet, die bei hohen Blockzahlen deutlich besser skaliert: 2,7× vor dem abgestimmten Build auf dem 20-Kern-Desktop, und auf dem Windows-Laptop 2,7× vor dem abgestimmten Build und 2,2× vor MultiPar. Leichter Schaden läuft noch immer über den klassischen Pfad, weshalb sich die anderen Stufen kaum bewegten: die Transformation zahlt sich erst oberhalb von etwa 512 beschädigten Blöcken aus, darunter nutzt der Dispatcher sie also nicht.</p>
+    <p class="note" style="text-align:start"><b>Die schwerste Schadstufe ist eine andere Art Arbeit, und sie bekommt einen anderen Algorithmus.</b> Diese letzte Stufe beschädigt 1.500 Blöcke über alle 21 Volumes hinweg und verbraucht etwa 91 % der Wiederherstellungsdaten, das ist der Punkt, an dem die Reed-Solomon-Arithmetik statt Hashing oder Platte fast die ganze Arbeit ausmacht. Der ausgelieferte Build berechnet die schwersten Reparaturen mit einer zahlentheoretischen Transformation statt der klassischen Galoisfeld-Faltung - dieselbe Mathematik, in einer Form ausgewertet, die bei hohen Blockzahlen deutlich besser skaliert: 2,7× vor dem abgestimmten Build auf dem 20-Kern-Desktop, und auf dem Windows-Laptop 2,7× vor dem abgestimmten Build und 2,2× vor MultiPar. Leichter Schaden läuft noch immer über den klassischen Pfad, weshalb sich die anderen Stufen kaum bewegten: die Transformation zahlt sich erst oberhalb von etwa 512 beschädigten Blöcken aus, darunter nutzt der Dispatcher sie also nicht.</p>
 
     <p class="note" style="text-align:start"><b>Ein schnellerer Pfad ist nur etwas wert, wenn er nicht falsch sein kann.</b> Beide Pfade berechnen dieselbe Größe und sind konstruktionsbedingt bitidentisch, und jede Reparatur auf dieser Seite wurde daran gemessen, ob die wiederhergestellten Dateien mit dem unversehrten Satz übereinstimmten: 228 zeitgemessene Reparaturen über die Maschinen dieser Runde, null Abweichungen. Der ausgelieferte Build verlässt sich nicht auf diese Bilanz. Jede Reparatur prüft ihre eigene Ausgabe gegen die Datei-Hashes, und eine fehlgeschlagene würde automatisch mit dem klassischen Pfad wiederholt, die Abweichung protokollieren und für den Rest dieses Laufs beim klassischen Pfad bleiben. Die Einstellung steht im Dashboard als <b>Fast-PAR-Modus</b>, falls Sie sie lieber gar nicht wollen, und Maschinen mit zu wenig Speicher dafür lehnen sie von sich aus ab, statt es zu versuchen und zu scheitern. Erneut gemessen am 2. August auf dem aktuellen Build: die beiden Desktops landen innerhalb weniger Prozent dieser Tabelle, und mit abgeschaltetem <b>Fast-PAR-Modus</b> fällt der 20-Kern-Desktop auf exakt die langsamere Zeit des klassischen Pfads zurück, was zeigt, dass der Sieg an der Methode liegt und nicht an den Bedingungen.</p>
 
     <p class="note" style="text-align:start"><b>Die Spalte des Windows-Laptops brauchte eine Korrektur, und sie geht gegen uns.</b> Windows verschiebt anhaltende Hintergrundarbeit nach ein paar Sekunden auf seine Effizienzkerne. Unser Daemon steigt beim Start daraus aus, und keines der anderen Werkzeuge kann das, sodass eine frühere Version dieser Seite deren gedrosselte Zeiten veröffentlichte, als wären es ihre eigenen. Diese Maschine mit jedem Werkzeug auf hohe Priorität gehoben erneut zu fahren, verschiebt das ganze Feld: auf der schwersten Schadstufe geht <code>par2-turbo</code> von 22,4 s auf 6,41, und <code>rarpar</code> von 59,2 s auf 14,4, und für einen Schnitt dieser Seite machte das aus der Spalte, die uns gehörte, eine, die wir verloren. Die ganze Laptop-Spalte wird jetzt so gemessen - die Korrektur bleibt bestehen, obwohl die Zeile inzwischen durch die Algorithmusänderung oben zurückgewonnen wurde, weil die Zeiten des Feldes auf dieser Maschine nur mit angehobener Drosselung ehrlich sind.</p>
 
     <h3 style="margin:44px 0 4px">RAR-Wiederherstellungsdatensätze: Reparieren ohne PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">Wenn PAR2 den Schaden nicht abdecken kann, ist der Wiederherstellungsdatensatz im RAR selbst die letzte Verteidigungslinie. Bis 1.0.8 scheiterte unseres an jedem Archiv über etwa 13 MB, diese Etappe konnte also gar nicht gefahren werden. Schaden sind drei 3,000-Byte-Löcher bei 20 %, 50 % und 80 % durch den geschützten Bereich. Beide Werkzeuge lieferten eine Ausgabe byte-identisch zur unversehrten Datei, und unsere ist byte-identisch zu dem, was <code>rar r</code> selbst schreibt. Bester von drei, 32-Kern-Desktop, beide Werkzeuge am 2. August gemeinsam erneut angetreten.</p>
+    <p class="note" style="text-align:start;margin-top:6px">Wenn PAR2 den Schaden nicht abdecken kann, ist der Wiederherstellungsdatensatz im RAR selbst die letzte Verteidigungslinie. Bis 1.0.8 scheiterte unseres an jedem Archiv über etwa 13 MB, diese Etappe konnte also gar nicht gefahren werden. Schaden sind drei 3.000-Byte-Löcher bei 20 %, 50 % und 80 % durch den geschützten Bereich. Beide Werkzeuge lieferten eine Ausgabe byte-identisch zur unversehrten Datei, und unsere ist byte-identisch zu dem, was <code>rar r</code> selbst schreibt. Bester von drei, 32-Kern-Desktop, beide Werkzeuge am 2. August gemeinsam erneut angetreten.</p>
     <div class="tblwrap"><table>
       <thead><tr><th></th><th>16 MB</th><th>32 MB</th><th>128 MB</th><th>512 MB</th><th>2 GB</th></tr></thead>
       <tbody>
@@ -888,7 +888,7 @@
     <p class="note" style="text-align:start">Diese Etappe existiert, weil Weavers <code>rarpar</code> genau das implementiert und darum bat, daran gemessen zu werden. Es gewann komfortabel, als wir es zum ersten Mal veröffentlichten, und wir veröffentlichten es damals aus diesem Grund.</p>
     <p class="note" style="text-align:start">Der Dateiabgleich war nie die Kostenstelle, was sich zu notieren lohnt, weil es der naheliegende Verdächtige war: Wiederherstellungsvolumes tragen keine Dateinamen, wir identifizieren also, welche Plätze überlebt haben, indem wir jedes Volume auf der Platte prüfsummen, statt dem zu vertrauen, wie sie heißen, und gegen einen unbeschädigten Satz, wo nur der Abgleich passiert, dauert der ganze Durchgang 0,18 s.</p>
 
-    <p class="note" style="text-align:start"><b>Was sich sonst noch bewegt hat, und wo es sich nicht zeigt.</b> Zwei weitere Engine-Änderungen sind gelandet, die diese Korpora nicht sehen können, hier genannt, damit die Zahlen oben nicht als die ganze Geschichte gelesen werden: RAR5-Archive mit zehntausenden Mitgliedern lösen jedes Mitglied einmal auf, statt die Liste je Worker zu durchlaufen, das ist 3× weniger Prozessorzeit bei 40,000 Mitgliedern; und der RAR1.3-Bit-Reader arbeitet ein Wort auf einmal, das ist 2×. Keines erscheint oben, weil die Formen hier 400 Mitglieder haben und kein RAR1.3.</p>
+    <p class="note" style="text-align:start"><b>Was sich sonst noch bewegt hat, und wo es sich nicht zeigt.</b> Zwei weitere Engine-Änderungen sind gelandet, die diese Korpora nicht sehen können, hier genannt, damit die Zahlen oben nicht als die ganze Geschichte gelesen werden: RAR5-Archive mit zehntausenden Mitgliedern lösen jedes Mitglied einmal auf, statt die Liste je Worker zu durchlaufen, das ist 3× weniger Prozessorzeit bei 40.000 Mitgliedern; und der RAR1.3-Bit-Reader arbeitet ein Wort auf einmal, das ist 2×. Keines erscheint oben, weil die Formen hier 400 Mitglieder haben und kein RAR1.3.</p>
 
     <p class="note" style="text-align:start"><b>Was wir absichtlich nicht tun:</b> wir
     <i>erzeugen</i> nie PAR2. Ein Downloader hat dazu keinen Grund, und ParPar besitzt diese Etappe. Wir kaufen auch bei beiden Engines Geschwindigkeit mit Speicher: die Extraktion erreicht Spitzen um 240 MB gegen unrars 41 MB, und die Prüfung um 126 MB gegen turbos 7 MB, weil das die Inline-Engines sind, die einen laufenden Download begleiten, statt eigenständige Einmal-Läufe zu sein. Die 128-MiB-Wörterbuch-Form ist das Schlimmste davon, bei etwa 304 MB gegen unrars 139 MB. <b>Die schwerste Reparatur kostet jetzt auch Speicher:</b> die schnellere Methode für 512 und mehr fehlende Blöcke arbeitet mit den residenten Wiederherstellungsdaten, sie darf also bis zu einem Viertel des Maschinenspeichers nutzen, gedeckelt bei 4 GB, und eine Maschine, die das nicht erübrigen kann, nimmt still die Low-Memory-Methode - dieselbe Arithmetik und dieselben Zeiten wie die mittleren Zeilen der PAR2-Tabelle, nur nicht das 3× bei der letzten. Wenn Sie den kleinstmöglichen residenten Speicher für einen eigenständigen Job wollen, gewinnen die dedizierten Werkzeuge diese Spalte immer noch.</p>
@@ -929,7 +929,7 @@
     zu entpacken (siehe <a href="#cost">die Kostentabellen</a>). Seine älteren Builds (1.3.4-1.3.9)
     lieferten verschleierte Volumes aus, die als „Fertig" markiert waren, ohne zu entpacken; dieser
     Fehler ist upstream in 1.4.5 behoben.
-    ⁶ GPL-3,0-or-later.
+    ⁶ GPL-3.0-or-later.
     ⁷ Weaver 0.7.8, das neueste ausgelieferte Binary, Identität per Hash geprüft (die sha256 des
     veröffentlichten Release-Tarballs und die des Binarys darin stimmen beide mit dem überein, gegen
     das wir antreten); seine gemessenen Zeilen stammen aus der Kostenrunde vom 23. August, seine mit
@@ -941,7 +941,7 @@
     <p class="note" style="text-align:start">⁸ macOS startet ein Programm mit einem Limit von
     256 offenen Dateien, und ein voller Satz Verbindungen über mehrere Server hinweg kann das
     überschreiten. nzbfast hebt sein eigenes Limit beim Start unter macOS und Linux an: es fordert
-    65,536 an, geht schrittweise herunter, bis das System zustimmt, geht nie über das harte Limit des
+    65.536 an, geht schrittweise herunter, bis das System zustimmt, geht nie über das harte Limit des
     Systems hinaus, und macht mit dem weiter, was es hatte, wenn jeder Schritt abgelehnt wird. Windows
     hat kein Limit dieser Art je Prozess. Die anderen Spalten sind <b>nicht bewertet</b>, statt
     bestätigte Abwesenheiten: wir haben den Startup-Code keines anderen Clients gelesen. Es lohnt sich,

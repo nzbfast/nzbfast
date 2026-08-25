@@ -70,7 +70,7 @@
     inden for den klients egen spredning fra kørsel til kørsel - og på disk flyttede
     hver eneste af dem mindst dobbelt så mange bytes for et byte-identisk resultat.
     Som leveret holdt nzbfast også mindst hukommelse af alle målte klienter, på hver
-    eneste fixtur, med 2.0x til 4.5x mod den nærmeste rival.</p>
+    eneste fixtur, med 2,0x til 4,5x mod den nærmeste rival.</p>
     <p><b>Hvilken er dig?</b></p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
       <div class="callout" style="margin:0"><b>Et NAS, en mini-pc eller en lille hjemmeserver.</b>
@@ -202,7 +202,7 @@
     6,5 GB på den rene fixtur - det samme tal, NZBGet og SABnzbd rapporterer for
     sig selv. Det værste tilfælde, vi kender til, er et bevidst omnummereret obfuskeret
     opslag, hvor det at styre uden om den forvrængede nummerering koster én ekstra artikel pr.
-    styring: målt til 1,10-1.20x minimumsplanen på begge sådanne former, vi kunne
+    styring: målt til 1,10-1,20x minimumsplanen på begge sådanne former, vi kunne
     bygge. rustnzbs celler på 7,2 og 37,8 GB er dens
     egen overflod, med en advarsel i dens log på to ben.</p>
     <p class="note" style="text-align:start"><b>Hvad hukommelseskolonnen betyder ved
@@ -253,7 +253,7 @@
     inden for 18% på uret, og vi fører over den nærmeste rival med 4,4%; ved 500 Mbit åbner
     hullet sig til 14,7%; ved gigabit- og 10 GbE-hastighederne i tabellerne ovenfor og nedenfor
     åbner det sig yderligere. Hastighedsforskelle vokser med linjen. Ressourcekolonnerne
-    venter ikke på en hurtig linje: ved hver målte hastighed holdt hver rival mindst 3.9x
+    venter ikke på en hurtig linje: ved hver målte hastighed holdt hver rival mindst 3,9x
     hukommelsen, brugte mere processor, og flyttede omkring dobbelt så mange diskbytes for den samme
     byte-identiske fil.</p>
     <p><b>Forbindelsesregulatoren tjener sin plads på langsomme linjer, og shaperens eget
@@ -261,7 +261,7 @@
     kørte hundreder; den samme binær med regulatoren fra kørte 360. Færre strømme gennem en
     fast kø betyder mindre tab og mindre gensending: shaperen registrerede omkring 4.200
     drop pr. begrænset ben mod omkring 155.000 ubegrænset ved 500 Mbit, og den begrænsede arm
-    var hurtigere, 4.2x lettere på hukommelse og 1.3x lettere på CPU end vores egen 360-socket-
+    var hurtigere, 4,2x lettere på hukommelse og 1,3x lettere på CPU end vores egen 360-socket-
     tilstand. Flere forbindelser er ikke mere hastighed; under en gigabit er det målbart det
     modsatte.</p>
     <p class="note" style="text-align:start"><b>Målt 24. august 2026</b>, medianer af
@@ -299,8 +299,8 @@
     </table></div>
     <p><b>Disk-historien i sin hidtil største skala.</b> Vores spidsdisk under jobbet er
     70,8 GiB - UNDER de 76,6 GB output, fordi halen af nyttelasten stadig
-    er på vej ind, mens hovedet allerede er endeligt - og samlet disk-I/O er 1.00x
-    nyttelasten. Rivalerne flytter 2.5x til 6.0x så mange bytes for den samme fil. Og den hurtigste
+    er på vej ind, mens hovedet allerede er endeligt - og samlet disk-I/O er 1,00x
+    nyttelasten. Rivalerne flytter 2,5x til 6,0x så mange bytes for den samme fil. Og den hurtigste
     arm opretholder omkring 8,7 Gbps <em>inklusive</em> løbende verificering og
     udpakning; i det øjeblik downloadbjælken er fuld, er filen færdig.</p>
     <p class="note" style="text-align:start">&sup1; Hver klient på denne side kører mod sine dokumenterede bedste indstillinger, og på en
@@ -308,7 +308,7 @@
     når - den samme ene-indstillings-tuning, vi giver hver rival (SABnzbd dens
     pipelining, NZBGet dens artikel-cache). Halvtreds er ikke et handicap: en gennemgang af seks trin
     på denne samme fixtur fandt væggen identisk fra 50 forbindelser hele vejen op til
-    kontomaksimum på 360, mens processoromkostningen stiger 2.3x hen over det interval for
+    kontomaksimum på 360, mens processoromkostningen stiger 2,3x hen over det interval for
     intet, så maksimum køber intet, denne tabel ville vise. Rækken med 50 forbindelser
     blev derefter genmålt ved fuld tre-gentagelses-kvalitet samme dag, på samme
     maskine, mod den samme output-tjeksum: 70 / 70 / 70 s, alle tre byte-tjekket.
@@ -347,8 +347,8 @@
     tre, begge klienter aktuelle. Newsbin kørte ved sine egne konfigurerede maksima pr.
     server - 360 sockets mod vores 50 - og dens tider udelukker de 90 sekunders
     ro, vores testramme venter, før den erklærer en overvåget klient færdig, så
-    sammenligningen læner sig dens vej to gange, og resultatet står alligevel: 4.5x væggen,
-    12x CPU-sekunderne, og 1.9x hukommelsen for den identiske fil. Ingen af siderne er
+    sammenligningen læner sig dens vej to gange, og resultatet står alligevel: 4,5x væggen,
+    12x CPU-sekunderne, og 1,9x hukommelsen for den identiske fil. Ingen af siderne er
     disk-begrænset her - one-pass-armen har brug for omkring 0,73 GB/s af drevets 0,99, og
     Newsbin bruger i gennemsnit en tredjedel af det, mens den holder næsten fire processorkerner
     beskæftiget i otte minutter - så forskellen er klienten, ikke hardwaren. Begge klienter
@@ -435,9 +435,9 @@
     sekunder hver, mens downloadet står stille på nul. nzbfast holder op med at spørge: så snart
     de paritetsdata, den allerede har i hånden, dækker det, der stadig mangler, reparerer den øjeblikkeligt
     i stedet for at fuldføre vandringen. Det er anden række - den samme binær med den
-    opførsel slået fra er 1.4x til 2.3x langsommere afhængigt af skaden - og runden
+    opførsel slået fra er 1,4x til 2,3x langsommere afhængigt af skaden - og runden
     bekræftede, at mekanismen aktiveredes på hvert aktiveret ben og aldrig på et deaktiveret.
-    Mod den nærmeste rival er marginen 2.4x til 2.7x, uden overlap i nogen af de
+    Mod den nærmeste rival er marginen 2,4x til 2,7x, uden overlap i nogen af de
     ni gentagelsespar.</p>
     <p><b>Disk er, hvor marginen er bredest, og det er ikke reparationstricket.</b> Hver
     fuldførende arm producerede den samme 6,48 GB-fil; vores flyttede 6,2-6,8 GB disk-I/O
@@ -514,12 +514,12 @@
     <p><b>Begrænsningen kørt mod feltets egne håndtag.</b> På 34 GB-fixturen (23.
     august 2026, 1 Gbit-maskine, fem udbydere, 30 af 30 ben byte-korrekte), fik det at holde
     NZBGet til en tilsvarende cache-begrænsning dens CPU til at mere end fordobles (215,5 til 453,0
-    CPU-sekunder, 2.10x) for at købe et fald på 52% i dens spidshukommelse, og SABnzbds begrænsning var
+    CPU-sekunder, 2,10x) for at købe et fald på 52% i dens spidshukommelse, og SABnzbds begrænsning var
     næsten gratis, men nåede kun en del af dens aftryk. rustnzbs cache-indstilling var
     dekorativ i det kørte build, og Weaver har slet intet hukommelseshåndtag, så begge kørte
     ubegrænsede som referencekolonner frem for at blive bedømt ved et budget, de ikke kan
     holde. Vores egen side af den runde er afløst af v1.2.2-stigen ovenfor, som
-    siger det samme ved 2.5x størrelsen: budgettet er aldrig den bindende begrænsning,
+    siger det samme ved 2,5x størrelsen: budgettet er aldrig den bindende begrænsning,
     fordi ét gennemløb holder så lidt til at begynde med.</p>
   </div>
 </section>
@@ -564,7 +564,7 @@
     ikke et mislykket job. &sup1; Weavers kolonne for den store fixtur er uafklaret af en grund,
     der intet har med disk at gøre: to af dens tre ben gik i stå ved encifrede
     MB/s med mere end 60 GB stadig fri og ramte rundens 40-minutters afskæring, mens
-    den tredje fuldførte korrekt ved samme ~2.25x, den behøver på det lille job. En standsning er ikke en
+    den tredje fuldførte korrekt ved samme ~2,25x, den behøver på det lille job. En standsning er ikke en
     fri-plads-afgørelse, så vi markerer cellen som uafklaret frem for at bedømme den
     nogen vej.</p>
   </div>
@@ -576,13 +576,13 @@
     <h2>Din disk sætter din hastighedsgrænse</h2>
     <p class="lead"><b>For ethvert drev er den linjehastighed, du kan opretholde gennem download,
     verificering og udpakning, drevets reelle hastighed divideret med klientens I/O-
-    multiplikator.</b> Omkostningstabellerne ovenfor måler vores til omkring 1.0x - hver byte
-    krydser disken omkring én gang - og hver rival til 2.0x til 3.0x for byte-identisk
+    multiplikator.</b> Omkostningstabellerne ovenfor måler vores til omkring 1,0x - hver byte
+    krydser disken omkring én gang - og hver rival til 2,0x til 3,0x for byte-identisk
     output. Så det samme drev opretholder to til tre gange linjehastigheden under nzbfast,
     som det ville under en staging-klient. Regnestykket, med multiplikatorerne taget
     fra de målte tabeller ovenfor:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>linje</th><th>nyttelast-hastighed</th><th>disk behøvet ved vores ~1.0x</th><th>ved 2.2x</th><th>ved 3.0x</th></tr></thead>
+      <thead><tr><th>linje</th><th>nyttelast-hastighed</th><th>disk behøvet ved vores ~1.0x</th><th>ved 2,2x</th><th>ved 3,0x</th></tr></thead>
       <tbody>
         <tr><td>100 Mbit</td><td class="num">12,5 MB/s</td><td class="win num">~13 MB/s</td><td class="num">~28 MB/s</td><td class="num">~38 MB/s</td></tr>
         <tr><td>1 Gbit</td><td class="num">125 MB/s</td><td class="win num">~130 MB/s</td><td class="num">~275 MB/s</td><td class="num">~375 MB/s</td></tr>
@@ -592,15 +592,15 @@
     </table></div>
     <p>Sæt de kolonner op mod, hvad drev reelt opretholder. Et 5400/5900 rpm NAS-drev
     holder cirka 100-140 MB/s på sine yderste spor og aftager mod 80-100, efterhånden som det
-    fyldes - så gigabit er allerede grænsetilfælde ved 1.0x på den langsomste klasse, hvilket vi
+    fyldes - så gigabit er allerede grænsetilfælde ved 1,0x på den langsomste klasse, hvilket vi
     siger ligeud, og uden for rækkevidde ved 2-3x. Et 7200 rpm-drev holder cirka
-    160-220 MB/s. En SATA-SSD's ~550 MB/s begrænser en 2.2x-klient til nær 2 Gbit og bærer
-    omkring 3,5-4 Gbit ved 1.0x. SMR-drev, solgt til NAS-bokse i årevis, er værst
+    160-220 MB/s. En SATA-SSD's ~550 MB/s begrænser en 2,2x-klient til nær 2 Gbit og bærer
+    omkring 3,5-4 Gbit ved 1,0x. SMR-drev, solgt til NAS-bokse i årevis, er værst
     tænkeligt specifikt for staging-mønsteret: vedvarende skrivning med gentilbagelæsning kan
     kollapse til titalls MB/s, når drevets omlægningscache løber tør. Og en
     multi-gig-linje er samme mur, blot højere oppe: 10 Gbit ved en 2-3x-multiplikator kræver
     2,75-3,75 GB/s <em>vedvarende</em>, forbi hvert SATA-drev og forbi mange NVMe-drev,
-    så snart et stort job overhaler deres hurtige cache-zone, mens en ~2 GB/s SSD ved 1.0x
+    så snart et stort job overhaler deres hurtige cache-zone, mens en ~2 GB/s SSD ved 1,0x
     følger med linjehastigheden med plads til overs.</p>
     <p><b>Målt frem for påstået, på en struppet disk.</b> Vi begrænsede en disk til
     150 MB/s - en hastighed i 5400 rpm-klassen - og kørte samme download to gange: én gang ét gennemløb,
@@ -608,8 +608,8 @@
     armen fulgte med 1 Gbit-linjen ved 109,9 MB/s, 0,2% under sin egen ubegrænsede hastighed;
     staging-mønsteret faldt til 59,0 MB/s, 54% af linjen. Fejet parametrisk med
     ingen linjegrænse tog ét-gennemløbs-armen 97% af, hvad disken end tilbød ved hver grænse
-    (290,7 MB/s af en 300 MB/s-grænse, 145,6 af 150) ved en målt 1,00-1.03x disk-I/O,
-    og staging-mønsteret tog 47-48% ved en målt 3.02x - forholdet konstant
+    (290,7 MB/s af en 300 MB/s-grænse, 145,6 af 150) ved en målt 1,00-1,03x disk-I/O,
+    og staging-mønsteret tog 47-48% ved en målt 3,02x - forholdet konstant
     på tværs af grænser, hvilket er regnestykket ovenfor gengivet som en måling. 32 ben,
     hvert output byte-tjekket.</p>
     <p><b>Og engang på rigtig hardware, ubegrænset.</b> Det langsomste drev i vores test-
@@ -621,7 +621,7 @@
     rigtigt drev frem for et struppet. Og flådens hurtige ende lukker
     argumentet fra den anden side: samme 87 GB-job, fuld hastighed ved 10 GbE, bliver færdigt
     på de samme 70-71 sekunder på et 1,24 GB/s-drev og på et 5,97 GB/s-drev - en
-    4.8x hurtigere disk flytter væggen med nul, fordi ved en 1.0x-multiplikator løber linjen
+    4,8x hurtigere disk flytter væggen med nul, fordi ved en 1,0x-multiplikator løber linjen
     tør længe før disken gør. For en staging-klient er de to drev
     forskellige verdener.</p>
     <p class="note" style="text-align:start"><b>Hvad den rig er, og hvad den ikke er.</b>
@@ -729,7 +729,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Alle syv former vores, på minimum og
-    på medianen, 1.16x til 4.29x mod unrar. Disse tider er ikke sammenlignelige
+    på medianen, 1,16x til 4,29x mod unrar. Disse tider er ikke sammenlignelige
     celle for celle med den bredere tabel nedenfor - testrammen er revideret siden den
     tabels runder, og runde-antallet er forskelligt - så læs hver tabel mod sig selv.
     Den bredere tabel beholder sine egne datoer og sit felt af seks værktøjer, og dens nzbfast-kolonne
@@ -787,7 +787,7 @@
 
     <p class="note" style="text-align:start"><b>Ét valg værd at erklære.</b> Arkiverne pakkes med kompressoren fastpinnet til fire tråde. RARs blokopdeling følger ellers kernetallet på den maskine, der pakkede arkivet, så en 32-core-maskine og en 20-core-maskine producerer forskellige bytes fra samme input, og maskinerne holder op med at være sammenlignelige. At fastpinne det gør udpaknings-korpuset byte-identisk overalt, hvilket er pointen, men det sætter også et loft for, hvor meget af afkodningen der kan køre parallelt - så da de to tætteste former var tab, kørte vi dem igen mod arkiver pakket med alle 32 tråde, for at tjekke at fastpinningen ikke var årsagen. Det var den ikke: solid gik fra 4,2% bagud til 2,4% bagud og 128 MiB-ordbogen fra 6,6% til 6,3%, samme rækkefølge begge veje. Begge er nu sejre på det fastpinnede korpus med en bredere margin, end det tjek kunne forklare.</p>
 
-    <p class="note" style="text-align:start"><b>Hvorfor der ikke er nogen RAR4-række, og hvad der sker med de opslag.</b> Hver form ovenfor er RAR5 eller RAR7, hvilket er det, usenet udgiver i dag. Ældre RAR4-arkiver dukker stadig op, og den samme motor læser dem, inklusive de komprimerede og adgangskode-beskyttede former, i det samme ene gennemløb som de nyere, frem for at skrive bindene til disk og pakke dem ud bagefter. De får ingen række her, fordi den officielle <code>rar</code> 7.23 ikke længere kan oprette RAR4, så der er intet neutralt korpus at køre feltet mod; det arbejde er i stedet tjekket mod arkiver skrevet af WinRAR 3,00, byte for byte mod unrar.</p>
+    <p class="note" style="text-align:start"><b>Hvorfor der ikke er nogen RAR4-række, og hvad der sker med de opslag.</b> Hver form ovenfor er RAR5 eller RAR7, hvilket er det, usenet udgiver i dag. Ældre RAR4-arkiver dukker stadig op, og den samme motor læser dem, inklusive de komprimerede og adgangskode-beskyttede former, i det samme ene gennemløb som de nyere, frem for at skrive bindene til disk og pakke dem ud bagefter. De får ingen række her, fordi den officielle <code>rar</code> 7.23 ikke længere kan oprette RAR4, så der er intet neutralt korpus at køre feltet mod; det arbejde er i stedet tjekket mod arkiver skrevet af WinRAR 3.00, byte for byte mod unrar.</p>
 
     <h3 style="margin:44px 0 4px">PAR2-verificering og -reparation: 1 GiB-sæt, fire skadesniveauer</h3>
     <p class="note" style="text-align:start;margin-top:6px">Korpus: 1 GiB tilfældig nyttelast pakket i gemt-tilstand i 21 RAR-bind, derefter to PAR2-sæt ved 10% redundans, ét ved 1 MiB-blokke og ét ved 64 KiB, derefter faste skadeskort. Hver kørsel bruger samme protokol: frisk kopi, læs hele korpuset én gang for at varme cachen op, tag så tid. Bedste af tre flettede runder; hvert repareret bind sammenlignes med det uberørte sæt ved hver runde. Lavere er bedre.</p>
@@ -798,7 +798,7 @@
 
     <p class="note" style="text-align:start"><b>Bekræftet på leveringsbuildet mod den aktuelle rival, 24. august 2026.</b> Disse tabeller blev målt før 1.2.2 blev skåret, og før <code>par2cmdline-turbo</code> udgav 1.5.0 (20. august 2026), så 20-core-kolonnen blev kørt igen mod begge: vores 1.2.2-releasebuild mod turbo 1.5.0, tre flettede runder pr. ben, hver repareret fil sammenlignet med det uberørte sæt. Alle fire ben gengiver sig - vores 0,18 / 0,30 / 0,75 / 2,02 mod de 0,19 / 0,33 / 0,74 / 2,07 trykt her, og turbo 1.5.0 lander inden for et par procent af buildet i tabellen på hvert ben og begge konfigurationer. Cellerne står som publiceret; de andre tre maskiner beholder deres egne datoer.</p>
 
-    <p class="note" style="text-align:start"><b>Så konkurrenten optræder to gange, og én af de kolonner er dens bedste tilfælde frem for dens standard.</b> Den release-binær, du ville downloade, er kompileret til en generisk baseline-CPU og hasher kun et par filer ad gangen; at bygge samme kilde til den faktiske vært-CPU og give <code>-T16</code> lader den bruge de instruktioner, den maskine reelt har, og hashe seksten filer ad gangen. På laptoppen er det op til 2.6x værd, udelukkende fra build og flag. Bedøm os på den tunede kolonne, som er den hårdere sammenligning; som-leveret-kolonnen er det, nogen der downloader den, rent faktisk oplever. <code>par2cmdline</code> er originalen, version 1.2.0, bygget fra kilde på hver maskine. <code>rarpar</code> er Weavers egen PAR2-implementering, bygget fra kilde med dens Metal GPU-backend slået til. MultiPars <code>par2j</code> er kun Windows, så den optræder kun i Windows-laptop-rækkerne. M5 Max-rækkerne kører de to værktøjer med aktuelle macOS arm64-builds ved siden af de to turbo-kolonner; <code>par2cmdline</code> klassisk blev ikke kørt på den maskine.</p>
+    <p class="note" style="text-align:start"><b>Så konkurrenten optræder to gange, og én af de kolonner er dens bedste tilfælde frem for dens standard.</b> Den release-binær, du ville downloade, er kompileret til en generisk baseline-CPU og hasher kun et par filer ad gangen; at bygge samme kilde til den faktiske vært-CPU og give <code>-T16</code> lader den bruge de instruktioner, den maskine reelt har, og hashe seksten filer ad gangen. På laptoppen er det op til 2,6x værd, udelukkende fra build og flag. Bedøm os på den tunede kolonne, som er den hårdere sammenligning; som-leveret-kolonnen er det, nogen der downloader den, rent faktisk oplever. <code>par2cmdline</code> er originalen, version 1.2.0, bygget fra kilde på hver maskine. <code>rarpar</code> er Weavers egen PAR2-implementering, bygget fra kilde med dens Metal GPU-backend slået til. MultiPars <code>par2j</code> er kun Windows, så den optræder kun i Windows-laptop-rækkerne. M5 Max-rækkerne kører de to værktøjer med aktuelle macOS arm64-builds ved siden af de to turbo-kolonner; <code>par2cmdline</code> klassisk blev ikke kørt på den maskine.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>sekunder, 1 GiB-sæt</th><th>desktop, 32 cores</th><th>desktop, 20 cores</th><th>laptop, 14 cores</th><th>laptop, M5 Max</th></tr></thead>
@@ -921,11 +921,11 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ Direkte udpakning materialiserer stadig bindene først:
     2× skrivninger og 2× disk. ⁵ rustnzb 1.4.5 leverer hver fixtur byte-korrekt i 23. august
-    2026-runden, og dens målte disk-I/O der er omkring 2.1x nyttelasten - så den stager
+    2026-runden, og dens målte disk-I/O der er omkring 2,1x nyttelasten - så den stager
     bindene og pakker ud efter downloadet frem for at udpakke løbende (se <a
     href="#cost">omkostningstabellerne</a>). Dens ældre builds (1.3.4-1.3.9) leverede obfuskerede
     bind markeret "Completed" uden at udpakke; den fejl er rettet opstrøms i 1.4.5.
-    ⁶ GPL-3,0-or-later.
+    ⁶ GPL-3.0-or-later.
     ⁷ Weaver 0.7.8, den nyeste leverede binær, identitet bevist ved hash (den publicerede release-
     tarballs sha256 og binæren i den matcher begge det, vi kører mod); dens målte rækker kommer
     fra 23. august-omkostningsrunden, dens kapacitetsceller markeret "-" er funktioner, vi ikke har

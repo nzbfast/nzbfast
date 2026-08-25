@@ -70,7 +70,7 @@
     percento - un pareggio statistico, dentro la stessa variabilità da corsa a corsa
     di quel client - e sul disco ognuno di loro ha spostato almeno il doppio dei byte
     per un risultato byte-identico. Di serie, nzbfast ha anche tenuto la memoria più
-    bassa di ogni client misurato, su ogni scenario, da 2.0x a 4.5x contro il rivale
+    bassa di ogni client misurato, su ogni scenario, da 2,0x a 4,5x contro il rivale
     più vicino.</p>
     <p><b>Qual è il tuo caso?</b></p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
@@ -204,7 +204,7 @@
     6,5 GB sullo scenario pulito - la stessa cifra che NZBGet e SABnzbd riportano per
     se stessi. Il caso peggiore che conosciamo è un post offuscato deliberatamente
     rinumerato, dove aggirare la numerazione mescolata costa un articolo in più per ogni
-    deviazione: misurato a 1,10-1.20x il piano minimo su entrambe le forme di questo tipo che siamo riusciti a
+    deviazione: misurato a 1,10-1,20x il piano minimo su entrambe le forme di questo tipo che siamo riusciti a
     costruire. Le celle di rustnzb a 7,2 e 37,8 GB sono un
     suo eccesso proprio, con un avviso nel suo log su due prove.</p>
     <p class="note" style="text-align:start"><b>Cosa significa la colonna della memoria alle
@@ -254,7 +254,7 @@
     entro il 18% sul cronometro e conduciamo sul rivale più vicino del 4,4%; a 500 Mbit il divario
     si apre al 14,7%; alle velocità gigabit e 10 GbE nelle tabelle sopra e sotto si
     apre ulteriormente. Le differenze di velocità crescono con la linea. Le colonne delle risorse non
-    aspettano una linea veloce: a ogni velocità misurata, ogni rivale ha tenuto almeno 3.9x la
+    aspettano una linea veloce: a ogni velocità misurata, ogni rivale ha tenuto almeno 3,9x la
     memoria, speso più processore, e spostato circa il doppio dei byte su disco per lo stesso
     file byte-identico.</p>
     <p><b>Il regolatore delle connessioni si guadagna il suo posto sulle linee lente, e il
@@ -263,7 +263,7 @@
     regolatore disattivato ne ha fatte girare 360. Meno flussi attraverso una
     coda fissa significa meno perdite e meno reinvii: il limitatore ha registrato circa 4.200
     scarti per prova limitata contro circa 155.000 senza limite a 500 Mbit, e il braccio limitato
-    era più veloce, 4.2x più leggero sulla memoria e 1.3x più leggero sulla CPU rispetto alla nostra
+    era più veloce, 4,2x più leggero sulla memoria e 1,3x più leggero sulla CPU rispetto alla nostra
     stessa postura a 360 socket. Più connessioni non significa più velocità; sotto il gigabit è misurabilmente il
     contrario.</p>
     <p class="note" style="text-align:start"><b>Misurato il 24 agosto 2026</b>, mediane di
@@ -301,8 +301,8 @@
     </table></div>
     <p><b>La storia del disco alla sua scala più grande finora.</b> Il nostro picco di disco durante il job è
     70,8 GiB - SOTTO l'output di 76,6 GB, perché la coda del payload sta ancora
-    arrivando mentre la testa è già definitiva - e l'I/O totale del dispositivo è 1.00x il
-    payload. I rivali spostano da 2.5x a 6.0x i byte per lo stesso file. E il braccio più veloce
+    arrivando mentre la testa è già definitiva - e l'I/O totale del dispositivo è 1,00x il
+    payload. I rivali spostano da 2,5x a 6,0x i byte per lo stesso file. E il braccio più veloce
     sostiene circa 8,7 Gbps <em>inclusa</em> la verifica e l'estrazione in
     flusso; nel momento in cui la barra di download si riempie, il file è pronto.</p>
     <p class="note" style="text-align:start">&sup1; Ogni client su questa pagina viene fatto correre alle sue impostazioni
@@ -311,7 +311,7 @@
     raggiunge - la stessa ottimizzazione a una sola impostazione che diamo a ogni rivale (a SABnzbd il suo
     pipelining, a NZBGet la sua cache degli articoli). Cinquanta non è uno svantaggio: una scansione a sei gradini
     su questo stesso scenario ha trovato il muro identico da 50 connessioni fino ai
-    massimi di account di 360, mentre il costo del processore sale del 2.3x lungo quell'intervallo per
+    massimi di account di 360, mentre il costo del processore sale del 2,3x lungo quell'intervallo per
     niente, quindi i massimi non comprano nulla che questa tabella mostrerebbe. La riga a 50 connessioni
     è stata poi rimisurata a piena qualità di tre ripetizioni lo stesso giorno, sulla stessa
     macchina, contro lo stesso checksum di output: 70 / 70 / 70 s, tutte e tre controllate byte per byte.
@@ -350,8 +350,8 @@
     tre, entrambi i client attuali. Newsbin ha girato ai propri massimi di connessione
     per server configurati - 360 socket contro i nostri 50 - e i suoi tempi escludono i 90 secondi
     di assestamento che il nostro banco aspetta prima di dichiarare finito un client osservato, quindi il
-    confronto pende dalla sua parte due volte e il risultato regge comunque: 4.5x il tempo totale,
-    12x i secondi di CPU, e 1.9x la memoria per il file identico. Nessuno dei due lati è
+    confronto pende dalla sua parte due volte e il risultato regge comunque: 4,5x il tempo totale,
+    12x i secondi di CPU, e 1,9x la memoria per il file identico. Nessuno dei due lati è
     vincolato dal disco qui - il braccio a passata unica ha bisogno di circa 0,73 GB/s dei 0,99 del disco, e
     Newsbin ne fa in media un terzo tenendo occupati quasi quattro core del processore
     per otto minuti - quindi il divario è il client, non l'hardware. Entrambi i client
@@ -438,9 +438,9 @@
     secondi ciascuno, durante i quali il download resta a zero. nzbfast smette di chiedere: non appena i
     dati di parità già in mano coprono ciò che ancora manca, ripara immediatamente
     invece di finire la camminata. Questa è la seconda riga - lo stesso binario con quel
-    comportamento disattivato è da 1.4x a 2.3x più lento a seconda del danno - e la tornata
+    comportamento disattivato è da 1,4x a 2,3x più lento a seconda del danno - e la tornata
     ha verificato che il meccanismo si attivava su ogni prova abilitata e mai su una disabilitata.
-    Contro il rivale più vicino il margine è da 2.4x a 2.7x, senza sovrapposizioni in nessuna delle
+    Contro il rivale più vicino il margine è da 2,4x a 2,7x, senza sovrapposizioni in nessuna delle
     nove coppie di ripetizioni.</p>
     <p><b>Il disco è dove il margine è più ampio, e non è il trucco della riparazione.</b> Ogni
     braccio che ha completato ha prodotto lo stesso file da 6,48 GB; il nostro ha spostato 6,2-6,8 GB di I/O su disco
@@ -517,12 +517,12 @@
     <p><b>Il vincolo messo in gara contro le manopole proprie del campo.</b> Sullo scenario da 34 GB (23
     agosto 2026, macchina 1 Gbit, cinque provider, 30 prove su 30 byte-corrette),
     tenere NZBGet a un vincolo di cache equivalente ha più che raddoppiato la sua CPU (da 215,5 a 453,0
-    secondi, 2.10x) per comprare un taglio del 52% nel suo picco di memoria, e il vincolo di SABnzbd era
+    secondi, 2,10x) per comprare un taglio del 52% nel suo picco di memoria, e il vincolo di SABnzbd era
     quasi gratuito ma raggiungeva solo parte del suo ingombro. L'impostazione della cache di rustnzb era
     decorativa nella build fatta correre, e Weaver non ha alcuna manopola di memoria, quindi entrambi hanno girato
     senza vincoli come colonne di riferimento invece di essere valutati a un budget che non possono
     tenere. Il nostro lato di quella tornata è superato dalla scala v1.2.2 qui sopra, che
-    dice la stessa cosa a 2.5x la dimensione: il budget non è mai il vincolo determinante,
+    dice la stessa cosa a 2,5x la dimensione: il budget non è mai il vincolo determinante,
     perché la passata unica tiene così poco per cominciare.</p>
   </div>
 </section>
@@ -567,7 +567,7 @@
     non un job fallito. &sup1; La colonna dello scenario grande di Weaver è irrisolta per una ragione
     che non ha nulla a che fare con il disco: due delle sue tre prove si sono bloccate a MB/s a una cifra
     con più di 60 GB ancora liberi e hanno colpito il limite di 40 minuti della tornata, mentre
-    la terza ha completato correttamente allo stesso ~2.25x di cui ha bisogno sul job piccolo. Un blocco non è un
+    la terza ha completato correttamente allo stesso ~2,25x di cui ha bisogno sul job piccolo. Un blocco non è un
     verdetto sullo spazio libero, quindi segniamo la cella come irrisolta invece di valutarla in un modo o
     nell'altro.</p>
   </div>
@@ -579,13 +579,13 @@
     <h2>Il tuo disco fissa il tuo limite di velocità</h2>
     <p class="lead"><b>Per qualsiasi disco, la velocità di linea che riesci a sostenere attraverso
     download, verifica e scompattazione è la velocità reale del disco divisa per il moltiplicatore di I/O del
-    client.</b> Le tabelle dei costi qui sopra misurano il nostro a circa 1.0x - ogni byte
-    attraversa il disco circa una volta - e ogni rivale da 2.0x a 3.0x per un output byte-identico.
+    client.</b> Le tabelle dei costi qui sopra misurano il nostro a circa 1,0x - ogni byte
+    attraversa il disco circa una volta - e ogni rivale da 2,0x a 3,0x per un output byte-identico.
     Quindi lo stesso disco sostiene da due a tre volte la velocità di linea sotto nzbfast
     di quanto farebbe sotto un client a passaggi. L'aritmetica, con i moltiplicatori presi
     dalle tabelle misurate qui sopra:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>linea</th><th>velocità del payload</th><th>disco necessario al nostro ~1.0x</th><th>a 2.2x</th><th>a 3.0x</th></tr></thead>
+      <thead><tr><th>linea</th><th>velocità del payload</th><th>disco necessario al nostro ~1.0x</th><th>a 2,2x</th><th>a 3,0x</th></tr></thead>
       <tbody>
         <tr><td>100 Mbit</td><td class="num">12,5 MB/s</td><td class="win num">~13 MB/s</td><td class="num">~28 MB/s</td><td class="num">~38 MB/s</td></tr>
         <tr><td>1 Gbit</td><td class="num">125 MB/s</td><td class="win num">~130 MB/s</td><td class="num">~275 MB/s</td><td class="num">~375 MB/s</td></tr>
@@ -595,15 +595,15 @@
     </table></div>
     <p>Metti queste colonne contro quello che i dischi sostengono davvero. Un disco NAS
     a 5400/5900 rpm tiene circa 100-140 MB/s sulle tracce esterne, decadendo verso
-    80-100 mentre si riempie - quindi il gigabit è già al limite a 1.0x sulla
+    80-100 mentre si riempie - quindi il gigabit è già al limite a 1,0x sulla
     classe più lenta, cosa che diciamo chiaramente, e fuori portata a 2-3x. Un disco a 7200 rpm tiene circa
-    160-220 MB/s. I ~550 MB/s di un SSD SATA limitano un client a 2.2x vicino ai 2 Gbit e ne portano
-    circa 3,5-4 a 1.0x. I dischi SMR, venduti nei vani NAS per anni, sono il caso
+    160-220 MB/s. I ~550 MB/s di un SSD SATA limitano un client a 2,2x vicino ai 2 Gbit e ne portano
+    circa 3,5-4 a 1,0x. I dischi SMR, venduti nei vani NAS per anni, sono il caso
     peggiore specificamente per lo schema a passaggi: la scrittura sostenuta con rilettura può
     crollare a decine di MB/s una volta esaurita la cache di reshingling del disco. E una
     linea multi-gig è lo stesso muro più in alto: 10 Gbit a un moltiplicatore di 2-3x richiede
     2,75-3,75 GB/s <em>sostenuti</em>, oltre ogni disco SATA e oltre molti dischi NVMe
-    una volta che un job grande supera la loro zona di cache veloce, mentre a 1.0x un SSD da ~2 GB/s
+    una volta che un job grande supera la loro zona di cache veloce, mentre a 1,0x un SSD da ~2 GB/s
     tiene il passo della velocità di linea con margine da vendere.</p>
     <p><b>Misurato invece di asserito, su un disco limitato.</b> Abbiamo limitato un disco a
     150 MB/s - una velocità di classe 5400 rpm - e fatto girare lo stesso download due volte: una a passata unica,
@@ -611,8 +611,8 @@
     braccio a passata unica ha tenuto il passo della linea 1 Gbit a 109,9 MB/s, lo 0,2% sotto la sua stessa velocità senza limite;
     lo schema a passaggi è crollato a 59,0 MB/s, il 54% della linea. Scansionato parametricamente senza
     limite di linea, il braccio a passata unica ha preso il 97% di qualsiasi cosa il disco offrisse a ogni limite
-    (290,7 MB/s di un limite a 300 MB/s, 145,6 di 150) a un I/O del dispositivo misurato di 1,00-1.03x,
-    e lo schema a passaggi ha preso il 47-48% a un 3.02x misurato - il rapporto costante
+    (290,7 MB/s di un limite a 300 MB/s, 145,6 di 150) a un I/O del dispositivo misurato di 1,00-1,03x,
+    e lo schema a passaggi ha preso il 47-48% a un 3,02x misurato - il rapporto costante
     attraverso i limiti, che è l'aritmetica qui sopra riprodotta come misura. 32 prove,
     ogni output controllato byte per byte.</p>
     <p><b>E una volta su hardware reale, senza limiti.</b> Il disco più lento della nostra test
@@ -624,7 +624,7 @@
     unità reale invece che limitata. E l'estremo veloce della flotta chiude l'argomento
     dall'altro lato: lo stesso job da 87 GB, a piena velocità a 10 GbE, finisce
     negli stessi 70-71 secondi su un disco da 1,24 GB/s e su uno da 5,97 GB/s - un
-    disco 4.8x più veloce sposta il tempo totale di zero, perché a un moltiplicatore di 1.0x la linea
+    disco 4,8x più veloce sposta il tempo totale di zero, perché a un moltiplicatore di 1,0x la linea
     si esaurisce molto prima del disco. Per un client a passaggi quei due dischi sono
     mondi diversi.</p>
     <p class="note" style="text-align:start"><b>Cos'è e cosa non è quel banco.</b> Il
@@ -731,7 +731,7 @@
       </tbody>
     </table></div>
     <p class="note" style="text-align:start">Tutte e sette le forme nostre, sul minimo e
-    sulla mediana, da 1.16x a 4.29x contro unrar. Questi tempi non sono confrontabili
+    sulla mediana, da 1,16x a 4,29x contro unrar. Questi tempi non sono confrontabili
     cella per cella con la tabella più ampia qui sotto - il banco è stato rivisto dalle
     tornate di quella tabella e i conteggi delle tornate differiscono - quindi leggi ogni tabella contro se stessa.
     La tabella più ampia mantiene le proprie date e il suo campo di sei strumenti, e la sua colonna nzbfast
@@ -789,7 +789,7 @@
 
     <p class="note" style="text-align:start"><b>Una scelta che merita di essere dichiarata.</b> Gli archivi sono impacchettati con il compressore fissato a quattro thread. Altrimenti la suddivisione in blocchi di RAR segue il numero di core della macchina che ha impacchettato l'archivio, così una macchina a 32 core e una a 20 core producono byte diversi dallo stesso input e le macchine smettono di essere confrontabili. Fissarlo rende il corpus di estrazione identico byte per byte ovunque, ed è questo il punto, ma limita anche quanta parte della decodifica può girare in parallelo - perciò, quando le due forme più vicine erano sconfitte, le abbiamo rifatte correre contro archivi impacchettati con tutti e 32 i thread, per verificare che non fosse il fissaggio a causarlo. Non lo era: solid è passato dal 4,2% di ritardo al 2,4% e il dizionario 128 MiB dal 6,6% al 6,3%, lo stesso ordinamento in entrambi i casi. Entrambe ora sono vittorie sul corpus fissato, con un margine più ampio di quanto quella verifica potrebbe spiegare.</p>
 
-    <p class="note" style="text-align:start"><b>Perché non c'è una riga RAR4, e cosa succede a quei post.</b> Ogni forma qui sopra è RAR5 o RAR7, che è quello che usenet pubblica oggi. Archivi RAR4 più vecchi si vedono ancora, e lo stesso motore li legge, incluse le forme compresse e protette da password, nella stessa passata unica di quelli più recenti invece di scrivere i volumi su disco e scompattarli dopo. Non hanno una riga qui perché il <code>rar</code> ufficiale 7.23 non può più creare RAR4, quindi non c'è un corpus neutrale su cui far correre il campo; quel lavoro è invece controllato contro archivi scritti da WinRAR 3,00, byte per byte contro unrar.</p>
+    <p class="note" style="text-align:start"><b>Perché non c'è una riga RAR4, e cosa succede a quei post.</b> Ogni forma qui sopra è RAR5 o RAR7, che è quello che usenet pubblica oggi. Archivi RAR4 più vecchi si vedono ancora, e lo stesso motore li legge, incluse le forme compresse e protette da password, nella stessa passata unica di quelli più recenti invece di scrivere i volumi su disco e scompattarli dopo. Non hanno una riga qui perché il <code>rar</code> ufficiale 7.23 non può più creare RAR4, quindi non c'è un corpus neutrale su cui far correre il campo; quel lavoro è invece controllato contro archivi scritti da WinRAR 3.00, byte per byte contro unrar.</p>
 
     <h3 style="margin:44px 0 4px">Verifica e riparazione PAR2: set da 1 GiB, quattro livelli di danno</h3>
     <p class="note" style="text-align:start;margin-top:6px">Corpus: 1 GiB di payload casuale impacchettato in modalità store in 21 volumi RAR, poi due set PAR2 al 10% di ridondanza, uno a blocchi da 1 MiB e uno da 64 KiB, poi mappe di danno fisse. Ogni corsa usa lo stesso protocollo: copia fresca, lettura dell'intero corpus una volta per scaldare la cache, poi cronometrare. Il migliore di tre tornate alternate; ogni volume riparato è confrontato contro il set incontaminato a ogni tornata. Più basso è meglio.</p>
@@ -800,7 +800,7 @@
 
     <p class="note" style="text-align:start"><b>Confermato sulla build distribuita contro il rivale attuale, 24 agosto 2026.</b> Queste tabelle sono state misurate prima che 1.2.2 fosse tagliata e prima che <code>par2cmdline-turbo</code> rilasciasse 1.5.0 (20 agosto 2026), quindi la colonna a 20 core è stata rifatta correre su entrambe: la nostra build di rilascio 1.2.2 contro turbo 1.5.0, tre tornate alternate per prova, ogni file riparato confrontato contro il set incontaminato. Tutte e quattro le prove si riproducono - le nostre 0,18 / 0,30 / 0,75 / 2,02 contro le 0,19 / 0,33 / 0,74 / 2,07 stampate qui, e turbo 1.5.0 atterra entro pochi punti percentuali dalla build in tabella su ogni prova ed entrambe le configurazioni. Le celle restano come pubblicate; le altre tre macchine mantengono le proprie date.</p>
 
-    <p class="note" style="text-align:start"><b>Quindi la concorrenza compare due volte, e una di quelle colonne è il suo caso migliore anziché il suo predefinito.</b> Il binario di rilascio che scaricheresti è compilato per una CPU generica di base e calcola l'hash di solo un paio di file alla volta; compilare lo stesso sorgente per la CPU host reale e passare <code>-T16</code> gli permette di usare le istruzioni che quella macchina ha davvero e calcolare l'hash di sedici file alla volta. Sul laptop questo vale fino a 2.6x, interamente dalla build e dai flag. Giudicaci sulla colonna ottimizzata, che è il confronto più difficile; la colonna di serie è quello che chi lo scarica sperimenta davvero. <code>par2cmdline</code> è l'originale, versione 1.2.0, compilato dai sorgenti su ogni macchina. <code>rarpar</code> è l'implementazione PAR2 propria di Weaver, compilata dai sorgenti con il suo backend GPU Metal abilitato. Il <code>par2j</code> di MultiPar è solo Windows, quindi compare solo sulle righe del laptop Windows. Le righe M5 Max fanno correre i due strumenti con build arm64 macOS attuali accanto alle due colonne turbo; <code>par2cmdline</code> classico non è stato fatto correre su quella macchina.</p>
+    <p class="note" style="text-align:start"><b>Quindi la concorrenza compare due volte, e una di quelle colonne è il suo caso migliore anziché il suo predefinito.</b> Il binario di rilascio che scaricheresti è compilato per una CPU generica di base e calcola l'hash di solo un paio di file alla volta; compilare lo stesso sorgente per la CPU host reale e passare <code>-T16</code> gli permette di usare le istruzioni che quella macchina ha davvero e calcolare l'hash di sedici file alla volta. Sul laptop questo vale fino a 2,6x, interamente dalla build e dai flag. Giudicaci sulla colonna ottimizzata, che è il confronto più difficile; la colonna di serie è quello che chi lo scarica sperimenta davvero. <code>par2cmdline</code> è l'originale, versione 1.2.0, compilato dai sorgenti su ogni macchina. <code>rarpar</code> è l'implementazione PAR2 propria di Weaver, compilata dai sorgenti con il suo backend GPU Metal abilitato. Il <code>par2j</code> di MultiPar è solo Windows, quindi compare solo sulle righe del laptop Windows. Le righe M5 Max fanno correre i due strumenti con build arm64 macOS attuali accanto alle due colonne turbo; <code>par2cmdline</code> classico non è stato fatto correre su quella macchina.</p>
 
     <div class="tblwrap"><table>
       <thead><tr><th>secondi, set da 1 GiB</th><th>desktop, 32 core</th><th>desktop, 20 core</th><th>laptop, 14 core</th><th>laptop, M5 Max</th></tr></thead>
@@ -842,7 +842,7 @@
 
     <p class="note" style="text-align:start"><b>Il danno leggero è il caso che conta.</b> Una manciata di articoli falliti è molto più tipica di 101 blocchi morti, e niente di simile a 1.500. Gran parte di una riparazione leggera non è affatto la matematica Reed-Solomon, è leggere e calcolare l'MD5 di un gigabyte, ed è per questo che la riga a 3 blocchi segue la riga della verifica pulita anziché quelle di riparazione.</p>
 
-    <p class="note" style="text-align:start"><b>Il livello di danno più pesante è un tipo di lavoro diverso, e riceve un algoritmo diverso.</b> Quell'ultimo livello danneggia 1.500 blocchi su tutti e 21 i volumi e consuma circa il 91% dei dati di recupero, ed è lì che l'aritmetica Reed-Solomon, e non l'hashing o il disco, diventa quasi tutto il lavoro. La build distribuita calcola le riparazioni più pesanti con una trasformata teorico-numerica invece della classica riduzione su campo di Galois - la stessa matematica, valutata in una forma che scala molto meglio ad alti conteggi di blocchi: 2,7× avanti alla build ottimizzata sul desktop a 20 core, e sul laptop Windows 2.7× avanti alla build ottimizzata e 2,2× avanti a MultiPar. Il danno leggero continua a girare sul percorso classico, ed è per questo che gli altri livelli si sono mossi appena: la trasformata conviene solo oltre circa 512 blocchi danneggiati, quindi sotto quella soglia lo smistamento non la usa.</p>
+    <p class="note" style="text-align:start"><b>Il livello di danno più pesante è un tipo di lavoro diverso, e riceve un algoritmo diverso.</b> Quell'ultimo livello danneggia 1.500 blocchi su tutti e 21 i volumi e consuma circa il 91% dei dati di recupero, ed è lì che l'aritmetica Reed-Solomon, e non l'hashing o il disco, diventa quasi tutto il lavoro. La build distribuita calcola le riparazioni più pesanti con una trasformata teorico-numerica invece della classica riduzione su campo di Galois - la stessa matematica, valutata in una forma che scala molto meglio ad alti conteggi di blocchi: 2,7× avanti alla build ottimizzata sul desktop a 20 core, e sul laptop Windows 2,7× avanti alla build ottimizzata e 2,2× avanti a MultiPar. Il danno leggero continua a girare sul percorso classico, ed è per questo che gli altri livelli si sono mossi appena: la trasformata conviene solo oltre circa 512 blocchi danneggiati, quindi sotto quella soglia lo smistamento non la usa.</p>
 
     <p class="note" style="text-align:start"><b>Un percorso più veloce vale la pena averlo solo se non può essere sbagliato.</b> Entrambi i percorsi calcolano la stessa quantità e sono identici bit per bit per costruzione, e ogni riparazione su questa pagina è stata verificata sul fatto che i file ricostruiti corrispondessero al set incontaminato: 228 riparazioni cronometrate sulle macchine di questa tornata, zero discordanze. La build distribuita non si affida a quel primato. Ogni riparazione verifica il proprio output contro gli hash dei file, e una che fallisse verrebbe rifatta automaticamente con il percorso classico, registrerebbe la divergenza nel log, e manterrebbe il percorso classico per il resto di quella corsa. L'impostazione è nella dashboard come <b>Fast PAR mode</b> se preferisci non averla affatto, e le macchine con troppo poca memoria per usarla la rifiutano da sole invece di provare e fallire. Rimisurato il 2 agosto sulla build attuale: i due desktop atterrano entro pochi punti percentuali da questa tabella, e con <b>Fast PAR mode</b> disattivato il desktop a 20 core torna esattamente al tempo più lento del percorso classico, il che dice che la vittoria è il metodo e non le condizioni.</p>
 
@@ -923,11 +923,11 @@
     </table></div>
     <p class="note" style="text-align:start">⁴ L'estrazione diretta materializza comunque prima i volumi:
     2× scritture e 2× disco. ⁵ rustnzb 1.4.5 consegna ogni scenario byte-corretto nella tornata del 23 agosto
-    2026, e il suo I/O di dispositivo misurato lì è circa 2.1x il payload - quindi scrive a fasi i
+    2026, e il suo I/O di dispositivo misurato lì è circa 2,1x il payload - quindi scrive a fasi i
     volumi e scompatta dopo il download invece di estrarre in flusso (vedi <a
     href="#cost">le tabelle dei costi</a>). Le sue build più vecchie (1.3.4-1.3.9) distribuivano
     volumi offuscati segnati "Completed" senza estrarre; quel difetto è corretto a monte in 1.4.5.
-    ⁶ GPL-3,0-or-later.
+    ⁶ GPL-3.0-or-later.
     ⁷ Weaver 0.7.8, il binario distribuito più recente, identità provata per hash (lo sha256 del
     tarball di rilascio pubblicato e il binario al suo interno corrispondono entrambi a ciò contro cui corriamo); le sue righe misurate vengono
     dalla tornata dei costi del 23 agosto, le sue celle di capacità segnate "-" sono funzionalità che non abbiamo
