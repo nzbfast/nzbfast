@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>قياس الأداء - nzbfast</title>
-<meta name="description" content="‏nzbfast مقيسًا مقابل أربعة عملاء يوزنت آخرين على عتاد متطابق: الزمن حتى ملف قابل للاستخدام، إضافة إلى القرص والمساحة الحرّة والذاكرة التي تكلّفها كل مهمة. كل جدول يسمّي الإصدارات التي جرى القياس مقابلها. يشمل الأشواط التي لا يفوز بها nzbfast.">
+<meta name="description" content="‏nzbfast مقيسًا مقابل أربعة عملاء يوزنت آخرين على عتاد متطابق: الزمن حتى ملف قابل للاستخدام، إضافة إلى القرص والمساحة الحرة والذاكرة التي تكلّفها كل مهمة. كل جدول يسمّي البُنى التي قيس مقابلها. يشمل الأشواط التي لا يفوز بها nzbfast.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -45,480 +45,634 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>قياس الأداء</h1>
-  <p class="sub">خمسة عملاء، وثمانية سيناريوهات، وعتاد ومزوّدون متطابقون، وأشواط متداخلة كي يُلغى انجراف المزوّدين. المقياس هو <b>الزمن حتى ملف قابل للاستخدام</b> - مُنزَّل، متحقَّق منه، مستخرَج - مقيسًا إلى جانب القرص والمساحة الحرّة والذاكرة التي تكلّفك المهمة. كل جدول يسمّي الإصدارات التي جرى القياس مقابلها واليوم الذي جرى فيه. يشمل الأشواط التي لا نفوز بها.</p>
+  <p class="sub">خمسة عملاء، وعتاد ومزوّدون متطابقون، وأشواط متداخلة كي يُلغى انجراف
+  المزوّدين. المقياس هو <b>الزمن حتى ملف قابل للاستخدام</b> -
+  مُنزَّل، متحقَّق منه، مستخرَج - مقيسًا إلى جانب القرص والمساحة الحرة والذاكرة التي
+  تكلّفك المهمة. كل جدول يسمّي البُنى التي سابقها واليوم الذي قيس فيه. يشمل الأشواط
+  التي لا نفوز بها.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">في هذه الصفحة</p>
-  <nav aria-label="في هذه الصفحة" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الإعداد</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما تكلّفك المهمة</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يُنشر فعلياً على يوزنت</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأرشيفات المخزَّنة: طابور مهام</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأرشيفات المشفَّرة: نصف الكتابة</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → ملف بحجم 157 GB، في نصف مساحة القرص (أوروبا، 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الزمن حتى ملف قابل للاستخدام، حسب حجم المهمة</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB بأسماء تجزئة 4K → ملف mkv قابل للاستخدام (الساحل الشرقي)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">إبقاء الخط مضيئًا عبر قائمة انتظار (الساحل الشرقي، ~43 GB)</a><a href="#damaged" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">حين يكون المنشور مثقوبًا</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأشواط التي لا نفوز بها</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سلّم الذاكرة المنخفضة: 190 GB في ~1.1 GB من RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">عشرة أشكال متداخلة: من يُنهي المهمة من دونك</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سقف العميل: ‏9.68 GB تُقدَّم من الذاكرة، ويمكنك إعادة بنائها</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">القياسات الأكثر تقنية، لمن يحب مزيدًا من البيانات</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يستطيعه كل عميل</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">المحرّك يُشبِع الخطوط الحقيقية</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما تكلّفه المهمة على الجهاز</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">تتبّع الإصدارات القادمة</a></nav>
+  <nav aria-label="في هذه الصفحة" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#summary" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">لا عميل مقيس أرخص في المعالج والذاكرة والقرص معًا</a><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الإعداد</a><a href="#cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما تكلّفه المهمة على 1.2.2: كل عميل بأحدث بنائه، ليلة واحدة، جهاز واحد</a><a href="#subgig" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">كلما أبطأ الخط قلّ ما يفرّق بين العملاء في السرعة، وزاد ما تفرّقه الفاتورة</a><a href="#bigfile" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">منشور بحجم 87 GB إلى ملف قابل للاستخدام بحجم 77 GB، على 10 GbE</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يُنشر فعليًا على يوزنت، وكم منه يمرّ بمرور واحد</a><a href="#damaged" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">حين يكون المنشور مثقوبًا: 6.5 GB بـ60 و20 و5 مقالات ميتة</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأشواط التي لا نفوز بها</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">سلّم الذاكرة المنخفضة: 87 GB في ~0.3 GB من RAM</a><a href="#floor" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">كم من المساحة الحرة تحتاجها المهمة</a><a href="#diskspeed" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">قرصك هو من يضبط سقف سرعتك</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">الأرشيفات المشفَّرة: مرور واحد، كسائر ما عداها</a><a href="#why-it-matters" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">قرصك يتحمّل نصف العمل</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">القياسات الأكثر تقنية، لمن يحب مزيدًا من البيانات</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ما يستطيعه كل عميل</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">المحرّك يواكب الخطوط الحقيقية</a></nav>
 </div>
+<section id="summary">
+  <div class="wrap">
+    <p class="kicker">النسخة المختصرة &middot; قيست في 23 أغسطس 2026 على nzbfast 1.2.2</p>
+    <h2>لا عميل مقيس أرخص في المعالج والذاكرة والقرص معًا</h2>
+    <p class="lead">أحدث الجولات في هذه الصفحة جرت في 23 و24 أغسطس 2026 - أحدثها
+    على <b>بناء الإصدار v1.2.2 نفسه</b> - مقابل أحدث بُنى أربعة عملاء آخرين على عتاد
+    وخطوط ومزوّدين متطابقين: شكلا مهمة من 6.5 إلى 87 GB، ومعدلات خط من 250 Mbit إلى
+    10 GbE. عبر تلك الجولات لم يكن أي عميل أرخص من nzbfast في المعالج والذاكرة والقرص
+    معًا: كل واحد منها أغلى في اثنين من الثلاثة على الأقل، وأقصى ما وفّره أيّ منها على
+    أي محور واحد كان نحو 2 بالمئة - تعادل إحصائي، ضمن تفاوت ذلك العميل نفسه بين
+    التكرارات - وعلى القرص تحرّك كل واحد منها ضعف البايتات على الأقل مقابل نتيجة
+    مطابقة بايت لبايت. وكما يُشحن، احتفظ nzbfast أيضًا بأقل ذاكرة بين كل عميل قِيس،
+    على كل عيّنة، بمعدل 2.0 إلى 4.5 أضعاف مقابل أقرب منافس.</p>
+    <p><b>أيّ سطر يصفك؟</b></p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
+      <div class="callout" style="margin:0"><b>جهاز NAS، أو مini PC، أو خادم منزلي صغير.</b>
+      احتفظ nzbfast بـ143 MB من الذاكرة في مهمة احتفظ فيها أقرب منافس بـ531 MB وأثقل
+      عميل بـ1.6 GB، وينتهي بنحو 50 MB من المساحة الحرة زيادةً حيث يحتاج عملاء آخرون
+      إلى ضعف مساحة التنزيل تقريبًا، وسلّم الذاكرة المنخفضة وضع مهمة بحجم 87 GB على
+      القرص في 286 MB من RAM بالإعدادات الافتراضية للشحن. ولأنه يحرّك كل بايت عبر قرصك
+      مرة واحدة تقريبًا، يستطيع قرص NAS مجاراة سرعة خط كانت لتُرهقه تحت عميل ذي مرورين.
+      انظر <a href="#cost">جداول التكلفة</a> و<a href="#floor">المساحة الحرة</a>
+      و<a href="#diskspeed">سقف سرعة القرص</a>.</div>
+      <div class="callout" style="margin:0"><b>ألياف جيجابت.</b> تنتهي المهمة حين يمتلئ
+      شريط التنزيل، لا بعده بدقائق: التحقق والاستخراج يركبان التنزيل، ولا يقعد اتصالك
+      خاملًا عبر قائمة انتظار كاملة أبدًا، ويرى قرصك نحو نصف البايتات. انظر
+      <a href="#cost">جداول التكلفة</a> و<a href="#damaged">جولة المنشور التالف</a>.</div>
+      <div class="callout" style="margin:0"><b>خط متعدد الجيجابت أو 10 GbE.</b> يحافظ
+      المحرّك على نحو 8.7 Gbps من عملية واحدة مع ركوب التحقق والاستخراج للتنزيل، وحساب
+      القرص هو من يعضّ أولًا: عميل يحرّك كل بايت عبر القرص مرتين أو ثلاثًا يحتاج قرصًا
+      أسرع بمرتين أو ثلاث من خطك قبل أن يصير الخط هو الحدّ. انظر
+      <a href="#bigfile">جولة الـ87 GB</a> و<a href="#diskspeed">سقف سرعة القرص</a>.</div>
+      <div class="callout" style="margin:0"><b>خط أبطأ أو مشترك (250-500 Mbit).</b>
+      قيس في 24 أغسطس 2026 عند المعدلين معًا: أنهى nzbfast أولًا ولم يتفوّق عليه أي
+      عميل آخر في أي مورد نقيسه - عند 500 Mbit عمل بنحو 96% من سعة السلك عبر التحقق
+      والاستخراج، أي بفارق 14.7% عن أقرب منافس. الخط المتواضع هو حيث يظهر الهدر أكثر
+      ما يظهر، وحيث يساعد العميل الأخف أكثر ما يساعد. انظر
+      <a href="#subgig">درجات الخط الأبطأ من الجيجابت</a>.</div>
+    </div>
+    <p style="margin-top:18px">تكتب معظم برامج التنزيل تنزيلك إلى القرص مرتين على
+    الأقل: مرة أثناء تنزيله، ومرة أخرى أثناء فك ضغطه. يؤدي nzbfast المهمة كاملة بمرور
+    واحد، فيكتب نحو نصف البايتات لكل مهمة، ويحتفظ بأقل في الذاكرة أثناء العمل، وينفق
+    ثوانيَ معالج أقل لكل جيجابايت. وهذا حِمل أقل على الجهاز أثناء استخدامك له، ونصف
+    الكتابات لكل مهمة على أقراصك، لنفس الملفات المطابقة بايت لبايت - ولأن كل بايت
+    يعبر القرص مرة واحدة تقريبًا، لا يحتاج قرصك مجاراة خطك إلا مرة واحدة.</p>
+    <p>لا يفوز nzbfast بكل جدول في هذه الصفحة، والجداول التي يخسرها موجودة تحت
+    <a href="#legs-we-lose">الأشواط التي لا نفوز بها</a> - بما في ذلك واحد من الجولة
+    نفسها. ما ثبت في كل جولة قِسناها هو الفاتورة الإجمالية.</p>
+  </div>
+</section>
+
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
     <p class="kicker">المنهجية أولًا</p>
     <h2>الإعداد</h2>
     <ul class="plain">
-      <li><b>العملاء:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5، جميعها على الجهاز نفسه لكل سيناريو (أجهزة Apple من سلسلة M: "أوروبا" M1 Ultra على 10&nbsp;GbE، و"الساحل الشرقي" M3 Ultra بخط ~2.4-3.0 Gbps). وأُعيد قياس أشواط المزوّدين الرئيسية (35 و77 و190 GB) في 31 يوليو 2026 على بناء nzbfast المنشور، بالعملاء الخمسة جميعًا، وكل شوط عبر TLS. وبقيت بضعة أشواط أقدم وهي تصرّح بذلك؛ وهي تُقلّل من شأن البناء المنشور بدل أن تُجمّله.</li>
-      <li><b>الإنصاف:</b> نفس الـ 6 مزوّدين × 8 اتصالات، وTLS في كل مكان، وتُشغَّل الأشواط بالتتابع متداخلةً. ضُبط كل منافس على أفضل ما هو موثّق له: أُعطي SABnzbd <code>pipelining_requests=8</code> (<b>يأتي بـ 1، أي بلا تسلسل بالأنابيب</b>؛ وذلك الإعداد وحده خفّض زمن 190 GB لديه من 24m24s إلى 19m02s)، وأُعطي NZBGet خيارات ArticleCache/DirectWrite/DirectUnpack/ParQuick، وأُعطي rustnzb إعداده الموثّق. وقد جرت جولتا 10 و11 أغسطس 2026 على خمسة مزوّدين لا ستة، وهي تقول ذلك؛ وصار الخمسة معيارنا في 20 أغسطس 2026، لذا فالرقم المقيس على ستة مزوّدين في هذه الصفحة لا يقارن مباشرة برقم أحدث مقيس على خمسة.</li>
-      <li><b>الحالة النهائية:</b> ملف متحقَّق منه، مستخرَج، قابل للاستخدام، لا "انتهى التنزيل". هذا ما تنتظره فعلًا.</li>
-      <li><b>قابلية إعادة الإنتاج:</b> كل ادّعاء مؤرَّخ ومقيس بالطريقة نفسها: الزمن المنقضي + عدّادات بايتات الواجهة + ذروة RSS لشجرة العمليات، بدقّة 1-2 s. وحيث يجري شوط على ملف NZB منشور للعموم، نذكر اسمه كي تستطيع تشغيله بنفسك.</li>
+      <li><b>العملاء:</b> nzbfast · SABnzbd · NZBGet · rustnzb · Weaver، كل جدول
+      بالبُنى التي يسمّيها. تسابقت أحدث الجولات (23 أغسطس 2026) مع البُنى الحالية
+      حينها للميدان - SABnzbd 5.1.1، وNZBGet 26.3-testing، وrustnzb 1.4.5، وWeaver
+      0.7.8 بأحدث ثنائيّه المنشور، مثبتة هويته بالتجزئة (hash) - مقابل خط الشيفرة
+      الذي شُحن تلك الليلة نفسها باسم <b>nzbfast 1.2.2</b>، فالبناء الذي أنتج
+      الأرقام الجديدة هو ما يمكنك تنزيله. جرت تلك الجولات على جهاز Apple Silicon
+      بعشرين نواة على خط 1&nbsp;Gbit. أما الجداول الأقدم فتحتفظ بالبُنى والأجهزة
+      التي سابقتها (أجهزة Apple من سلسلة M: "أوروبا" M1 Ultra على 10&nbsp;GbE،
+      و"الساحل الشرقي" M3 Ultra بخط ~2.4-3.0 Gbps) وتصرّح بذلك؛ وهي تُقلّل من شأن
+      البناء المنشور بدل أن تُجمّله.</li>
+      <li><b>العدالة:</b> المزوّدون وTLS أنفسهم في كل مكان لكل عميل، والأشواط تجري
+      متتابعة متداخلة. كل منافس ضُبط عند أفضل حاله الموثّق: حصل SABnzbd على
+      <code>pipelining_requests=8</code> (<b>يُشحن بـ1، أي بلا أنابيب</b>، والإعداد
+      يستحق نسبًا مئوية مزدوجة الرقم على المهام الكبيرة)، وحصل NZBGet على
+      ArticleCache وDirectWrite وDirectUnpack وParQuick، وحصل rustnzb على إعداده
+      الموثّق. منذ 20 أغسطس 2026 تسابق كل جولة <b>خمسة مزوّدين</b> لا ستة - فعدد
+      المزوّدين ليس رافعة سرعة على هذه الأجهزة، حيث يمكن لمزوّد واحد وحده بلوغ سقف
+      الخط، ومجموعة ثابتة تُبقي الجولات قابلة للمقارنة - فرقم بستة مزوّدين في هذه
+      الصفحة غير قابل للمقارنة المباشرة مع رقم أحدث بخمسة مزوّدين، وكل جدول يذكر أيّهما
+      شغّل.</li>
+      <li><b>الحالة النهائية:</b> ملف متحقَّق منه، مستخرَج، قابل للاستخدام، لا مجرّد
+      "انتهى التنزيل". هذا ما تنتظره فعليًا.</li>
+      <li><b>القابلية للتكرار:</b> كل ادعاء مؤرَّخ ومقيس بالطريقة نفسها: الزمن المنقضي
+      + عدّادات بايتات الواجهة + ذروة RSS لشجرة العمليات، بدقة 1-2 s. وحيثما يجري شوط
+      على NZB منشور علنًا، نسمّيه كي تُجريه بنفسك.</li>
+      <li><b>ملاحظات منهجية تسري على الصفحة كلها:</b> يُؤخذ زمن المعالج بالعيّنة من
+      شجرة العمليات بتردد 2 Hz على كل ذراع من كل جدول ولا يُوضع أبدًا إلى جانب رقم من
+      محاسبة مختلفة، لأن الطريقتين تختلفان بالتصميم. يُذكر إدخال/إخراج الجهاز بوحدة
+      GiB وبايتات السلك بوحدة GB عشرية؛ ونحوّل قبل القسمة. وأي جدول يسابق بناءنا
+      مقابل بنائنا نفسه يحمل <b>ضابط A/A</b> - الثنائي نفسه يسابق نسخة مطابقة بايت
+      لبايت من نفسه عبر المنصة نفسها - لأن هذا الضابط هو كيف اكتشفنا أن منصة السباق
+      لدينا كانت تمنح أيّ أداة تعمل أولًا عقوبة نحو 1.5% (القصة إلى جانب جداول الاستخراج
+      أدناه). ذراعان وترتيب مبدَّل لا يُلغيان انحيازًا يقع دائمًا على الذراع الأول؛
+      ضابط A/A هو ما يكشفه.</li>
     </ul>
   </div>
 </section>
 
-<section class="alt" id="what-holds">
+<section class="alt" id="cost">
   <div class="wrap">
-    <p class="kicker">اقرأ هذا أولًا</p>
-    <h2>ما تكلّفك المهمة، وما لا يستطيع تغيير المعالجة اللاحقة أن يزحزحه</h2>
-    <p class="lead">العملاء يتغيّرون، وتغيير في ما يفعله العميل <em>بعد</em> التنزيل قد يزحزح زمن الانتهاء دون أن يتحرّك مساره الشبكي إطلاقًا. هذا ما حدث في أغسطس 2026، ولذلك صار كل جدول في هذه الصفحة يسمّي الإصدارات التي جرى القياس مقابلها واليوم الذي جرى فيه. أما ما لا تستطيع ملاحظة إصدار أن تزحزحه فهو بقية الفاتورة: البايتات المكتوبة على قرصك، والمساحة الحرّة التي تطلبها المهمة قبل أن تبدأ أصلًا، والذاكرة التي تحتجزها أثناء عملها، وما إذا كانت البيانات قد فُحصت أصلًا.</p>
+    <p class="kicker">جولة 23 أغسطس 2026</p>
+    <h2>ما تكلّفه المهمة على 1.2.2: كل عميل بأحدث بنائه، ليلة واحدة، جهاز واحد</h2>
+    <p class="lead">ستة أذرع على جهاز Apple Silicon بعشرين نواة على خط 1 Gbit:
+    nzbfast بالإعدادات الافتراضية للشحن، والثنائي نفسه مع إيقاف منظّم الاتصالات، وأحدث
+    بُنى العملاء الأربعة الآخرين. خمسة مزوّدين، وTLS في كل مكان، وثلاث تكرارات لكل
+    عميل لكل عيّنة مع تدوير الترتيب داخل كل جولة، وناتج كل شوط مُتحقَّق منه بايت لبايت:
+    36 من 36 شوطًا أنتجت الحمولة الدقيقة نفسها. عند 1 Gbit يضبط الخط الإيقاع وتتقارب
+    أزمنة الإنهاء بالتصميم، فعمود الزمن هنا ليُظهر ذلك التقارب؛ أعمدة الموارد هي ما
+    وُجدت الجولة لقياسه.</p>
+    <p>مقياس واحد يهمّ، ونذكره بدل أن ندفنه: <b>تشمل الإعدادات الافتراضية للشحن الآن
+    منظّم اتصالات واعيًا بالخط</b>، وعلى هذا الخط أبقى 25 اتصالًا بينما شغّل كل عميل
+    آخر مئاته المضبوطة. صف "المنظّم متوقف" يضبط الـ360 مقبسًا نفسها التي استخدمتها
+    جولاتنا الأقدم، فتبقى المقارنتان متاحتين: المنتج كما يستخدمه القارئ، والتجربة
+    التاريخية.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>إصدار مُعمّى بحجم 34.5 GB، كل عميل في أحدث بناء له (7 أغسطس 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>إصدار مسمّى بحجم 6.5 GB، مع استخراج في المسار</th><th>الزمن حتى ملف قابل للاستخدام</th><th>ذروة الذاكرة (RSS)</th><th>زمن المعالج</th><th>إدخال/إخراج الجهاز (GiB)</th><th>السلك (GB)</th></tr></thead>
       <tbody>
-        <tr><td>الزمن حتى ملف قابل للاستخدام</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">لا ملف قابل للاستخدام&sup1;</td></tr>
-        <tr><td>ذروة الذاكرة (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
-        <tr><td>ما كُتب على القرص</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
-        <tr><td>المساحة الحرّة المطلوبة</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+        <tr><td><b>nzbfast 1.2.2، كما يُشحن (25 اتصالًا)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="num">35.7 s</td><td class="win num">6.2</td><td class="num">6.5</td></tr>
+        <tr><td>nzbfast 1.2.2، المنظّم متوقف (360)</td><td class="num">60 s</td><td class="num">583 MB</td><td class="num">38.0 s</td><td class="num">6.1</td><td class="num">6.6</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">61 s</td><td class="num">801 MB</td><td class="num">40.1 s</td><td class="num">12.5</td><td class="num">6.5</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">63 s</td><td class="num">1,588 MB</td><td class="num">69.5 s</td><td class="num">13.8</td><td class="num">6.5</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">67 s</td><td class="num">628 MB</td><td class="num">61.9 s</td><td class="num">13.4</td><td class="num">7.2</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">110 s</td><td class="num">531 MB</td><td class="win num">34.9 s&sup1;</td><td class="num">12.5</td><td class="num">6.5</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> SABnzbd 5.1.0RC2 وNZBGet 26.3-testing وWeaver 0.7.8 وrustnzb 1.3.9 في 7 أغسطس 2026: ‏M3 Ultra على الساحل الشرقي، ستة مزوّدين، كل شيء عبر TLS، شوطان لكل عميل مع عكس الترتيب في الثاني كي يُلغى انجراف الخط. وقد تجاوزت الزمنُ بُنى المنافسين الأربع جميعها منذ ذلك الحين؛ وتحتفظ هذه الصفوف بالبُنى التي قيست عليها، ويُعاد تشغيل الجولة بدل تحرير الأرقام. &sup1; نقل rustnzb ‏36 GB عبر السلك، وأعلن انتهاء المهمة، وترك جزء أرشيف بحجم 1 GB دون أي فيديو مستخرَج، فخلاياه التي تبدو زهيدة هي ثمن عدم الإتمام.</p>
-
-    <p><b>من أين يأتي فارقنا في تلك المهمة فعلاً.</b> شغّلنا نسخة SABnzbd 5.1.0 المستقرّة في المساء نفسه الذي صدرت فيه، 10 أغسطس 2026. يفصل سجلّها الخاص المهمة إلى تنزيل وتمريرة معالجة لاحقة، وفي هذا الإصدار المُعمّى يستغرق التنزيل <b>31 s</b> عند كلا إعدادَي الاتصالات اللذين جرّبناهما، وهو زمن nzbfast كاملاً على المجموعة نفسها، والليلة نفسها، والخط نفسه. فنحن لا ننزّل هنا أسرع منه ولا ندّعي ذلك: أمام المستقرّة الحالية عند أفضل إعداد لها هي، يبلغ الفارق <b>+19%</b>، وهذه الـ +19% هي تمريرة معالجتها اللاحقة زائد كلفة الإقلاع والاستعلام، لا السلك. أما ما لا يبلغه أي تغيير في المعالجة اللاحقة فهو بقية الجولة: <b>241&ndash;334 MB</b> من الذاكرة مقابل 1,380&ndash;1,827 MB، و<b>32.4 GB</b> من حركة القرص مقابل 65&ndash;99 GB. هذه هي الأعمدة التي تُقرأ.</p>
-
-    <p><b>أربع تكاليف لا يظهرها زمن الانتهاء.</b></p>
-    <ul class="plain">
-      <li><b>ما كُتب على القرص.</b> تمريرة واحدة تكتب الحمولة مرة واحدة: 159.0 GB لملف بحجم 157 GB، مقابل 387.4 GB و458.3 GB لدى العملاء الذين ينزلون كل جزء أرشيف على القرص ثم يفكّونه. المهمة نفسها، والليلة نفسها، والبناءات الحالية للثلاثة جميعًا.</li>
-      <li><b>المساحة الحرّة.</b> تلك المهمة البالغة 190 GB تحتاج هنا إلى 156.3 GB حرّة وإلى 312.7&ndash;313.0 GB لدى عميل يكتب ثم يفكّ. هذا هو الفارق بين مهمة تعمل ومهمة لا تبدأ أصلًا.</li>
-      <li><b>ذروة الذاكرة (RSS).</b> ‏232&ndash;248 MB مقابل 1.8&ndash;2.0 GB على الإصدار المذكور في الجدول أعلاه، والسقف إعداد لا أثر جانبي: المهمة نفسها البالغة 190 GB تكتمل ضمن ميزانية 1 GB، وملف تعريف NAS ينهي مهمة 35 GB في 0.4 GB.</li>
-      <li><b>هل فُحصت أصلًا.</b> يتحقّق nzbfast من كل كتلة مقابل بيانات PAR2 المنشورة أثناء وصولها ويصلح في التمريرة نفسها، فخط النهاية ملف متحقَّق منه. والعميل الذي لا يجري أي تمريرة تحقّق على مجموعة سليمة يشتري ساعته من جديد بعدم الإجابة عن السؤال.</li>
-    </ul>
-    <p>واثنتان أخريان لا تظهران إلا حين يسوء شيء ما. اقتل العملية بعد 15.6 GB من مهمة بحجم 35 GB: يعيد nzbfast التشغيل وينهيها في 57 ثانية دون إعادة تنزيل بايت واحد. وعلى منصّة يصمت فيها كل اتصال نهائيًا بعد 25 جسم مقالة دون أن يُغلق أبدًا، وهو ما يفعله NAT المشغّل بتنزيل طويل، ينتهي في 26 ثانية حيث يستغرق العملاء الأربعة الآخرون من 74 إلى 275 ثانية.</p>
-
-    <p><b>وشيء آخر لا يزحزحه تغيير الإعدادات أيضاً.</b> عدد الاتصالات هو الإعداد الذي يقال لك دائماً أن ترفعه، لذلك في 10 أغسطس 2026 شغّلنا الجولة الكاملة بخمسة عملاء مرّتين في مساء واحد: مرّة عند الحدود القصوى لكل خادم التي تنشرها الحسابات، 360 مقبساً موزّعة على خمسة مزوّدين، ومرّة عند 8 لكل خادم، أي 40 مقبساً. البناءات نفسها، والمجموعات نفسها، والخط نفسه، مع شوط ضبط في النهاية يُظهر أن الخط نفسه لم ينجرف بين المسحين. يتحرّك nzbfast ثانية واحدة عبر ذلك التغيير المضاعف تسع مرّات. أما كل عميل آخر فيتأرجح بقوّة، وهم لا يتفقون على الاتجاه الذي يفيد.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>360 مقبساً &rarr; 40 مقبساً</th><th>34.5 GB مُعمّى</th><th>6.6 GB REMUX</th><th>ما معنى ذلك</th></tr></thead>
+      <thead><tr><th>إصدار مموَّه بحجم 34 GB</th><th>الزمن حتى ملف قابل للاستخدام</th><th>ذروة الذاكرة (RSS)</th><th>زمن المعالج</th><th>إدخال/إخراج الجهاز (GiB)</th><th>السلك (GB)</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">ثابت: ثانية واحدة</td></tr>
-        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>يريد مقابس، في المهمتين</td></tr>
-        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>تضرّه المقابس في المهمة الكبيرة</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>يعكس الاتجاه بحسب المهمة</td></tr>
-        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s&sup3;</td><td>تضرّه المقابس، في المهمتين</td></tr>
+        <tr><td><b>nzbfast 1.2.2، كما يُشحن (25 اتصالًا)</b></td><td class="win">302 s</td><td class="win num">191 MB</td><td class="win num">194.0 s</td><td class="win num">32.5</td><td class="num">34.4</td></tr>
+        <tr><td>nzbfast 1.2.2، المنظّم متوقف (360)</td><td class="win">302 s</td><td class="num">465 MB</td><td class="num">205.4 s</td><td class="num">32.9</td><td class="num">34.4</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">306 s</td><td class="num">900 MB</td><td class="num">221.3 s</td><td class="num">68.1</td><td class="num">34.4</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">308 s</td><td class="num">1,607 MB</td><td class="num">356.5 s</td><td class="num">72.5</td><td class="num">34.4</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">343 s</td><td class="num">445 MB</td><td class="num">332.6 s</td><td class="num">69.8</td><td class="num">37.8</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">511 s</td><td class="num">1,076 MB</td><td class="num">373.8 s</td><td class="num">98.0</td><td class="num">34.4</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> SABnzbd 5.1.0 وNZBGet 26.3-testing وWeaver 0.7.8 وrustnzb 1.4.1 في 10 أغسطس 2026: ‏M1 Ultra في أوروبا، خمسة مزوّدين، كل شيء عبر TLS، والمسحان في المساء نفسه، مع تطبيق إعداد المقابس على كل عميل لا على عميلنا وحده. &sup2; لم يسلّم rustnzb أي ملف قابل للاستخدام في المهمة المُعمّاة عند أي من الإعدادين، فصفّه يُقرأ حساسيةً لا ترتيباً. كما تتفاوت أزمنته من إعادة إلى أخرى حيث يثبت الآخرون: ثلاث إعادات متطابقة بحجم 6.6 GB عند الحدود القصوى قاست 91 و53 و99 ثانية، بتفاوت 1.9x، ولهذا فكل رقم لـ rustnzb هنا مدى لا رقم واحد. ويسير NZBGet في الاتجاه المعاكس في طابور الأرشيفات المخزّنة أسفل هذه الصفحة، ببناء أقدم وعلى مهمة مختلفة، وهذا هو المقصود بالضبط: الاتجاه ليس خاصية في الإعداد. وحيث يتأرجح زمن الانتهاء كل هذا بسبب رقم واحد في ملف إعدادات، فذلك الرقم جزء من النتيجة. &sup3; المستخرج في عمود rustnzb كان علينا نحن تحزيمه وقد حزّمناه خطأ: حتى 11 أغسطس وضع مقعد اختبارنا نسخة x86_64 من <code>unrar</code> على مساره، فجرى استخراجه على هذه الآلة من Apple Silicon مترجَماً بينما جرى استخراج كل عميل آخر أصلياً. قسنا الأمر بدل التخمين: يكلف 2.6x في المستخرج لكن بضع ثوانٍ من المعالج فقط، ولا زمناً يمكن فصله. وبإعادة السباق بمستخرج أصلي تعود المهمة نفسها عند 16-19 ثانية مقابل 18-19 المعروضة. أما العمود المُعمّى فلا يصل إلى مستخرج أصلاً، فهو دون تغيير.</p>
-    <div class="callout">في تنزيل سليم، أسرع معالجة لاحقة ممكنة هي ألّا تكون هناك معالجة أصلًا. نحن نساوي ذلك الزمن بينما نفحص كل كتلة عند وصولها: <b>بسرعة تخطّي الفحص، لأننا لا نتخطّاه أبدًا.</b></div>
+    <p class="note" style="text-align:start"><b>قيست في 23 أغسطس 2026</b> مقابل
+    SABnzbd 5.1.1، وNZBGet 26.3-testing، وrustnzb 1.4.5، وWeaver 0.7.8، أوساط ثلاث
+    تكرارات مع تحقق من كل شوط بايت لبايت، خمسة مزوّدين، وTLS بالكامل. عملت أذرع
+    nzbfast بالبناء الذي شُحن بعد ساعات في الليلة نفسها باسم v1.2.2. &sup1; وسيط
+    معالج Weaver على عيّنة الـ6.5 GB أقل من رقمنا بنسبة 2% (34.9 مقابل 35.7)، مع
+    امتداد أشواطه الثلاثة من 34.1 إلى 56.1 s، فنعدّه تعادلًا إحصائيًا؛ وهو الخلية
+    الوحيدة في أيّ من الجدولين التي يحتفظ بها منافس، وهي مكرَّرة تحت
+    <a href="#legs-we-lose">الأشواط التي لا نفوز بها</a>. وعلى عيّنة الـ34 GB معالجنا
+    هو الأدنى مطلقًا. لا يشحن إصدار Weaver الأحدث 0.8.3 أي ثنائي؛ قاس بناؤنا من
+    المصدر له نمط معالج لا يمكننا نسبته بوضوح إلى الإصدار لا إلى البناء، فيسابق هذا
+    الجدول أصل الإصدار 0.7.8 المثبتة هويته بالتجزئة ويصرّح بذلك بدل نشر رقم مُلتبس.
+    أكمل rustnzb 1.4.5 كل شوط هنا، بما فيه عيّنة التمويه.</p>
+    <p class="note" style="text-align:start"><b>عمود السلك، بدقة.</b>
+    6.5 GB على العيّنة النظيفة - الرقم نفسه الذي يبلّغ عنه NZBGet وSABnzbd لنفسيهما.
+    أسوأ حالة نعرفها هي منشور مموَّه أُعيد ترقيمه عمدًا، حيث تكلّف المناورة حول
+    الترقيم المبعثر مقالة إضافية واحدة لكل مناورة: قيست بين 1.10 و1.20x من الخطة
+    الدنيا على كلا الشكلين اللذين استطعنا بناءهما. خليتا rustnzb البالغتان 7.2
+    و37.8 GB هما زيادته الخاصة، مع تحذير في سجلّه على شوطين.</p>
+    <p class="note" style="text-align:start"><b>ما يعنيه عمود الذاكرة بالإعدادات
+    الافتراضية:</b> المنظّم هو معظم سبب احتفاظ الصف المشحون بـ143-191 MB - اتصالات
+    أقل تعني أقل قيد التنفيذ في وقت واحد - وإيقافه (الصف الثاني) هو الجسر الأمين إلى
+    كل جدول أقدم بـ360 مقبسًا في هذه الصفحة. حتى عند 360 مقبسًا نحن على مستوى أخفّ
+    منافس (583 MB مقابل 628 لـrustnzb على العيّنة الصغيرة، و465 مقابل 445 على
+    الكبيرة)؛ أما بالإعدادات الافتراضية للشحن فلا تعادل متبقٍّ.</p>
+  </div>
+</section>
+
+
+<section id="subgig">
+  <div class="wrap">
+    <p class="kicker">الخطوط الأبطأ &middot; قيست في 24 أغسطس 2026 على nzbfast 1.2.2</p>
+    <h2>كلما أبطأ الخط قلّ ما يفرّق بين العملاء في السرعة، وزاد ما تفرّقه الفاتورة</h2>
+    <p class="lead">على خط بطيء بما يكفي، يصير زمن إنهاء كل عميل هو السلك ولا شيء
+    غيره، فالخط البطيء يخفي كثيرًا من الخطايا. ما لا يستطيع إخفاءه هو ما يحرقه كل
+    عميل ليملأه. شكّلنا منصة الـ1 Gbit عند معدلين حقيقيين تكون عليهما خطط فعلية
+    وسابقنا الأذرع الستة عند كل واحد منهما - الجهاز نفسه، والمزوّدون الخمسة أنفسهم،
+    ثلاث تكرارات لكل عميل مع تدوير الترتيب، وتحقق من كل شوط بايت لبايت، 36 من 36
+    صحيحًا عبر الجولتين. ذراع nzbfast عند 500 Mbit هو بناء إصدار v1.2.2 نفسه.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>خط 500 Mbit، إصدار بحجم 6.5 GB</th><th>الزمن حتى ملف قابل للاستخدام</th><th>ذروة الذاكرة (RSS)</th><th>زمن المعالج</th><th>إدخال/إخراج الجهاز (GiB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast 1.2.2، كما يُشحن</b></td><td class="win">109 s</td><td class="win num">142 MB</td><td class="win num">45.4 s</td><td class="win num">6.2</td></tr>
+        <tr><td>nzbfast 1.2.2، المنظّم متوقف</td><td class="num">115 s</td><td class="num">592 MB</td><td class="num">59.0 s</td><td class="num">6.2</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">125 s</td><td class="num">1,665 MB</td><td class="num">99.2 s</td><td class="num">14.2</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">131 s</td><td class="num">626 MB</td><td class="num">92.6 s</td><td class="num">14.5</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">138 s</td><td class="num">564 MB</td><td class="num">48.5 s</td><td class="num">12.4</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">145 s&sup1;</td><td class="num">846 MB</td><td class="num">64.3 s</td><td class="num">13.2</td></tr>
+      </tbody>
+    </table></div>
+    <div class="tblwrap"><table>
+      <thead><tr><th>خط 250 Mbit، الإصدار نفسه</th><th>الزمن حتى ملف قابل للاستخدام</th><th>ذروة الذاكرة (RSS)</th><th>زمن المعالج</th><th>إدخال/إخراج الجهاز (GiB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast، كما يُشحن</b></td><td class="win">217 s</td><td class="win num">144 MB</td><td class="win num">53.3 s</td><td class="win num">6.2</td></tr>
+        <tr><td>nzbfast، المنظّم متوقف</td><td class="num">219 s</td><td class="num">651 MB</td><td class="num">67.9 s</td><td class="num">6.2</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">227 s</td><td class="num">826 MB</td><td class="num">78.4 s</td><td class="num">13.3</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">230 s</td><td class="num">1,667 MB</td><td class="num">162.4 s</td><td class="num">15.2</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">230 s</td><td class="num">789 MB</td><td class="num">62.0 s</td><td class="num">12.9</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">256 s</td><td class="num">644 MB</td><td class="num">122.4 s</td><td class="num">15.4</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>اقرأ الجدولين كتدرّج.</b> عند 250 Mbit يقع الميدان كله ضمن 18% على الساعة
+    ونتصدّر على أقرب منافس بـ4.4%؛ عند 500 Mbit تتّسع الفجوة إلى 14.7%؛ وعند معدلَي
+    الجيجابت و10 GbE في الجدولين أعلاه وأدناه تتّسع أكثر. فروق السرعة تكبر مع الخط.
+    أعمدة الموارد لا تنتظر خطًا سريعًا: عند كل معدل مقيس، احتفظ كل منافس بـ3.9 أضعاف
+    الذاكرة على الأقل، وأنفق معالجًا أكثر، وحرّك نحو ضعف بايتات القرص لنفس الملف
+    المطابق بايت لبايت.</p>
+    <p><b>يكسب منظّم الاتصالات ثمنه على الخطوط البطيئة، وعدّاد الإسقاط الخاص بالمشكِّل
+    يقول لماذا.</b> أبقت الإعدادات الافتراضية للشحن 25 اتصالًا حيث شغّل كل منافس
+    مئات؛ والثنائي نفسه مع إيقاف المنظّم شغّل 360. تدفّقات أقل عبر طابور ثابت تعني
+    فقدانًا أقل وإعادة إرسال أقل: سجّل المشكِّل نحو 4,200 إسقاط لكل شوط مسقوف مقابل
+    نحو 155,000 غير مسقوف عند 500 Mbit، وكان الذراع المسقوف أسرع، وأخفّ بـ4.2 أضعاف
+    على الذاكرة، وأخفّ بـ1.3 ضعف على المعالج من وضعية الـ360 مقبسًا الخاصة بنا. مزيد
+    من الاتصالات ليس مزيدًا من السرعة؛ دون الجيجابت هو العكس قياسًا.</p>
+    <p class="note" style="text-align:start"><b>قيست في 24 أغسطس 2026</b>، أوساط ثلاث
+    تكرارات، على جهاز Apple Silicon بعشرين نواة مع تشكيل خطه عند كل معدل (المعدل
+    المشكَّل تحقّق منه مسبار مستقل قبل كل جولة: 248 و496 Mbit). ذراع nzbfast عند
+    500 Mbit هو بناء وسم الإصدار v1.2.2؛ وجرت جولة 250 Mbit قبل ساعات على خط الشيفرة
+    نفسه. تُقرأ أعداد البايتات على خط مشكَّل من عدّاد كل عميل الخاص، لا من واجهة
+    الشبكة أبدًا (يُسقط المشكِّل ويعيد TCP الإرسال، فتحسب الواجهة النسختين معًا).
+    الساعات قابلة للمقارنة داخل كل جدول، لا عبر جولات مشكَّلة مختلفة. &sup1; امتدت
+    أشواط NZBGet الثلاثة عند 500 Mbit من 114 إلى 158 s بقراءات موارد ثابتة - تفاوت
+    حقيقي، فيُذكر الوسيط ويُذكر التفاوت بدل تضييقه.</p>
+  </div>
+</section>
+
+<section class="alt" id="bigfile">
+  <div class="wrap">
+    <p class="kicker">الملف الكبير &middot; قيست في 24 أغسطس 2026 على nzbfast 1.2.2</p>
+    <h2>منشور بحجم 87 GB إلى ملف قابل للاستخدام بحجم 77 GB، على 10 GbE</h2>
+    <p class="lead">الطرف الآخر من قصة معدل الخط: جهاز 10 GbE، وخمسة مزوّدين، ومنشور
+    بحجم 87 GB حمولته فيديو واحد بحجم 76.6 GB، وستة أذرع، وثلاث تكرارات مدوَّرة،
+    وناتج كل شوط مُتحقَّق منه بايت لبايت - أنتجت 18 من 18 شوطًا الملف نفسه، واتفق
+    كل العملاء الستة على مجموعه التحققي. أذرع nzbfast هي بناء إصدار v1.2.2.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>منشور بحجم 87 GB، على 10 GbE</th><th>الزمن حتى ملف قابل للاستخدام</th><th>ذروة الذاكرة (RSS)</th><th>زمن المعالج</th><th>إدخال/إخراج الجهاز (GiB)</th><th>السلك (GB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast 1.2.2 (50 اتصالًا)&sup1;</b></td><td class="win">70 s</td><td class="num">415 MB</td><td class="num">144 s</td><td class="win num">72.9</td><td class="num">77.2</td></tr>
+        <tr><td>nzbfast 1.2.2، منظّم الاتصالات يعمل (25)</td><td class="num">90 s</td><td class="win num">336 MB</td><td class="win num">130.5 s</td><td class="win num">72.9</td><td class="num">77.4</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">93 s</td><td class="num">1,195 MB</td><td class="num">443 s</td><td class="num">183.7</td><td class="num">77.2</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">113 s</td><td class="num">1,910 MB</td><td class="num">234 s</td><td class="num">235.1</td><td class="num">77.2</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">645 s</td><td class="num">1,825 MB</td><td class="num">631 s</td><td class="num">435.1&sup2;</td><td class="num">77.3</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup3;</td><td class="num">681 MB</td><td class="num">2,444 s</td><td class="num">216.1</td><td class="num">86.9</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>قصة القرص عند أكبر حجم بعد.</b> ذروة قرصنا أثناء المهمة هي 70.8 GiB -
+    أقل من ناتج الـ76.6 GB - لأن ذيل الحمولة ما زال واصلًا بينما الرأس نهائي فعلًا -
+    وإجمالي إدخال/إخراج الجهاز هو 1.00x الحمولة. يحرّك المنافسون 2.5 إلى 6.0 أضعاف
+    البايتات لنفس الملف. والذراع الأسرع يحافظ على نحو 8.7 Gbps <em>شاملًا</em> التحقق
+    والاستخراج الجاريَين ضمن التدفّق؛ فبمجرد امتلاء شريط التنزيل يكون الملف جاهزًا.</p>
+    <p class="note" style="text-align:start">&sup1; كل عميل في هذه الصفحة يُسابق عند
+    أفضل إعداداته الموثّقة، وعلى خط 10 GbE إعدادنا هو 50 اتصالًا إجماليًا - 10 لكل
+    خادم، وهو رقم تبلغه أي فئة حساب - نفس ضبط الإعداد الواحد الذي نمنحه كل منافس
+    (أنابيب SABnzbd، وذاكرة تخزين المقالات لدى NZBGet). خمسون ليست إعاقة: مسح
+    بست درجات على العيّنة نفسها وجد السقف مطابقًا من 50 اتصالًا وحتى الحد الأقصى
+    لفئة الحساب البالغ 360، بينما تكلفة المعالج ترتفع 2.3 أضعاف عبر ذلك المدى مقابل
+    لا شيء، فالحد الأقصى لا يشتري شيئًا يُظهره هذا الجدول. أُعيد قياس صف الخمسين
+    اتصالًا بجودة ثلاث تكرارات كاملة في اليوم نفسه، على الجهاز نفسه، مقابل المجموع
+    التحققي للناتج نفسه: 70 / 70 / 70 s، وكلها مُتحقَّق منها بايت لبايت. صف المنظّم
+    موجود هنا لأنه الأكثر إثارة للاهتمام: عند كل معدل حتى الجيجابت اتصالاته الـ25
+    مجانية-وأسرع، وحتى هنا، حيث تكلّف نحو خُمس الساعة، تشتري 336 مقابل 415 MB من
+    الذاكرة و130 مقابل 144 ثانية معالج. توسيع المنظّم تلقائيًا مع معدل الخط - كي يكون
+    السلوك الأفضل هو الافتراضي أيضًا، عند الركبة لا عند الحد الأقصى - مُدرَج للإصدار
+    التالي.
+    &sup2; إدخال/إخراج جهاز Weaver البالغ 435 GiB لتنزيل بحجم 77 GB هو مخزنه المشفَّر
+    عند السكون يعيد قراءة وكتابة كل شيء تقريبًا مع نمو المهمة - النمط فوق الخطي الذي
+    قاسته جولاتنا الآلية في يوليو، وما زال حاضرًا في البناء الحالي. &sup3; يكتمل
+    rustnzb 1.4.5 صحيحًا بايت لبايت وتكلفته في زمن المعالج والسلك: نحو 2,444 ثانية
+    معالج مقابل ساعة 869 s عبر التكرارات الثلاث، و86.9 GB مسحوبة حيث الخطة المتحفّزة
+    هي 77.2 (يجلب مجموعة الاسترداد الكاملة بلا شرط). قيست في 24 أغسطس 2026، أوساط
+    ثلاث تكرارات، كل بناء حالي؛ التكرار الثالث للأذرع الثلاثة الأسرع جرى بعد نحو 40
+    دقيقة من البقية (حارس مساحة حرة أوقف الجولة مؤقتًا؛ لم يحرّك الفارق أي وسيط أكثر
+    من تفاوت التكرار).</p>
+    <h3>الـ87 GB نفسها على Windows أصيل، مقابل الرائد التجاري</h3>
+    <p class="lead">أول عميل تجاري في هذه الصفحة: Newsbin Pro، أطول عميل Windows
+    مدفوع صمودًا، سابقناه ببنائنا الرسمي لـWindows على جهاز 10 GbE أصيل لـWindows
+    يحافظ قرصه النظامي من نوع TLC على 0.99 GB/s من الكتابة - أبطأ قرص في أسطول
+    اختبارنا، ما يجعله المكان الأمين لسباق عميل تدريجي. المنشور نفسه بحجم 87 GB،
+    ثلاث تكرارات متداخلة، وناتج كل شوط مُتحقَّق منه بايت لبايت مقابل المجموع
+    التحققي نفسه للجدول أعلاه: 6 من 6 مطابقة.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>منشور بحجم 87 GB، Windows، قرص TLC</th><th>الزمن حتى ملف قابل للاستخدام</th><th>ذروة الذاكرة (RSS)</th><th>زمن المعالج</th><th>إدخال/إخراج الجهاز (GiB)</th><th>السلك (GB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast 1.2.2 (50 اتصالًا)</b></td><td class="win">105 s</td><td class="win num">469 MB</td><td class="win num">154 s</td><td class="win num">84.5</td><td class="num">76.7</td></tr>
+        <tr><td>Newsbin Pro 6.90 (360 اتصالًا)</td><td class="num">477 s</td><td class="num">881 MB</td><td class="num">1,862 s</td><td class="num">154.1</td><td class="num">76.7</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start">قيست في 24 أغسطس 2026، أوساط ثلاث
+    تكرارات، وكلا العميلين حاليّان. عمل Newsbin عند حده الأقصى المضبوط للاتصالات
+    لكل خادم - 360 مقبسًا مقابل 50 لدينا - وتستثني أزمنته الاستقرار البالغ 90 ثانية
+    الذي تنتظره منصتنا قبل إعلان انتهاء عميل مراقَب، فتنحاز المقارنة إلى صفّه مرّتين
+    وتصمد النتيجة رغم ذلك: 4.5 أضعاف الساعة، و12 ضعفًا من ثواني المعالج، و1.9 ضعف
+    الذاكرة لنفس الملف. لا طرف مقيَّد بالقرص هنا - يحتاج الذراع أحادي المرور نحو
+    0.73 GB/s من 0.99 GB/s للقرص، بينما يبلغ متوسط Newsbin ثلث ذلك مع إبقاء نحو أربعة
+    أنوية معالج مشغولة لثماني دقائق - فالفجوة هي العميل، لا العتاد. سحب كلا العميلين
+    بايتات السلك نفسها للحمولة. Newsbin علامة تجارية مسجَّلة لشركة CMCE، Inc.؛ والعميل
+    ناشره DJI Interprises, LLC.</p>
   </div>
 </section>
 
 <section class="alt" id="census">
   <div class="wrap">
     <p class="kicker">الإحصاء</p>
-    <h2>شكلان يمثلان 98.6% من البيانات</h2>
-    <p>معظم المقارنات تختار ملفاً واحداً. نحن بدأنا من مكان آخر: <b>ما شكل المحتوى الذي ينزّله الناس فعلاً؟</b> فحصنا 890,852 إصداراً و1.6 مليون ملف و79.6 تيرابايت في أكثر مجموعتي الأفلام والمسلسلات نشاطاً، ثم قرأنا ترويسات الأرشيف لألف منشور حقيقي لنؤكد ما كانت أسماء الملفات تلمّح إليه فقط. العدّ بال<b>بايت</b> لا بعدد المنشورات، لأن مليون ملف صغير يزن أقل من ملف كبير واحد.</p>
+    <h2>ما يُنشر فعليًا على يوزنت، وكم منه يمرّ بمرور واحد</h2>
+    <p><b>أُعيد الترجيح في أغسطس 2026 على عيّنة أكبر بكثير.</b> قرأ إحصاء يوليو أدناه
+    مجموعتين؛ يحمل الفهرس وراءه الآن 13.2 مليون إصدار و174.7&nbsp;TB عبر 114 مجموعة،
+    وتحرّك المزيج - نمت أرشيفات 7z من أقل من 2% من البايتات إلى حصة كبيرة. مُعاد
+    القياس على تلك العيّنة، يمرّ <b>نحو 95%</b> من بايتات الإصدارات الكاملة بمرور
+    واحد (من 94.3% إلى 96.3% عبر أربع طرق لتقطيع العيّنة)، والمؤهِّل الذي يهمّ فعلًا
+    ليس شكل الأرشيف بل <b>كلمة السر</b>: يحتاج نحو ثلث البايتات إلى واحدة لإنتاج
+    ناتج على الإطلاق، أيًّا كان العميل الذي تشغّله. تبقى لقطة يوليو أدناه كما هي، لقطة
+    زمنية.</p>
+    <p>في إحصاء يوليو نظرنا في 890,852 إصدارًا، و1.6 مليون ملف، و79.6&nbsp;TB عبر
+    أكثر مجموعتَي أفلام ومسلسلات ازدحامًا، ثم جلبنا وقرأنا ترويسات أرشيفات ألف منشور
+    حقيقي لتأكيد ما كانت تلمّح إليه أسماء الملفات فقط. عُدَّت بـ<b>البايتات</b> لا
+    بالمنشور، لأن مليون ملف صغير يهمّ أقل من ملف واحد كبير.</p>
     <ul class="plain">
-      <li><b>2.5% من الإصدارات أرشيفات RAR متعددة الأجزاء، وهي 84% من كل البيانات.</b> وكل ما عداها ذيل طويل من الملفات الصغيرة.</li>
-      <li>وداخلها: <b>84% مخزَّنة</b> (مُحزَّمة بلا ضغط) و<b>14% مشفَّرة</b>. معاً <b>98.6%</b>.</li>
-      <li>الأرشيفات المضغوطة تمثل <b>1.4%</b>. أما الأرشيفات الصلبة، وهي الأبطأ في الاستخراج، فتبيّن أنها <b>منقرضة</b>: ولا واحد من نحو 700 أرشيف قرأناها.</li>
+      <li><b>2.5% من الإصدارات أرشيفات RAR متعددة المجلدات، وهي 84% من كل البيانات.</b>
+      كل ما عداها ذيل طويل من ملفات صغيرة.</li>
+      <li>داخل ذلك: <b>84% مخزَّنة</b> (مُحزَّمة بلا ضغط) و<b>14% مشفَّرة</b>. معًا،
+      <b>98.6%</b>.</li>
+      <li>الأرشيفات المضغوطة <b>1.4%</b>. أما الأرشيفات الصلبة، وهي الأبطأ في فك
+      الضغط، فتبيّن أنها <b>منقرضة</b>: ولا واحد بين نحو 700 أرشيف قرأناه.</li>
     </ul>
-    <p>غيّر ذلك ما نعمل عليه. لا جدوى تُذكر من تحسين مسار ضغط يحمل 1.4% من البيانات، فحسّنّا المسارين اللذين يحملان الباقي.</p>
-    <p>والتشفير أيضاً غير موزَّع بالتساوي. إنه يزداد مع الحجم:</p>
+    <p>هذا أعاد تشكيل ما نعمل عليه. لا معنى كبيرًا لضبط مسار ضغط يحمل 1.4% من
+    البيانات، فضبطنا الاثنين اللذين يحملان الباقي.</p>
+
+    <p>التشفير أيضًا ليس موزّعًا بالتساوي. يتناسب مع الحجم:</p>
     <div class="tblwrap"><table>
-      <tr><th>حجم الإصدار</th><th class="num">الحصة من كل البيانات</th><th class="num">مخزَّنة</th><th class="num">مشفَّرة</th></tr>
-      <tr><td>1-5 ج.ب</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr><tr><td>5-20 ج.ب</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr><tr><td>20-60 ج.ب</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr><tr><td>أكثر من 60 ج.ب</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
+      <tr><th>حجم الإصدار</th><th class="num">حصة كل البيانات</th><th class="num">مخزَّن</th><th class="num">مشفَّر</th></tr>
+      <tr><td>1-5 GB</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr>
+      <tr><td>5-20 GB</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr>
+      <tr><td>20-60 GB</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr>
+      <tr><td>فوق 60 GB</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
     </table></div>
-    <p class="note">التنزيلات العادية هي دائماً تقريباً أرشيفات مخزَّنة بسيطة. أما الكبيرة فهي كرمي عملة بين المخزَّنة والمشفَّرة. وفيما يلي كيف يتعامل nzbfast مع كل منهما.</p>
+    <p class="note">التنزيلات العادية تكاد دائمًا أن تكون أرشيفات مخزَّنة صرفة.
+    الكبيرة منها قرعة عملة بين المخزَّن والمشفَّر. الشكل المخزَّن هو ما يسابقه كل
+    جدول حالي في هذه الصفحة؛ وقصة القرص للشكل المشفَّر مقيسة في قسمها الخاص أدناه.</p>
   </div>
 </section>
 
-<section class="alt" id="huge-190">
-  <div class="wrap">
-    <p class="kicker">السيناريو 1 · نظيف، ضخم</p>
-    <h2>169.7 GB → ملف بحجم 157 GB، في نصف مساحة القرص (أوروبا، 10 GbE)</h2>
-    <p class="lead">ينهي nzbfast هذه المهمة أولًا، لكن الرقم الجدير بالنظر هو القرص. فهو يكتب
-    الحمولة نفسها تقريبًا، مرة واحدة. أما العملاء الذين يُنزلون كل جزء من الأرشيف إلى القرص ثم
-    يفكّونه فيدفعون ثمن البايتات نفسها من مرّتين ونصف إلى ثلاث مرّات، ويحتاجون إلى ضعف المساحة
-    الحرّة لتشغيل المهمة أصلًا.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3</th><th>‏Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
-      <tbody>
-        <tr><td>ما كُتب على القرص لملف بحجم 157 GB</td><td class="win num">159.0 GB (1.0&times;)</td><td class="num">458.3 GB (2.9&times;)</td><td class="num">387.4 GB (2.4&times;)</td><td class="num">&ndash;</td><td class="num">73.8 GB&sup1;</td></tr>
-        <tr><td>المساحة الحرّة المطلوبة</td><td class="win num">156.3 GB</td><td class="num">312.7 GB</td><td class="num">313.0 GB</td><td class="num">&ndash;</td><td class="num">70.9 GB&sup1;</td></tr>
-        <tr><td>الزمن حتى ملف قابل للاستخدام</td><td class="win">3m 14s</td><td class="lose">4m 06s (+27%)</td><td class="lose">7m 40s (+137%)</td><td class="lose">22m 57s (+610%)</td><td class="bad">لا شيء&sup1;</td></tr>
-        <tr><td>زمن المعالج</td><td class="win num">312 s</td><td class="num">418 s</td><td class="num">771 s</td><td class="num">&ndash;</td><td class="num">3,822 s</td></tr>
-        <tr><td>ذروة الذاكرة (RSS)</td><td class="num">1.1 GB&sup2;</td><td class="num">1.9 GB</td><td class="num">1.3 GB</td><td class="num">1.9 GB</td><td class="win num">0.5 GB</td></tr>
-      </tbody>
-    </table></div>
-    <div class="bars">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:14%"></i></span><span class="t">3m 14s</span></div>
-      <div class="bar"><span>SABnzbd 5.1.0RC2</span><span class="trk"><i style="width:18%"></i></span><span class="t">4m 06s &middot; +27%</span></div>
-      <div class="bar"><span>NZBGet 26.3</span><span class="trk"><i style="width:33%"></i></span><span class="t">7m 40s &middot; +137%</span></div>
-      <div class="bar"><span>‏Weaver 0.7.8</span><span class="trk"><i style="width:100%"></i></span><span class="t">22m 57s &middot; +610%</span></div>
-      <div class="bar"><span>rustnzb 1.3.9</span><span class="trk dnf"><i style="width:25%"></i></span><span class="t">بلا خرج&sup1;</span></div>
-    </div>
-    <p class="note" style="text-align:start">قِيس في 6 أغسطس 2026 على البناء المنشور. جرى العملاء
-    الخمسة جميعًا في الليلة نفسها على الخط نفسه، بالتناوب عميلًا فعميلًا داخل كل جولة، فيتلاشى
-    غلاف المزوّد - الذي يتقلّب من الضعفين إلى ثلاثة الأضعاف من دقيقة إلى أخرى - بدل أن يحابي من
-    صادف أن جرى أولًا. ولم يبدأ أي شوط إلا بعد فحص حيّ أظهر مصادقة الخوادم الستة كلها، وكانت بُنى المنافسين هي المنشورة يومَها. &sup1; سحب rustnzb ‏186.5 GB، أي 16.8 GB أكثر من الحمولة،
-    ولم يترك <b>أي ملف خرج على الإطلاق</b>؛ وأرقام قرصه صغيرة لأن شيئًا لم يُنتَج قط. وهذا يكرّر
-    نتيجة مطابقة سُجّلت ضدّه سابقًا.
-    &middot; &sup2; تتبع ذاكرة nzbfast <em>ميزانيته المُعدّة</em>، لا المهمة: بلغت الميزانية
-    التلقائية الافتراضية ذروة 1.1 GB، ومقيَّدًا عند <b>1 GB</b> تكتمل المهمة نفسها بعدُ (انظر
-    سلّم الذاكرة المنخفضة أدناه). في شوط الساحل الشرقي الأسبق (خط ~2.4-3.0 Gbps) جرى السيناريو
-    نفسه في 9m 00s مقابل ‏+30% و‏+111%؛ الفجوة صامدة عبر سرعات الخطوط.</p>
-  </div>
-</section>
 
-<section id="by-job-size">
-  <div class="wrap">
-    <p class="kicker">السيناريو 2 · الفجوة تتّسع مع الحجم</p>
-    <h2>الزمن حتى ملف قابل للاستخدام، حسب حجم المهمة</h2>
-    <p class="lead">التمريرة الواحدة تعني لا تمريرة تحقق/فكّ ضغط بعد التنزيل، فكلما كبرت المهمة،
-    ازداد تقدّمها في الوصول. أشواط تسلسلية على الجهاز نفسه، أُعيد قياسها في 31 يوليو 2026 على
-    البناء المنشور (أوروبا، 10 GbE، كلها عبر TLS) ما لم يُذكر خلاف ذلك:</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>المهمة</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>‏Weaver v0.7.5 (مُسخَّن)</th></tr></thead>
-      <tbody>
-        <tr><td>7.4 GB REMUX (جولة أقدم)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
-        <tr><td>35 GB مموّه 4K</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
-        <tr><td>77 GB 4K</td><td class="win">90 s</td><td class="lose">206 s (+129%)</td><td class="lose">504 s (+460%)</td><td class="lose">509 s (+466%)</td></tr>
-        <tr><td>87 GB على قرص فيه 97 GB حرّة (جولة أقدم)</td><td class="win">3m 08s</td><td class="bad">يتعذّر التشغيل²</td><td class="bad">يتعذّر التشغيل²</td><td class="bad">يتعذّر التشغيل²</td></tr>
-        <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ صدرت 5.1.0 منذ ذلك الحين نسخةً مستقرّة وجرى سباقها: مع كل عميل عند أفضل إعداد اتصالات له هو، يقترب الفارق في الإصدار المُعمّى من +19% المقيسة في أعلى هذه الصفحة. وتحتفظ هذه الصفوف بالبناءات التي جرت مقابلها بدل أن تُعدَّل.</p>
-    <p class="note" style="text-align:start">شغّل rustnzb كل شوط ولم يسلّم ملفًا قابلًا للاستخدام في
-    أيٍّ منها، فلا عمود له هنا؛ والتفاصيل في قسم التكلفة أدناه. ويُقاس Weaver وفق بروتوكول أفضل
-    حالاته مُسخَّنًا (خدمة دائمة، ومهمة تسخين مُهمَلة، والاتصالات مرفوعة إلى 120 قبل بدء الساعة).
-    ² تجاوز أثرهم الأقصى (المجلدات + الخرج المفكوك في آنٍ واحد، ~156 GB عند 87 GB) الـ 97 GB
-    الحرّة. تحتاج التمريرة الواحدة إلى ضعف واحد من حجم المحتوى: فتنصّف القرص الذي تحتاجه، لا الوقت
-    فحسب. وقد بلغ متوسط أشواط nzbfast المكررة على متني 35 و77 GB في الصباح نفسه 39.7 s و94 s
-    (ثلاثة أشواط لكل منهما)، فأرقام الشوط الواحد أعلاه ليست أشواطًا سريعة منتقاة.</p>
-  </div>
-</section>
 
-<section class="alt" id="hash-named-35">
-  <div class="wrap">
-    <p class="kicker">السيناريو 3 · منشور مموّه</p>
-    <h2>35 GB بأسماء تجزئة 4K → ملف mkv قابل للاستخدام (الساحل الشرقي)</h2>
-    <p class="lead">كل ملف في المنشور هو تلبيدة ست عشرية؛ ولا تستعيد الحمولة اسمها الحقيقي إلا من بيانات PAR2 الوصفية. أُعيد السباق في 31 يوليو 2026 على النسخة الموزَّعة، بالعملاء الخمسة جميعًا، وكله عبر TLS (عُولج خلل المنصة وراء إشارة إتمام SABnzbd - إذ تُرجع واجهة سجله عشر خانات افتراضيًا - ولذلك كل رقم أدناه محدَّث):</p>
-        <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (مُسخَّن)</th><th>rustnzb 1.3.4</th></tr></thead>
-      <tbody>
-        <tr><td>الزمن حتى ملف قابل للاستخدام</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">لا ملف قابل للاستخدام³</td></tr>
-        <tr><td>زمن المعالج</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
-        <tr><td>ذروة الذاكرة (RSS)</td><td class="num">0.45 GB</td><td class="num">1.31 GB</td><td class="num">1.98 GB</td><td class="num">1.13 GB</td><td class="win num">0.15 GB</td></tr>
-        <tr><td>ذروة القرص الإضافي</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ صدرت 5.1.0 منذ ذلك الحين نسخةً مستقرّة وجرى سباقها: مع كل عميل عند أفضل إعداد اتصالات له هو، يقترب الفارق في الإصدار المُعمّى من +19% المقيسة في أعلى هذه الصفحة. وتحتفظ هذه الصفوف بالبناءات التي جرت مقابلها بدل أن تُعدَّل.</p>
-    <p class="note" style="text-align:start">³ نزّل rustnzb في 97 ثانية، ووسم المهمة بأنها <i>منتهية</i>، وسلّم الأجزاء المموَّهة الخام: بلا إعادة تسمية وبلا استخراج - في 1.3.4 و1.3.9 على السواء († رقم قرصه هو التنزيل وحده). أما nzbfast فقد أزال التمويه من بيانات PAR2 الوصفية واستخرج أثناء التنزيل، بصفر كتل أُعيدت قراءتها؛ والمدى 76&ndash;83 ثانية هو أول مرحلة له وآخر مرحلة في الجولة. وبالمقارنة مع نسخة 23 يوليو من هذا الجدول، فالنسخة الموزَّعة أسرع هنا وبذاكرة أقل بمقدار 3.4× (1.55 → 0.45 GB): عمل المرور الواحد من أواخر يوليو، مقيسًا على الجهاز نفسه والمجموعة نفسها.</p>
-  </div>
-</section>
 
-<section id="job-cost">
-  <div class="wrap">
-    <p class="kicker">الجولة المُجهَّزة بالعدّادات</p>
-    <h2>ما تكلّفه المهمة على الجهاز: المعالج والذاكرة والقرص والدخل/الخرج</h2>
-    <p class="lead">الساعة وحدها تُخفي أين ذهب العمل، ولذلك شغّل كل عميل في 31 يوليو 2026 المهام
-    الثلاث نفسها والعدّادات تعمل: ثواني معالج شجرة العمليات (مستقلة عن سرعة الخط)، وذروة الذاكرة
-    (RSS)، وأعلى ارتفاع للقرص فوق نقطة بداية الشوط (بعيّنة كل 2 s)، وإجمالي حركة الدخل/الخرج على
-    القرص. الجهاز نفسه، والمزوّدون الستة أنفسهم، وكلها عبر TLS، وشوط مُجهَّز واحد لكل عميل لكل مهمة.
-    هذا هو ادّعاء التمريرة الواحدة مقيسًا لا مُدّعى: ذروة قرص nzbfast هي الحمولة نفسها، ودخله وخرجه
-    يساويان كتابة كل بايت مرة واحدة.</p>
 
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ صدرت 5.1.0 منذ ذلك الحين نسخةً مستقرّة وجرى سباقها: مع كل عميل عند أفضل إعداد اتصالات له هو، يقترب الفارق في الإصدار المُعمّى من +19% المقيسة في أعلى هذه الصفحة. وتحتفظ هذه الصفوف بالبناءات التي جرت مقابلها بدل أن تُعدَّل.</p>
 
-    <div class="tblwrap"><table>
-      <thead><tr><th>35 GB مموّه (حمولة 32 GB)</th><th>الزمن</th><th>المعالج</th><th>ثانية معالج/GB</th><th>ذروة الذاكرة (RSS)</th><th>ذروة القرص الإضافي</th><th>دخل/خرج القرص</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">39 s</td><td class="win num">59 s</td><td class="win num">1.7</td><td class="num">0.41 GB</td><td class="win num">31.8 GB (1.0×)</td><td class="win num">31.9 GB</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">85 s</td><td class="num">157 s</td><td class="num">4.6</td><td class="num">1.45 GB</td><td class="num">62.0 GB (1.9×)</td><td class="num">66.2 GB</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">217 s</td><td class="num">416 s</td><td class="num">12.1</td><td class="num">1.38 GB</td><td class="num">63.6 GB (2.0×)</td><td class="num">66.1 GB</td></tr>
-        <tr><td>‏Weaver (مُسخَّن)</td><td class="num">258 s</td><td class="num">304 s</td><td class="num">8.8</td><td class="num">1.21 GB</td><td class="num">64.2 GB (2.0×)</td><td class="num">94.4 GB</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="bad">لم يكتمل† (75 s)</td><td class="bad num">1,201 s</td><td class="bad num">31.7</td><td class="num">0.19 GB</td><td class="num">34.8 GB†</td><td class="num">35.6 GB†</td></tr>
-      </tbody>
-    </table></div>
 
-    <div class="tblwrap"><table>
-      <thead><tr><th>77 GB (حمولة 72 GB)</th><th>الزمن</th><th>المعالج</th><th>ثانية معالج/GB</th><th>ذروة الذاكرة (RSS)</th><th>ذروة القرص الإضافي</th><th>دخل/خرج القرص</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">90 s</td><td class="win num">135 s</td><td class="win num">1.7</td><td class="num">0.57 GB</td><td class="win num">71.3 GB (1.0×)</td><td class="win num">71.5 GB</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">206 s</td><td class="num">348 s</td><td class="num">4.5</td><td class="num">1.30 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">171.5 GB</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">504 s</td><td class="num">978 s</td><td class="num">12.6</td><td class="num">3.03 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">258.5 GB</td></tr>
-        <tr><td>‏Weaver (مُسخَّن)</td><td class="num">509 s</td><td class="num">635 s</td><td class="num">8.2</td><td class="num">1.53 GB</td><td class="num">145.3 GB (2.0×)</td><td class="num">315.2 GB</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="bad">لم يكتمل† (166 s)</td><td class="bad num">2,665 s</td><td class="bad num">31.3</td><td class="num">0.36 GB</td><td class="num">80.0 GB†</td><td class="num">80.8 GB†</td></tr>
-      </tbody>
-    </table></div>
 
-    <div class="tblwrap"><table>
-      <thead><tr><th>190 GB (حمولة 157 GB)</th><th>الزمن</th><th>المعالج</th><th>ثانية معالج/GB</th><th>ذروة الذاكرة (RSS)</th><th>ذروة القرص الإضافي</th><th>دخل/خرج القرص</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">287 s</td><td class="win num">290 s</td><td class="win num">1.7</td><td class="num">1.11 GB</td><td class="win num">156.6 GB (1.0×)</td><td class="win num">159.0 GB</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">546 s</td><td class="num">764 s</td><td class="num">4.5</td><td class="num">1.93 GB</td><td class="num">312.9 GB (2.0×)</td><td class="num">393.0 GB</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">1,169 s</td><td class="num">2,081 s</td><td class="num">12.3</td><td class="num">1.80 GB</td><td class="num">312.8 GB (2.0×)</td><td class="num">586.8 GB</td></tr>
-        <tr><td>‏Weaver (مُسخَّن)</td><td class="num">1,418 s</td><td class="num">1,625 s</td><td class="num">9.6</td><td class="num">2.04 GB</td><td class="num">317.3 GB (2.0×)</td><td class="num">808.9 GB</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="bad">لم يكتمل† (348 s)</td><td class="bad num">5,745 s</td><td class="bad num">30.8</td><td class="num">0.54 GB</td><td class="bad">بلا خرج†</td><td class="num">74.0 GB†</td></tr>
-      </tbody>
-    </table></div>
-
-    <p><b>المهمة نفسها، مرسومة.</b> المعالج وذروة القرص لمهمة 190 GB، مقيسة إلى أثقل
-    عميل:</p>
-    <div class="bars wide">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:5%"></i></span><span class="t">290 ثانية معالج</span></div>
-      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:13%"></i></span><span class="t">764 ثانية معالج</span></div>
-      <div class="bar"><span>‏Weaver (مُسخَّن)</span><span class="trk"><i style="width:28%"></i></span><span class="t">1,625 ثانية معالج</span></div>
-      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:36%"></i></span><span class="t">2,081 ثانية معالج</span></div>
-      <div class="bar"><span>rustnzb</span><span class="trk dnf"><i style="width:100%"></i></span><span class="t">5,745 ثانية معالج · بلا خرج†</span></div>
-    </div>
-    <div class="bars wide" style="margin-top:14px">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:49%"></i></span><span class="t">156.6 GB ذروة قرص · 1.0×</span></div>
-      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.8 GB · 2.0×</span></div>
-      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.9 GB · 2.0×</span></div>
-      <div class="bar"><span>‏Weaver (مُسخَّن)</span><span class="trk"><i style="width:100%"></i></span><span class="t">317.3 GB · 2.0×</span></div>
-    </div>
-
-    <p class="note" style="text-align:start">† لم يستخرج rustnzb في أي من المهام الثلاث رغم إبلاغه <i>منتهية</i> في كل مرة؛ وأرقام قرصه تُسقِط نسخة الاستخراج التي دفعها كل عميل آخر، ومعالجه (نحو 16 نواة مشبعة على امتداد مراحل كاملة، 20× nzbfast لكل جيجابايت في هذه المراحل) يبدو كطحن إصلاح متواصل لم يُنتج الحمولة قط - وقد قاست إعادةُ تشغيل في اليوم نفسه وسباقُ 1.3.9 المعاد كلتاهما غياب ذلك الطحن، فهو إذن حالة قد تصادفها تشغيلاته لا ثابت من ثوابته، وهذه الخلايا هي ما سجّلته مراحلنا المقيسة لا تعرفة يدفعها دائمًا؛ وفي مهمة 190 جيجابايت كان مجلد خرجه فارغًا. قراءات عبر الأحجام الثلاثة: يبقى nzbfast مستويًا عند <b>1.7 ثانية معالج لكل جيجابايت وذروة قرص تساوي 1.0× الحمولة</b> من 35 إلى 190 جيجابايت؛ ويحافظ NZBGet وSABnzbd على ذروة نظيفة قدرها 2.0×؛ وينمو الدخل/الخرج لدى Weaver نموًا فوق خطي (94 → 315 → 809 GB, 3.0× → 5.1× حركتنا) لأن مخزنه المعمَّى عند السكون يعيد قراءة وكتابة كل شيء تقريبًا، وهذا أيضًا سبب تدرّج زمنه على النحو الذي يتدرّج به. وعمود القرص قيد صارم لا تفضيل: مهمة 190 GB تحتاج ~313 GB حرة على كل برنامج يكتب أولًا ثم يفك الضغط، و157 GB على nzbfast. وللمنشورات التالفة الآن جولتها الخاصة، أُعيد قياسها على الإصدار الحالي: انظر <a href="#damaged">حين يكون المنشور مثقوبًا</a>.</p>
-  </div>
-</section>
-
-<section id="queue">
-  <div class="wrap">
-    <p class="kicker">السيناريو 4 · قائمة انتظار من ثلاث</p>
-    <h2>إبقاء الخط مضيئًا عبر قائمة انتظار (الساحل الشرقي، ~43 GB)</h2>
-    <p class="lead">ثلاث مهام أُضيفت دفعةً واحدة - نسخة REMUX بحجم 7.4 جيجابايت، وإصدار 4K بحجم 35 جيجابايت بأسماء تلبيدية، ومنشور صغير بحجم 0.35 جيجابايت - وتظل الساعة تعمل حتى تستقر كل حمولة على القرص، مُتحقَّقًا منها ومستخرَجة. أُعيد القياس في 31 يوليو 2026 على النسخة الموزَّعة، بالعملاء الخمسة جميعًا؛ وقد رفض أحد المزوِّدين الستة الاستيثاق طوال الجولة، على النحو نفسه لكل عميل.</p>
-        <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>rustnzb 1.3.4 / 1.3.9</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (مُسخَّن)</th></tr></thead>
-      <tbody>
-        <tr><td>زمن إنهاء قائمة الانتظار</td><td class="win">144&ndash;148 s</td><td class="bad">لم يكتمل¹ (138 / 125 s)</td><td class="num">164 s</td><td class="num">249 s</td><td class="num">328 s</td></tr>
-        <tr><td>مهام سُلِّمت قابلة للاستخدام</td><td class="win">3/3</td><td class="bad">2/3¹ (كلتا النسختين)</td><td class="num">3/3</td><td class="num">3/3</td><td class="num">3/3</td></tr>
-        <tr><td>خمول الخط (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start">ينتهي nzbfast أولًا بين العملاء الذين يسلّمون الحمولات الثلاث جميعًا. ¹ عمود rustnzb انسحابٌ لا نتيجة: فقد توقفت ساعته أولًا (138 ثانية على 1.3.4، و125 ثانية على 1.3.9، الأحدث حينها، وقد شُغِّل لمنحه أفضل فرصة) لأنه سلّم مهمة 35 جيجابايت أجزاءً مموَّهة خامًا موسومة <i>Completed</i> - بلا إعادة تسمية وبلا استخراج، في النسختين كلتيهما (انظر قسم المتابعة أدناه). وخط نهاية لم يبلغه لا يقارَن بعملاء بلغوه، ولذلك وُسِمت كل خلية في ذلك العمود بأنها غير صالحة لا بأنها سريعة. ويترك SABnzbd الخط مجددًا <b>مظلمًا 63% من الجولة</b> أثناء المعالجة اللاحقة المتسلسلة - وهو الرقم الوحيد هنا الذي بقي ثابتًا في كل نسخة من هذا الجدول. أما NZBGet فلا يخمل قط لكنه يدفع ثمن الاستخراج المتزامن في زمنه النهائي. ² نسبة خمولنا نحن صادقة ومحدَّثة، وهي الرقم الذي تحرك أكثر من غيره: إذ لم يكن اثنان من المزوِّدين الستة متاحين في هذه الجولة، والتداخل بين المهام يحتاج خادمًا خاليًا تُشغَّل عليه المهمة التالية - وقد ضبط هذا القياسُ المحركَ وهو يبني المهمة التالية على خادم ميت، والإصلاح الذي تلاه يفعل ما هو أفضل من التنحّي: فحين يرفض كل خادم خامل الرد، يستعير المحرك شريحة محدودة من الاتصالات من الخوادم المشغولة ويحافظ على التداخل. أُعيد الاختبار المطوَّل في 2 أغسطس 2026 في حالة المزوِّدين الميتين نفسها: فالفجوات في منتصف الجولة التي كوّنت هذه الخلية زالت (49 ثانية من الخمول بين المهام حينها، ودون 6 ثوانٍ الآن)، والمهمة التالية تسير كليًا على اتصالات مستعارة. وفي صيغة الصلابة (مهمة واحدة برؤوس RAR مشفَّرة، جولة أقدم) علقت قائمة SABnzbd عند المهمة المشفَّرة ولم تكتمل سوى مهمة واحدة من ثلاث؛ أما nzbfast فأوقفها جانبًا برسالة واضحة وأتمّ البقية.</p>
-  </div>
-</section>
 
 <section id="damaged">
   <div class="wrap">
-    <p class="kicker">السيناريو 5 &middot; منشور تالف</p>
-    <h2>حين يكون المنشور مثقوبًا: 6.5 GB مع 60 مقالة ميتة</h2>
-    <p class="lead">كل السيناريوهات أعلاه تفترض أن المنشور يصل كاملًا. وكثير منها لا يصل كذلك - المقالات تنتهي مدتها، وخادوم يُسقطها بصمت، ورفعٌ يهبط ناقصًا - وهذه بالضبط الحالة التي صُمم حولها هذا المحرك. وهي أيضًا حيث تتسع الفجوة بين البرامج أكثر ما تتسع. قِيس في 11 أغسطس 2026 على جهاز 10 GbE، وتسابقت الأذرع الستة كلها في جولة متناوبة واحدة، بثلاث إعادات لكل ذراع، وعشرين اتصالًا لكل خادوم، وخمسة مزودين. المادة نفسها، REMUX بحجم 6.5 GB، في ثلاث حالات: 60 مقالة ميتة، و5 مقالات ميتة، وسليم كضابط. حُسبت بصمة مخرَج كل شوط مقابل الملف المعروف الصحة، وعاد 53 من الأشواط الـ 56 مطابقًا بايتًا ببايت.</p>
-
+    <p class="kicker">المنشور التالف &middot; أُعيد السباق في 24 أغسطس 2026، كل بناء حالي</p>
+    <h2>حين يكون المنشور مثقوبًا: 6.5 GB بـ60 و20 و5 مقالات ميتة</h2>
+    <p class="lead">تنتهي صلاحية المقالات، وتُسقطها الخوادم بصمت، وتصل الرفعات ناقصة -
+    والتلف هو حيث تكون الفجوة بين العملاء أوسع ما تكون، فله جولته الخاصة على أحدث
+    بناء لكل عميل، بما فيه nzbfast v1.2.2: جهاز أوروبا 10 GbE، وخمسة مزوّدين، و100
+    اتصال لكل عميل، الإصدار نفسه بحجم 6.5 GB مسمَّم عند ثلاثة مستويات تلف، ثلاث
+    تكرارات لكل ذراع مع تناوب الترتيب، وتحقق من كل شوط بايت لبايت مقابل الملف
+    النظيف. عادت 63 من 65 شوطًا مطابقة بايت لبايت؛ والشوطان اللذان لم يعودا كذلك
+    مسمّيان أدناه، لأنهما نتيجتان.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>الزمن حتى ملف متحقَّق منه وصالح للاستعمال</th><th class="num">60 مقالة ميتة</th><th class="num">5 مقالات ميتة</th><th class="num">سليم</th></tr></thead>
+      <thead><tr><th>الزمن حتى ملف متحقَّق منه قابل للاستخدام (متوسط 3)</th><th>60 مقالة ميتة</th><th>20 ميتة</th><th>5 ميتة</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast 1.0.24</b></td><td class="win">13 s</td><td class="win">9 s</td><td class="win">7 s</td></tr>
-        <tr><td>NZBGet 26.3-testing</td><td class="num">30 s</td><td class="num">18&ndash;21 s</td><td class="num">12 s</td></tr>
-        <tr><td>SABnzbd 5.1.0</td><td class="num">34 s</td><td class="num">23 s</td><td class="num">14&ndash;20 s</td></tr>
-        <tr><td>rustnzb 1.4.4</td><td class="num">102 s</td><td class="num">45 s</td><td class="num">17&ndash;19 s</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="bad">لم يُنهِ¹</td><td class="num">194 s</td><td class="num">32&ndash;65 s</td></tr>
+        <tr><td><b>nzbfast 1.2.2</b></td><td class="win">13.0 s</td><td class="win">10.0 s</td><td class="win">8.7 s</td></tr>
+        <tr><td>nzbfast 1.2.2، الإصلاح المبكر متوقف</td><td class="num">29.3 s</td><td class="num">19.0 s</td><td class="num">12.3 s</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">33.0 s</td><td class="num">23.7 s</td><td class="num">23.0 s</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">48.0 s&sup1;</td><td class="num">28.0 s</td><td class="num">24.3 s</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">107.3 s&sup2;</td><td class="num">51.3 s</td><td class="num">47.0 s</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="bad">لم يُنهِ&sup3;</td><td class="bad">لم يُنهِ&sup3;</td><td class="num">194.0 s</td></tr>
       </tbody>
     </table></div>
-
-    <p>اقرأ على امتداد الصف لا نزولًا في العمود. على منشور سليم يكون الفارق عاديًا: ننهي مهمة 6.5 GB في 7 ثوانٍ مقابل 12 لـ NZBGet، نحو 1.7&times;. ضع 60 مقالة ميتة في المنشور نفسه فيتسع الفارق إلى <b>2.3&times;</b>، ويقضي كل برنامج غيرنا معظم الوقت الزائد بلا فعل شيء البتة. التلف ليس حالة هامشية تكلّف الجميع بالتساوي؛ بل هو الحالة التي تفصل بين التصاميم.</p>
-
-    <p><b>ما هو الانتظار في حقيقته.</b> حين تنقص مقالة، يسأل البرنامج الخادوم التالي، ثم الذي يليه، حتى يرفضها كل خادوم. تلك المشية متسلسلة وهي بطيئة لأسباب خارجة عن يد أحد: يستغرق الرفض بين 79 ms و2.2 ثانية تبعًا للعمود الفقري المجيب، ومشية كاملة عبر خمسة منها تبلغ نحو 5 ثوانٍ. افعل ذلك لذيل منشور تالف فيقف التنزيل عند الصفر والساعة تجري. ومعظم زمن NZBGet البالغ 30 ثانية وزمننا الأقدم البالغ 23 ثانية هو هذا بالضبط، لا حساب إصلاح - فالإصلاح نفسه يستغرق نحو 2.3 ثانية في كل نسخة قِسناها.</p>
-
-    <p><b>ما الذي غيّره هذا الإصدار.</b> إصدار اليوم يكفّ عن السؤال. فما إن تغطِّ بياناتُ التماثل التي بحوزته ما تبقّى ناقصًا، لم يعد في إتمام المشية مكسب، فيصلح فورًا بدلًا من ذلك. وقد تسابقت النسختان أدناه في هذه الجولة نفسها، فهذا قبلٌ وبعدٌ لا رقمان من يومين مختلفين:</p>
-
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th class="num">60 مقالة ميتة</th><th class="num">5 مقالات ميتة</th><th class="num">سليم</th></tr></thead>
-      <tbody>
-        <tr><td>nzbfast 1.0.23 (إصدار الأمس)</td><td class="num">23 s</td><td class="num">16 s</td><td class="num">7 s</td></tr>
-        <tr><td><b>nzbfast 1.0.24 (هذا الإصدار)</b></td><td class="win">13 s</td><td class="win">9 s</td><td class="num">7 s</td></tr>
-      </tbody>
-    </table></div>
-
-    <p>المنشور الشديد التلف ينتهي في ما يزيد قليلًا عن نصف الزمن الذي استغرقه أمس، والسليم على حاله عند 7 ثوانٍ، وهذا هو المقصود: التغيير لا يفعل شيئًا إلا حين تكون المقالات ناقصة فعلًا. وقد أكدنا ذلك مباشرةً لا استنتاجًا، بتشغيل الإصدار الجديد نفسه والسلوك مُعطَّل - فيعود إلى 23&ndash;25 ثانية، ويحطّ على النسخة الأقدم حطًّا يكاد يطابقها.</p>
-
-    <p><b>ما يكلّفه، إذ ليس مجانيًا.</b> الإصلاح المبكر يعني الاحتفاظ ببيانات الاسترجاع في الذاكرة بدل جلبها لاحقًا، فترتفع ذروة الذاكرة (RSS) على منشور شديد التلف من نحو 0.8 GB إلى نحو 1.3 GB، ونسحب من الخواديم نحو 400 MB زيادة. أما على منشور سليم فلا يتغير شيء: ذروة الذاكرة 0.24 GB في الحالتين، كما في الإصدار الأقدم. وإن كان قيدك أصغر أثر ذاكرة ممكن على المنشورات التالفة تحديدًا، فتلك المقايضة صارت عندنا تسير في الاتجاه الآخر، والإعداد موجود في لوحة التحكم.</p>
-
-    <p class="note" style="text-align:start">¹ لم يُنهِ Weaver أيًّا من الأشواط الثلاثة عند 60 مقالة ميتة، بعشرين دقيقة لكل شوط. وليست نتيجةً بطيئة بل متوقفة: أتمّ ملفًا واحدًا من 73 ملفًا في المنشور خلال الثانية الأولى، ثم لم يُحرز أي تقدّم في الـ 18&nbsp;دقيقة الباقية مع إبقائه الاتصالات مفتوحة، وترك مجلدات جزئية على القرص. وقد أُشِّر على العمود بأنه عدم إنهاء بدل توقيته، بالقاعدة نفسها التي نطبّقها هنا على كل برنامج. وهذا خاص بالتلف الشديد - فعند 5 مقالات ميتة أتمّ بصورة صحيحة في 194 ثانية، وسليمًا في 32 ثانية - فهو إذن شكل واحد لا يستطيع اجتيازه حاليًا لا إخفاق عام. <b>عمود الخمس مقالات لدى NZBGet مذكور كمدى عن قصد.</b> فعند هذا الضبط للاتصالات كانت أشواطه الثلاثة متقاربة (18 و21 و18 ثانية)، لكن عند أعداد اتصالات أعلى قِسنا مرارًا انقسام البرنامج نفسه إلى تجمّعين على هذه المادة، نحو 18 ثانية و28 ثانية وليس بينهما شيء، فرقمٌ متوسط واحد كان سيسيء تمثيله في هذا الاتجاه أو ذاك. ولم نُثبت السبب ولا ندّعي سببًا. <b>زمن rustnzb البالغ 102 ثانية</b> يأتي وكل بايت فيه صحيح، والكلفة في وقت المعالج لا في الموثوقية: نحو 1,630 ثانية معالجة مقابل ساعة قدرها 102 ثانية، أي نحو ستة عشر نواة مشغولة طوال الشوط، حيث يكلّفنا المخرَج نفسه 52 ثانية معالجة. وإصدارات البرامج والأرقام الكاملة لكل شوط في حاشية التذييل.</p>
+    <p><b>لماذا المنشور التالف سريع هنا.</b> حين تُفقَد مقالة، يسأل العميل عادةً
+    الخادم التالي، ثم الذي يليه، حتى يرفضها كل خادم - سير متسلسل يستغرق فيه كل رفض
+    بين عشرات المللي ثانية وثانيتين، يقعد التنزيل خلاله عند الصفر. يتوقّف nzbfast عن
+    السؤال: بمجرد أن تغطي بيانات التكافؤ الموجودة أصلًا ما زال مفقودًا، يُصلح فورًا
+    بدل إنهاء السير. هذا هو الصف الثاني - الثنائي نفسه بإيقاف ذلك السلوك أبطأ بـ1.4
+    إلى 2.3 أضعاف حسب التلف - وتحققت الجولة من أن الآلية عملت في كل شوط مفعَّل ولم
+    تعمل أبدًا في شوط معطَّل. مقابل أقرب منافس الهامش من 2.4 إلى 2.7 أضعاف، بلا تداخل
+    في أيّ من أزواج التكرار التسعة.</p>
+    <p><b>القرص هو حيث الهامش أوسع ما يكون، وليس هذا حيلة الإصلاح.</b> أنتج كل ذراع
+    مكتمل الملف نفسه بحجم 6.48 GB؛ حرّكنا 6.2-6.8 GB من إدخال/إخراج القرص لفعل ذلك،
+    وNZBGet 12.7-18.5 GB، وSABnzbd 13.9-20.3 GB، وrustnzb 12.8-13.1 GB. هذا هو خط
+    أنابيب المرور الواحد - يحرّك الصف المُوقَف نفس الـ6.2 GB - فهو يصمد على المنشورات
+    التالفة وغير التالفة سواء بسواء.</p>
+    <p class="note" style="text-align:start">&sup1; جرت أشواط SABnzbd الثلاثة عند
+    أثقل تلف في 43 و41 و60 s - تفاوت حقيقي على مدخلات متطابقة، فيُذكر المتوسط مع
+    ذكر المدى. &sup2; سلَّم rustnzb 1.4.5 كل شوط صحيحًا بايت لبايت، وتكلفته في زمن
+    المعالج لا في الموثوقية: نحو 1,620 ثانية معالج مقابل ساعة 107 s عند أثقل تلف -
+    نحو خمسة عشر نواة مشغولة طوال الشوط - حيث يكلّفنا الناتج المُصلَح نفسه نحو 50
+    ثانية معالج. &sup3; حرّك Weaver 1.5 GB و4.9 GB من الـ6.5 ضمن مهلتنا البالغة
+    20 دقيقة عند مستويَي التلف الأثقل - عدم الإنهاء نفسه في الجولات الثلاث التي
+    سابقته، في ثلاث ليالٍ منفصلة؛ المهلة لنا وعدم الإنهاء هو النتيجة. عند 5 مقالات
+    ميتة أكمل صحيحًا في المرّات الثلاث. تكلفة معالجه هناك قصتها الخاصة: نحو 2,325
+    ثانية معالج للشوط البالغ 194 s، مقابل 20 لدينا.</p>
+    <p class="note" style="text-align:start">قيست في 24 أغسطس 2026، كل بناء حالي:
+    nzbfast v1.2.2 (وسم الإصدار نفسه)، وNZBGet 26.3-testing (بناء 20 أغسطس)،
+    وSABnzbd 5.1.1، وrustnzb 1.4.5، وWeaver 0.7.8. سابق ذراع استمرارية بناء nzbfast
+    الخاص بالليلة السابقة داخل هذه الجولة نفسها ووقع في ثانية واحدة من v1.2.2 على كل
+    عيّنة، فلا شيء هنا يعتمد على ليلة محظوظة؛ وإعدادات المنافسين لا تختلف عن الجولة
+    السابقة إلا في مسار التطبيق، مُتحقَّق منها إعدادًا إعدادًا قبل تشغيل الجولة.</p>
   </div>
 </section>
 
 <section class="alt" id="legs-we-lose">
   <div class="wrap">
-    <p class="kicker">العمود الصادق</p>
+    <p class="kicker">العمود الصريح</p>
     <h2>الأشواط التي لا نفوز بها</h2>
-    <div>
-    </div>
-    <p class="lead">كل مرحلة جلست في هذا القسم أُعيد قياسها في نهاية المطاف على نسخة موزَّعة أحدث، وقد أفرغته هذه الجولة، وهو ما يستدعي الحذر لا الرضا. وما خرج منه، وكل حالة مشروحة بجانب جدولها لا محرَّرة في صمت: أثقل إصلاح PAR2، وقد ظل خسارةً على جهازين عبر نسختين من هذه الصفحة؛ وإعادة بناء أجزاء الاسترجاع <code>.rev</code> المفقودة، وهي أكبر خسارة حملتها هذه الصفحة، إذ كانت أبطأ بمقدار 6.6× من أداة RARLab نفسها وصارت الآن فوزًا ضيقًا؛ وثلاث صيغ استخراج كانت متأخرة عن unrar بما بين نقاط مئوية قليلة والثلث، وتبين أن سببها أضيق من التفسير الذي نشرناه له.</p>
 
-    <p class="lead">أما ما <em>لم</em> يزل قائمًا فهو المقايضة وراء تلك الأرقام، وهذا ما يقوله هذا القسم الآن: <b>نستهلك ذاكرة أكثر مما تستهلكه الأدوات المستقلة</b>، وأثقل إصلاح صار يستهلك أكثر مما كان. فمستخرِجنا ومُصلِحنا مبنيان ليرافقا تنزيلًا جاريًا لا ليعملا مرة واحدة من سطر أوامر، وذلك يكلف ذاكرة مقيمة؛ والتفصيل بجانب جداول المكوّنات. وإن كان قيدك أصغر بصمة ممكنة لمهمة مفردة، فالأدوات المتخصصة تفوز بذلك العمود ولن ندّعي خلاف ذلك.</p>
-    <div class="callout">لماذا نعرض خسارة أصلًا؟ لأن المكاسب لا تكون قابلة للتصديق إلا بجوارها. كل رقم على هذه الصفحة يأتي من الأشواط المتداخلة نفسها، والشوط الذي نخسره يبقى منشورًا إلى أن يحل محله شوط جديد.</div>
+    <p class="lead">هذا القسم موجود من أجل الأشواط التي يفوز بها منافس، ويُعاد قياسه
+    كل جولة بدل أن يُنتقى: أي شيء نخسره يوضع هنا، مسمّى، إلى جانب الجدول الذي يُظهره.
+    على البناء الحالي، هذه الجولة، خالٍ من خسائر السرعة - وهذا يستحق الحذر أكثر مما
+    يستحق الرضا، فالمقايضات المتبقية مذكورة أدناه بدلًا من ذلك.</p>
+
+    <p class="lead">ما <em>لم</em> يزُل هو المقايضة وراء تلك الأرقام، فهذا ما يقوله
+    هذا القسم الآن: <b>ننفق ذاكرة أكثر مما تنفقه الأدوات المستقلة</b>، ومسار الإصلاح
+    الثقيل السريع ينفق الأكثر. صُمم مستخرِجنا ومُصلِحنا لركوب تنزيل حيّ لا للعمل مرة
+    واحدة من سطر أوامر، وهذا يكلّف ذاكرة مقيمة؛ التفصيل إلى جانب جداول المكوّنات
+    أدناه. إن كان قيدك هو أصغر بصمة ممكنة لمهمة لمرة واحدة، تفوز الأدوات المخصَّصة
+    بذلك العمود ولن ندّعي غير ذلك.</p>
+
+    <p class="lead">وتضيف جولة 23 أغسطس 2026 خانة، نفضّل إدراجها هنا على تركها في
+    حاشية: على عيّنة الـ6.5 GB، وسيط معالج Weaver أقل من رقمنا بنسبة 2% - 34.9 مقابل
+    35.7 ثانية معالج، مع امتداد أشواطه الثلاثة من 34.1 إلى 56.1 s - فنعدّه تعادلًا
+    إحصائيًا، وهو موجود في <a href="#cost">جدول التكلفة</a> موسومًا بأنه الخلية
+    الوحيدة التي لا نحتفظ بها. وعلى عيّنة الـ34 GB في الجولة نفسها معالجنا هو الأدنى
+    مطلقًا.</p>
+    <div class="callout">لماذا نُظهر خسارة أصلًا؟ لأن الانتصارات لا تُصدَّق إلا إلى
+    جانبها. كل رقم في هذه الصفحة يأتي من الأشواط المتداخلة نفسها، ويبقى الشوط الذي
+    نخسره منشورًا حتى تحلّ محله إعادة تشغيل.</div>
   </div>
 </section>
 
 <section id="low-memory">
   <div class="wrap">
-    <p class="kicker">السيناريو 6 · جوّعه من RAM</p>
-    <h2>سلّم الذاكرة المنخفضة: 190 GB في ~1.1 GB من RAM</h2>
-    <p>المهام الأربع نفسها، مُعادة التشغيل بميزانيات ذاكرة صارمة 2 GB و1 GB و256 MB:
-    ما سيختاره المحدِّد التلقائي على جهاز 8 GB، وجهاز 4 GB، وNAS بـ 2 GB. أنتج كل
-    شوط ملفًا صحيحًا، متحقَّقًا منه بالكامل، مستخرَجًا؛ وتتبّعت ذروة RSS
-    <em>الميزانية</em>، لا المهمة. الزمن حتى ملف قابل للاستخدام، خط 10 GbE:</p>
+    <p class="kicker">تجويعه من RAM &middot; قيست في 24 أغسطس 2026 على nzbfast 1.2.2</p>
+    <h2>سلّم الذاكرة المنخفضة: 87 GB في ~0.3 GB من RAM</h2>
+    <p>المهمة نفسها بحجم 87 GB من الجولة أعلاه، أُعيد تشغيلها بميزانيات ذاكرة صارمة
+    عند 2 GB و1 GB و256 MB - ما قد يختاره المُحجِّم التلقائي على جهاز 8 GB، وجهاز
+    4 GB، وNAS بحجم 2 GB. أنتج كل شوط الملف نفسه المُتحقَّق منه بايت لبايت، وتتبّع
+    عمود الذاكرة <em>الميزانية</em>، لا المهمة أبدًا:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>حجم المهمة</th><th>وفرة من RAM</th><th>ميزانية 2 GB</th><th>ميزانية 1 GB</th><th>ميزانية 256 MB</th></tr></thead>
+      <thead><tr><th>مهمة بحجم 87 GB، على 10 GbE</th><th>تلقائي</th><th>ميزانية 2 GB</th><th>ميزانية 1 GB</th><th>ميزانية 256 MB</th></tr></thead>
       <tbody>
-        <tr><td>7 GB</td><td class="num">15 s</td><td class="num">15 s</td><td class="num">15 s</td><td class="num">15 s</td></tr>
-        <tr><td>35 GB</td><td class="num">65 s</td><td class="num">70 s</td><td class="num">70 s</td><td class="num">65 s</td></tr>
-        <tr><td>87 GB</td><td class="num">148 s</td><td class="num">206 s</td><td class="num">196 s</td><td class="num">180 s</td></tr>
-        <tr><td>190 GB</td><td class="num">330 s</td><td class="num">427 s</td><td class="num">402 s</td><td class="num">411 s</td></tr>
+        <tr><td>الزمن حتى ملف قابل للاستخدام</td><td class="num">94 s</td><td class="num">87 s</td><td class="num">94 s</td><td class="num">102 s</td></tr>
+        <tr><td>ذروة الذاكرة (RSS)</td><td class="num">286 MB</td><td class="num">558 MB</td><td class="num">336 MB</td><td class="num">284 MB</td></tr>
+        <tr><td>إدخال/إخراج القرص (GiB)</td><td class="num">73.2</td><td class="num">73.2</td><td class="num">72.8</td><td class="num">72.7</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">علاوة الـ 20-40% على المهام الكبيرة هي
-    أثر خاص بـ 10 GbE: الكتل المنسكبة لا تكلّف وقتًا إلا حين يسبق الخطُّ القرص.
-    نفس مهمة 87 GB بالميزانيات نفسها على خط ~2.4 Gbps قاست −1% إلى +7%، ضوضاء.
-    على اتصال منزلي نموذجي تكون الميزانية الصغيرة شبه مجانية عند أي حجم مهمة. أنهى
-    ملفّ NAS (2 اتصال، ميزانية 256 MB) مهمة 35 GB بذروة RSS بمقدار 0.4 GB.
-    يستطيع NAS بـ 2 GB تشغيل هذا. لا عميل آخر يقدّم سقف ذاكرة إطلاقًا.</p>
+    <p class="note" style="text-align:start">شوط واحد لكل ميزانية على بناء الإصدار،
+    محكوم مقابل المجموع التحققي نفسه للناتج في الجولة السداسية الأذرع. تكلّف أضيق
+    ميزانية نحو 9% من الساعة، وذلك فقط لأن هذا الخط هو 10 GbE - لا تكلّف الكتل
+    المُسكَبة إلى القرص وقتًا إلا حين يتخطّى الخط القرص سرعةً، فعلى اتصال منزلي
+    نموذجي تكاد ميزانية صغيرة أن تكون مجانية. يتّسع السلّم كله، بما فيه تنزيل بحجم
+    87 GB، في 0.3-0.6 GB من الذاكرة؛ وبالإعدادات الافتراضية للشحن جرت المهمة في
+    286 MB. لا يعرض أي عميل آخر ميزانية ذاكرة صارمة على مستوى العملية كله؛ أقرب ما
+    لديهم مفاتيح حجم ذاكرة تخزين مؤقت، والجولة أدناه تقيس ما تكلّفه تلك المفاتيح.</p>
+    <p><b>القيد سابَق مقابل مفاتيح الميدان نفسها.</b> على عيّنة الـ34 GB (23 أغسطس
+    2026، جهاز 1 Gbit، خمسة مزوّدين، 30 من 30 شوطًا صحيحًا بايت لبايت)، أدّى تقييد
+    NZBGet بذاكرة تخزين مؤقت معادلة إلى أكثر من مضاعفة معالجه (من 215.5 إلى 453.0
+    ثانية معالج، أي 2.10x) لشراء تخفيض 52% في ذروة ذاكرته، وكان قيد SABnzbd شبه
+    مجاني لكنه بلغ جزءًا فقط من بصمته. كان إعداد ذاكرة rustnzb التخزينية زخرفيًا في
+    البناء المسابَق، ولا يملك Weaver أي مفتاح ذاكرة على الإطلاق، فعملا كلاهما بلا قيد
+    كعمودين مرجعيين بدل أن يُقيَّما عند ميزانية لا يستطيعان الالتزام بها. جانبنا من
+    تلك الجولة يتخطّاه سلّم v1.2.2 أعلاه، الذي يقول الشيء نفسه بـ2.5 أضعاف الحجم:
+    الميزانية ليست أبدًا القيد المُلزِم، لأن المرور الواحد يحتفظ بقليل جدًا من
+    الأساس.</p>
   </div>
 </section>
 
-<section class="alt" id="nested">
+<section id="floor">
   <div class="wrap">
-    <p class="kicker">السيناريو 7 · أرشيفات داخل أرشيفات</p>
-    <h2>عشرة أشكال متداخلة: من يُنهي المهمة من دونك</h2>
-    <p class="lead">المنشورات تصل متداخلة أكثر فأكثر: RAR داخل RAR، و7z مدسوس في أرشيف تخزين،
-    وسلّم من الطبقات، وسلسلة كلمات مرور. هذا الشوط يقيّم ما يتبقى على عاتق المشغّل.
-    <b>تلقائي</b> تعني أن كل حمولة استُخرجت، مطابقةً بالبايت، دون أي تدخّل؛ و<b>يدوي</b> تعني
-    أن العميل أبلغ عن النجاح لكنه ترك أرشيفًا داخليًا جاثمًا في دليل الخرج لتفتحه أنت بنفسك.
-    وأُعيد السباق في 2 أغسطس 2026 على البناء الحالي، بخمسة عملاء الآن.</p>
+    <p class="kicker">المساحة الحرة &middot; قيست إلى الميغابايت</p>
+    <h2>كم من المساحة الحرة تحتاجها المهمة</h2>
+    <p class="lead">يحتاج عميل يكتب ثم يفك الضغط إلى مكان لمجلدات الأرشيف والحمولة
+    المفكوكة في آن واحد، فلن تبدأ المهمة دون نحو ضعف مساحة التنزيل حرّة. يحتاج
+    المرور الواحد الحمولة - وقاست هذه الجولة كم أكثر بالضبط، بتصغير مجلد الهدف حتى
+    يفشل كل عميل. إجابة nzbfast هي <b>ثابت قدره نحو 50 MB من الهامش</b>، لا نسبة،
+    ويصمد من مهمة بحجم 6.5 GB إلى أخرى بحجم 34 GB.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>الشكل</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
+      <thead><tr><th>المساحة الحرة التي تحتاجها المهمة</th><th>مهمة 6.5 GB</th><th>مهمة 34 GB</th></tr></thead>
       <tbody>
-        <tr><td>RAR تخزين داخل RAR تخزين</td><td class="win">تلقائي</td><td>تلقائي</td><td class="bad">يدوي</td><td class="bad">يدوي</td><td class="bad">DNF¹</td></tr>
-        <tr><td>RAR مضغوط داخل RAR تخزين</td><td class="win">تلقائي</td><td>تلقائي</td><td class="bad">يدوي</td><td class="bad">يدوي</td><td class="bad">DNF¹</td></tr>
-        <tr><td>7z داخل RAR تخزين</td><td class="win">تلقائي</td><td>تلقائي</td><td class="bad">يدوي</td><td class="bad">يدوي</td><td class="bad">DNF¹</td></tr>
-        <tr><td>سلّم من 5 مستويات، 6 حمولات</td><td class="win">تلقائي · 6/6</td><td class="bad">يدوي · 3/6</td><td class="bad">يدوي · 1/6</td><td class="bad">يدوي · 1/6</td><td class="bad">DNF¹</td></tr>
-        <tr><td>تالف في المستويات الثلاثة كلها</td><td class="win">تلقائي</td><td class="bad">يدوي</td><td class="bad">يدوي</td><td class="bad">يدوي</td><td class="bad">DNF¹</td></tr>
-        <tr><td>سلسلة كلمات مرور، 3 مستويات مشفّرة</td><td class="win">تلقائي · 3/3</td><td class="bad">استسلم (مهلة)</td><td class="bad">يطلب كلمة مرور</td><td class="bad">يطلب كلمة مرور</td><td class="bad">DNF¹</td></tr>
-        <tr><td><b>إكمال تلقائي، الأشكال العشرة كلها</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
+        <tr><td><b>nzbfast 1.2.2</b></td><td class="win num">الناتج + 48.6 MB</td><td class="win num">الناتج + 51.0 MB</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">~2.1x الحمولة</td><td class="num">~2.1x (37.6 GB فوق الناتج)</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">~2.1x الحمولة</td><td class="num">~2.1x (37.6 GB فوق الناتج)</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">~2.25x الحمولة</td><td class="num">~2.25x (42.7 GB فوق الناتج)</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">~2.25x الحمولة</td><td class="bad">غير محسوم&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">منصة loopback، ومتن مولَّد آليًا، والعملاء الخمسة
-    كلهم على الآلة نفسها، والتقييم بتجزئة المحتوى، فالعميل الذي يعيد تسمية الحمولة ينال حقه مع
-    ذلك. ولأن الطبقات الداخلية تُفكّ من تداخلها أثناء التدفق، يحتفظ nzbfast بنسخة واحدة نحو
-    1.5 GB على القرص حيث يحتفظ عملاء الكتابة-ثم-الفكّ بنحو 3 GB، ويُنهي هذه الأشواط في
-    1-4 ثوانٍ مقابل 4-10 ثوانٍ. في سلسلة كلمات المرور، تصل كلمة مرور كل طبقة في ملف تستخرجه
-    الطبقة التي فوقها: يقرؤه nzbfast ويفتح المستويات الثلاثة كلها؛ بينما يتوقف الآخرون منتظرين
-    أن تكتبها أنت. الجديد منذ النسخة السابقة: المنشور التالف في مستوياته الثلاثة كلها صار يكتمل
-    الآن دون مساعدة - إصلاح PAR2 خارجي، ثم إصلاح PAR2 للطبقة الوسطى من أجزاء معبّأة إلى جانبها،
-    ثم سجل الاسترداد الخاص بالأرشيف الأعمق نفسه، في تمريرة واحدة و4 ثوانٍ. والشكل الوحيد المتبقي
-    هو السلّم ذو 10 مستويات، وهو إعداد لا حدّ: فعند حدّ العمق الافتراضي 5 تنتهي المهمة نظيفة بـ 9
-    من 11 حمولة والطبقة الأعمق متروكة أرشيفًا سليمًا - وهو مع ذلك أكثر مما يسترده أي عميل آخر -
-    والمهمة نفسها مع رفع <code>nested_max_depth</code> إلى 10 تُكمل الحمولات الإحدى عشرة كلها
-    تلقائيًا. ¹ لم يُنهِ Weaver (v0.7.5، أحدث إصداراته، وأول ظهور له في هذا الجدول) أيًا من
-    الأشواط العشرة، وموضع الخلل ظاهر في سجلّه هو نفسه: فكل شوط ينتهي بالسطر
-    &quot;not repairable: 2013 damaged slices, only 0 recovery blocks available in NZB&quot;.
-    وشطرا هذا السطر كلاهما تدحضهما هذه المنصة - فالعملاء الأربعة الآخرون يفكّون ترميز المقالات
-    نفسها ويتحققون منها بتطابق بايت ببايت (ترميز yEnc في المتن يحمل ذيول CRC)، فالبيانات التي
-    يحكم عليها بالتلف سليمة؛ وكل ملف من ملفات NZB هذه يحمل مجموعة PAR2 منشورة بنسبة 10%،
-    فكتل الاسترداد التي يبلّغ عن غيابها موجودة. إنه يخطئ الحكم على مقالات سليمة فيعدّها تالفة،
-    ثم يعجز عن إيجاد بيانات الإصلاح التي كانت ستنقذ حتى منشورًا تالفًا حقًا. وشوطان يعلقان بدل
-    أن يفشلا. وبحسب قاعدة هذه الصفحة نفسها، العميل الذي لا يُنتج الحمولة أبدًا ينال عمودًا
-    أحمر لا زمنًا.
-    وينتقل عدّ SABnzbd من 6 إلى 5 لأن شوط إعادة البناء من PAR وحده، مقيسًا على هذه المنصة،
-    يُهجر بعد ثانيتين دون أن يُبنى شيء؛ وإعادة بنائه السابقة في 390 ثانية كانت على آلة أخرى،
-    ونحن نقيّم ما قاسته هذه الجولة.</p>
+    <p class="note" style="text-align:start">قيست على جهاز Apple Silicon بعشرين نواة،
+    وخط 1 Gbit، وخمسة مزوّدين، وثلاث تكرارات عند كل حد، وتحقق من كل شوط مكتمل بايت
+    لبايت - صفوف المنافسين في 22-23 أغسطس 2026، وصف nzbfast أُعيد قصّه على بناء
+    إصدار v1.2.2 في 24 أغسطس، وأعاد إنتاج الحدّين تمامًا، بإجماع 12 من 12 شوطًا عبر
+    العيّنتين. خلايانا هي حد أدنى مقيس: تكتمل المهمة 3 من 3 بهامش 48.6 MB و51.0 MB،
+    وتُرفض 3 من 3 عند نحو 17 MB دون ذلك - فالحد الأدنى حقيقي في الاتجاهين. ما تحتفظ
+    به المهمة فعليًا يستقر عند الناتج زائد نحو 3 MB؛ يدفع الهامش ثمن اللحظات الأخيرة
+    من خط الأنابيب، لا لنسخة ثانية أبدًا. خلايا المنافسين هي حدّها الأدنى المقيس على
+    مهمة الـ6.5 GB وكفاية مؤكَّدة عند النسبة نفسها على مهمة الـ34 GB (3 من 3 صحيحة
+    بايت لبايت عند تلك النسبة بالضبط)؛ لم نمشِ بسلّمهم أبعد عند الحجم الأكبر، فقد
+    يقع حدّهم الأدنى الحقيقي هناك تحت النسبة إلى حدّ ما، ونقول ذلك بدل التقريب لصالحنا.</p>
+    <p class="note" style="text-align:start">ما يبدو عليه النفاد فعليًا يهمّ بقدر
+    الرقم نفسه. عند 17 MB دون حدّه الأدنى يصطدم nzbfast برفض القرص عند الكتابة،
+    ويتوقّف بنظافة برسالة "نفدت مساحة القرص"، ويحتفظ بكل ما وصل مُسجَّلًا في اليوميات،
+    وتستأنف إعادة المحاولة دون إعادة الجلب - جزء تحتفظ به، لا مهمة فاشلة. &sup1;
+    عمود Weaver على العيّنة الكبيرة غير محسوم لسبب لا علاقة له بالقرص: تعطّل اثنان
+    من أشواطه الثلاثة عند سرعات أحادية الرقم بالميغابايت في الثانية مع أكثر من
+    60 GB ما زالت حرّة وبلغا مهلة الجولة البالغة 40 دقيقة، بينما اكتمل الثالث صحيحًا
+    عند النسبة ~2.25x نفسها التي يحتاجها على المهمة الصغيرة. التعطّل ليس حكمًا على
+    المساحة الحرة، فنسمّي الخلية غير محسومة بدل تسجيلها لأي جانب.</p>
   </div>
 </section>
 
-<section id="disk-cost">
+<section class="alt" id="diskspeed">
   <div class="wrap">
-    <p class="kicker">ما تكلفة المهمة</p>
-    <h2>ذروة استخدام القرص لحمولة 1.5 GB</h2>
-    <p class="lead">وعد المرور الواحد يتعلق بالقرص بقدر ما يتعلق بالسرعة، وها هو مقيسًا لا مُدّعى: أعلى ما بلغه دليل العمل أثناء الأشواط المتداخلة، بأخذ عيّنة مرتين في الثانية. القراءة مرة واحدة في النهاية لا تعني شيئًا، لأن عميلًا يحذف مجلداته بعد الاستخراج سيبدو وكأنه لم يكتبها قط.</p>
+    <p class="kicker">نتيجة المضاعِف</p>
+    <h2>قرصك هو من يضبط سقف سرعتك</h2>
+    <p class="lead"><b>لأي قرص، سرعة الخط التي تستطيع الحفاظ عليها عبر التنزيل
+    والتحقق وفك الضغط هي معدّل القرص الحقيقي مقسومًا على مضاعِف إدخال/إخراج العميل.</b>
+    تقيس جداول التكلفة أعلاه مضاعِفنا عند نحو 1.0x - يعبر كل بايت القرص مرة واحدة
+    تقريبًا - وكل منافس عند 2.0x إلى 3.0x لناتج مطابق بايت لبايت. فالقرص نفسه يحافظ
+    على مرتين إلى ثلاث أضعاف سرعة الخط تحت nzbfast مقارنة بما كان ليحافظ عليه تحت
+    عميل تدريجي. الحساب، بالمضاعِفات المأخوذة من الجداول المقيسة أعلاه:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>الشكل</th><th>nzbfast</th><th>NZBGet 26.2</th><th>rustnzb 1.3.4</th><th>SABnzbd 5.0.4</th></tr></thead>
+      <thead><tr><th>الخط</th><th>معدل الحمولة</th><th>القرص المطلوب عند ~1.0x لدينا</th><th>عند 2.2x</th><th>عند 3.0x</th></tr></thead>
       <tbody>
-        <tr><td>‏RAR store داخل RAR store</td><td class="win num">1538</td><td class="num">1538</td><td class="num">1774</td><td class="num">3080</td></tr>
-        <tr><td>طبقة داخلية مضغوطة</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1674</td><td class="num">3102</td></tr>
-        <tr><td>‏RAR داخل RAR، عمق 2</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1714</td><td class="num">3076</td></tr>
-        <tr><td>‏7z ملفوف في RAR store</td><td class="win num">1503</td><td class="num">1536</td><td class="num">1722</td><td class="num">3102</td></tr>
+        <tr><td>100 Mbit</td><td class="num">12.5 MB/s</td><td class="win num">~13 MB/s</td><td class="num">~28 MB/s</td><td class="num">~38 MB/s</td></tr>
+        <tr><td>1 Gbit</td><td class="num">125 MB/s</td><td class="win num">~130 MB/s</td><td class="num">~275 MB/s</td><td class="num">~375 MB/s</td></tr>
+        <tr><td>5 Gbit</td><td class="num">625 MB/s</td><td class="win num">~650 MB/s</td><td class="num">~1,400 MB/s</td><td class="num">~1,900 MB/s</td></tr>
+        <tr><td>10 Gbit</td><td class="num">1.25 GB/s</td><td class="win num">~1.3 GB/s</td><td class="num">~2.75 GB/s</td><td class="num">~3.75 GB/s</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">بالميغابايت، والأقل أفضل. <b>‏NZBGet يجارينا هنا</b> ويجدر قول السبب: إنه يعمل بتشغيل <code>DirectUnpack</code> و<code>DirectWrite</code>، وهكذا نضبط كل منافس، وعلى هذه الأشكال يكفي ذلك لنسخة واحدة على القرص. أما SABnzbd فيحتفظ باثنتين. الفارق الباقي هو ما بُني له المسار: نحن لا نُجسّد المجلدات أصلًا، فتكون الذروة هي الحمولة نفسها لا الحمولة زائد الأرشيف الذي حملها.</p>
+    <p>ضع هذه الأعمدة إلى جانب ما تحافظ عليه الأقراص فعليًا. يحافظ قرص NAS بسرعة
+    5400/5900 دورة في الدقيقة على نحو 100-140 MB/s على مساراته الخارجية، متدهورًا
+    نحو 80-100 مع امتلائه - فالجيجابت على الحدّ أصلًا عند 1.0x على أبطأ فئة، ونقول
+    ذلك صراحةً، وخارج المنال عند 2-3x. يحافظ قرص 7200 دورة في الدقيقة على نحو
+    160-220 MB/s. سرعة ~550 MB/s لقرص SSD من نوع SATA تسقف عميلًا بمضاعِف 2.2x قرب
+    2 Gbit وتحمل نحو 3.5-4 Gbit عند 1.0x. أقراص SMR، التي تُباع في حاويات NAS منذ
+    سنوات، هي أسوأ حالة لنمط التدريج تحديدًا: يمكن للكتابة المستمرة مع إعادة القراءة
+    أن تنهار إلى عشرات MB/s بمجرد استنفاد ذاكرة إعادة التبليط المؤقتة للقرص. والخط
+    متعدد الجيجابت هو الجدار نفسه أعلى: يتطلّب 10 Gbit بمضاعِف 2-3x سرعة
+    2.75-3.75 GB/s <em>مستمرة</em>، متخطّيًا كل قرص SATA وكثيرًا من أقراص NVMe بمجرد
+    أن تتخطّى مهمة كبيرة منطقة ذاكرتها المؤقتة السريعة، بينما عند 1.0x يواكب SSD
+    بسرعة ~2 GB/s سرعة الخط بمتّسع.</p>
+    <p><b>مقيس لا مفترَض، على قرص مقيَّد.</b> قيّدنا قرصًا عند 150 MB/s - معدل من
+    فئة 5400 دورة في الدقيقة - وشغّلنا التنزيل نفسه مرتين: مرة بمرور واحد، ومرة
+    باتّباع كتابة نمط التدريج وإعادة القراءة وفك الضغط. واكب الذراع أحادي المرور خط
+    الـ1 Gbit عند 109.9 MB/s، أي أقل بـ0.2% من معدله غير المقيَّد؛ وهبط نمط التدريج
+    إلى 59.0 MB/s، أي 54% من الخط. مُسحًا بارامتريًا بلا حد للخط، أخذ الذراع أحادي
+    المرور 97% من كل ما عرضه القرص عند كل حد (290.7 MB/s من حد 300 MB/s، و145.6 من
+    150) عند إدخال/إخراج جهاز مقيس 1.00-1.03x، وأخذ نمط التدريج 47-48% عند 3.02x
+    مقيسة - النسبة ثابتة عبر الحدود، وهو الحساب أعلاه معادًا إنتاجه كقياس. 32 شوطًا،
+    وكل ناتج مُتحقَّق منه بايت لبايت.</p>
+    <p><b>ومرة على عتاد حقيقي، بلا تقييد.</b> أبطأ قرص في أسطول اختبارنا هو قرص نظامي
+    من نوع TLC على جهاز 10 GbE أصيل لـWindows، يحافظ على 0.99 GB/s من الكتابة حيث
+    يحافظ أسرع جهاز اختبار لدينا على 5.97. جرت
+    <a href="#bigfile">جولة الـ87 GB على Windows أعلاه</a> عليه: احتاج الذراع أحادي
+    المرور نحو 0.73 GB/s من تلك الـ0.99 للحفاظ على ساعة 105 s - متّسع باقٍ على أسوأ
+    قرص في الأسطول - وهي الخلية العلوية اليمنى من الجدول أعلاه تهبط على قرص حقيقي لا
+    مقيَّد. ويغلق طرف الأسطول السريع الحجة من الجانب الآخر: المهمة نفسها بحجم 87 GB،
+    بالمعدل الكامل على 10 GbE، تنتهي في الثواني السبعين إلى الحادية والسبعين نفسها
+    على قرص بسرعة 1.24 GB/s وعلى قرص بسرعة 5.97 GB/s - قرص أسرع بـ4.8 أضعاف يحرّك
+    الساعة بمقدار صفر، لأنه عند مضاعِف 1.0x ينفد الخط قبل أن ينفد القرص بوقت طويل.
+    بالنسبة لعميل تدريجي، هذان القرصان عالمان مختلفان.</p>
+    <p class="note" style="text-align:start"><b>ما هي هذه المنصة وما ليست.</b> قُيِّد
+    القرص بمتحكّم إدخال/إخراج على مستوى نظام التشغيل داخل آلة افتراضية على جهاز
+    Apple Silicon بـ32 نواة، وذراع التدريج هو ثنائيّنا نفسه مُجبَرًا على الكتابة
+    وإعادة القراءة وإعادة الكتابة بالطريقة التي يفعلها عميل تدريجي. لم يسابق فيها
+    أي منافس - يخدم خط المحاكاة في هذه المنصة ملفات عادية سيتعامل معها أي منافس
+    بمرور واحد أيضًا، فتوجيه أحدهم إليها لن يُثبت شيئًا - ما يعني أن الجدول أعلاه
+    حساب مرتكز على زوج واحد مقيس، بمضاعِفات المنافسين مأخوذة من جداول العملاء
+    الخمسة الحقيقية أعلاه، ونُصنّفه هكذا عمدًا. ثلاث ملاحظات أمانة ترافقه. يُخصّص
+    المتحكّم القراءات والكتابات بميزانيات منفصلة، ما يحابي ذراع التدريج؛ على جهاز
+    بميزانية واحدة، وهو كل قرص دوّار، ستكون حصته أدنى بعد. مضاعِف التدريج نحو 2x
+    حين تكون المجلدات ما زالت في ذاكرة الصفحة المؤقتة عند إعادة القراءة و3x حين لا
+    تكون، فتقع مهمة كبيرة على جهاز عادي عند طرف الـ3x. وتكلفة البحث (seek) عن كتابة
+    وإعادة قراءة وحذف مئات ملفات المجلدات - مقابل ملف واحد مكتوب مرة بالترتيب - حجة
+    من شكل حركة المرور، لا قياسًا بعد؛ يحتاج قرصًا دوّارًا، ونذكرها كحجة حتى يتوفّر
+    له واحد.</p>
   </div>
 </section>
 
-<section id="client-ceiling">
-  <div class="wrap">
-    <p class="kicker">السيناريو 8 · خمسة عملاء، محتوى قابل لإعادة الإنتاج</p>
-    <h2>سقف العميل: ‏9.68 GB تُقدَّم من الذاكرة، ويمكنك إعادة بنائها</h2>
-    <p class="lead">كل شوط أعلاه يجري أمام مزوّدين تجاريين، فعليك أن تصدّقنا في وصف ظروف الخط. أما هذا فيمكنك إعادة بنائه بنفسك: المحتوى أفلام Blender المفتوحة (‏Tears of Steel 4K وSintel وBig Buck Bunny 4K عند 60 و30 fps)، برخصة CC-BY 3.0، مُحزَّمة في RAR بنمط store مع 10% PAR2 في 53 ملفًا و14,521 مقالة، وتُقدَّم من الذاكرة عبر NNTP على loopback بمنصّة موجودة في هذا المستودع. <b>لا مزوّد في الصورة</b>، فهذا يقيس العميل نفسه، بإزالة تباين المزوّد بدل تذويبه في متوسّط.</p>
-    <p class="note" style="text-align:start">ولأن المقالات تأتي من الذاكرة، فالأزمنة المطلقة أقصر بكثير من أي تنزيل حقيقي و<b>لا</b> تُقارَن بأشواط المزوّدين أعلاه. اقرأ النسب وعمود القرص، لا الثواني.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>العميل</th><th>زمن الإنهاء</th><th>الاتصالات</th><th>ذروة القرص</th><th>مقابل nzbfast</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td><b>7 s</b></td><td>8</td><td><b>8.8 GB</b></td><td>الأساس</td></tr>
-        <tr><td>‏Weaver (مُسخَّن)</td><td>11 s</td><td>‏120 (تصاعد تلقائي)</td><td>17.9 GB</td><td>‏1.6× أبطأ</td></tr>
-        <tr><td>NZBGet 26.2</td><td>14 s</td><td>16</td><td>17.6 GB</td><td>‏2.0× أبطأ</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td>22 s</td><td>8</td><td>18.3 GB</td><td>‏3.1× أبطأ</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 مطابق)</td><td>17.6 GB</td><td>‏8.1× أبطأ</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. لم تُعَد هذه المنصّة مقابل SABnzbd 5.1؛ وحين يصدر 5.1.0 نسخةً مستقرّة نعيد سباق الجدول كله بدل تعديل خلية واحدة.</p>
-    <p class="note" style="text-align:start"><b>أُعيد القياس في 31 يوليو 2026</b>، بالمنصة نفسها والمجموعة نفسها، بعد تحديث نظام التشغيل على الجهاز. تحرك أربعة عملاء ثانيةً أو ثلاثًا؛ أما SABnzbd فلا: صار يستغرق 57 ثانية حيث سجلت نسخة 24 يوليو من هذا الجدول 14 ثانية، وقد أُعيد إنتاجه ثماني مرات عبر صيغتين للمنصة، وتأكد خط الأنابيب عند 8 بإعادة القراءة من الواجهة في كل تشغيلة، وكان مطابقًا عند 16 اتصالًا. ونتائجه في مراحل المزرعة في مواضع أخرى من هذه الصفحة غير متأثرة، فهذا يبدو خاصًا بالمعدلات المغذَّاة عبر الحلقة المحلية على نظام التشغيل الحالي لهذا الجهاز؛ وننشر ما تقيسه المنصة اليوم وسنعيد الاختبار مع إصدارَي نظام التشغيل وSABnzbd القادمين.</p>
 
-    <p class="note" style="text-align:start"><b>زمن الإنهاء</b> يمتد من بدء المهمة حتى تكون الفيديوهات الأربعة كلها على القرص، متحقَّقًا منها ومستخرَجة. <b>ذروة القرص</b> هي أكبر مساحة شغلها العميل في أي لحظة، بأخذ عيّنة مرتين في الثانية، وهي العمود الأهم هنا: تحتاج التمريرة الواحدة إلى نحو ضعف واحد من حجم المحتوى، وكل ما عداها إلى ضعفين. انتهى الخمسة جميعًا وهم يحتفظون بالـ 8.6 GB نفسها بعد أن رتّبوا خلفهم، ولهذا بالضبط تكون الذروة هي الرقم المثير للاهتمام. أنتج كل عميل الحمولات الأربع كلها مطابقةً بـ sha256 للمصدر. ويظهر كلٌّ منها عند عدد الاتصالات الذي جعله <i>هو</i> الأسرع (جُرّبت 8 و16 و32 على كل منها؛ وكان nzbfast مستويًا عند الثلاثة، فما كانت زيادة الاتصالات لتفيده).</p>
-    <p class="note" style="text-align:start"><b>كل منافس عند أفضل ما هو موثّق له.</b> يجب ألا يخسر منافس أبدًا بسبب سوء إعدادنا له، ولذلك تُنشر إعدادات كل عميل مع الجولة. اثنان منها يسهل الخطأ فيهما ويستحقان المعرفة إن كنت تشغّل نسختك: يعيد SABnzbd كتابة ملف ini الخاص به عند الإقلاع ويعيد <code>pipelining_requests</code> إلى القيمة <code>1</code> التي يأتي بها، فيجب ضبط التسلسل بالأنابيب عبر الواجهة البرمجية بعد ذلك وقراءته مجددًا للتأكيد؛ كما أن ملف إعداد <code>-c</code> مستقلًّا في NZBGet يرث الافتراضيات المدمجة في NZBGet بدل القيم الموجودة في ملف conf المرفق به، مما يترك ذاكرة المقالات المؤقتة مطفأة بصمت. جرى تشغيلهما بعد تصحيح ذلك. ويُقاس Weaver مُسخَّنًا، لأنه يرفع عدد اتصالاته تلقائيًا ويضبط تجمّعاته في المهمة الأولى، ولأن أمر <code>download</code> لديه لا يخرج أبدًا، فيعمل كخدمة دائمة مع تمريرة تسخين مُهمَلة. فالـ 8 s لديه هي إذن خدمة مُسخَّنة عند 120 اتصالًا في مواجهة تشغيلتنا الباردة لمرة واحدة عند 8. هذا هو كل عميل عند أفضل حالاته بقاعدتنا نحن، لكن اللاتماثل حقيقي ونفضّل ذكره على دفنه.</p>
-    <p class="note" style="text-align:start">تُؤخذ ذروة القرص بمعدل مرتين في الثانية بدل قراءتها مرة واحدة في النهاية، وهذا أهم مما يبدو: كل عميل هنا يحذف مجلداته بعد الاستخراج، فينتهي الخمسة جميعًا وهم يحتفظون بالـ 8.6 GB نفسها ويبدو أربعة منهم كأنهم بتمريرة واحدة إن قِست ما بعد الانتهاء فقط. وبأخذ العيّنات خلال الشوط، يبلغ أربعة ذروة قرب 18 GB. لكل ما ينظّف خلفه، أبلِغ عن الذروة لا عن البقايا.</p>
-  </div>
-</section>
 
-<section id="shape-store">
-  <div class="wrap">
-    <p class="kicker">الشكل 1 &middot; 84% من البيانات</p>
-    <h2>الأرشيفات المخزَّنة: طابور مهام</h2>
-    <p>ثلاثة إصدارات حقيقية، وُضعت في الطابور واحداً تلو الآخر بحيث ينتظر كل منها انتهاء سابقه. هكذا يفرغ الطابور في الواقع، وهناك تظهر كلفة <i>بدء</i> كل مهمة. ستة مزوّدين، والعدد نفسه من الاتصالات لكل عميل، والجهاز نفسه والشبكة نفسها.</p>
-    <div class="bars wide">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:36%"></i></span><span class="t">7.05 s</span></div>
-      <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
-      <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
-    </div>
-    <p><b>nzbfast أسرع من NZBGet 26.2 بمقدار 1.51 مرة ومن SABnzbd 5.0.4 بمقدار 2.55 مرة</b> في الشكل الأكثر شيوعاً على يوزنت.</p>
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 في 27 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ صدرت 5.1.0 منذ ذلك الحين نسخةً مستقرّة وجرى سباقها: مع كل عميل عند أفضل إعداد اتصالات له هو، يقترب الفارق في الإصدار المُعمّى من +19% المقيسة في أعلى هذه الصفحة. وتحتفظ هذه الصفوف بالبناءات التي جرت مقابلها بدل أن تُعدَّل.</p>
-    <p>جُرّب كل عميل عند 8 و16 و32 اتصالاً لكل خادم، ويظهر عند أفضل إعداد له هو، لأن المنافس يجب ألا يخسر أبداً بسبب سوء الإعداد. ومما يستحق المعرفة إن كنت تضبط تثبيتك بنفسك: <b>صار NZBGet أبطأ بنحو الضعف عند 32 اتصالاً</b>، وتصرّف SABnzbd بالمثل في اختباراتنا السابقة. زيادة الاتصالات ليست زيادة في السرعة. أما nzbfast فبقي ثابتاً عبر المدى كله، فلن يخدعك هذا الإعداد.</p>
-    <p class="note">نتحقق أيضاً من أن كل عميل أنتج الملفات فعلاً، بدلاً من تصديقه حين يبلّغ عن النجاح. في اختباراتنا أبلغ أحد العملاء عن ثلاث تنزيلات مكتملة في نحو ثانية لكل منها، ولم يكن قد كتب شيئاً على الإطلاق.</p>
-  </div>
-</section>
+
+
+
+
 
 <section class="alt" id="shape-encrypted">
   <div class="wrap">
-    <p class="kicker">الشكل 2 &middot; 14% من البيانات، ونصف كل ما يتجاوز 60 ج.ب</p>
-    <h2>الأرشيفات المشفَّرة، ونصف الكتابة</h2>
-    <p>في إصدار مشفَّر حقيقي بحجم 94 ج.ب، صار nzbfast يكتب <b>90 ج.ب</b> على قرصك بدل <b>180 ج.ب</b> سابقاً، وينتهي في اللحظة التي ينتهي فيها التنزيل بدل التوقف لمرور فكّ تشفير منفصل.</p>
-    <p>كانت الأرشيفات المشفَّرة آخر شكل لم نتمكن من معالجته في مرور واحد. كان على nzbfast أن يكتب البيانات المقفلة على القرص، ثم يقرأها كلها من جديد، ويفكّ قفلها، ويكتبها مرة أخرى. ضعف الكتابة، وضعف مساحة القرص، وانتظار في النهاية يكبر مع كبر الإصدار. أما الآن فيُفكّ قفل كل قطعة فور وصولها، فلا تصل البيانات المقفلة إلى القرص أبداً.</p>
-    <div class="bars wide">
-      <div class="bar"><span>قبل</span><span class="trk"><i style="width:92%"></i></span><span class="t">179.8 GB</span></div>
-      <div class="bar me"><span>الآن</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB</span></div>
-    </div>
+    <p class="kicker">الشكل الثاني &middot; قرعة عملة الإصدار الكبير</p>
+    <h2>الأرشيفات المشفَّرة: مرور واحد، كسائر ما عداها</h2>
+    <p>نصف كل ما يُنشر فوق 60 GB أرشيف مشفَّر، وهو الشكل الذي يدفع فيه العملاء
+    التدريجيون أكثر ما يدفعون: يجب كتابة البيانات المقفلة ثم إعادة قراءتها وفك
+    قفلها وكتابتها مجددًا. يفك nzbfast كل قطعة فور وصولها، فلا تبلغ البيانات المقفلة
+    القرص على الإطلاق. قيست على إصدار مشفَّر حقيقي بحجم 94&nbsp;GB:</p>
     <div class="tblwrap"><table>
-      <tr><th></th><th class="num">قبل</th><th class="num">الآن</th><th class="num">التغير</th></tr>
-      <tr><td><b>المكتوب على القرص</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">النصف</td></tr>
-      <tr><td><b>أقصى استخدام للقرص دفعة واحدة</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">أقل بنسبة 46%</td></tr>
-      <tr><td><b>التوقف بعد التنزيل</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">زال</td></tr>
-      <tr><td>الزمن الكلي</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">أسرع بنسبة 5.6%</td></tr>
+      <tr><th>إصدار مشفَّر بحجم 94 GB، بمرور واحد</th><th class="num">مقيس</th></tr>
+      <tr><td><b>مكتوب إلى القرص</b></td><td class="win num">90.1 GB - نحو الحمولة، مرة واحدة</td></tr>
+      <tr><td><b>أكثر قرص مستخدَم في آن واحد</b></td><td class="win num">89.6 GB - الملف الناتج نفسه</td></tr>
+      <tr><td><b>الوقفة بعد التنزيل</b></td><td class="win num">0.6 s</td></tr>
     </table></div>
-    <p>أقصى استخدام للقرص دفعة واحدة صار 89.6 ج.ب، أي حجم الملف الذي طلبته بالضبط. لم تعد هناك لحظة أثناء تنزيل مشفَّر يحتاج فيها nzbfast إلى مساحة لنسخة ثانية.</p>
+    <p>أكثر قرص مستخدَم في آن واحد هو حجم الملف الذي طلبته. لا لحظة أثناء تنزيل
+    مشفَّر يحتاج فيها nzbfast مكانًا لنسخة ثانية، ولا مرور فك بعد امتلاء شريط
+    التنزيل - يدفع عميل تدريجي نحو الضعف على كل من هذه الصفوف الثلاثة، وهو
+    نفس الـ2x الذي تقيسه جداول التكلفة أعلاه على كل شكل آخر.</p>
     <h3>شكل الأمر</h3>
     <div class="shot" style="background:transparent;padding:10px">
-      <img src="assets/disk-occupancy-encrypted.svg" alt="استخدام القرص أثناء تنزيل مشفَّر واحد بحجم 94 ج.ب. يسير السلوك القديم والجديد على المنحنى نفسه تماماً حتى نهاية التنزيل، ثم يقفز القديم إلى 166 ج.ب بينما يبقى الجديد عند 90 ج.ب.">
+      <img src="assets/disk-occupancy-encrypted.svg" alt="القرص المستخدَم أثناء تنزيل مشفَّر واحد بحجم 94 GB. يتتبّع النمط المُدرَّج وخط المرور الواحد بعضهما تمامًا حتى ينتهي التنزيل، ثم يقفز المُدرَّج إلى 166 GB بينما يبقى خط المرور الواحد ثابتًا عند 90 GB.">
     </div>
-    <p class="note">استخدام القرص أثناء تنزيل واحد، مُقاس كل خمس ثوانٍ. الخطان متطابقان حتى اللحظة التي ينتهي فيها التنزيل تماماً. عندها يصعد القديم إلى 166 ج.ب: ذلك هو مرور فكّ التشفير، الذي يكتب الملف المكتمل بينما النسخة المقفلة ما تزال على القرص. أما الجديد فيتوقف ببساطة، لأن الملف الذي كان يكتبه كان مفكوك القفل أصلاً.</p>
+    <p class="note">القرص المستخدَم أثناء تنزيل واحد، مأخوذ كل خمس ثوانٍ. الخط
+    الثابت هو nzbfast؛ والخط الذي يتسلّق إلى 166 GB في النهاية هو نمط الكتابة ثم
+    فك القفل، يدفع ثمن الملف المكتمل بينما النسخة المقفلة ما زالت على القرص - قيس
+    بتشغيل النمطين معًا على الإصدار نفسه.</p>
   </div>
 </section>
 
 <section id="why-it-matters">
   <div class="wrap">
-    <p class="kicker">لماذا يهم هذا</p>
-    <h2>قرصك يؤدي نصف العمل</h2>
-    <p>تتآكل ذاكرة الفلاش بالكتابة عليها. كان تنزيل إصدار بحجم 94 ج.ب يكلّف قرصك 180 ج.ب من الكتابة؛ وصار يكلّف 90 ج.ب. وعلى جهاز NAS بأقراص صلبة، يزيل التغيير نفسه مروراً طويلاً أحادي الخيط في نهاية كل تنزيل مشفَّر، وهو مرور يستغرق دقائق على جهاز أبطأ بدل العشرين ثانية التي قِسناها هنا.</p>
-    <h3>ما لا ندّعيه</h3>
-    <ul class="plain">
-      <li>التوقف البالغ 20 ثانية الذي قِسناه هو <b>أفضل حالة للسلوك القديم</b>. قِيس على محطة عمل سريعة بـ32 نواة مع تسريع عتادي لفكّ التشفير. أما على جهاز NAS منخفض الاستهلاك، حيث يشغّله معظم الناس، فالمرور القديم أبطأ بكثير والمكسب أكبر بالمقابل. نذكر الرقم الأصغر لأنه ما قِسناه.</li>
-      <li>تحسّن الزمن الكلي بنسبة 5.6% حقيقي لكنه متواضع، وهو ناتج <b>كلياً</b> عن التوقف الذي أُزيل في النهاية. التنزيل نفسه ليس أسرع. بل إن مرحلة التنزيل في السلوك الجديد كانت في تجاربنا أبطأ قليلاً من القديم، ولذلك نثق بأن هذه الـ5.6% ليست انحرافاً في القياس يجاملنا.</li>
-    </ul>
+    <p class="kicker">لماذا يهمّ</p>
+    <h2>قرصك يتحمّل نصف العمل</h2>
+    <p>يبلى التخزين الفلاشي بالكتابة إليه. يكلّف إصدار بحجم 94&nbsp;GB قرصك نحو
+    90&nbsp;GB من الكتابة تحت nzbfast؛ وتحت عميل يُدرِّج ويفك الضغط، يكلّف الإصدار
+    نفسه نحو الضعف. على NAS بأقراص صلبة يزيل شكل المرور الواحد أيضًا المرور الطويل
+    أحادي الخيط في نهاية كل تنزيل مشفَّر - وقفة قيست بـ20 ثانية على محطة عمل بـ32
+    نواة سريعة بفك قفل مسرَّع بالعتاد، وأطول تناسبيًا على الأجهزة منخفضة الطاقة التي
+    يشغّل عليها معظم الناس هذا فعليًا. نذكر الرقم الصغير لأنه ما قسناه.</p>
   </div>
 </section>
 
@@ -526,334 +680,475 @@
   <div class="wrap">
     <p class="kicker">مبارزات المكوّنات</p>
     <h2>القياسات الأكثر تقنية، لمن يحب مزيدًا من البيانات</h2>
-    <p class="lead">الإصلاح (PAR2) والفكّ (RAR) كودنا الأصيل لا ملفات تنفيذية مرفقة من طرف ثالث، ولذلك نسابقهما أيضًا منفردَين أمام الأدوات المتخصصة على متون متطابقة، على أربع آلات تغطي ما قد يملكه القارئ فعلًا. لا يُحتسب زمن إلا عندما يكون الخرج مطابقًا بالبايت للحمولة المصدر: كل رقم RAR أدناه فُحص بـ sha256 أمام المصدر، وكل ملف مُصلَح أمام المجموعة السليمة.</p>
+    <p class="lead">الإصلاح (PAR2) وفك الضغط (RAR) هما شيفرتنا الأصلية لا ثنائيات
+    خارجية مرفَقة، فنسابقهما أيضًا مستقلَّين مقابل الأدوات المخصَّصة على عيّنات
+    متطابقة، على أربعة أجهزة تمتد مما قد يملكه القارئ فعليًا. لا يُحتسَب زمن إلا
+    حين يكون الناتج مطابقًا بايت لبايت لحمولة المصدر: كل رقم RAR أدناه تحقّقنا منه
+    بـsha256 مقابل المصدر، وكل ملف مُصلَح مقابل المجموعة السليمة.</p>
     <div class="chips">
       <span class="chip"><b>4</b> أجهزة، من محمول إلى 32 نواة</span>
       <span class="chip"><b>7</b> أشكال أرشيف RAR</span>
-      <span class="chip"><b>6</b> أدوات استخراج متسابقة</span>
-      <span class="chip"><b>1 GB</b> بيانات لكل شكل</span>
-      <span class="chip"><b>أفضل من 3</b> متناوبة، ذاكرة مؤقتة دافئة</span>
+      <span class="chip"><b>6</b> مستخرِجات مُسابَقة</span>
+      <span class="chip"><b>1 GB</b> من الحمولة لكل شكل</span>
+      <span class="chip"><b>أفضل 3</b> متداخلة، ذاكرة تخزين مؤقت دافئة</span>
     </div>
 
     <h3 style="margin:38px 0 4px">استخراج RAR: 7 أشكال أرشيف، 6 أدوات</h3>
-    <p class="note" style="text-align:start;margin-top:6px">استخدمت الجولة السابقة من هذا الجدول من 100 ميغابايت إلى 200 ميغابايت لكل شكل، وكان ذلك خطأ: نحو 28 مللي ثانية من بدء العملية كانت 40 % من مرحلة التخزين، والترتيب الناتج لا يصمد عند حجم واقعي. تستخدم هذه الجولة <b>1 غيغابايت من البيانات لكل شكل</b>، وهذا يغيّر عدة إجابات، بعضها في الاتجاه المعاكس. أُنشئت الأرشيفات بـ <code>rar</code> 7.23 الرسمي، فلا تُحاكم أي أداة على مدخلات من مُرمّزها الخاص، وتتسابق البايتات نفسها على كل جهاز.</p>
+    <p class="note" style="text-align:start;margin-top:6px">استخدمت الجولة السابقة
+    من هذا الجدول من 100 MB إلى 200 MB لكل شكل، وكان ذلك خطأ: كان نحو 28 ms من إطلاق
+    العملية يمثّل 40% من شوط التخزين، والترتيب الذي أنتجه لا يصمد بحجم واقعي. هذه
+    الجولة <b>1 GB من الحمولة لكل شكل</b>، وهي تغيّر عدة إجابات، بعضها في الاتجاه
+    الآخر. أُنشئت الأرشيفات بأداة <code>rar</code> الرسمية 7.23، فلا تُحكَم أي أداة
+    على مدخل من مُرمِّزها الخاص، وتُسابق البايتات نفسها على كل جهاز.</p>
 
-    <p class="note" style="text-align:start"><b>ما بداخل البيانات يزن أكثر مما يبدو.</b> بيانات مبنية من نسخ كتل تحوّل كل شكل مضغوط إلى اختبار نسخ ذاكرة؛ وبيانات نص خالص تحوّله إلى اختبار حرفيات وهوفمان؛ قسنا الاثنين ولا يتفقان على الفائز. لذلك تتألف الأشكال المضغوطة الأربعة من أثلاث متساوية: نص، وسجلات مهيكلة، وبايتات غير قابلة للضغط، والشكلان عند طرفي هذا المدى مرحلتان مستقلتان عن قصد: <code>store</code> غير قابل للضغط و<code>repetitive</code> يكاد يكون كله تطابقات. المولّد ومنصة القياس موجودان في المستودع، فيمكن إعادة بناء المجموعة بايتًا بايت.</p>
+    <p class="note" style="text-align:start"><b>ما في الحمولة يهمّ أكثر مما يبدو.</b>
+    حمولة مبنية من نسخ كتل تجعل كل شكل مضغوط قياس نسخ ذاكرة؛ وحمولة نص صرف تجعله
+    قياس حروف وHuffman؛ قسنا كلا الأمرين ولا يتّفقان على الفائز. فالأشكال المضغوطة
+    الأربعة تستخدم أثلاثًا متساوية من النص والسجلات المهيكلة والبايتات غير القابلة
+    للضغط، والشكلان عند طرفَي ذلك المدى ذراعان منفصلان عمدًا: <code>store</code> غير
+    قابل للضغط و<code>repetitive</code> كله تقريبًا تطابقات. باني العيّنة والمنصة
+    موجودان في المستودع، فيمكن إعادة بناء العيّنة بايتًا لبايت.</p>
 
-    <p class="note" style="text-align:start"><b>الميدان كله، بالثواني، الأقل أفضل.</b> أفضل من ثلاث، والأدوات متناوبة داخل كل جولة بدل تشغيلها في كتل، والمخرجات مُتحقَّق منها مقابل بيانات المصدر في كل تشغيلة على حدة. الأداة التي تنتج بايتات خاطئة تحصل على ملاحظة صحّة، لا على زمن سريع أبدًا. <code>rarpar</code> هو شيفرة RAR وPAR2 الخاصة بـ Weaver، مبنية من المصدر عند <code>bd87611</code>؛ نثبّت الالتزام بدل رقم الإصدار لأن حزمه تحمل ثلاثة أرقام إصدار مختلفة.</p>
+    <p class="note" style="text-align:start"><b>أُعيد السباق في 23 أغسطس 2026 على
+    محرّك 1.2.2، والمسح يصمد.</b> الأدوات الثلاث التي يزنها القارئ أكثر ما يزن -
+    أداتنا، وunrar 7.23، وrarpar 0.2.5 - أُعيد سباقها على المكتب ذي الـ32 نواة على
+    محرّك الإصدار (شيفرة الاستخراج المسابَقة مطابقة بايت لبايت لوسم 1.2.2)، ست جولات
+    متداخلة، الأدنى لكل أداة، وناتج كل شوط مُتحقَّق منه مقابل بيان العيّنة. ثوانٍ،
+    الأقل أفضل:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>الشكل</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar 1.10.7</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
+      <thead><tr><th>حمولة 1 GB، 32 نواة (23 أغسطس 2026)</th><th>store</th><th>400 ملف صغير</th><th>solid</th><th>repetitive</th><th>كبير، 3 مجلدات</th><th>مشفَّر</th><th>قاموس 128 MiB</th></tr></thead>
       <tbody>
-        <tr><td colspan="7" class="grp">مكتبي عالي الأداء، 32 نواة</td></tr>
-        <tr><td>store، 1 غيغابايت</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
-        <tr><td>400 ملف صغير</td><td><b>0.47</b></td><td>2.02</td><td>2.55</td><td>6.40</td><td>13.67</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>صلب</td><td><b>1.26</b></td><td>1.62</td><td>2.22</td><td>5.29</td><td>11.48</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>متكرر</td><td><b>0.14</b></td><td>0.16</td><td>0.26</td><td>0.69</td><td>1.86</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>كبير، 4 أجزاء</td><td><b>1.08</b></td><td>1.61</td><td>1.75</td><td>5.41</td><td class="no">مخرجات خاطئة²</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>مشفّر</td><td><b>1.09</b></td><td>1.82</td><td>1.74</td><td>6.88</td><td class="no">لا تشفير³</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>قاموس 128 ميبي</td><td><b>1.07</b></td><td>1.37</td><td>1.64</td><td>4.03</td><td class="no">لا قاموس كبير⁴</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td colspan="7" class="grp">مكتبي أقدم، 20 نواة</td></tr>
-        <tr><td>store، 1 غيغابايت</td><td><b>0.16</b></td><td>0.25</td><td>0.28</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
-        <tr><td>400 ملف صغير</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>صلب</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>متكرر</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>كبير، 4 أجزاء</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">مخرجات خاطئة²</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>مشفّر</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>8.49</td><td class="no">لا تشفير³</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td>قاموس 128 ميبي</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">لا قاموس كبير⁴</td><td class="no">غير مدعوم¹</td></tr>
-        <tr><td colspan="7" class="grp">محمول، 14 نواة / 20 خيطًا، ويندوز⁵</td></tr>
-        <tr><td>store، 1 غيغابايت</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">لا واجهة أوامر⁵</td><td>0.81</td><td>0.76</td></tr>
-        <tr><td>400 ملف صغير</td><td><b>1.05</b></td><td>6.37</td><td>11.58</td><td class="no">لا واجهة أوامر⁵</td><td>16.72</td><td>5.45</td></tr>
-        <tr><td>صلب</td><td><b>2.92</b></td><td>6.14</td><td>9.76</td><td class="no">لا واجهة أوامر⁵</td><td>15.14</td><td>5.79</td></tr>
-        <tr><td>متكرر</td><td><b>0.32</b></td><td>0.62</td><td>0.54</td><td class="no">لا واجهة أوامر⁵</td><td>1.13</td><td>0.65</td></tr>
-        <tr><td>كبير، 4 أجزاء</td><td><b>2.32</b></td><td>2.92</td><td>2.72</td><td class="no">لا واجهة أوامر⁵</td><td class="no">مخرجات خاطئة²</td><td>4.21</td></tr>
-        <tr><td>مشفّر</td><td><b>2.22</b></td><td>3.33</td><td>2.85</td><td class="no">لا واجهة أوامر⁵</td><td class="no">لا تشفير³</td><td>4.13</td></tr>
-        <tr><td>قاموس 128 ميبي</td><td><b>2.04</b></td><td>2.44</td><td>2.38</td><td class="no">لا واجهة أوامر⁵</td><td class="no">لا قاموس كبير⁴</td><td>2.51</td></tr>
-        <tr><td colspan="7" class="grp">محمول، Apple M5 Max⁶</td></tr>
-        <tr><td>store، 1 غيغابايت</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td></tr>
-        <tr><td>400 ملف صغير</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td></tr>
-        <tr><td>صلب</td><td><b>1.15</b></td><td>1.87</td><td>1.97</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td></tr>
-        <tr><td>متكرر</td><td><b>0.10</b></td><td>0.15</td><td>0.18</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td></tr>
-        <tr><td>كبير، 4 أجزاء</td><td><b>0.98</b></td><td>1.75</td><td>1.54</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td></tr>
-        <tr><td>مشفّر</td><td><b>0.99</b></td><td>1.91</td><td>1.55</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td></tr>
-        <tr><td>قاموس 128 ميبي</td><td><b>0.94</b></td><td>1.52</td><td>1.33</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td><td class="no">لم يُسابَق⁶</td></tr>
+        <tr><td><b>nzbfast 1.2.2</b></td><td><b>0.119</b></td><td><b>0.474</b></td><td><b>1.515</b></td><td><b>0.120</b></td><td><b>1.118</b></td><td><b>1.137</b></td><td><b>1.146</b></td></tr>
+        <tr><td>unrar 7.23</td><td>0.190</td><td>2.032</td><td>1.784</td><td>0.139</td><td>1.655</td><td>1.846</td><td>1.420</td></tr>
+        <tr><td>rarpar 0.2.5</td><td>0.206</td><td>2.563</td><td>2.395</td><td>0.237</td><td>1.852</td><td>1.857</td><td>1.725</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>أين عجز الميدان عن المنافسة، ولماذا.</b> ¹ نسخة 7-Zip التي تُقاس هنا هي حزمة Homebrew، وهي ترفض كل صيغة مضغوطة بـ<code>ERROR: Unsupported Method</code> ولا تقرأ على macOS سوى الصيغة المخزَّنة. نسبت نسخة سابقة من هذه الصفحة ذلك إلى بناء 7-Zip لـmacOS، وكان ذلك خطأ: Homebrew يبنيه دون مرمّز unRAR غير الحر، بينما بناء macOS الذي ينشره 7-zip.org يحمله ويفك الصيغ السبع جميعها، مثل بناء ويندوز. أُعيد القياس في 14 أغسطس 2026. ومن ثبّت 7-Zip من المشروع لا من Homebrew فإن هذا العمود لا يصف ما لديه. ² لا يدعم bsdtar أرشيفات RAR5 متعددة الأجزاء وأنتج ملفًا مبتورًا دون الإبلاغ عن أي خطأ؛ فتلك المرحلة إخفاق في الصحّة لا زمن بطيء. التقطته منصتنا لأنها تفحص المخرجات، ولهذا بالضبط يستحق فحص المخرجات العناء. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ لا يوفّر unar أداة سطر أوامر لويندوز، فميدان المحمول خمس أدوات. ⁶ تسابق صفوف M5 Max الأدوات الثلاث التي قد يلجأ إليها قارئ macOS فعلًا - unrar و<code>rarpar</code> ونحن؛ أما unar وbsdtar و7-Zip فلم تُسابَق على ذلك الجهاز. وunrar في تلك الصفوف هو 7.22، أحدث بناء يعمل هناك دون تدخّل.</p>
+    <p class="note" style="text-align:start">كل الأشكال السبعة لنا، على الأدنى وعلى
+    الوسيط، من 1.16x إلى 4.29x مقابل unrar. هذه الأزمنة غير قابلة للمقارنة خليةً
+    بخلية مع الجدول الأوسع أدناه - نُقِّحت المنصة منذ جولات ذلك الجدول وتختلف أعداد
+    الجولات - فاقرأ كل جدول مقابل نفسه. يحتفظ الجدول الأوسع بتواريخه الخاصة وميدانه
+    السداسي الأدوات، ويصف عمود nzbfast فيه المحرّك الذي يشحنه 1.2.2: قاست إعادة
+    السباق أعلاه المحرّك الحالي مستوًى مع بناء ذلك الجدول على الأشكال السبعة كلها،
+    محسومًا بعدد تعليمات العتاد (0.14% أقل للساعة نفسها)، فتلك الخلايا ليست أرقام
+    بناء متجاوَز يرتدي تسمية حالية. <b>وإعادة السباق هذه هي أيضًا حيث كُسبت قاعدة
+    A/A في قسم الإعداد.</b> أبلغ تمرير في اليوم نفسه أولًا عن شكل واحد كتراجع طفيف
+    مقابل بنائنا السابق، وصمدت القراءة عبر تشغيل كلا ترتيبَي الأذرع. أظهر ضابط A/A -
+    الثنائي نفسه يسابق نسخة مطابقة بايت لبايت من نفسه - أن المنصة كانت تمنح أيّ ذراع
+    يعمل أولًا عقوبة نحو 1.5%: فاز الثنائي نفسه بـ6 من 15 جولة فقط من الفتحة الأولى،
+    وتبديل الترتيب لا يُلغي انحيازًا يقع دائمًا على من يعمل أولًا. حسم عدد تعليمات
+    العتاد السؤال الذي عجزت المنصة عن حسمه - يقاعد البناء الأحدث 0.14% تعليمات أقل
+    للساعة نفسها، فلا تراجع هناك. كل مقارنة بناء مقابل بنائنا ننشرها الآن تحمل ذلك
+    الضابط.</p>
 
-    <p class="note" style="text-align:start"><b>كل صيغة على كل جهاز إلا واحدة، وتلك الواحدة تعادل.</b> خسرت النسخة السابقة من هذه الصفحة خمسًا من هذه الخلايا، وسبب تحركها جدير بالقول، لأنه ليس السبب الذي قدّمناه أولًا. ألقينا اللوم على روتين نسخ الذاكرة في المنصة، وقال التحليل شيئًا أضيق: تطابقٌ من بايتين إلى اثنين وثلاثين بايتًا كان يدفع ثمن استدعاء كامل إلى ذلك الروتين، وكان الاستدعاء أغلى من النسخ. ونسخُ اثنين وثلاثين بايتًا ثابتة عبر مسجل بدلًا من ذلك أزاله، ولهذا تحركت <code>repetitive</code> و<code>solid</code> وقاموس 128 ميبيبايت كلها دفعة واحدة - فهي الصيغ الثلاث المبنية من تطابقات قصيرة. وعلى حدة، كان المجموع التحققي يعمل على خيط الكاتب ويعطّله؛ ونقله إلى المصبّ أخذ الباقي. والخلية الوحيدة التي ليست لنا هي الصيغة المخزَّنة على المكتبي ذي 32 نواة، حيث نبعد عن unrar ثلاث أجزاء من الألف من الثانية في مرحلة كل ما فيها نقل بايتات.</p>
+    <p class="note" style="text-align:start"><b>الميدان كله، ثوانٍ، الأقل أفضل.</b>
+    أفضل ثلاث، الأدوات متداخلة داخل كل جولة لا مشغَّلة في كتل، والناتج مُتحقَّق منه
+    مقابل حمولة المصدر في كل تشغيل واحد. أداة أنتجت بايتات خاطئة تحصل على ملاحظة
+    صحة، لا زمنًا سريعًا أبدًا. <code>rarpar</code> هي شيفرة RAR وPAR2 الخاصة
+    بـWeaver، مبنيّة من المصدر عند <code>bd87611</code>؛ نثبّت الالتزام (commit)
+    لا الإصدار لأن حزماته تحمل ثلاثة أرقام إصدار مختلفة.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>ثوانٍ، 1 GB لكل شكل</th><th>store</th><th>400 ملف صغير</th><th>solid</th><th>repetitive</th><th>كبير، 4 مجلدات</th><th>مشفَّر</th><th>قاموس 128 MiB</th></tr></thead>
+      <tbody>
+        <tr><td colspan="8" class="grp">مكتب متطوّر، 32 نواة</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.21</b></td><td><b>0.47</b></td><td><b>1.26</b></td><td><b>0.14</b></td><td><b>1.08</b></td><td><b>1.09</b></td><td><b>1.07</b></td></tr>
+        <tr><td>unrar 7.23</td><td><b>0.21</b></td><td>2.02</td><td>1.62</td><td>0.16</td><td>1.61</td><td>1.82</td><td>1.37</td></tr>
+        <tr><td>rarpar</td><td>0.23</td><td>2.55</td><td>2.22</td><td>0.26</td><td>1.75</td><td>1.74</td><td>1.64</td></tr>
+        <tr><td>unar 1.10.7</td><td>0.60</td><td>6.40</td><td>5.29</td><td>0.69</td><td>5.41</td><td>6.88</td><td>4.03</td></tr>
+        <tr><td>bsdtar</td><td>0.34</td><td>13.67</td><td>11.48</td><td>1.86</td><td class="no">ناتج خاطئ&sup2;</td><td class="no">لا تشفير&sup3;</td><td class="no">لا قاموس كبير&#8308;</td></tr>
+        <tr><td>7-Zip</td><td>0.30</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td></tr>
+        <tr><td colspan="8" class="grp">مكتب أقدم، 20 نواة</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.16</b></td><td><b>0.57</b></td><td><b>1.83</b></td><td><b>0.15</b></td><td><b>1.50</b></td><td><b>1.51</b></td><td><b>1.40</b></td></tr>
+        <tr><td>unrar 7.23</td><td>0.25</td><td>2.48</td><td>2.31</td><td>0.20</td><td>2.28</td><td>2.49</td><td>1.84</td></tr>
+        <tr><td>rarpar</td><td>0.28</td><td>3.15</td><td>3.00</td><td>0.31</td><td>2.26</td><td>2.26</td><td>1.97</td></tr>
+        <tr><td>unar 1.10.7</td><td>0.67</td><td>7.49</td><td>6.93</td><td>0.85</td><td>6.85</td><td>8.49</td><td>5.29</td></tr>
+        <tr><td>bsdtar</td><td>0.33</td><td>15.58</td><td>13.97</td><td>2.18</td><td class="no">ناتج خاطئ&sup2;</td><td class="no">لا تشفير&sup3;</td><td class="no">لا قاموس كبير&#8308;</td></tr>
+        <tr><td>7-Zip</td><td>0.33</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td><td class="no">غير مدعوم&sup1;</td></tr>
+        <tr><td colspan="8" class="grp">محمول، 14 نواة / 20 خيطًا، Windows&#8309;</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.35</b></td><td><b>1.05</b></td><td><b>2.92</b></td><td><b>0.32</b></td><td><b>2.32</b></td><td><b>2.22</b></td><td><b>2.04</b></td></tr>
+        <tr><td>unrar 7.23</td><td>0.63</td><td>6.37</td><td>6.14</td><td>0.62</td><td>2.92</td><td>3.33</td><td>2.44</td></tr>
+        <tr><td>rarpar</td><td>0.74</td><td>11.58</td><td>9.76</td><td>0.54</td><td>2.72</td><td>2.85</td><td>2.38</td></tr>
+        <tr><td>unar</td><td class="no">لا CLI&#8309;</td><td class="no">لا CLI&#8309;</td><td class="no">لا CLI&#8309;</td><td class="no">لا CLI&#8309;</td><td class="no">لا CLI&#8309;</td><td class="no">لا CLI&#8309;</td><td class="no">لا CLI&#8309;</td></tr>
+        <tr><td>bsdtar</td><td>0.81</td><td>16.72</td><td>15.14</td><td>1.13</td><td class="no">ناتج خاطئ&sup2;</td><td class="no">لا تشفير&sup3;</td><td class="no">لا قاموس كبير&#8308;</td></tr>
+        <tr><td>7-Zip</td><td>0.76</td><td>5.45</td><td>5.79</td><td>0.65</td><td>4.21</td><td>4.13</td><td>2.51</td></tr>
+        <tr><td colspan="8" class="grp">محمول، Apple M5 Max&#8310;</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.10</b></td><td><b>0.40</b></td><td><b>1.15</b></td><td><b>0.10</b></td><td><b>0.98</b></td><td><b>0.99</b></td><td><b>0.94</b></td></tr>
+        <tr><td>unrar 7.22</td><td>0.16</td><td>1.94</td><td>1.87</td><td>0.15</td><td>1.75</td><td>1.91</td><td>1.52</td></tr>
+        <tr><td>rarpar</td><td>0.11</td><td>2.09</td><td>1.97</td><td>0.18</td><td>1.54</td><td>1.55</td><td>1.33</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>حيث عجز الميدان عن المنافسة، ولماذا.</b>
+    ¹ إن 7-Zip المُسابَقة هنا هي حزمة Homebrew، التي ترفض كل شكل مضغوط برسالة
+    <code>ERROR: Unsupported Method</code> ولا تقرأ إلا الشكل المخزَّن على macOS.
+    نسبت نسخة أقدم من هذه الصفحة ذلك إلى بناء 7-Zip لـmacOS، وكان ذلك خطأ: يبنيها
+    Homebrew دون مرمّز unRAR غير الحر، بينما يحمل بناء macOS الذي يشحنه 7-zip.org
+    المرمّز ويفكّ الأشكال السبعة كلها، كما يفعل بناء Windows. أُعيد القياس في 14
+    أغسطس 2026. إن ثبّتّ 7-Zip من المشروع لا من Homebrew، فهذا العمود لا يصف ما
+    لديك. ² لا يدعم bsdtar تعدد مجلدات RAR5 وأنتج ملفًا مبتورًا دون الإبلاغ عن خطأ،
+    فذلك الشوط فشل صحة لا زمنًا بطيئًا؛ اكتشفته منصتنا بفحص الناتج، وهذا سبب قيمة
+    فحص الناتج. ³ <code>bsdtar: Encryption is not supported</code>. ⁴
+    <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ لا يشحن unar
+    أي أداة سطر أوامر لـWindows، فميدان المحمول خمسة. ⁶ تسابق مجموعة M5 Max الأدوات
+    الثلاث التي قد يقصدها قارئ macOS فعليًا - unrar و<code>rarpar</code> ونحن؛ لم تُسابَق unar
+    وbsdtar وZip-7 على ذلك الجهاز. نسخة unrar عليه هي 7.22، أحدث بناء يعمل دون تدخّل
+    هناك.</p>
 
-    <p class="note" style="text-align:start">الشكل الذي نتفوق فيه بأكبر فارق هو الذي ينشر منه يوزنت فعلًا مئات في المرة الواحدة: <b>400 ملف صغير، 4.3× و4.4× مقابل unrar</b> و5.4× إلى 5.5× مقابل <code>rarpar</code>. هذا توازٍ عبر الأعضاء، وهو الفرق بين أداة استخراج كُتبت لطابور تنزيل وأخرى كُتبت لسطر أوامر. أما الشكل المخزَّن، الذي يقول <a href="#census">الإحصاء أعلاه</a> إنه 84 % من البايتات على السلك، فهو تعادل تقريبًا بين الأدوات الجادة الثلاث، لأن الجميع عند تلك النقطة لا يفعل سوى نقل البايتات.</p>
+    <p class="note" style="text-align:start"><b>كل شكل على كل جهاز إلا واحدًا، وذلك
+    الواحد تعادل.</b> ترجع أشكال التطابقات القصيرة إلى شيئين محدَّدين في مفكِّكنا.
+    كانت مطابقة من اثنين إلى اثنين وثلاثين بايتًا تدفع ثمن استدعاء كامل لروتين نسخ
+    الذاكرة في المنصة، وكان الاستدعاء يكلّف أكثر من النسخ؛ نسخ اثنين وثلاثين بايتًا
+    ثابتة عبر سجلّ بدلًا من ذلك هو سبب سرعة <code>repetitive</code> و<code>solid</code> وقاموس
+    128 MiB - الأشكال الثلاثة المبنية من تطابقات قصيرة - جميعًا دفعة واحدة. ويعمل
+    المجموع التحققي في مسار منفصل عن خيط الكاتب لا عليه. الخلية الوحيدة التي لا نفوز
+    بها صراحةً هي الشكل المخزَّن على المكتب ذي الـ32 نواة، حيث نبعد نحن وunrar ثلاث
+    مللي ثانية على شوط ينقل بايتات صرفة - متطابقان عند دقة هذا الجدول، فتُوسَم
+    الخليتان معًا ويُحتسب تعادلًا، لا خسارة ولا فوزًا.</p>
 
-    <p class="note" style="text-align:start"><b>اختيار جدير بالإعلان.</b> تُحزَم الأرشيفات والضاغط مثبَّت على أربعة خيوط. وإلا فإن تقسيم RAR للكتل يتبع عدد أنوية الجهاز الذي حزم الأرشيف، فيُنتج جهاز بـ32 نواة وآخر بـ20 نواة بايتات مختلفة من المدخل نفسه ويكفّ الجهازان عن كونهما قابلين للمقارنة. والتثبيت يجعل مجموعة الاستخراج مطابقة بايتًا ببايت في كل مكان، وهذا هو المقصود، لكنه يضع أيضًا سقفًا لمقدار ما يمكن أن يجري من فك التشفير بالتوازي - ولذلك، حين كانت الصيغتان الأقرب ما تزالان خسارتين، أعدنا سباقهما أمام أرشيفات محزومة بالخيوط الاثنين والثلاثين كلها، للتأكد من أن التثبيت ليس هو السبب. ولم يكن: انتقلت solid من تأخر 4.2% إلى 2.4% وانتقل قاموس 128 ميبيبايت من 6.6% إلى 6.3%، بالترتيب نفسه في الحالتين. وكلتاهما الآن فوز على المجموعة المثبَّتة، وبفارق أوسع مما يمكن أن يفسره ذلك الفحص.</p>
+    <p class="note" style="text-align:start">الشكل الذي نفوز به بأكبر فارق هو ما
+    يُنشر منه يوزنت فعليًا مئات في المرة: <b>400 ملف صغير، 4.3× و4.4× مقابل unrar</b>
+    و5.4× إلى 5.5× مقابل <code>rarpar</code>. تلك موازاة على مستوى العضو، وهي الفرق
+    بين مستخرِج كُتب لطابور تنزيل وآخر كُتب لسطر أوامر. الشكل المخزَّن، الذي يقول
+    <a href="#census">الإحصاء أعلاه</a> إنه 84% من البايتات على السلك، شبه تعادل بين
+    الأدوات الجادة الثلاث، لأن الجميع عند تلك النقطة ينقل بايتات فحسب.</p>
 
-    <p class="note" style="text-align:start"><b>لماذا لا يوجد صف لـRAR4، وماذا يحدث لتلك المنشورات.</b> كل صيغة أعلاه هي RAR5 أو RAR7، لأن هذا ما يُنشر على يوزنت اليوم. لا تزال أرشيفات RAR4 الأقدم تظهر، والمحرك نفسه يقرأها، بما في ذلك الصيغ المضغوطة والمحمية بكلمة مرور، في المرور الواحد نفسه الذي تمر به الأحدث بدل كتابة الأجزاء على القرص ثم فكّها بعد ذلك. لا صف لها هنا لأن <code>rar</code> 7.23 الرسمي لم يعد قادرًا على إنشاء RAR4، فلا يوجد متن محايد يتسابق عليه الميدان؛ ويُتحقق من هذا العمل بدلًا من ذلك على أرشيفات كتبها WinRAR 3.00، بايتًا ببايت مقابل unrar.</p>
+    <p class="note" style="text-align:start"><b>خيار يستحق التصريح به.</b> تُحزَم
+    الأرشيفات بضغط مثبَّت عند أربعة خيوط. يتبع تقسيم كتل RAR خلاف ذلك عدد أنوية أي
+    جهاز حزم الأرشيف، فينتج مكتب بـ32 نواة ومكتب بـ20 نواة بايتات مختلفة من المدخل
+    نفسه وتتوقّف الأجهزة عن كونها قابلة للمقارنة. تثبيته يجعل عيّنة الاستخراج مطابقة
+    بايت لبايت في كل مكان، وهذا هو المقصود، لكنه أيضًا يسقف مقدار ما يمكن لفكّ الضغط
+    تشغيله بالتوازي - فحين كان أقرب شكلين خسارتين أعدنا سباقهما مقابل أرشيفات حُزمت
+    بكل الأنوية الـ32، للتحقق من أن التثبيت لم يكن السبب. لم يكن كذلك: تحرّك solid
+    من 4.2% متأخرًا إلى 2.4% متأخرًا، وقاموس 128 MiB من 6.6% إلى 6.3%، الترتيب نفسه
+    في الحالتين. كلاهما فوزان الآن على العيّنة المثبَّتة بفارق أوسع مما يمكن لذلك
+    الفحص تفسيره.</p>
 
-    <h3 style="margin:44px 0 4px">تحقق PAR2 وإصلاحه: مجموعة 1 غيبي، أربعة مستويات ضرر</h3>
-    <p class="note" style="text-align:start;margin-top:6px">المجموعة: 1 جيبيبايت من حمولة عشوائية محزومة بوضع التخزين في 21 جزء RAR، ثم طقمان من PAR2 بتكرار 10%، أحدهما بكتل 1 ميبيبايت والآخر بـ64 كيبيبايت، ثم خرائط تلف ثابتة. وتستخدم كل تشغيلة البروتوكول نفسه: نسخة جديدة، وقراءة المجموعة كلها مرة لتسخين المخبأ، ثم القياس. الأفضل من ثلاث جولات متداخلة؛ ويقابَل كل جزء مُصلَح بالطقم السليم في كل جولة. الأقل أفضل.</p>
+    <p class="note" style="text-align:start"><b>لماذا لا صف لـRAR4، وماذا يحدث لتلك
+    المنشورات.</b> كل شكل أعلاه هو RAR5 أو RAR7، وهو ما ينشره يوزنت اليوم. لا تزال
+    أرشيفات RAR4 الأقدم تظهر، ويقرأها المحرّك نفسه، بما فيها الأشكال المضغوطة
+    والمحمية بكلمة سر، بالمرور الواحد نفسه بدل كتابة المجلدات إلى القرص وفكّ ضغطها
+    لاحقًا. لا صف لها هنا لأن أداة <code>rar</code> الرسمية 7.23 لم تعد تستطيع إنشاء
+    RAR4، فلا عيّنة محايدة لسباق الميدان عليها؛ ذلك العمل مُتحقَّق منه مقابل أرشيفات
+    كتبها WinRAR 3.00 بدلًا من ذلك، بايتًا بايت مقابل unrar.</p>
 
-    <p class="note" style="text-align:start"><b>تصويب بشأن المجموعة، لأن نسخة سابقة من هذه الصفحة بالغت.</b> قلنا إن كل جهاز يشغّل مجموعة مطابقة بايتًا ببايت، مُتحقَّقًا منها بالتلبيد. وتلبيدُ كل جزء من كل طقم يُظهر أن ذلك صحيح في المكتبي ذي 32 نواة والمحمول العامل بـWindows، وهما متطابقان تمامًا، وغير صحيح في المكتبي ذي 20 نواة، الذي يحمل سحبة عشوائية مختلفة للصيغة نفسها: الأجزاء الـ21 نفسها بالأحجام نفسها، وحجما الكتل نفساهما، وتلف مُتحقَّق منه عند الكتل 3 و101 و1,500 نفسها موزَّعة على العدد نفسه من الملفات. وما يزال كل رقم داخل صف مقيسًا على بايتات تشترك فيها كل أداة في ذلك الصف، وعلى هذا تستند كل مقارنة. لكن الصفوف ليست أربع نظرات إلى مدخل واحد، ولمّا كان طابع الحمولة يساوي نحو 7% في مسح أحد المنافسين، فذلك جدير بالقول لا بالتغافل.</p>
+    <h3 style="margin:44px 0 4px">تحقق وإصلاح PAR2: مجموعة 1 GiB، أربعة مستويات تلف</h3>
+    <p class="note" style="text-align:start;margin-top:6px">العيّنة: 1 GiB من حمولة
+    عشوائية حُزمت بنمط التخزين في 21 مجلد RAR، ثم مجموعتا PAR2 عند 10% تكرار، واحدة
+    بكتل 1 MiB وأخرى بكتل 64 KiB، ثم خرائط تلف ثابتة. يستخدم كل تشغيل البروتوكول
+    نفسه: نسخة طازجة، اقرأ العيّنة كاملة مرة لتدفئة ذاكرة التخزين المؤقت، ثم اقِس.
+    أفضل ثلاث جولات متداخلة؛ يُقارَن كل مجلد مُصلَح مقابل المجموعة السليمة في كل جولة.
+    الأقل أفضل.</p>
 
-    <p class="note" style="text-align:start"><b>أي par2 هو أي.</b> <code>par2cmdline</code> الأصلي هو التنفيذ المرجعي الذي تفرّع منه الجميع. و<code>par2cmdline-turbo</code> هو الفرع الذي يضم أنوية <b>ParPar</b> المكتوبة يدويًا لحقل غالوا بتعليمات SIMD: هذا بالضبط ما تعنيه «turbo»، ولهذا فإن turbo، لا الأصل، هو الأداة الجديرة بالقياس مقابلها. عمودا turbo أدناه يشغّلان أنوية ParPar ذاتها. وما يفصل بينهما ليس الحساب بل البناء والرايات.</p>
+    <p class="note" style="text-align:start"><b>تصحيح بشأن العيّنة، لأن نسخة أقدم من
+    هذه الصفحة بالغت فيه.</b> قلنا إن كل جهاز شغّل عيّنة مطابقة بايت لبايت، مُتحقَّقًا
+    منها بالتجزئة. تجزئة كل مجلد في كل مجموعة تُظهر أن ذلك صحيح على المكتب ذي الـ32
+    نواة والمحمول Windows، وهما متطابقان تمامًا، وليس صحيحًا على المكتب ذي الـ20 نواة،
+    الذي يحمل سحبًا عشوائيًا مختلفًا من الشكل نفسه: المجلدات الـ21 نفسها بالأحجام
+    نفسها، وحجما الكتلة نفسهما، والتلف مُتحقَّقًا منه عند 3 و101 و1,500 كتلة نفسها
+    موزّعة عبر عدد الملفات نفسه. كل رقم داخل صف واحد ما زال مقيسًا على بايتات تشتركها
+    كل أداة في ذلك الصف، وهو ما ترتكز عليه كل مقارنة. لكن الصفوف ليست أربع نظرات إلى
+    مدخل واحد، وبما أن طابع الحمولة يستحق نحو 7% لأحد المنافسين في مسحه، فذلك يستحق
+    ذكره بدل التعتيم عليه.</p>
 
-    <p class="note" style="text-align:start"><b>لذلك يظهر المنافس مرتين، وأحد هذين العمودين هو أفضل حالاته لا حالته الافتراضية.</b> الملف التنفيذي للإصدار الذي قد تنزّله مُصرَّف لمعالج عام ويحسب بصمة ملفين أو ثلاثة في المرة؛ أما المصدر نفسه مبنيًا لمعالج الجهاز الفعلي ومشغَّلًا بـ <code>-T16</code> فيستخدم التعليمات التي يملكها ذلك الجهاز حقًا ويحسب بصمة ستة عشر ملفًا دفعة واحدة. على المحمول يساوي ذلك حتى 2.6×، من البناء والرايات وحدهما. احكموا علينا بالعمود المضبوط، فهو المقارنة الأصعب؛ أما عمود «كما يُوزَّع» فهو ما يعيشه فعلًا من ينزّله. <code>par2cmdline</code> هو الأصل، الإصدار 1.2.0، مبنيًا من المصدر على كل جهاز. و<code>rarpar</code> هو تنفيذ PAR2 الخاص بـ Weaver، مبنيًا من المصدر مع تفعيل خلفية Metal للمعالج الرسومي. أما <code>par2j</code> من MultiPar فلا يوجد إلا لويندوز، فيظهر في صفوف المحمول بويندوز وحدها. وتسابق صفوف M5 Max الأداتين اللتين لهما بناءات macOS arm64 حالية إلى جانب عمودي turbo؛ أما <code>par2cmdline</code> الكلاسيكي فلم يُسابَق على ذلك الجهاز.</p>
+    <p class="note" style="text-align:start"><b>أيّ par2 هو أيّ.</b> <code>par2cmdline</code>
+    الأصلي هو التطبيق المرجعي الذي تفرَّع منه الجميع. <code>par2cmdline-turbo</code>
+    هو التفرّع الذي يزوّد نوى Galois-field المكتوبة يدويًا بـSIMD من <b>ParPar</b>:
+    هذا بالضبط ما تعنيه كلمة "turbo"، وهذا سبب استحقاق turbo، لا الأصلي، القياس
+    مقابله. يشغّل عمودا turbo أدناه نوى ParPar نفسها. ما يفرّقهما ليس الحساب بل
+    البناء والخيارات.</p>
+
+    <p class="note" style="text-align:start"><b>تأكَّد على البناء المشحون مقابل
+    المنافس الحالي، في 24 أغسطس 2026.</b> قيست هذه الجداول قبل قصّ 1.2.2 وقبل أن
+    يُصدِر <code>par2cmdline-turbo</code> النسخة 1.5.0 (20 أغسطس 2026)، فأُعيد
+    سباق عمود العشرين نواة على كليهما: بناء إصدارنا 1.2.2 مقابل turbo 1.5.0، ثلاث
+    جولات متداخلة لكل شوط، وكل ملف مُصلَح مقارَن مقابل المجموعة السليمة. تعيد كل
+    الأشواط الأربعة إنتاج النتيجة - أرقامنا 0.18 / 0.30 / 0.75 / 2.02 مقابل
+    0.19 / 0.33 / 0.74 / 2.07 المطبوعة هنا، ويهبط turbo 1.5.0 ضمن نسب مئوية قليلة
+    من بناء الجدول على كل شوط وكلا الإعدادين. تبقى الخلايا كما نُشرت؛ وتحتفظ
+    الأجهزة الثلاثة الأخرى بتواريخها الخاصة.</p>
+
+    <p class="note" style="text-align:start"><b>فيظهر المنافس مرّتين، وأحد هذين
+    العمودين هو أفضل حالته لا افتراضه.</b> الثنائي المنشور الذي قد تنزّله مُصرَّف
+    لعتاد أساس عام ويجزّئ ملفين أو ثلاثة فقط في وقت واحد؛ بناء المصدر نفسه للمعالج
+    المضيف فعليًا وتمرير <code>-T16</code> يتيح له استخدام التعليمات التي يملكها ذلك
+    الجهاز فعلًا وتجزئة ستة عشر ملفًا مرة واحدة. على المحمول يستحق ذلك حتى 2.6x،
+    كله من البناء والخيارات فحسب. احكم علينا بالعمود المضبوط، وهو المقارنة الأصعب؛
+    العمود كما يُشحن هو ما يختبره فعليًا من ينزّله. <code>par2cmdline</code> هو
+    الأصلي، النسخة 1.2.0، مبني من المصدر على كل جهاز. <code>rarpar</code> هو تطبيق
+    Weaver الخاص لـPAR2، مبني من المصدر بمحرّك Metal GPU مفعَّلًا. <code>par2j</code>
+    من MultiPar مقتصر على Windows، فيظهر على صفوف المحمول Windows وحدها. تسابق
+    صفوف M5 Max الأداتين ذواتَي بناء macOS arm64 الحالي إلى جانب عمودَي turbo؛
+    لم تُسابَق النسخة الكلاسيكية من <code>par2cmdline</code> على ذلك الجهاز.</p>
 
     <div class="tblwrap"><table>
-      <thead><tr>
-        <th>الضرر</th><th>الجهاز</th><th>nzbfast</th>
-        <th>par2-turbo<br><span class="note">مضبوط</span></th>
-        <th>par2-turbo<br><span class="note">كما يُوزَّع</span></th>
-        <th>par2cmdline</th>
-        <th>rarpar</th>
-        <th>MultiPar</th>
-      </tr></thead>
+      <thead><tr><th>ثوانٍ، مجموعة 1 GiB</th><th>مكتب، 32 نواة</th><th>مكتب، 20 نواة</th><th>محمول، 14 نواة</th><th>محمول، M5 Max</th></tr></thead>
       <tbody>
-        <tr><td rowspan="4">لا شيء<br><span class="note">تحقق نظيف</span></td>
-            <td>مكتبي، 32 نواة</td><td><b>0.11</b></td><td>0.31</td><td>0.86</td><td>3.03</td><td>2.62</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>مكتبي، 20 نواة</td><td><b>0.19</b></td><td>0.38</td><td>1.12</td><td>3.84</td><td>3.45</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>محمول، 14 نواة</td><td><b>0.23</b></td><td>0.42</td><td>1.06</td><td>3.81</td><td>2.96</td><td>1.34</td></tr>
-        <tr><td>محمول، M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">لم يُسابَق</td><td>2.32</td><td class="no">ويندوز فقط</td></tr>
-
-        <tr><td rowspan="4">3 كتل<br><span class="note">بضع مقالات ميتة</span></td>
-            <td>مكتبي، 32 نواة</td><td><b>0.22</b></td><td>0.51</td><td>1.08</td><td>3.64</td><td>4.27</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>مكتبي، 20 نواة</td><td><b>0.33</b></td><td>0.66</td><td>1.46</td><td>4.58</td><td>5.53</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>محمول، 14 نواة</td><td><b>0.46</b></td><td>0.78</td><td>1.42</td><td>4.98</td><td>4.99</td><td>1.71</td></tr>
-        <tr><td>محمول، M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">لم يُسابَق</td><td>3.64</td><td class="no">ويندوز فقط</td></tr>
-
-        <tr><td rowspan="4">101 كتلة</td>
-            <td>مكتبي، 32 نواة</td><td><b>0.48</b></td><td>0.88</td><td>2.04</td><td>5.57</td><td>4.73</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>مكتبي، 20 نواة</td><td><b>0.74</b></td><td>1.17</td><td>2.65</td><td>7.57</td><td>5.73</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>محمول، 14 نواة</td><td><b>0.96</b></td><td>1.40</td><td>2.69</td><td>11.7</td><td>5.74</td><td>2.65</td></tr>
-        <tr><td>محمول، M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">لم يُسابَق</td><td>4.17</td><td class="no">ويندوز فقط</td></tr>
-
-        <tr><td rowspan="4">1500 كتلة<br><span class="note">استُهلك 91 % من الاسترداد</span></td>
-            <td>مكتبي، 32 نواة</td><td><b>1.00</b></td><td>3.00</td><td>5.21</td><td>67.7</td><td>7.15</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>مكتبي، 20 نواة</td><td><b>2.07</b></td><td>5.52</td><td>8.20</td><td>86.1</td><td>11.49</td><td class="no">ويندوز فقط</td></tr>
-        <tr><td>محمول، 14 نواة</td><td><b>2.46</b></td><td>6.73</td><td>9.30</td><td>403</td><td>14.22</td><td>5.40</td></tr>
-        <tr><td>محمول، M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">لم يُسابَق</td><td>6.91</td><td class="no">ويندوز فقط</td></tr>
+        <tr><td colspan="5" class="grp">بلا تلف - تحقق نظيف</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.11</b></td><td><b>0.19</b></td><td><b>0.23</b></td><td><b>0.18</b></td></tr>
+        <tr><td>par2-turbo، مضبوط</td><td>0.31</td><td>0.38</td><td>0.42</td><td>0.28</td></tr>
+        <tr><td>par2-turbo، كما يُشحن</td><td>0.86</td><td>1.12</td><td>1.06</td><td>0.80</td></tr>
+        <tr><td>par2cmdline</td><td>3.03</td><td>3.84</td><td>3.81</td><td class="no">لم يُسابَق</td></tr>
+        <tr><td>rarpar</td><td>2.62</td><td>3.45</td><td>2.96</td><td>2.32</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows فقط</td><td class="no">Windows فقط</td><td>1.34</td><td class="no">Windows فقط</td></tr>
+        <tr><td colspan="5" class="grp">3 كتل تالفة - بضع مقالات ميتة</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.22</b></td><td><b>0.33</b></td><td><b>0.46</b></td><td><b>0.26</b></td></tr>
+        <tr><td>par2-turbo، مضبوط</td><td>0.51</td><td>0.66</td><td>0.78</td><td>0.48</td></tr>
+        <tr><td>par2-turbo، كما يُشحن</td><td>1.08</td><td>1.46</td><td>1.42</td><td>1.00</td></tr>
+        <tr><td>par2cmdline</td><td>3.64</td><td>4.58</td><td>4.98</td><td class="no">لم يُسابَق</td></tr>
+        <tr><td>rarpar</td><td>4.27</td><td>5.53</td><td>4.99</td><td>3.64</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows فقط</td><td class="no">Windows فقط</td><td>1.71</td><td class="no">Windows فقط</td></tr>
+        <tr><td colspan="5" class="grp">101 كتلة تالفة</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.48</b></td><td><b>0.74</b></td><td><b>0.96</b></td><td><b>0.66</b></td></tr>
+        <tr><td>par2-turbo، مضبوط</td><td>0.88</td><td>1.17</td><td>1.40</td><td>0.85</td></tr>
+        <tr><td>par2-turbo، كما يُشحن</td><td>2.04</td><td>2.65</td><td>2.69</td><td>1.84</td></tr>
+        <tr><td>par2cmdline</td><td>5.57</td><td>7.57</td><td>11.7</td><td class="no">لم يُسابَق</td></tr>
+        <tr><td>rarpar</td><td>4.73</td><td>5.73</td><td>5.74</td><td>4.17</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows فقط</td><td class="no">Windows فقط</td><td>2.65</td><td class="no">Windows فقط</td></tr>
+        <tr><td colspan="5" class="grp">1,500 كتلة تالفة - استُهلك 91% من الاسترداد</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>1.00</b></td><td><b>2.07</b></td><td><b>2.46</b></td><td><b>1.61</b></td></tr>
+        <tr><td>par2-turbo، مضبوط</td><td>3.00</td><td>5.52</td><td>6.73</td><td>4.07</td></tr>
+        <tr><td>par2-turbo، كما يُشحن</td><td>5.21</td><td>8.20</td><td>9.30</td><td>6.01</td></tr>
+        <tr><td>par2cmdline</td><td>67.7</td><td>86.1</td><td>403</td><td class="no">لم يُسابَق</td></tr>
+        <tr><td>rarpar</td><td>7.15</td><td>11.49</td><td>14.22</td><td>6.91</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows فقط</td><td class="no">Windows فقط</td><td>5.40</td><td class="no">Windows فقط</td></tr>
       </tbody>
     </table></div>
 
-    <p class="note" style="text-align:start">الصفوف الستة عشر كلها لنا، عدة منها بأكثر من 2× مقابل البناء المضبوط وبـ 2.3× إلى 7.7× مقابل ما قد تنزّله فعلًا. أما صفّا الضرر الثقيل اللذان جلسا هنا خسارتين في النسخة السابقة من هذه الصفحة فقد صارا فوزَين، والملاحظة أدناه تشرح ما تغيّر، لأن الخسارة المنقلبة تستحق شرحًا لا تعديلًا صامتًا.</p>
+    <p class="note" style="text-align:start">كل خلايا nzbfast الست عشرة - أربعة
+    أجهزة عند أربعة مستويات تلف - لنا، عدة منها بأكثر من 2× مقابل البناء المضبوط
+    وبـ2.3× إلى 7.7× مقابل ما قد تنزّله فعليًا. خلايا التلف الثقيل هي المثيرة
+    للاهتمام، والملاحظة أدناه تشرح الخوارزمية وراءها.</p>
 
-    <p class="note" style="text-align:start"><b>الأصل عاد إلى الجدول، ويستحق أن نرى لماذا يوجد الفرع أصلًا.</b> أسقطت نسخة سابقة من هذه الصفحة عمود <code>par2cmdline</code> بحجة أنه أبطأ من كل شيء آخر في الجولة، وهذا صحيح وليس سببًا كافيًا: فهو التنفيذ الذي تنحدر منه كل الأدوات الأخرى تقريبًا، ويستحق القارئ المرجع نفسه لا زعمنا عنه. عند أثقل مستوى ضرر يستغرق نحو 69 ثانية حيث يستغرق الفرع بتعليمات SIMD 3.2 ثانية ونستغرق نحن 3.1 ثانية. ذلك المعامل عشرون هو الحجة كلها لأنوية حقل غالوا المكتوبة يدويًا، وهو الحجة ذاتها التي نسوقها لأنويتنا.</p>
+    <p class="note" style="text-align:start"><b>الأصلي عاد إلى الجدول، ويستحق أن
+    نرى لماذا يوجد التفرّع أصلًا.</b> أسقطت نسخة أقدم من هذه الصفحة عمود
+    <code>par2cmdline</code> على أساس أنه أبطأ من كل شيء آخر في الجولة، وهذا صحيح
+    وليس سببًا كافيًا: إنه التطبيق الذي تفرَّعت منه كل أداة أخرى تقريبًا، ويستحق
+    القارئ الأساس المرجعي بدل تأكيدنا عليه. عند أثقل مستوى تلف يستغرق نحو 69 s حيث
+    يستغرق التفرّع بـSIMD 3.2 s ونستغرق نحن 3.1 s. هذا العامل العشرون هو كل الحجة
+    لنوى Galois-field المكتوبة يدويًا، وهي الحجة نفسها التي نسوقها لأدواتنا.</p>
 
-    <p class="note" style="text-align:start"><b>الضرر الخفيف هو الحالة التي تهم.</b> حفنة من المقالات الفاشلة أكثر شيوعًا بكثير من 101 كتلة ميتة، ناهيك عن 1500. ومعظم الإصلاح الخفيف ليس رياضيات ريد-سولومون أصلًا، بل قراءة غيغابايت وحساب MD5 له، ولهذا يتبع صف الكتل الثلاث صفَ التحقق النظيف لا صفوف الإصلاح.</p>
+    <p class="note" style="text-align:start"><b>التلف الخفيف هو الحالة التي تهمّ.</b>
+    حفنة من المقالات الفاشلة أشيع بكثير من 101 كتلة ميتة، ولا شيء يشبه 1,500. معظم
+    الإصلاح الخفيف ليس حساب Reed-Solomon على الإطلاق، إنه قراءة جيجابايت وتجزئته
+    بـMD5، وهذا سبب تتبّع صف الثلاث كتل صف التحقق النظيف لا صفوف الإصلاح.</p>
 
-    <p class="note" style="text-align:start"><b>الصف الأثقل كان هو الصف الذي نخسره، وقالت النسخة السابقة من هذه الصفحة إن الحل سيكون «خوارزمية مختلفة لا جولة ضبط». وهذه هي تلك الخوارزمية.</b> يُتلف ذلك المستوى الأخير 1500 كتلة عبر الأجزاء الواحد والعشرين كلها ويستهلك نحو 91 % من بيانات الاسترداد، وهناك يصير حساب ريد-سولومون، لا البصمات ولا القرص، هو العمل كله تقريبًا. صار البناء المنشور يحسب أثقل الإصلاحات بتحويل عددي-نظري بدل طيّ حقل غالوا الكلاسيكي - الرياضيات ذاتها، مُقيَّمة في صورة تتدرّج أفضل بكثير عند أعداد الكتل العالية - وانقلب كل صف ثقيل: 2.7× تقدّمًا على البناء المضبوط في المكتبي ذي 20 نواة الذي كان أقرب خسائرنا، و2.7× على المحمول الذي كان أسوأها. أما الضرر الخفيف فما يزال يجري على المسار الكلاسيكي، ولهذا تحرّكت الصفوف الأخرى بالكاد. وعلى المحمول بويندوز هذا أيضًا 2.2× تقدّمًا على MultiPar. والتحويل لا يفيد إلا فوق نحو 512 كتلة تالفة، ودونها لا يلجأ إليه الموزّع.</p>
+    <p class="note" style="text-align:start"><b>أثقل مستوى تلف نوع عمل مختلف،
+    ويحصل على خوارزمية مختلفة.</b> يتلف ذلك المستوى الأخير 1,500 كتلة عبر المجلدات
+    الـ21 كلها ويستهلك نحو 91% من بيانات الاسترداد، حيث يصير حساب Reed-Solomon، لا
+    التجزئة أو القرص، تقريبًا كل العمل. يحسب البناء المشحون الإصلاحات الأثقل بتحويل
+    نظري-عددي بدل طيّ Galois-field الكلاسيكي - الحساب نفسه، مُقيَّمًا بصيغة تتوسّع
+    أفضل بكثير عند عدد كتل مرتفع: بفارق 2.7× أمام البناء المضبوط على المكتب ذي
+    العشرين نواة، وعلى المحمول Windows 2.7× أمام البناء المضبوط و2.2× أمام
+    MultiPar. لا يزال التلف الخفيف يشغّل المسار الكلاسيكي، وهذا سبب بقاء المستويات
+    الأخرى شبه ثابتة: لا يُجدي التحويل إلا فوق نحو 512 كتلة تالفة، فتحت ذلك لا يستخدمه
+    الموزِّع.</p>
 
-    <p class="note" style="text-align:start"><b>لا يستحق المسار الأسرع أن يُتخذ إلا إذا استحال أن يخطئ.</b> يحسب المساران المقدار نفسه وهما متطابقان بتًا ببت بحكم البناء، وكان كل إصلاح في هذه الصفحة مشروطًا بمطابقة الملفات المُعاد بناؤها للطقم السليم: 228 إصلاحًا موقوتًا عبر أجهزة هذه الجولة، وصفر حالات عدم تطابق. والنسخة الموزَّعة لا تتكئ على ذلك السجل. فكل إصلاح يتحقق من خرجه بمقابلته بتلبيدات الملفات، وأي إصلاح يفشل يُعاد تلقائيًا بالمسار التقليدي، ويسجل الانحراف، ويبقي المسار التقليدي لبقية تلك التشغيلة. والإعداد موجود في اللوحة باسم <b>وضع PAR السريع</b> إن فضّلت الاستغناء عنه بالكلية، والأجهزة التي لا تكفي ذاكرتها له ترفضه من تلقائها بدل أن تحاول وتفشل. أُعيد القياس في 2 أغسطس على البناء الحالي: يقع الجهازان المكتبيان ضمن نسب قليلة من هذا الجدول، ومع إيقاف <b>وضع PAR السريع</b> يعود ذو 20 نواة إلى الخسارة نفسها التي كان ينشرها، وهذا ما يبيّن أن التقدّم في الطريقة لا في الظروف.</p>
+    <p class="note" style="text-align:start"><b>لا يستحق مسار أسرع أن يكون إلا إن
+    كان لا يمكن أن يكون خاطئًا.</b> يحسب المساران الكمية نفسها ويتطابقان بايت لبايت
+    بالبناء، وكل إصلاح في هذه الصفحة كان محكومًا بمطابقة الملفات المعاد بناؤها
+    للمجموعة السليمة: 228 إصلاحًا مؤقَّتًا عبر أجهزة هذه الجولة، صفر حالات عدم
+    تطابق. لا يعتمد البناء المشحون على ذلك السجل. يتحقق كل إصلاح من ناتجه مقابل
+    تجزئات الملفات، وواحد فشل كان سيُعاد بالمسار الكلاسيكي تلقائيًا، ويسجّل
+    الانحراف، ويحتفظ بالمسار الكلاسيكي لبقية ذلك التشغيل. الإعداد موجود في
+    لوحة التحكم باسم <b>وضع PAR السريع</b> إن فضّلت عدم استخدامه أصلًا، والأجهزة
+    ذات الذاكرة القليلة جدًا له ترفضه من تلقاء نفسها بدل المحاولة والفشل. أُعيد
+    القياس في 2 أغسطس على البناء الحالي: يقع المكتبان ضمن نسب مئوية قليلة من هذا
+    الجدول، ومع إيقاف <b>وضع PAR السريع</b> يعود المكتب ذو العشرين نواة إلى زمن
+    المسار الكلاسيكي الأبطأ بالضبط، وهذا ما يقول إن الفوز هو الأسلوب لا الظروف.</p>
 
-    <p class="note" style="text-align:start"><b>صف المحمول كان يحتاج تصحيحًا، وهو ليس في صالحنا.</b> يخفض ويندوز رتبة العمل الخلفي المستمر إلى أنوية الكفاءة بعد ثوانٍ قليلة. خادمنا ينسحب من ذلك عند الإقلاع ولا تستطيع أي أداة أخرى فعل ذلك، فنشرت نسخة سابقة من هذه الصفحة أزمنتها المخنوقة كأنها أزمنة الأدوات نفسها. وإعادة تشغيل ذلك الجهاز مع رفع كل أداة إلى أولوية عالية تحرّك الميدان كله: عند أثقل مستوى ضرر ينتقل <code>par2-turbo</code> من 22.4 ثانية إلى 6.41، و<code>rarpar</code> من 59.2 ثانية إلى 14.4، وقد حوّل ذلك الصف في نسخة واحدة من هذه الصفحة من صف لنا إلى صف نخسره. صف المحمول كله مقيس بهذه الطريقة الآن - ويبقى التصحيح رغم أن الصف استُعيد منذ ذلك الحين بتغيير الخوارزمية أعلاه، لأن أزمنة الميدان على ذلك الجهاز لا تكون صادقة إلا بعد رفع الخنق.</p>
+    <p class="note" style="text-align:start"><b>احتاج عمود المحمول Windows تصحيحًا،
+    وهو ضدنا.</b> يخفض Windows العمل الخلفي المستمر إلى أنويته الاقتصادية بعد بضع
+    ثوانٍ. تنسحب خدمتنا من ذلك عند الإقلاع ولا تستطيع أي أداة أخرى فعل ذلك، فنشرت
+    نسخة أقدم من هذه الصفحة أزمنتها المخنوقة وكأنها أزمنة الأدوات نفسها. إعادة
+    تشغيل ذلك الجهاز مع رفع كل أداة إلى أولوية عالية يحرّك الميدان كله: عند أثقل
+    مستوى تلف ينتقل <code>par2-turbo</code> من 22.4 s إلى 6.41 وينتقل
+    <code>rarpar</code> من 59.2 s إلى 14.4، وفي إحدى نسخ هذه الصفحة حوّل ذلك العمود
+    من لنا إلى عمود خسرناه. يُقاس عمود المحمول كله بتلك الطريقة الآن - ويبقى التصحيح
+    حتى بعد أن استعاد الصف الفوز بتغيير الخوارزمية أعلاه، لأن أزمنة الميدان على ذلك
+    الجهاز أمينة فقط برفع الخنق.</p>
 
     <h3 style="margin:44px 0 4px">سجلات استرداد RAR: الإصلاح دون PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">حين يعجز PAR2 عن تغطية الضرر، يكون سجل الاسترداد داخل ملف RAR نفسه خط الدفاع الأخير. حتى الإصدار 1.0.8 كان سجلنا يفشل مع أي أرشيف يتجاوز نحو 13 ميغابايت، فلم يكن يمكن تشغيل هذه المرحلة أصلًا. الضرر ثلاث فجوات بحجم 3000 بايت عند 20 % و50 % و80 % من المنطقة المحمية. أنتجت الأداتان مخرجات مطابقة بايتًا بايت للملف السليم، ومخرجاتنا مطابقة بايتًا بايت لما يكتبه <code>rar r</code> نفسه. أفضل من ثلاث، مكتبي بـ 32 نواة. وأُعيد سباق الأداتين معًا في 2 أغسطس.</p>
+    <p class="note" style="text-align:start;margin-top:6px">حين لا يستطيع PAR2 تغطية
+    التلف، يكون سجل الاسترداد داخل ملف RAR نفسه خط الدفاع الأخير. حتى 1.0.8 كانت
+    أداتنا تفشل على أي أرشيف فوق نحو 13 MB، فلم يكن ممكنًا تشغيل هذا الشوط أصلًا.
+    التلف ثلاث ثقوب بحجم 3,000 بايت عند 20% و50% و80% عبر المنطقة المحمية. أنتجت
+    كلتا الأداتين ناتجًا مطابقًا بايت لبايت للملف السليم، وناتجنا مطابق بايت لبايت
+    لما تكتبه <code>rar r</code> نفسها. أفضل ثلاث، مكتب ذو 32 نواة، أُعيد سباق
+    الأداتين معًا في 2 أغسطس.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>الأرشيف</th><th>nzbfast</th><th>إصلاح rar 7.23</th><th></th></tr></thead>
+      <thead><tr><th></th><th>16 MB</th><th>32 MB</th><th>128 MB</th><th>512 MB</th><th>2 GB</th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× أسرع</td></tr>
-        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× أسرع</td></tr>
-        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× أسرع</td></tr>
-        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× أسرع</td></tr>
-        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× أسرع</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.049</b></td><td><b>0.059</b></td><td><b>0.130</b></td><td><b>0.400</b></td><td><b>1.527</b></td></tr>
+        <tr><td>rar 7.23 repair</td><td>0.278</td><td>0.466</td><td>1.065</td><td>2.291</td><td>6.400</td></tr>
+        <tr><td>الأفضلية</td><td>5.7&times;</td><td>7.9&times;</td><td>8.2&times;</td><td>5.7&times;</td><td>4.2&times;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">أظهرت نسخة سابقة من هذه الصفحة صف 512 ميغابايت كخسارة وفسّرتها بأنها ثمن معالجة الجزء على دفعات بدل الاحتفاظ به كاملًا في الذاكرة. كان ذلك التفسير صحيحًا حينها وصار الآن متجاوَزًا: كانت التكلفة CRC64 يعمل بتًا بتًا في مسار الإصلاح، استُبدل بآخر قائم على جدول، ورحلت الخسارة معه. لم تعد هناك نقطة تقاطع، وبقيت مجموعة العمل المحدودة. صف 2 غيغابايت هنا لأن الأجزاء التي يقابلها خادم فعلًا تتراوح بين 8 و20 غيغابايت لا 512 ميغابايت، ومرحلة تتوقف دون المدى الحقيقي ليست اختبارًا كبيرًا.</p>
-    <p class="note" style="text-align:start"><b>ما الذي تغيّر في هذه النسخة، والشاهد الذي يثبته.</b> صار تحديد الكتل التالفة أكبر مرحلة في هذا الإصلاح - أكبر من حساب الإصلاح نفسه - وكان يعمل على خيط واحد، يقرأ 64 كيلوبايت من كل مجموعة عبر الملف، مرة لكل مجموعة. صار الآن يمرّ مرة واحدة متتابعة بترتيب الملف مع حساب المجاميع الاختبارية لكل شظية على التوازي، ويُستنسخ المجلد المُصلَح بدل نسخه حيث يسمح نظام الملفات بذلك. انخفض الاكتشاف وحده من نحو 300 مللي ثانية إلى 18 مللي ثانية في أرشيف 512 ميجابايت، وهو معظم ما تغيّر أعلاه. الشاهد هو العمود المجاور لعمودنا: أُعيد سباق <code>rar r</code> في الجولات نفسها وعلى الجهاز نفسه فعاد إلى أزمنته السابقة بفارق نسبته نقاط مئوية قليلة، فالتغيّر في الفارق يخصّنا نحن لا منصة القياس.</p>
-    <p class="note" style="text-align:start">يكرر M5 Max النمط، وقد شُغِّل في 31 يوليو بالمجموعة نفسها والمعايير نفسها: 0.050 / 0.066 / 0.171 / 0.581 ثانية مقابل 0.211 / 0.335 / 0.751 / 1.735 لـ<code>rar r</code> من 16 ميجابايت إلى 512 ميجابايت - أسرع بمقدار 3.0&times; إلى 5.1&times;؛ ولم يُشغَّل حجم 2 جيجابايت على ذلك الجهاز. هذه الأرقام تسبق إعادة كتابة الاكتشاف الموصوفة أعلاه، فهي تخص البناء الأقدم وتَرِد هنا بوصفها الجهاز الثاني لا رقمًا حاليًا.</p>
-    <p class="note" style="text-align:start"><code>rarpar</code> الخاص بـ Weaver غائب عن هذا الجدول وحده، وليس باختياره: فهو لا ينفّذ هذا الإصلاح. وحين يُطلب منه إصلاح أحد هذه الأرشيفات يجيب <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> ويترك الملف تالفًا. وهو حاضر في كل مقارنة أخرى على هذه الصفحة: مراحل PAR2 الأربع أعلاه، وأشكال الاستخراج السبعة فوقها، ومرحلة أجزاء الاسترداد أسفلها مباشرة، وهي بالضبط العمل الذي يقول إنه يؤديه، وهو يفوز بها.</p>
+    <p class="note" style="text-align:start">أظهرت نسخة أقدم من هذه الصفحة حجم
+    512 MB كخسارة، وفسّرتها بثمن السير عبر المجلد على قطع بدل الاحتفاظ به كله في
+    الذاكرة. كان ذلك التفسير صحيحًا حينها وهو الآن متجاوَز: كانت التكلفة CRC64
+    تسلسلي بت-بت في مسار الإصلاح، استُبدل بآخر يعمل بجدول، وذهبت الخسارة معه. لا
+    تقاطع بعد الآن، واحتُفظ بمجموعة العمل المحدودة. حجم 2 GB موجود هنا لأن المجلدات
+    التي تصادفها الخدمة فعليًا هي 8 GB إلى 20 GB، لا 512 MB، وشوط يتوقّف دون المدى
+    الحقيقي ليس اختبارًا يُذكر.</p>
+    <p class="note" style="text-align:start"><b>ما حرّك هذا القصّ، والضابط الذي
+    يقول ذلك.</b> كان إيجاد الكتل التالفة قد صار أكبر مرحلة في هذا الإصلاح - أكبر
+    من حساب الإصلاح نفسه - وكان يعمل على خيط واحد، يقرأ 64 KB من كل مجموعة عبر
+    الملف، مرة لكل مجموعة. يمرّ الآن مرورًا تسلسليًا واحدًا بترتيب الملف مع حساب
+    المجاميع التحققية لكل شريحة بالتوازي، ويُستنسَخ المجلد المُصلَح بدل نسخه حيثما
+    يستطيع نظام الملفات فعل ذلك. هبط الاكتشاف وحده من نحو 300 ms إلى 18 ms على
+    أرشيف 512 MB، وهذا معظم ما تحرّك أعلاه. الضابط هو العمود إلى جانب رقمنا:
+    أُعيد سباق <code>rar r</code> في الجولات نفسها على الجهاز نفسه وعاد ضمن نسب
+    مئوية قليلة من أزمنته السابقة، فالتغيّر في الفجوة هو تغيّرنا لا تغيّر المنصة.</p>
+    <p class="note" style="text-align:start">يكرّر M5 Max النمط، سُوبِق في 31 يوليو
+    بالعيّنة والضوابط نفسها: 0.050 / 0.066 / 0.171 / 0.581 s مقابل 0.211 / 0.335 /
+    0.751 / 1.735 لـ<code>rar r</code> عبر الأحجام من 16 MB إلى 512 MB - أسرع بـ3.0×
+    إلى 5.1×؛ لم يُسابَق حجم 2 GB على ذلك الجهاز. تسبق تلك الأرقام إعادة كتابة
+    الاكتشاف الموصوفة أعلاه، فهي أرقام البناء الأقدم، محفوظة هنا كالجهاز الثاني لا
+    كرقم حالي.</p>
+    <p class="note" style="text-align:start">غائب <code>rarpar</code> الخاص بـWeaver
+    عن هذا الجدول وحده، وليس اختيارًا: لا يطبّق هذا الإصلاح. عند مطالبته بإصلاح واحد
+    من هذه الأرشيفات يجيب <i>"embedded Rar5 recovery record detected ... this API
+    restores standalone .rev recovery volumes only and does not consume embedded
+    RR/protect data"</i>، ويترك الملف تالفًا. يظهر في كل مقارنة أخرى في هذه الصفحة:
+    كل الأشواط الأربعة لـPAR2 أعلاه، وأشكال الاستخراج السبعة قبلها، وشوط مجلدات
+    الاسترداد أدناه مباشرة، وهو العمل الذي يقول إنه يؤديه - والذي يفوز به.</p>
 
-    <h3 style="margin:44px 0 4px">أجزاء الاسترداد: إعادة بناء ملفات <code>.rev</code> المفقودة بالكامل</h3>
-    <p class="note" style="text-align:start;margin-top:6px">النصف الآخر من قصة الاسترجاع الخاصة بـRAR، وكان حتى هذه الجولة أكبر خسارة في هذه الصفحة. ملف <code>.rev</code> جزء استرجاع قائم بذاته: ثلاثة منه إلى جانب طقم من 21 جزءًا تستطيع إعادة بناء أي ثلاثة أجزاء لم تصل قط. المجموعة: 1 جيبيبايت مخزَّن في 21 جزءًا سعة 50 ميجابايت بأمر <code>rar rv3</code>، ثم حُذفت الأجزاء 4 و11 و19 - ثلاثة مفقودة مقابل ثلاثة أجزاء استرجاع، وهي أسوأ حالة ما يزال الطقم ينجو منها. الأفضل من ثلاث، وقد قوبل كل جزء أُعيد بناؤه بالجزء السليم.</p>
-        <div class="tblwrap"><table>
-      <thead><tr><th>الجهاز</th><th>nzbfast</th><th>rar 7.23 <code>rc</code></th><th>rarpar <code>restore-volumes</code></th></tr></thead>
+    <h3 style="margin:44px 0 4px">مجلدات الاسترداد: إعادة بناء ملفات <code>.rev</code> المفقودة كلها</h3>
+    <p class="note" style="text-align:start;margin-top:6px">النصف الآخر من قصة
+    استرداد RAR الخاصة، وحتى هذه الجولة كانت أكبر خسارة في هذه الصفحة. ملف
+    <code>.rev</code> هو مجلد استرداد مستقل: يمكن لثلاثة منها إلى جانب مجموعة من
+    21 مجلدًا إعادة بناء أي ثلاثة مجلدات لم تصل أبدًا. العيّنة: 1 GiB مخزَّن في 21
+    مجلدًا بحجم 50 MB بأمر <code>rar rv3</code>، ثم حُذفت المجلدات 4 و11 و19 - ثلاثة
+    مفقودة مقابل ثلاثة مجلدات استرداد، وهي أسوأ حالة يمكن للمجموعة الصمود أمامها.
+    أفضل ثلاث، كل مجلد أُعيد بناؤه مقارَن مقابل المجلد السليم.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>مكتب، 32 نواة</th><th>مكتب، 20 نواة</th></tr></thead>
       <tbody>
-        <tr><td>مكتبي، 32 نواة</td><td><b>0.44</b></td><td>0.46</td><td>0.48</td></tr>
-        <tr><td>مكتبي، 20 نواة</td><td><b>0.50</b></td><td>0.58</td><td>0.61</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.44</b></td><td><b>0.50</b></td></tr>
+        <tr><td>rar 7.23 <code>rc</code></td><td>0.46</td><td>0.58</td></tr>
+        <tr><td>rarpar <code>restore-volumes</code></td><td>0.48</td><td>0.61</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>كان هذا الصف 3.12 ثانية مقابل 0.47 لـ<code>rar rc</code> في النسخة السابقة من هذه الصفحة، ونُشر بوصفه أبطأ بمقدار 6.6× وأسوأ رقم فيها.</b> والسبب أن حل المحو كان يعمل عند نحو 48 ميجابايت في الثانية من الخرج المُعاد بناؤه حيث كانت RARLab تحقق 320؛ وهو يعمل الآن على الحساب المعتمد على الجداول نفسه الذي تعمل عليه بقية شيفرة الاسترجاع، وهو تحسُّن بمقدار سبعة أضعاف يقلب الخسارة فوزًا على الجهازين معًا. والفارقان 3% و14%، فهو إذن فوز يُذكر ببساطة لا يُصدَّر عنوانًا، وسبب ذكره أصلًا أن الخسارة ذُكرت أولًا.</p>
-    <p class="note" style="text-align:start">هذه المرحلة قائمة لأن <code>rarpar</code> التابع لـWeaver يؤدي هذا بالضبط وطلب أن يُقاس عليها. وقد كان يفوز بها بأريحية حين نشرناها أول مرة، ونشرناها حينها لهذا السبب بعينه.</p>
-    <p class="note" style="text-align:start">لم تكن مطابقة الملفات هي الكلفة قط، وهذا جدير بالتسجيل لأنها كانت المشتبه به البديهي: أجزاء الاسترجاع لا تحمل أسماء ملفات، ولذلك نحدد الخانات الباقية بحساب المجموع التحققي لكل جزء على القرص بدل الوثوق بأسمائها، وأمام طقم سليم لا يجري فيه سوى المطابقة يستغرق المرور كله 0.18 ثانية.</p>
+    <p class="note" style="text-align:start"><b>كانت خلية الـ32 نواة هنا 3.12 s مقابل
+    0.47 لـ<code>rar rc</code> في القصّة السابقة لهذه الصفحة، ونُشرت كأبطأ بـ6.6×
+    وأسوأ رقم فيها.</b> كان السبب حلّ المحو (erasure solve) يعمل عند نحو 48 MB/s من
+    الناتج المُعاد بناؤه حيث تدير RARLab 320؛ يعمل الآن على الحساب نفسه القائم على
+    جدول الذي تستخدمه بقية شيفرة الاسترداد، وهو تحسّن سبعة أضعاف يحوّل الخسارة إلى
+    فوز على كلا الجهازين. الهامشان 3% و14%، فهو فوز يُذكر ببساطة لا يُصدَّر عنوانًا،
+    والسبب في ذكره أصلًا أن الخسارة ذُكرت أولًا.</p>
+    <p class="note" style="text-align:start">هذا الشوط موجود لأن <code>rarpar</code>
+    الخاص بـWeaver يطبّق هذا بالضبط وطلب أن يُقاس عليه. كان يفوز بارتياح حين نشرناه
+    أول مرة، ونشرناه حينها لذلك السبب.</p>
+    <p class="note" style="text-align:start">لم تكن مطابقة الملفات التكلفة أبدًا،
+    ويستحق ذلك التسجيل لأنه كان المشتبَه به البديهي: لا تحمل مجلدات الاسترداد أي
+    أسماء ملفات، فنحدّد أي الفتحات نجت بتجزئة كل مجلد على القرص بدل الثقة بما تُسمّى،
+    ومقابل مجموعة غير تالفة، حيث المطابقة هي كل ما يحدث، يستغرق المرور كله 0.18 s.</p>
 
-    <p class="note" style="text-align:start"><b>ما تحرّك غير ذلك، وأين لا يظهر.</b> هبط تغييران آخران في المحرك لا تستطيع هذه المجموعات إظهارهما، مذكوران هنا كي لا تُقرأ الأرقام أعلاه على أنها القصة كلها: أرشيفات RAR5 التي تضم عشرات الآلاف من الأعضاء تحلّ كل عضو مرة واحدة بدل المرور على القائمة لكل عامل، وهو ما يعني 3× أقل من زمن المعالج عند 40 ألف عضو؛ وقارئ البتات في RAR1.3 يعمل كلمةً كلمة، وهو ما يعني 2×. ولا يظهر أي منهما أعلاه، لأن الأشكال هنا تضم 400 عضو ولا تضم أي RAR1.3.</p>
+    <p class="note" style="text-align:start"><b>ما تحرّك أيضًا، وأين لا يظهر.</b>
+    حدث تغييران آخران في المحرّك لا تستطيع هذه العيّنات رؤيتهما، مذكوران هنا كي لا
+    تُقرأ الأرقام أعلاه كالقصة كلها: تحلّ أرشيفات RAR5 ذات عشرات الآلاف من الأعضاء
+    كل عضو مرة واحدة بدل السير في القائمة لكل عامل، وهذا 3× زمن معالج أقل عند 40,000
+    عضو؛ وقارئ بتّات RAR1.3 يعمل كلمة كاملة في وقت واحد، وهذا 2×. لا يظهر أيّ منهما
+    أعلاه، لأن الأشكال هنا تحمل 400 عضو ولا RAR1.3.</p>
 
-    <p class="note" style="text-align:start"><b>ما نمتنع عنه عمدًا:</b> لا <i>ننشئ</i> PAR2 أبدًا. فليس لبرنامج تنزيل سبب لذلك، وتلك المرحلة من نصيب ParPar. ونشتري السرعة بالذاكرة كذلك في المحركين: يبلغ الاستخراج ذروته عند نحو 240 ميجابايت مقابل 41 ميجابايت لـunrar، والتحقق نحو 126 ميجابايت مقابل 7 ميجابايت لـturbo، لأن هذين محركان مدمجان يرافقان تنزيلًا جاريًا لا تشغيلين مستقلين لمرة واحدة. وأسوأ الحالات هي الصيغة ذات القاموس 128 ميبيبايت، عند نحو 304 ميجابايت مقابل 139 ميجابايت لـunrar. <b>وأثقل إصلاح صار يكلف ذاكرة أيضًا:</b> فالطريقة الأسرع لـ512 كتلة مفقودة فأكثر تعمل من بيانات الاسترجاع المحفوظة في الذاكرة، ولذلك يُسمح لها بربع ذاكرة الجهاز بحد أقصى 4 جيجابايت، والجهاز الذي لا يستطيع بذل ذلك يأخذ بهدوء طريقة التدفق - الحساب نفسه والأزمنة نفسها كصفوف الوسط في جدول PAR2، لكن دون الـ3× في الأخير. وإن أردت أصغر بصمة ذاكرة ممكنة لمهمة مستقلة، فما تزال الأدوات المتخصصة تفوز بذلك العمود.</p>
-    <div class="callout">كل رقم على هذه الصفحة شوط مؤرَّخ سُجّل أمره الدقيق وظروفه، بما في ذلك النتائج السلبية والمقاربات المهجورة. هذه الصفحات هي السجل المنشور، وتزداد تفصيلًا كلما نزلت جولات أخرى.</div>
+    <p class="note" style="text-align:start"><b>ما لا نفعله عمدًا:</b> لا
+    <i>ننشئ</i> PAR2 أبدًا. لا سبب لبرنامج تنزيل ليفعل ذلك، وParPar يملك ذلك العمل.
+    نشتري السرعة أيضًا بالذاكرة على كلا المحرّكين: يبلغ الاستخراج ذروته حول 240 MB
+    مقابل 41 MB لـunrar، ويبلغ التحقق ذروته حول 126 MB مقابل 7 MB لـturbo، لأن هذين
+    محرّكان مضمَّنان يركبان تنزيلًا حيًّا لا أدوات مستقلة لمرة واحدة. شكل قاموس
+    128 MiB هو الأسوأ في ذلك، عند نحو 304 MB مقابل 139 MB لـunrar. <b>وأثقل إصلاح
+    يكلّف ذاكرة الآن أيضًا:</b> الطريقة الأسرع لـ512 كتلة مفقودة فأكثر تعمل من
+    بيانات الاسترداد محفوظة مقيمة، فيُسمَح لها بربع ذاكرة الجهاز، بحد أقصى 4 GB،
+    وجهاز لا يملك ذلك يأخذ بهدوء الطريقة منخفضة الذاكرة بدلًا منها - الحساب نفسه
+    والأزمنة نفسها كصفوف PAR2 الوسطى، لكن دون الـ3× في الأخيرة. إن أردت أصغر مجموعة
+    مقيمة ممكنة لمهمة مستقلة، ما زالت الأدوات المخصَّصة تفوز بذلك العمود.</p>
+    <div class="callout">كل رقم في هذه الصفحة تشغيل مؤرَّخ بأمره الدقيق وظروفه
+    مسجَّلة، بما في ذلك النتائج السلبية والمقاربات المهجورة. هذه الصفحات هي السجل
+    المنشور، وتُستكمل مع نزول جولات إضافية.</div>
   </div>
 </section>
 
-
 <section class="alt" id="client-matrix">
   <div class="wrap">
-    <p class="kicker">القدرة، لا القياسات الصغيرة</p>
+    <p class="kicker">القدرة، لا القياسات الصغرى</p>
     <h2>ما يستطيعه كل عميل</h2>
     <div class="tblwrap"><table>
       <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>NNTP متسلسل بالأنابيب</td><td class="yes">نعم</td><td class="half">معطّل افتراضيًا</td><td class="no">لا</td><td class="yes">نعم</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>تحقق كامل أثناء التنزيل</td><td class="yes">كل كتلة</td><td class="no">بعده</td><td class="half">فحص سريع</td><td class="no">بعده</td><td class="no">بعده</td><td class="no">بعده</td><td class="no">بعده</td></tr>
-        <tr><td>استخراج أثناء التنزيل</td><td class="yes">أثناء التنزيل، بلا مجلدات على القرص</td><td class="half">فكّ ضغط مباشر⁴</td><td class="half">فكّ ضغط مباشر⁴</td><td class="half">غير موثوق⁵</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td></tr>
-        <tr><td>القرص المطلوب لمنشور بحجم N-GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>حكم على قابلية الاكتمال قبل التنزيل</td><td class="yes">دقيق بالكتلة</td><td class="no">لا</td><td class="half">% صحة</td><td class="no">لا</td><td class="no">-⁷</td><td class="yes">فحص المقالات</td><td class="no">لا</td></tr>
-        <tr><td>ذاكرة مقيَّدة (لا مبادلة أبدًا)</td><td class="yes">بميزانية</td><td class="no">9.3 GB عند 190 GB</td><td class="half">إعداد ذاكرة مؤقتة</td><td class="no">لا</td><td class="no">لا</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>يرفع حدّ ملفاته المفتوحة بنفسه</td><td class="yes">نعم، عند الإقلاع</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
-        <tr><td>تحقّق من الملف عند أي نقطة أثناء التنزيل</td><td class="yes">نعم</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="half">تسلسلي</td><td class="no">لا</td></tr>
-        <tr><td>مفهرِس مدمج + جدار ملصقات</td><td class="yes">نعم، بلا مفاتيح</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="half">واجهة بحث</td><td class="half">متصفّح مجموعات</td></tr>
-        <tr><td>توافق مباشر مع Sonarr/Radarr</td><td class="yes">واجهة SAB + Newznab</td><td class="yes">أصيل</td><td class="yes">أصيل</td><td class="half">جزئي</td><td class="half">‏RPC متوافق مع NZBGet⁷</td><td class="no">لا</td><td class="no">لا</td></tr>
-        <tr><td>تطبيقات هاتف عن بُعد (nzb360/LunaSea)</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="no">لا</td><td class="no">-⁷</td><td class="no">لا</td><td class="no">لا</td></tr>
+        <tr><td>NNTP بأنابيب</td><td class="yes">نعم</td><td class="half">متوقف افتراضيًا</td><td class="no">لا</td><td class="yes">نعم</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>تحقق كامل أثناء التنزيل</td><td class="yes">كل كتلة</td><td class="no">بعد</td><td class="half">فحص سريع</td><td class="no">بعد</td><td class="no">بعد</td><td class="no">بعد</td><td class="no">بعد</td></tr>
+        <tr><td>استخراج أثناء التنزيل</td><td class="yes">ضمن التدفّق، بلا مجلدات على القرص</td><td class="half">فك ضغط مباشر⁴</td><td class="half">فك ضغط مباشر⁴</td><td class="half">يُدرِّج ثم يفك الضغط⁵</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td></tr>
+        <tr><td>القرص المطلوب لمنشور بحجم N GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
+        <tr><td>حكم اكتمال قبل التنزيل</td><td class="yes">دقيق للكتلة</td><td class="no">لا</td><td class="half">نسبة صحة</td><td class="no">لا</td><td class="no">-⁷</td><td class="yes">فحص المقالة</td><td class="no">لا</td></tr>
+        <tr><td>ذاكرة محدودة (بلا مبادلة قط)</td><td class="yes">مُيزَّنة</td><td class="half">إعداد حد ذاكرة تخزين مؤقت</td><td class="half">إعداد ذاكرة تخزين مؤقت</td><td class="no">لا</td><td class="no">لا</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>يرفع حد الملفات المفتوحة الخاص به</td><td class="yes">نعم، عند الإقلاع</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
+        <tr><td>فحص الملف في أي لحظة أثناء التنزيل</td><td class="yes">نعم</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="half">تسلسلي</td><td class="no">لا</td></tr>
+        <tr><td>مفهرِس مدمج + جدار ناشرين</td><td class="yes">نعم، بلا مفتاح</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="no">لا</td><td class="half">واجهة بحث</td><td class="half">متصفّح مجموعات</td></tr>
+        <tr><td>توصيل مباشر مع Sonarr/Radarr</td><td class="yes">واجهة SAB + Newznab</td><td class="yes">أصلي</td><td class="yes">أصلي</td><td class="yes">واجهة متوافقة مع SAB</td><td class="half">RPC متوافق مع NZBGet⁷</td><td class="no">لا</td><td class="no">لا</td></tr>
+        <tr><td>تحكّم هاتفي عن بُعد (nzb360/LunaSea)</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="no">لا</td><td class="no">-⁷</td><td class="no">لا</td><td class="no">لا</td></tr>
         <tr><td>جلب تلقائي لقائمة المتابعة + ترقيات</td><td class="yes">مدمج</td><td class="no">عبر *arr</td><td class="no">عبر *arr</td><td class="no">لا</td><td class="no">لا</td><td class="yes">Watchdog</td><td class="half">قواعد</td></tr>
-        <tr><td>ملف تنفيذي واحد قائم بذاته</td><td class="yes">نعم</td><td class="no">Python</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="yes">‏.app</td><td class="yes">‏.exe</td></tr>
-        <tr><td>مفتوح المصدر</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="no">مدفوع</td><td class="no">مدفوع</td></tr>
-        <tr><td>المنصّات</td><td class="yes">mac/win/linux/docker</td><td class="yes">mac/win/linux</td><td class="yes">mac/win/linux</td><td class="half">linux/win</td><td class="half">بناء من المصدر⁷</td><td class="no">mac فقط</td><td class="no">win فقط</td></tr>
+        <tr><td>ثنائي مستقل واحد</td><td class="yes">نعم</td><td class="half">حزم تطبيق؛ Python على Linux</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="yes">نعم</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
+        <tr><td>مفتوح المصدر</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="yes">نعم</td><td class="no">مدفوع</td><td class="no">مدفوع</td></tr>
+        <tr><td>المنصات</td><td class="yes">mac/win/linux (x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/حزم NAS</td><td class="yes">mac/win/linux/docker/NAS + مدمج</td><td class="half">linux/win (mac من المصدر)</td><td class="half">ثنائي mac؛ المصدر في مكان آخر⁷</td><td class="no">mac فقط</td><td class="no">win فقط</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">⁴ فكّ الضغط المباشر لا يزال يجسّد المجلدات أولًا:
-    ضعف كتابة وضعف قرص. ⁵ سلّم rustnzb مجلدات مموّهة موسومة "مكتملة" في شوطنا
-    (كما يتعلّق فكّ ضغطه مع RARLab unrar ما لم يُعطَّل). قيس ذلك على 1.3.4 و1.3.9؛ وقد أصلحه rustnzb في 1.4.5، لذا تبقى هذه الخانة مثبّتة على البُنى التي قِسناها إلى أن تحلّ محلّها جولة جديدة. ⁶ GPL-3.0-or-later.
-    ⁷ ‏Weaver v0.7.5؛ صفوفه المقيسة (التحقق والاستخراج والقرص والذاكرة) تأتي من جولتنا
-    المُجهَّزة بالعدّادات في 31 يوليو، أما خلايا القدرة الموسومة بـ "-" فهي ميزات لم نقيّمها
-    بعد لا غيابات مؤكَّدة؛ وهو يتحدث RPC متوافقًا مع NZBGet، وبه تقوده منصتنا، لكننا لم نجرّب
-    تطبيقات الهاتف عن بُعد معه.
-    وUsenapp/Newsbin قارئان تجاريان أحادِيَا المنصّة بميزات تنزيل؛ أُدرِجا
-    لأن الناس يسألون، لا لأنهما ينافسان على السرعة.</p>
-    <p class="note" style="text-align:start">⁸ يبدأ macOS البرنامج بحدّ 256 ملفاً مفتوحاً، وقد تتجاوزه مجموعة كاملة من الاتصالات موزّعة على عدّة خوادم. يرفع nzbfast حدّه بنفسه عند الإقلاع على macOS وLinux: يطلب 65,536، وينزل تدريجياً حتى يوافق النظام، ولا يتجاوز أبداً الحدّ الصلب للنظام، ويمضي بما كان لديه إن رُفضت كل الخطوات. أما Windows فليس فيه حدّ لكل عملية من هذا النوع. وبقية الأعمدة <b>غير مقيَّمة</b> لا غيابات مؤكَّدة: لم نقرأ شفرة إقلاع أي عميل آخر. ويستحق ذلك المعرفة بسبب طريقة الفشل: البرنامج الذي تنفد ملفاته المفتوحة في منتصف المهمة يميل إلى الاختفاء بدل الإبلاغ عن خطأ.</p>
+    <p class="note" style="text-align:start">⁴ لا يزال فك الضغط المباشر يُجسِّد
+    المجلدات أولًا: كتابتان مضاعَفتان وقرص مضاعَف. ⁵ يسلّم rustnzb 1.4.5 كل عيّنة
+    صحيحة بايت لبايت في جولة 23 أغسطس 2026، وإدخال/إخراج جهازه المقيس هناك نحو
+    2.1x الحمولة - فهو يُدرِّج المجلدات ويفك الضغط بعد التنزيل بدل الاستخراج ضمن
+    التدفّق (انظر <a href="#cost">جداول التكلفة</a>). شحنت بُناه الأقدم (1.3.4-1.3.9)
+    مجلدات مموَّهة موسومة بـ"Completed" دون استخراج؛ ذلك الفشل مُصلَح في الجذر عند
+    1.4.5.
+    ⁶ GPL-3.0-or-later.
+    ⁷ Weaver 0.7.8، أحدث ثنائي منشور، مثبتة هويته بالتجزئة (تتطابق تجزئة sha256
+    لأرشيف الإصدار المنشور والثنائي داخله مع ما نسابقه)؛ صفوفه المقيسة تأتي من جولة
+    23 أغسطس للتكلفة، وخلايا قدرته الموسومة بـ"-" هي ميزات لم نُقيِّمها لا غيابًا
+    مؤكَّدًا؛ يتحدّث RPC متوافقًا مع NZBGet، وهو كيف تسوقه منصتنا، لكننا لم نجرّب
+    التحكّم الهاتفي عن بُعد مقابله.
+    ‏Usenapp/Newsbin قارئان تجاريان أحاديّا المنصة بميزات تنزيل؛ مذكوران لأن الناس
+    يسألون، لا لأنهما يتنافسان على السرعة.</p>
+    <p class="note" style="text-align:start">⁸ يبدأ macOS برنامجًا بحدّ 256 ملف
+    مفتوح، ويمكن لمجموعة كاملة من الاتصالات عبر عدة خوادم تجاوزه. يرفع nzbfast حدّه
+    الخاص عند الإقلاع على macOS وLinux: يطلب 65,536، ويتنازل خطوة خطوة حتى يوافق
+    النظام، ولا يتجاوز أبدًا حدّ النظام الصلب، ويواصل بما لديه إن رُفضت كل خطوة.
+    لا يملك Windows حدًّا من هذا النوع لكل عملية. الأعمدة الأخرى <b>لم تُقيَّم</b>
+    لا غيابات مؤكَّدة؛ لم نقرأ شيفرة إقلاع أي عميل آخر. يستحق المعرفة بسبب طريقة
+    فشله: برنامج ينفد من الملفات المفتوحة منتصف مهمة يميل إلى الاختفاء بدل الإبلاغ
+    عن خطأ.</p>
   </div>
 </section>
 
-<section id="weaver-method">
-  <div class="wrap">
-    <p class="kicker">المنهجية &middot; كاملةً، لأننا سُئلنا</p>
-    <h2>كيف اختبرنا Weaver</h2>
-    <p class="lead">قال مطوِّر Weaver علنًا إننا تجنبنا قياسه. والحق عكس ذلك: فهو حاضر في كل مقارنة في هذه الصفحة يستطيع خوضها، بما فيها مرحلة الإصلاح بأجزاء الاسترجاع، وهي التي يفوز بها والتي ننشرها لهذا السبب بعينه. وهذه هي المنهجية كاملة، وكل عقبة صادفناها، وكل التفاف لجأنا إليه، حتى يمكن إعادة إنتاج التشغيلات والاعتراض عليها.</p>
-    <ul>
-      <li><b>ما شغّلناه:</b> الملف التنفيذي الرسمي arm64 للإصدار v0.7.5. وحيثما لزم البناء من المصدر (مكوّنه <code>rarpar</code> لجداول PAR2 والاستخراج) نذكر الالتزام الدقيق بجانب الجدول.</li>
-      <li><b>الظروف نفسها التي للجميع:</b> جهاز مطابق، والخوادم التجارية الستة نفسها، وTLS على كل اتصال، ومهام مُرسَلة عبر واجهته المتوافقة مع NZBGet، وقاعدة النجاح نفسها المطبَّقة على كل عميل في هذه الصفحة: لا تُحتسب المرحلة إلا إذا تُحقِّق من الحمولة المستخرَجة بايتًا بايتًا على القرص. ويُقابَل سجل إتمامه دائمًا بغيره، ولا يُصدَّق وحده أبدًا.</li>
-      <li><b>قيس في أفضل حالاته لا أسوئها:</b> مراحل التنزيل الموسومة <i>مُسخَّن</i> تُشغِّل خدمة دائمة، وتُطعمها أولًا مهمة إحماء حقيقية، وتنتظر بلوغ تصاعد الاتصالات التلقائي سقفه عند 120 اتصالًا قبل أن تبدأ المهمة الموقوتة. وأرقام البدء البارد، حيثما عُرضت، موسومة بأنها باردة. وقد بنينا منصة البدء الساخن ونشرناها بعدما لاحظنا أن البدايات الباردة تبخس قدره.</li>
-      <li><b>العقبات التي صادفناها وما فعلناه حيالها:</b> وضع التنزيل ذو التشغيلة الواحدة يُتمّ المهمة لكنه لا ينتهي أبدًا (فقِسنا وضع الخدمة بدلًا منه)؛ وأجهزة Mac بلا شاشة تتوقف عند طلب سلسلة المفاتيح (التُفَّ عليه بمتغير البيئة الخاص بمفتاح التعمية)؛ وقاعدة بيانات دائمة لمنع التكرار ترفض إعادة إرسال ملف NZB نفسه حتى بعد محو البيانات (التُفَّ عليها بخيار force)؛ والبناء من المصدر يفشل من دون واجهة الويب المبنية على حدة (استُعيض عنها بجذمور؛ والملف التنفيذي الرسمي غير متأثر)؛ ورفض الشهادة الموقَّعة ذاتيًا لمنصة قائمة الانتظار لدينا، فمرحلة قائمة الانتظار أعلاه تستخدم العملاء الذين قبلوا الاتصال؛ وانتهت تشغيلة باردة سعتها 190 جيجابايت في يوليو إلى حالة فشل بعد 33 دقيقة، فأعدناها ونشرنا الإعادة المكتملة. وكل التفاف يصبّ في مصلحة نتيجة Weaver لا في مصلحتنا.</li>
-      <li><b>ماذا تقول الأرقام:</b> يحافظ على ذروة القرص نفسها البالغة 2.0&times; كسائر العملاء الذين يكتبون ثم يستخرجون، وتنمو حركة قرصه مع حجم المهمة أسرع من أي أحد (2.5&times; حركتنا عند 35 جيجابايت، و5.1&times; عند 190 جيجابايت) لأن مخزنه المعمَّى عند السكون يعيد قراءة وكتابة كل ما ينزّله تقريبًا. ولذلك التصميم مزايا حقيقية لا تقيسها صفحة سرعة؛ وكلفته هي ما ترونه في عمود الدخل/الخرج.</li>
-      <li><b>أعِد إنتاج ذلك:</b> المشغِّلات الدقيقة، بما فيها منصة البدء الساخن ومعالجتها للرموز، مرفقة في مجلد القياسات بمستودعنا العام. وجِّهوها إلى خوادمكم وانشروا ما تحصلون عليه.</li>
-    </ul>
-  </div>
-</section>
 
 <section id="real-lines">
   <div class="wrap">
-    <p class="kicker">إثبات النقل</p>
-    <h2>المحرّك يُشبِع الخطوط الحقيقية</h2>
+    <p class="kicker">إثبات النقل &middot; قيست على 1.2.2</p>
+    <h2>المحرّك يواكب الخطوط الحقيقية</h2>
     <ul class="plain">
-      <li><b>9.0-9.3 Gbps</b> عبر أسطول من خمسة مزوّدين على خط 10 GbE يقيس سقفه العتادي نفسه 9.8 Gbps، بوسيط مستدام 9.5-9.9 (‏M1 Ultra أوروبا، 9 أغسطس 2026). ما يتبقّى هو إقلاع أسطول بارد في مهمة من 33 ثانية، لا المعدّل نفسه.</li>
-      <li><b>4.8-4.9 Gbps مستدامة</b> على وصلة كابل بنحو 5 Gbps على الضفة الأخرى من الأطلسي، بأخذ عيّنة كل ثانية على امتداد المهمة كلها (8 أغسطس 2026). صنفان من الوصلات، وكلاهما عند المعدّل الذي يقدّمه العتاد نفسه.</li>
-      <li><b>5.44 Gbps مُستدامة</b> عبر مهمة كاملة بحجم 20.4 GB <i>بما في ذلك</i> التحقق أثناء التنزيل.</li>
-      <li><b>التسلسل بالأنابيب متكرّر عند كل RTT</b>: +64% عند 63 ms على Starlink، +170-177% عند 14 ms في مركز بيانات، +270% عند 31 ms على الساحل الشرقي. يهزم اضمحلال نافذة ازدحام TCP، لا الكمون فحسب.</li>
-      <li><b>إثبات الضغط العكسي</b>: حُدّ مرحلة الكتابة بـ 4 أضعاف دون الشبكة فيُقفَل الدخل عند الحد ±1% خلال 2 s، وتنخفض RAM، بصفر مبادلة. قرص بطيء لا يمكنه أبدًا تضخيم الذاكرة.</li>
-      <li><b>هامش المعالجة</b>: سقوف فك تشفير+تحقق مقيسة 86-165 Gbps على معالجات Apple. الشبكة هي عنق الزجاجة بـ 4-50 ضعفًا على كل جهاز اختُبر.</li>
+      <li><b>نحو 8.7 Gbps مستمرة عبر أسطول خمسة مزوّدين على خط 10 GbE، بما في ذلك
+      التحقق والاستخراج ضمن التدفّق</b> - جولة الـ87 GB أعلاه، 24 أغسطس 2026،
+      v1.2.2، 360 اتصالًا: 77.4 GB على السلك في 71 s مع تحقق الحمولة واستخراجها
+      وهي واصلة. ليس رقم اندفاع: المهمة كلها بذلك المعدل.</li>
+      <li><b>عند 1 Gbit فما دون، الخط هو الحدّ ويجلس nzbfast عليه</b>: نحو 96% من
+      خط 500 Mbit ونحو 96% من خط 250 Mbit عبر التحقق والاستخراج، بجزء من ذاكرة
+      وقرص كل منافس - قسم ما دون الجيجابت أعلاه.</li>
+      <li><b>تكلفة المعالج للمهمة كلها على مهمة الـ87 GB هي 1.7 ثانية معالج لكل
+      جيجابايت</b> مع تشغيل منظّم الاتصالات - التنزيل عبر TLS، والتحقق، وجهوزية
+      الإصلاح، والاستخراج مشمولة - مقابل 3.0 إلى 28 للميدان في الجولة نفسها؛ ينفق
+      الذراع كامل السعة أعلاه 4.3.</li>
     </ul>
-    <p class="note" style="text-align:start"><b>كم يكلّف التنزيل من زمن CPU.</b> منصة محلية
-    واحدة تقدّم المقالات من RAM بحيث لا يُقاس سوى العميل، وكل صف يذكر جولته. صفّا SABnzbd
-    وNZBGet لم يتغيّرا منذ جولة 22 يوليو - الإصدارات نفسها على الجهاز نفسه، مقيسة عبر cgroup
-    في Linux على نواة CPU واحدة - ويبقيان قائمين حتى يغيّر إصدار جديد أحدهما. أما صفوف
-    nzbfast وWeaver وrustnzb فقد قيست في 31 يوليو 2026 على M3 Ultra في الساحل الشرقي،
-    nzbfast على الإصدار الحالي وWeaver مُسخَّنًا عند أفضل ما هو موثّق له.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>العميل</th><th>ثوانٍ CPU لكل GB</th><th>مع TLS</th><th>الجولة</th></tr></thead>
-      <tbody>
-                <tr><td><b>nzbfast</b></td><td class="win num">0.43</td><td class="num">&ndash;</td><td>M5 Max، 31 يوليو، مسار محلي سعة 64 جيجابايت عند 76&ndash;79 جيجابت/ث، جميع الملفات كاملة</td></tr>
-        <tr><td><b>nzbfast</b></td><td class="num">0.58</td><td class="num">0.80</td><td>M3 Ultra في الساحل الشرقي، 31 يوليو، الإصدار الحالي</td></tr>
-        <tr><td><b>nzbfast</b></td><td class="num">0.74</td><td class="num">1.06</td><td>M1 Ultra في أوروبا، 31 يوليو، الإصدار الحالي</td></tr>
-        <tr><td><b>nzbfast</b></td><td class="num">0.72</td><td class="num">&ndash;</td><td>حاوية Linux بنواة واحدة، 22 يوليو</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">1.5</td><td class="num">&ndash;</td><td>حاوية Linux بنواة واحدة، 22 يوليو</td></tr>
-        <tr><td>‏Weaver (مُسخَّن)</td><td class="num">2.15</td><td class="num">&ndash;</td><td>M3 Ultra في الساحل الشرقي، 31 يوليو</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">3.0</td><td class="num">&ndash;</td><td>حاوية Linux بنواة واحدة، 22 يوليو</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="num">21.1</td><td class="num">22.2</td><td>M3 Ultra في الساحل الشرقي، 31 يوليو</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start">يكلّف TLS كل عميل زمن CPU؛ وقياسنا هو +38% لكل GB
-    على M3 Ultra و+44% على M1 Ultra، ولا يزال خط المعالجة يعمل عند حد نظام التشغيل نفسه
-    للمقابس المحلية البالغ نحو ~32 Gbps مع تفعيل TLS. علاوة TLS لدى rustnzb صغيرة، لكنها فوق
-    أعلى خط أساس غير مشفّر في الصفحة؛ ورقمه عمل مهمة حقيقي لا دوران خامل - فالعملية صامتة
-    تمامًا بين المهام. ورفض Weaver الشهادة الموقّعة ذاتيًا الخاصة بالمنصة، لذا تبقى خلية TLS
-    الخاصة به فارغة، ولم يُشغَّل SABnzbd وNZBGet على شوط TLS بعد - فالخلايا الفارغة غير
-    مقيسة، ولا تُقدَّر أبدًا. وعلى حاسوب محمول Intel من 2022 (i7-1280P،
-    Windows 11) يظل عمل nzbfast نفسه عند نحو ~0.7 ثانية من زمن CPU لكل GB؛ وتُضاعِف نواة
-    Windows ومضاد الفيروسات المجموع نحو ثلاث مرات، ويبلغ مسار المقابس المحلية في تلك المنصة
-    ذروته قرب 8 Gbps.</p>
-    <p class="note" style="text-align:start"><b>والتكلفة نفسها مقيسة على مهام حقيقية، بالعملاء
-    الخمسة.</b> المنصة أعلاه تعزل النقل؛ أما الجولة المُجهَّزة بالعدّادات في 31 يوليو فتقيس المهمة
-    كاملة - تنزيل عبر TLS من ستة مزوّدين، وتحقق، وإصلاح، وفكّ - بثواني معالج لكل GB مُنزَّل. وكان
-    كل عميل مستويًا عبر متون 35 و77 و190 GB، فرقم واحد لكل عميل أمرٌ صادق:</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>العميل</th><th>ثواني معالج لكل GB للمهمة كاملة</th><th>مقابل nzbfast</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">1.7</td><td>الأساس</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">4.5&ndash;4.6</td><td class="num">2.7×</td></tr>
-        <tr><td>‏Weaver (مُسخَّن)</td><td class="num">8.2&ndash;9.6</td><td class="num">5.2×</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">12.1&ndash;12.6</td><td class="num">7.2×</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">‏18×، بلا ملف قابل للاستخدام</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>قيس مقابل</b> NZBGet 26.2 وSABnzbd 5.0.4 وWeaver v0.7.5 وrustnzb 1.3.4 في 31 يوليو 2026، ومثبّت على تلك البناءات. يسقط SABnzbd 5.1 تمريرة التحقّق بعد التنزيل التي يدفع ثمنها جزء كبير من نتيجته هنا؛ صدرت 5.1.0 منذ ذلك الحين نسخةً مستقرّة وجرى سباقها: مع كل عميل عند أفضل إعداد اتصالات له هو، يقترب الفارق في الإصدار المُعمّى من +19% المقيسة في أعلى هذه الصفحة. وتحتفظ هذه الصفوف بالبناءات التي جرت مقابلها بدل أن تُعدَّل.</p>
-    <div class="callout"><b>قاعدة ثابتة: كل ادّعاء أداء يذكر الظروف التي جرى فيها</b>، بما في ذلك النتائج السلبية والمنعطفات الخاطئة.</div>
+    <p class="note" style="text-align:start">حملت قصّات أقدم من هذه الصفحة مجموعة
+    أوسع من إثباتات النقل - تشغيلات إشباع متعددة الخطوط، ومكاسب أنابيب لكل RTT،
+    وإثبات ضغط عكسي، وقياسات سقف فكّ التشفير - سُوبِقت على بُنى تجاوزها v1.2.2
+    منذ ذلك الحين. بموجب قاعدة هذه الصفحة تُسحَب بدل أن تُترك تشيخ، وتعود عند إعادة
+    قصّها على الإصدار الحالي؛ الادعاءات الثلاثة أعلاه هي ما أُعيد قياسه بالفعل على
+    v1.2.2.</p>
+    <div class="callout">قاعدة ثابتة: <b>كل ادعاء أداء يذكر الظروف التي جرى تحتها</b>،
+    بما في ذلك النتائج السلبية والمنعطفات الخاطئة.</div>
   </div>
 </section>
 
-<section class="alt" id="next-releases">
-  <div class="wrap">
-    <p class="kicker">نظرة إلى الأمام</p>
-    <h2>تتبّع الإصدارات القادمة</h2>
-    <p>العملاء الآخرون يتحسّنون أيضًا، ونحن نقيس إصداراتهم التجريبية لحظة ظهورها كي لا تتأخر
-    هذه الجداول عن الإصدار المستقر التالي لمنافس. في 31 يوليو 2026 شغّلنا بناء NZBGet
-    التجريبي 26.3-testing (28 يوليو) وSABnzbd 5.1.0RC1 مقابل المستقرَّين المثبَّتين في هذه
-    الصفحة - وكل زوج متداخل بترتيب الأقدم/الأحدث/الأحدث/الأقدم على الجهاز نفسه بإعدادات
-    متطابقة، وكل تشغيلة متحقَّق منها حتى الملف المستخرَج. شوطان: مجموعة 9.68&nbsp;GB القابلة
-    لإعادة الإنتاج والمقدَّمة من الذاكرة (أوروبا M1 Ultra)، وإصدار الـ 4K بأسماء التجزئة بحجم
-    ~35&nbsp;GB عبر المزوّدين الستة المعتادين.</p>
-
-    <div class="tblwrap"><table>
-      <tr><th>9.68 GB من الذاكرة</th><th class="num">زمن الإنهاء</th><th class="num">المعالج</th><th class="num">ذروة الذاكرة (RSS)</th></tr>
-      <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
-      <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
-      <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
-      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table></div>
-
-    <div class="tblwrap"><table>
-      <tr><th>~35 GB، 6 مزوّدين</th><th class="num">زمن الإنهاء</th><th class="num">المعالج</th><th class="num">ذروة الذاكرة (RSS)</th></tr>
-      <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
-      <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
-      <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
-      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table></div>
-
-    <p>ما الذي تحرّك: يخفض إصدار NZBGet التجريبي كلفته على المعالج بنحو الثلث وذروة ذاكرته
-    بما يصل إلى النصف، بأزمنة إنهاء لم تتغيّر - عمل كفاءة حقيقي (إصلاح حلقة دوران، وإصلاحات
-    لسباقات البيانات، وتحديث أدوات الفكّ). أما إصدار SABnzbd ‏5.1.0RC1 فيقيس ضمن
-    الضوضاء مقارنةً بـ 5.0.4 في الشوطين، ولذلك حتى 31 يوليو لم يكن الزمن حتى ملف قابل
-    للاستخدام، وهو المقياس الذي تتصدّر به هذه الصفحة، قد تحرّك لأي من العميلين في أي من
-    الشوطين.</p>
-
-    <p><b>واحد من تلك الأرقام تحرّك منذ ذلك الحين.</b> أعدنا سباق SABnzbd ‏5.1.0RC2 في
-    7 أغسطس، على الجهاز نفسه وبالتداخل نفسه: مهمة مموَّهة بحجم 34.5&nbsp;GB تستغرق مع
-    5.0.4 وRC1 ما بين 227&ndash;236&nbsp;s تنتهي في 45&ndash;59&nbsp;s على RC2، وبنحو
-    خُمس كلفة المعالج. التنزيل نفسه يستغرق 31&nbsp;s في كل النسخ - وما يزيله RC2 هو تحقق
-    par2 كامل زائد كانت النسخ الأقدم تشغّله بعد أن يكون الأرشيف قد استُخرج فعلًا، فهذا
-    تغيير في المعالجة اللاحقة لا مسار نقل أسرع. وقد قاس سباقُ متابعةٍ على الأرشيفات
-    مشفّرة الترويسات، حيث لا يستطيع الاستخراج المباشر العمل، الانخفاضَ نفسه: أزمنة تنزيل
-    متطابقة على النسختين، ومعالجة لاحقة تهبط من تحقق par2 إلى لا شيء. وما يتخلى عنه RC2
-    هو التحقق نفسه - فعلى مجموعة سليمة لم يعد يتحقق من البيانات إطلاقًا، بينما يتحقق
-    nzbfast من كل كتلة لحظة وصولها، من دون تمريرة إضافية. وما تزال الجداول المستقرة في هذه الصفحة على 5.0.4: فقد صدرت 5.1.0 مستقرةً في 10 أغسطس 2026 ثم جاءت 5.1.1 بعدها، لذا فهذه الجداول مثبّتة على بنية تجاوزها الزمن ويلزمها إعادة قياس لا تحرير.</p>
-
-    <p>يتحرك rustnzb أسرع من الجميع - خمسة إصدارات بين 1.3.4 المثبَّت لدينا (18 يوليو) و1.3.9 (28 يوليو) - فبنينا 1.3.9 من المصدر وأعدنا سباقه في اليوم نفسه. ويَعِد سجل تغييراته بإصلاحات لِما تُبلغ عنه جداولنا بالضبط («اجعل الاستخراج المباشر موثوقًا»، «ارفض المهام المكتملة بلا خرج قابل للاستخدام»): وبالقياس، ما يزال إصدار 35&nbsp;جيجابايت المموَّه يصل أجزاءً خامًا موسومة <i>منتهية</i>، في المهمة المفردة وفي قائمة الانتظار على السواء. أما الذي تغير فهو الكلفة والوتيرة: أزمنة أسرع بنحو 10%، وغاب الطحن المُشبِع للمعالج الذي قسناه على 1.3.4 عن كل مرحلة على 1.3.9 - غير أن إعادة تشغيل لـ1.3.4 في اليوم نفسه قاست منخفضة أيضًا، فتلك الكلفة إذن رهن الظروف لا مما أصلحته النسخة، ولا نذكرها في أي موضع رقمًا واحدًا.</p>
-
-    <p class="note" style="text-align:start">الأرقام في هذا القسم لبناءات تجريبية وهي قابلة
-    للمقارنة داخل هذا القسم فقط (حالة المنصّة تختلف عن الأشواط أعلاه - والمقصود هو اقتران
-    المستقر بالتجريبي). وحين تنزل هذه النسخ إصداراتٍ مستقرة، سنعيد تشغيل كل شوط منشور تتأثر
-    به ونستبدل الأرقام بدل إضافتها، وفق القاعدة الثابتة في التذييل.</p>
-  </div>
-</section>
 
 <footer><div class="wrap">
   <div class="cols">
-    <div>⚡ <b>nzbfast</b> - أداة تنزيل Usenet ذات التمريرة الواحدة.</div>
+    <div>⚡ <b>nzbfast</b> - برنامج تنزيل يوزنت أحادي المرور.</div>
     <div>
       <a href="index.ar.html">الرئيسية</a> ·
       <a href="features.ar.html">الميزات</a> ·
@@ -864,19 +1159,27 @@
       <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
     </div>
   </div>
-  <p class="fine">بيانات قياس الأداء: الأشواط التنافسية 19&ndash;31 يوليو 2026. إصدارات
-  العملاء: SABnzbd 5.0.4، NZBGet 26.2 (فرع nzbget.com)، rustnzb 1.3.4، Weaver v0.7.5 الرسمي
-  لمعمارية arm64 (استخدم شوط سقف العميل بناءه من المصدر في 23 يوليو <code>410c114</code>؛ وهو
-  لا يعلن سلسلة إصدار خاصة به). يضاف إلى ذلك أشواط البناءات الحالية من 6 إلى 9 أغسطس 2026، مقابل SABnzbd 5.1.0RC2 وNZBGet 26.3-testing وWeaver 0.7.8 وrustnzb 1.3.9؛ وكل جدول يسمّي 5.0.4 أو 26.2 أو v0.7.5 أو 1.3.4 مثبّت على تلك البناءات ويُعاد سباقه، لا تعديله، حين تصدر النسخ المستقرّة التالية.
-  إن غيّرت نسخة أحدث من أي عميل نتيجةً تغييرًا جوهريًا، فسنعيد التشغيل ونحدّث - وقسم
-  "تتبّع الإصدارات القادمة" أعلاه هو ذلك الوعد يُنفَّذ سلفًا.
-  أما أشواط المزوّدين الرئيسية (35 و77 و190 GB) وجولة التكلفة المُجهَّزة بالعدّادات فقد أُعيد
-  قياسها <b>في 31 يوليو 2026 على البناء المنشور</b>، بكل عميل، وكل شوط عبر TLS، لتحل محل أرقام
-  20&ndash;24 يوليو بدل أن تُضاف إليها. جولة المنشور التالف أحدث من بقية هذه الصفحة وتقوم بذاتها: <b>11 أغسطس 2026</b>، تسابق nzbfast 1.0.24 و1.0.23 إلى جانب SABnzbd 5.1.0 stable وNZBGet 26.3-testing وrustnzb 1.4.4 وWeaver 0.7.8، ستة أذرع في جولة متناوبة واحدة من 56 شوطًا بعشرين اتصالًا لكل خادوم. وكل شوط من الأشواط الـ 53 التي بلغت النهاية أنتج ملفًا مطابقًا بايتًا ببايت للأصل المعروف الصحة، مفحوصًا بالحجم وMD5 في كل شوط لا على عيّنة. والأشواط الأقدم القليلة الباقية (جولة قائمة الانتظار،
-  وسلّم الذاكرة المنخفضة، وصفوف الساحل الشرقي) تسبق أعمال المحرك في أواخر يوليو وهي تُقلّل من
-  شأن البناء الحالي بدل أن تُجمّله. ونُعدّ أيضًا ملفات اختبار يمكننا نشر ملفات NZB الخاصة بها،
-  لتصير أشواط المزوّدين قابلة لإعادة الإنتاج باستقلال، كما هي أشواط سقف العميل والمكوّنات
-  بالفعل. وقد تقدّمت بُنى العملاء منذ هذه الجولات: أصدرت SABnzbd الإصدار 5.1.0 ثم 5.1.1، وأصلح rustnzb في 1.4.5 إخفاقَ الإصدار المموّه الذي تسجّله جداولنا. وإعادة تلك الأشواط مستحقّة، وإلى أن تجري تحتفظ الجداول بالبُنى التي قيست عليها.</p>
+  <p class="fine">بيانات القياس في هذه الصفحة: جولتا <b>23 و24 أغسطس 2026</b> -
+  جداول التكلفة، وإعادة سباق السلك، وجولة المنشور التالف، وحدّ المساحة الحرة،
+  ومنصة سقف القرص، وإعادة سباق الاستخراج - سابقت SABnzbd 5.1.1 (5.1.0 في جولة
+  التلف)، وNZBGet 26.3-testing (بناء 20 أغسطس)، وrustnzb 1.4.5، وWeaver 0.7.8
+  (أحدث ثنائي منشور، مثبتة هويته بالتجزئة)، وخمسة مزوّدين، وTLS بالكامل - أحدث
+  الجولات على <b>بناء الإصدار v1.2.2 نفسه</b>، والباقي على خط الشيفرة الذي شُحن
+  به. أُعيد قصّ حدّ المساحة الحرة على بناء الإصدار في 24 أغسطس وأعاد إنتاج حدوده
+  تمامًا؛ تحتفظ خلايا المنافسين في جولة قيد الذاكرة بتاريخها في 23 أغسطس، مع
+  تخطّي جانبنا بسلّم v1.2.2. كل شوط مُتحقَّق منه بايت لبايت مقابل ناتج معروف
+  السلامة بدل الثقة بادعاء اكتمال عميل نفسه. منذ 20 أغسطس 2026 تسابق كل جولة
+  خمسة مزوّدين؛ لا شيء هنا يُقارَن مقابل رقم أقدم بستة مزوّدين.
+  <b>قاعدة السحب التي تتّبعها هذه الصفحة الآن:</b> حملت قصّات أقدم جولات سُوبِقت
+  مقابل بُنى منافسين تجاوزها الزمن منذ ذلك الحين، وبدل ترك تلك الجداول تشيخ نسحبها -
+  يعود السيناريو حين يُعاد سباقه على بُنى حالية، ولا يُذكر إصلاح ثابت لمنافس أبدًا
+  وكأنه حالي. جولة الطابور، وسلّم حجم المهمة، ومنصة سقف العميل، ودرجات الأرشيف
+  المتداخل، وسيناريو الملف الكبير مسحوبة بموجب تلك القاعدة اليوم وتعود مع نزول
+  إعادة سباقها؛ إعادة سباق الملف الكبير مُدرَجة بالفعل. الأقسام التي لا تسابق أي
+  بناء منافس (سلّم الذاكرة المنخفضة، وقصة القرص للشكل المشفَّر، ومبارزات المكوّنات
+  مقابل الأدوات المستقلة الحالية) تحتفظ بتواريخها الخاصة. نُحضِّر أيضًا ملفات
+  اختبار يمكننا نشر NZB الخاصة بها، لتصير أشواط المزوّدين قابلة للتكرار باستقلالية
+  بالطريقة التي تكون بها أشواط المكوّنات بالفعل.</p>
 </div></footer>
 
 </body>

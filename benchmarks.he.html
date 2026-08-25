@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>בדיקות ביצועים - nzbfast</title>
-<meta name="description" content="‏nzbfast נמדד מול ארבעה קליינטים אחרים על חומרה זהה: זמן לקובץ שמיש, וגם הדיסק, השטח הפנוי והזיכרון שכל משימה עולה. כל טבלה מציינת את הגרסאות שמולן רצה. כולל המקטעים שבהם nzbfast אינו מנצח.">
+<meta name="description" content="‏nzbfast נמדד מול ארבעה קליינטים אחרים ליוזנט על חומרה זהה: זמן לקובץ שמיש, וגם הדיסק, השטח הפנוי והזיכרון שכל משימה עולה. כל טבלה מציינת את הגרסאות שמולן רצה. כולל את המקטעים שבהם nzbfast אינו מנצח.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 <link rel="stylesheet" href="assets/site.css">
 <link rel="alternate" hreflang="en" href="benchmarks.html">
@@ -45,642 +45,1072 @@
 
 <div class="hero wrap" style="padding-bottom:6px">
   <h1>בדיקות ביצועים</h1>
-  <p class="sub">חמישה קליינטים, שמונה תרחישים, חומרה וספקים זהים, הרצות משולבות כך שסחיפת הספק מתקזזת. המדד הוא <b>זמן לקובץ שמיש</b> - מורד, מאומת, מחולץ - ולצידו הדיסק, השטח הפנוי והזיכרון שהמשימה עולה לך. כל טבלה מציינת את הגרסאות שמולן רצה ואת היום שבו רצה. כולל את המקטעים שבהם איננו מנצחים.</p>
+  <p class="sub">חמישה קליינטים, חומרה וספקים זהים, הרצות משולבות כך שסחיפת הספק מתקזזת. המדד הוא <b>זמן לקובץ שמיש</b> -
+  מורד, מאומת, מחולץ - נמדד לצד הדיסק, השטח הפנוי והזיכרון שהמשימה עולה לכם. כל טבלה מציינת את הגרסאות שמולן רצה ואת היום שבו רצה. כולל את המקטעים
+  שבהם איננו מנצחים.</p>
 </div>
 
 <div class="wrap" data-benchtoc style="padding:10px 0 2px">
   <p class="kicker">בדף הזה</p>
-  <nav aria-label="בדף הזה" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">המערך</a><a href="#what-holds" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מה משימה עולה לך</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מה באמת מתפרסם ביוזנט</a><a href="#shape-store" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ארכיונים מאוחסנים: תור משימות</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ארכיונים מוצפנים: חצי מהכתיבה</a><a href="#huge-190" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">169.7 GB → קובץ של 157 GB, בחצי משטח הדיסק (אירופה, 10 GbE)</a><a href="#by-job-size" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">זמן לקובץ שמיש, לפי גודל משימה</a><a href="#hash-named-35" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">35 GB 4K בעל שם-גיבוב → mkv שמיש (החוף המזרחי)</a><a href="#queue" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">לשמור על הקו דולק לאורך תור (החוף המזרחי, ~43 GB)</a><a href="#damaged" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">כשיש חורים בפרסום</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">המקטעים שבהם איננו מנצחים</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">סולם הזיכרון-הנמוך: 190 GB ב-~1.1 GB של RAM</a><a href="#nested" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">עשר צורות מקוננות: מי מסיים בלעדיך</a><a href="#client-ceiling" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">תקרת הקליינט: ‏9.68 GB מוגשים מ-RAM, ואפשר לשחזר את זה</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">בדיקות הביצועים הטכניות יותר, למי שאוהב עוד נתונים</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מה כל קליינט יכול לעשות</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">המנוע מרווה קווים אמיתיים</a><a href="#job-cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מה משימה עולה למכונה</a><a href="#next-releases" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מעקב אחרי הגרסאות הבאות</a></nav>
+  <nav aria-label="בדף הזה" style="display:flex;flex-wrap:wrap;gap:7px"><a href="#summary" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">אין קליינט נמדד שזול יותר במעבד, בזיכרון ובדיסק ביחד</a><a href="#setup" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">המערך</a><a href="#cost" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מה משימה עולה בגרסה 1.2.2: כל קליינט עדכני, לילה אחד, מכונה אחת</a><a href="#subgig" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ככל שהקו איטי יותר, כך הפער במהירות בין הקליינטים קטן - והחשבון גדל</a><a href="#bigfile" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">פרסום של 87 GB לקובץ שמיש של 77 GB, ב-10 GbE</a><a href="#census" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מה באמת מתפרסם ביוזנט, וכמה מזה עובר במעבר אחד</a><a href="#damaged" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">כשיש חורים בפרסום: 6.5 GB עם 60, 20 ו-5 מאמרות מתות</a><a href="#legs-we-lose" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">המקטעים שבהם איננו מנצחים</a><a href="#low-memory" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">סולם הזיכרון הנמוך: 87 GB ב-~0.3 GB של RAM</a><a href="#floor" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">כמה מעט שטח פנוי משימה צריכה</a><a href="#diskspeed" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">הדיסק שלכם קובע את תקרת המהירות שלכם</a><a href="#shape-encrypted" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">ארכיונים מוצפנים: מעבר אחד, כמו כל השאר</a><a href="#why-it-matters" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">הכונן שלכם עושה חצי מהעבודה</a><a href="#unpack-repair" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">בדיקות הביצועים הטכניות יותר, למי שאוהב עוד נתונים</a><a href="#client-matrix" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">מה כל קליינט יכול לעשות</a><a href="#real-lines" style="font-size:12px;padding:3px 9px;border:1px solid rgba(128,128,128,.34);border-radius:999px;text-decoration:none;color:inherit;opacity:.85">המנוע עומד בקצב של קווים אמיתיים</a></nav>
 </div>
+<section id="summary">
+  <div class="wrap">
+    <p class="kicker">הגרסה הקצרה &middot; נמדד 23 באוגוסט 2026 על nzbfast 1.2.2</p>
+    <h2>אין קליינט נמדד שזול יותר במעבד, בזיכרון ובדיסק ביחד</h2>
+    <p class="lead">הסבבים החדשים ביותר בדף הזה רצו ב-23 וב-24 באוגוסט 2026 - החדש שבהם
+    על <b>בניית השחרור של v1.2.2 עצמה</b> - מול הבניות העדכניות של ארבעה קליינטים
+    אחרים על חומרה, קווים וספקים זהים: שתי צורות משימה מ-6.5 עד 87 GB, וקצבי קו
+    מ-250 Mbit עד 10 GbE. לאורך הסבבים האלה אף קליינט לא היה זול יותר מ-nzbfast
+    במעבד, בזיכרון ובדיסק ביחד: כל אחד עולה יותר בלפחות שניים מהשלושה, המקסימום
+    שמישהו מהם חסך בכל ציר בודד היה כ-2 אחוזים - תיקו סטטיסטי, בתוך הפיזור הפנימי
+    של אותו קליינט בין הרצה להרצה - ובדיסק כל אחד מהם הזיז לפחות פי שניים מהבייטים
+    לתוצאה זהה בית-בית. כפי שהוא נשלח, nzbfast גם החזיק את הזיכרון הנמוך ביותר מכל
+    קליינט שנמדד, בכל תרחיש, פי 2.0 עד פי 4.5 מהמתחרה הקרוב ביותר.</p>
+    <p><b>מי מכם זה?</b></p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px">
+      <div class="callout" style="margin:0"><b>NAS, מיני מחשב, או שרת בית קטן.</b>
+      ‏nzbfast החזיק 143 MB זיכרון במשימה שבה המתחרה הקרוב ביותר החזיק 531 MB והכבד
+      ביותר 1.6 GB, מסיים עם כ-50 MB שטח פנוי לרזרבה שבו קליינטים אחרים צריכים כפול
+      מכך פנוי בערך, וסולם הזיכרון הנמוך הכניס משימה של 87 GB לדיסק ב-286 MB של RAM
+      בברירות המחדל שנשלחות. ומכיוון שהוא מזיז כל בייט על פני הדיסק שלכם פעם אחת
+      בערך, כונן NAS יכול לעמוד בקצב קו שהיה מציף אותו תחת קליינט דו-מעברי.
+      ראו <a href="#cost">טבלאות העלות</a>, <a href="#floor">שטח פנוי</a> ו-
+      <a href="#diskspeed">תקרת מהירות הדיסק</a>.</div>
+      <div class="callout" style="margin:0"><b>סיבים אופטיים בגיגה-ביט.</b> המשימה
+      מסתיימת כשמד ההורדה מתמלא, לא דקות אחר כך: האימות והחילוץ רוכבים על ההורדה,
+      החיבור שלכם אף פעם לא נח לאורך תור שלם, והדיסק שלכם רואה בערך חצי
+      מהבייטים. ראו <a href="#cost">טבלאות העלות</a> ו-<a href="#damaged">סבב
+      הפוסט הפגום</a>.</div>
+      <div class="callout" style="margin:0"><b>קו מרובה-גיגה-ביט או 10 GbE.</b> המנוע
+      מחזיק כ-8.7 Gbps מתהליך אחד כשהאימות והחילוץ רוכבים על ההורדה, וחשבון הדיסק
+      נושך ראשון: קליינט שמזיז כל בייט על פני הדיסק פעמיים או שלוש פעמים צריך דיסק
+      מהיר פי שניים או שלושה מהקו שלכם לפני שהקו עצמו הופך למגבלה. ראו
+      <a href="#bigfile">סבב ה-87 GB</a> ו-<a href="#diskspeed">תקרת מהירות
+      הדיסק</a>.</div>
+      <div class="callout" style="margin:0"><b>קו איטי יותר או משותף (250-500 Mbit).</b>
+      נמדד 24 באוגוסט 2026 בשני הקצבים: nzbfast סיים ראשון ואף קליינט אחר לא ניצח
+      אותו באף משאב שאנחנו מודדים - ב-500 Mbit הוא רץ בכ-96% מהקו לאורך האימות
+      והחילוץ, 14.7% נקי מהמתחרה הקרוב ביותר. קו צנוע הוא המקום שבו הבזבוז ניכר
+      ביותר, ושבו הקליינט הקל ביותר עוזר הכי הרבה. ראו
+      <a href="#subgig">מדרגות הקו האיטי יותר</a>.</div>
+    </div>
+    <p style="margin-top:18px">רוב הקליינטים כותבים את ההורדה שלכם לדיסק לפחות
+    פעמיים: פעם אחת בזמן ההורדה, ופעם נוספת בזמן הפריקה. ‏nzbfast עושה את כל
+    המשימה במעבר אחד, כך שהוא כותב בערך חצי מהבייטים למשימה, מחזיק פחות בזיכרון
+    בזמן העבודה, ומוציא פחות שניות מעבד לכל GB. זה פחות עומס על המכונה בזמן
+    שאתם משתמשים בה וחצי מהכתיבות למשימה על הכוננים שלכם, לאותם קבצים זהים
+    בית-בית - ומכיוון שכל בייט חוצה את הדיסק פעם אחת בערך, הכונן שלכם צריך
+    לעמוד בקצב הקו שלכם רק פעם אחת.</p>
+    <p>‏nzbfast לא מנצח בכל טבלה בעמוד הזה, והמקטעים שבהם הוא מפסיד נמצאים תחת
+    <a href="#legs-we-lose">המקטעים שבהם איננו מנצחים</a> - כולל אחד מאותו סבב
+    עצמו. מה שהחזיק בכל סבב שמדדנו הוא החשבון המשולב.</p>
+  </div>
+</section>
+
 <section style="padding-top:26px" id="setup">
   <div class="wrap">
     <p class="kicker">קודם המתודולוגיה</p>
     <h2>המערך</h2>
     <ul class="plain">
-      <li><b>קליינטים:</b> nzbfast · SABnzbd 5.0.4 · NZBGet 26.2 · rustnzb 1.3.4 · Weaver v0.7.5, כולם על אותה מכונה לכל תרחיש (מכונות Apple מסדרת M: "אירופה" M1 Ultra על 10&nbsp;GbE, "החוף המזרחי" M3 Ultra קו ~2.4-3.0 Gbps). מקטעי הספקים המובילים (35, ‏77 ו-190 GB) נמדדו מחדש ב-31 ביולי 2026 על הבנייה המשוחררת של nzbfast עם כל חמשת הקליינטים, כל מקטע מעל TLS. נותרו כמה מקטעים ישנים יותר והם מצוינים ככאלה; הם מפחיתים מהבנייה המשוחררת במקום להחמיא לה.</li>
-      <li><b>הוגנות:</b> אותם 6 ספקים × 8 חיבורים, TLS בכל מקום, המקטעים רצים משולבים בזה אחר זה. כל מתחרה מכוונן למיטבו המתועד: SABnzbd קיבל <code>pipelining_requests=8</code> (<b>הוא מגיע עם 1, כלומר ללא צנרת</b>; הגדרה זו לבדה הורידה את זמן ה-190 GB שלו מ-24m24s ל-19m02s), NZBGet קיבל ArticleCache/DirectWrite/DirectUnpack/ParQuick, ו-rustnzb את התצורה המתועדת שלו. הסבבים של 10 ו-11 באוגוסט 2026 רצו על חמישה ספקים ולא שישה, והם אומרים זאת; חמישה נעשה התקן שלנו ב-20 באוגוסט 2026, ולכן מספר שנמדד על שישה ספקים בעמוד הזה אינו בר השוואה ישירה למספר חדש יותר שנמדד על חמישה.</li>
-      <li><b>מצב סופי:</b> קובץ מאומת, מחולץ, שמיש, לא "ההורדה הסתיימה". לזה אתה באמת מחכה.</li>
-      <li><b>ניתנות לשחזור:</b> כל טענה מתוארכת ונמדדת באותה דרך: זמן שחלף + מוני בייטים של הממשק + שיא RSS של עץ התהליכים, ברזולוציה של 1-2 s. היכן שמקטע רץ על קובץ NZB שפורסם בפומבי, אנחנו נוקבים בשמו כדי שתוכלו להריץ אותו בעצמכם.</li>
+      <li><b>קליינטים:</b> nzbfast · SABnzbd · NZBGet · rustnzb · Weaver, כל טבלה על
+      הבניות שהיא מציינת. הסבבים החדשים ביותר (23 באוגוסט 2026) הריצו את הבניות
+      העדכניות אז של השדה - SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5
+      ו-Weaver 0.7.8, הבינארי המשוחרר האחרון שלו, זהות מוכחת בגיבוב - מול שורת
+      הקוד ששוחררה באותו לילה בתור <b>nzbfast 1.2.2</b>, כך שהבנייה שהפיקה את
+      המספרים החדשים היא זו שאפשר להוריד. הסבבים האלה רצו על מכונת Apple Silicon
+      עם 20 ליבות על קו של 1&nbsp;Gbit. טבלאות ישנות יותר שומרות על הבניות
+      והמכונות שמולן רצו (מכונות Apple מסדרת M: "אירופה" M1 Ultra על
+      10&nbsp;GbE, "החוף המזרחי" M3 Ultra קו ~2.4-3.0 Gbps) ואומרות זאת; הן
+      מפחיתות מהבנייה המשוחררת במקום להחמיא לה.</li>
+      <li><b>הוגנות:</b> אותם ספקים ו-TLS בכל מקום לכל קליינט, המקטעים רצים
+      משולבים בזה אחר זה. כל מתחרה מכוונן למיטבו המתועד: SABnzbd קיבל
+      <code>pipelining_requests=8</code> (<b>הוא מגיע עם 1, כלומר ללא
+      צנרת</b>, וההגדרה הזו שווה אחוזים דו-ספרתיים במשימות גדולות), NZBGet קיבל
+      ArticleCache/DirectWrite/DirectUnpack/ParQuick, ו-rustnzb את התצורה
+      המתועדת שלו. מאז 20 באוגוסט 2026 כל סבב מריץ <b>חמישה ספקים</b> ולא שישה -
+      מספר הספקים אינו מנוף תפוקה על המכונות האלה, שבהן ספק בודד יכול להגיע
+      לתקרת הקו בעצמו, ומערך קבוע שומר על הסבבים ברי-השוואה - כך שמספר על שישה
+      ספקים בעמוד הזה אינו בר-השוואה ישירה למספר חדש יותר על חמישה, וכל טבלה
+      מציינת כמה היא הריצה.</li>
+      <li><b>מצב סופי:</b> קובץ מאומת, מחולץ, שמיש - לא "ההורדה הסתיימה". לזה
+      אתם באמת מחכים.</li>
+      <li><b>ניתנות לשחזור:</b> כל טענה מתוארכת ונמדדת באותה דרך: זמן שחלף +
+      מוני בייטים של הממשק + שיא RSS של עץ התהליכים, ברזולוציה של 1-2 s. היכן
+      שמקטע רץ על קובץ NZB שפורסם בפומבי, אנחנו נוקבים בשמו כדי שתוכלו להריץ
+      אותו בעצמכם.</li>
+      <li><b>הערות שיטה שחלות על העמוד כולו:</b> זמן המעבד נדגם מעץ התהליכים
+      בתדר 2 Hz בכל זרוע של טבלה, ולעולם אינו מוצב לצד מספר מחשבונאות אחרת, כי
+      שתי השיטות חלוקות בכוונה. קלט/פלט לדיסק מצוטט ב-GiB ובייטים על הקו ב-GB
+      עשרוני; אנחנו ממירים לפני שאנחנו מחלקים. וכל טבלה שמריצה את הבנייה שלנו
+      מול הבנייה שלנו נושאת <b>בקרת A/A</b> - אותו בינארי מתחרה מול עותק
+      זהה-בית של עצמו דרך אותו מתקן - כי בקרה כזו היא איך תפסנו את מתקן ההשוואה
+      שלנו עצמו נותן קנס של כ-1.5% למי שרץ ראשון (הסיפור נמצא לצד טבלאות החילוץ
+      למטה). שתי זרועות והחלפת סדר אינן מבטלות הטיה שנוחתת תמיד על הזרוע
+      הראשונה; בקרת A/A חושפת אותה.</li>
     </ul>
   </div>
 </section>
 
-<section class="alt" id="what-holds">
+<section class="alt" id="cost">
   <div class="wrap">
-    <p class="kicker">קראו את זה קודם</p>
-    <h2>מה משימה עולה לך, ומה שינוי בעיבוד שאחרי ההורדה לא יכול להזיז</h2>
-    <p class="lead">קליינטים משתנים, ושינוי במה שקליינט עושה <em>אחרי</em> ההורדה יכול להזיז זמן סיום בלי שמסלול הרשת שלו זז בכלל. זה קרה באוגוסט 2026, ולכן כל טבלה בעמוד הזה מציינת עכשיו את הגרסאות שמולן רצה ואת היום שבו רצה. מה שהערת גרסה לא יכולה להזיז הוא שאר החשבון: הבייטים שנכתבים לדיסק שלך, השטח הפנוי שהמשימה דורשת עוד לפני שהיא מתחילה, הזיכרון שהיא מחזיקה בזמן הריצה, והאם הנתונים נבדקו בכלל.</p>
+    <p class="kicker">הסבב מ-23 באוגוסט 2026</p>
+    <h2>מה משימה עולה בגרסה 1.2.2: כל קליינט עדכני, לילה אחד, מכונה אחת</h2>
+    <p class="lead">שש זרועות על מכונת Apple Silicon עם 20 ליבות על קו של 1 Gbit:
+    nzbfast בברירות המחדל שנשלחות, אותו בינארי עם וסת החיבורים שלו כבוי, והבניות
+    העדכניות של ארבעת הקליינטים האחרים. חמישה ספקים, TLS בכל מקום, שלוש חזרות
+    לכל קליינט לכל תרחיש כשהסדר מסתובב בתוך כל סבב, והפלט של כל מקטע נבדק
+    בית-בית: 36 מתוך 36 מקטעים הפיקו את המטען המדויק. ב-1 Gbit הקו קובע את
+    הקצב וזמני הסיום מתכנסים מעצם התכנון, כך שעמודת הזמן נמצאת שם כדי להראות
+    את ההתכנסות הזו; עמודות המשאבים הן מה שהסבב קיים כדי למדוד.</p>
+    <p>חוגה אחת חשובה, והיא מוצהרת ולא קבורה: <b>ברירות המחדל שנשלחות כוללות
+    כעת וסת חיבורים מודע-קו</b>, ועל הקו הזה הוא החזיק 25 חיבורים בזמן שכל
+    קליינט אחר הריץ את המאות המוגדרות שלו. השורה "וסת כבוי" חוגה את אותם 360
+    סוקטים שהסבבים הישנים יותר שלנו השתמשו בהם, כך ששתי ההשוואות נשארות
+    זמינות: המוצר כפי שקורא מקבל אותו, והניסוי ההיסטורי.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>הפצה מעורפלת של 34.5 GB, כל קליינט בבנייה העדכנית שלו (7 באוגוסט 2026)</th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3-testing</th><th>Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
+      <thead><tr><th>פרסום בעל שם של 6.5 GB, חילוץ בנתיב</th><th>זמן לקובץ שמיש</th><th>שיא זיכרון (RSS)</th><th>זמן מעבד</th><th>קלט/פלט לדיסק (GiB)</th><th>קו (GB)</th></tr></thead>
       <tbody>
-        <tr><td>זמן לקובץ שמיש</td><td class="win">65&ndash;69 s</td><td class="lose">94&ndash;97 s (+43%)</td><td class="lose">91&ndash;105 s (+46%)</td><td class="lose">259&ndash;273 s (+297%)</td><td class="bad">אין קובץ שמיש&sup1;</td></tr>
-        <tr><td>שיא זיכרון (RSS)</td><td class="num">232&ndash;248 MB</td><td class="num">1,814&ndash;2,022 MB</td><td class="num">1,168&ndash;1,604 MB</td><td class="num">1,042&ndash;1,222 MB</td><td class="win num">150&ndash;154 MB&sup1;</td></tr>
-        <tr><td>דיסק שנכתב</td><td class="win num">32.5 GB (1.0&times;)</td><td class="num">69.1&ndash;69.2 GB (2.1&times;)</td><td class="num">64.1&ndash;64.3 GB (2.0&times;)</td><td class="num">&ndash;</td><td class="num">36.3&ndash;36.5 GB&sup1;</td></tr>
-        <tr><td>שטח פנוי נדרש</td><td class="win num">31.5 GB</td><td class="num">61.7&ndash;62.7 GB</td><td class="num">61.9&ndash;63.4 GB</td><td class="num">&ndash;</td><td class="num">35.0&ndash;35.4 GB&sup1;</td></tr>
+        <tr><td><b>nzbfast 1.2.2, ברירת מחדל (25 חיבורים)</b></td><td class="win">58 s</td><td class="win num">143 MB</td><td class="num">35.7 s</td><td class="win num">6.2</td><td class="num">6.5</td></tr>
+        <tr><td>nzbfast 1.2.2, וסת כבוי (360)</td><td class="num">60 s</td><td class="num">583 MB</td><td class="num">38.0 s</td><td class="num">6.1</td><td class="num">6.6</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">61 s</td><td class="num">801 MB</td><td class="num">40.1 s</td><td class="num">12.5</td><td class="num">6.5</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">63 s</td><td class="num">1,588 MB</td><td class="num">69.5 s</td><td class="num">13.8</td><td class="num">6.5</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">67 s</td><td class="num">628 MB</td><td class="num">61.9 s</td><td class="num">13.4</td><td class="num">7.2</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">110 s</td><td class="num">531 MB</td><td class="win num">34.9 s&sup1;</td><td class="num">12.5</td><td class="num">6.5</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>נמדד מול</b> SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ו-rustnzb 1.3.9 ב-7 באוגוסט 2026: M3 Ultra בחוף המזרחי, שישה ספקים, הכול ב-TLS, שתי הרצות לכל קליינט כשהסדר הפוך בשנייה כך שסחיפת הקו מתקזזת. כל ארבע גרסאות המתחרים הוחלפו מאז בגרסאות חדשות יותר; השורות האלה שומרות על הגרסאות שמולן נמדדו, ומורצות מחדש במקום להיערך. &sup1; ‏rustnzb העביר 36 GB על הקו, דיווח שהמשימה הסתיימה והשאיר חלק ארכיון של 1 GB בלי שום וידאו מחולץ, כך שהתאים שנראים חסכוניים הם המחיר של אי-סיום.</p>
-
-    <p><b>מהיכן מגיע הפער שלנו במשימה הזו באמת.</b> הרצנו את גרסת 5.1.0 היציבה של SABnzbd בערב שבו יצאה, 10 באוגוסט 2026. ההיסטוריה שלה עצמה מפצלת משימה להורדה ולמעבר עיבוד שאחרי ההורדה, ובהפצה המעורפלת הזו ההורדה נמשכת <b>31 s</b> בשתי הגדרות החיבורים שבדקנו, וזה בדיוק כל הזמן של nzbfast על אותו מערך, באותו לילה, על אותו קו. כלומר איננו מורידים כאן מהר ממנה ואיננו טוענים זאת: מול היציבה הנוכחית בהגדרה הטובה ביותר שלה עצמה הפער הוא <b>+19%</b>, ואותם +19% הם מעבר העיבוד שלה שאחרי ההורדה בתוספת עלות ההפעלה והתשאול, לא הקו. מה ששינוי בעיבוד שאחרי ההורדה אינו מגיע אליו הוא שאר הסבב: <b>241&ndash;334 MB</b> זיכרון מול 1,380&ndash;1,827 MB, ו-<b>32.4 GB</b> תעבורת דיסק מול 65&ndash;99 GB. אלה העמודות שכדאי לקרוא.</p>
-
-    <p><b>ארבעה מחירים שזמן סיום לא מראה.</b></p>
-    <ul class="plain">
-      <li><b>דיסק שנכתב.</b> מעבר אחד כותב את התוכן פעם אחת: 159.0 GB לקובץ של 157 GB, מול 387.4 GB ו-458.3 GB אצל הקליינטים שמניחים כל חלק ארכיון על הדיסק ואז מחלצים אותו. אותה משימה, אותו לילה, הבניות הנוכחיות של שלושתם.</li>
-      <li><b>שטח פנוי.</b> אותה משימה של 190 GB דורשת כאן 156.3 GB פנויים ו-312.7&ndash;313.0 GB אצל קליינט שכותב ואז מחלץ. זה ההבדל בין משימה שרצה לבין משימה שלא מתחילה בכלל.</li>
-      <li><b>שיא זיכרון (RSS).</b> ‏232&ndash;248 MB מול 1.8&ndash;2.0 GB על ההפצה שבטבלה למעלה, והתקרה היא הגדרה ולא תופעת לוואי: אותה משימה של 190 GB מסתיימת בתוך תקציב של 1 GB, ופרופיל NAS מסיים את המשימה של 35 GB ב-0.4 GB.</li>
-      <li><b>האם זה נבדק בכלל.</b> ‏nzbfast מאמת כל בלוק מול נתוני ה-PAR2 שפורסמו תוך כדי הגעתו ומתקן באותו מעבר, כך שקו הסיום הוא קובץ מאומת. קליינט שאינו מריץ שום מעבר אימות על מערך תקין קונה לעצמו בחזרה את השעון בכך שאינו עונה על השאלה.</li>
-    </ul>
-    <p>שניים נוספים מתגלים רק כשמשהו משתבש. הרגו את התהליך אחרי 15.6 GB מתוך משימה של 35 GB, ו-nzbfast יעלה מחדש ויסיים אותה ב-57 שניות בלי להוריד בייט אחד מחדש. ובמערך שבו כל חיבור משתתק לצמיתות אחרי 25 גופי מאמר בלי להיסגר אי פעם, מה ש-NAT של ספק תקשורת עושה להורדה ארוכה, הוא מסיים ב-26 שניות במקום שארבעת הקליינטים האחרים לוקחים 74 עד 275 שניות.</p>
-
-    <p><b>ועוד דבר אחד ששינוי הגדרה אינו מזיז.</b> מספר החיבורים הוא ההגדרה שכולם אומרים לכם להעלות, ולכן ב-10 באוגוסט 2026 הרצנו את הסבב המלא של חמישה לקוחות פעמיים באותו ערב: פעם אחת במקסימום לכל שרת שהחשבונות מפרסמים, 360 סוקטים על פני חמישה ספקים, ופעם אחת ב-8 לכל שרת, 40 סוקטים. אותן בניות, אותם מערכים, אותו קו, ועם הרצת בקרה בסוף שמראה שהקו עצמו לא נסחף בין שתי הסריקות. nzbfast זז שנייה אחת לאורך השינוי הזה פי תשעה. כל לקוח אחר מיטלטל חזק, והם אינם מסכימים על הכיוון שעוזר.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>360 סוקטים &rarr; 40 סוקטים</th><th>34.5 GB מעורפל</th><th>6.6 GB REMUX</th><th>מה זה אומר</th></tr></thead>
+      <thead><tr><th>פרסום מעורפל של 34 GB</th><th>זמן לקובץ שמיש</th><th>שיא זיכרון (RSS)</th><th>זמן מעבד</th><th>קלט/פלט לדיסק (GiB)</th><th>קו (GB)</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">31&ndash;32 &rarr; 32 s</td><td class="win num">7&ndash;8 &rarr; 7 s</td><td class="win">יציב: שנייה אחת</td></tr>
-        <tr><td>NZBGet 26.3-testing</td><td class="num">49 &rarr; 80 s</td><td class="num">12&ndash;13 &rarr; 16&ndash;17 s</td><td>רוצה סוקטים, בשתי המשימות</td></tr>
-        <tr><td>SABnzbd 5.1.0</td><td class="num">57 &rarr; 37&ndash;43 s</td><td class="num">16&ndash;17 &rarr; 17&ndash;24 s</td><td>נפגע מהסוקטים במשימה הגדולה</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="num">203&ndash;204 &rarr; 268&ndash;276 s</td><td class="num">74&ndash;84 &rarr; 22&ndash;45 s</td><td>מחליף כיוון לפי המשימה</td></tr>
-        <tr><td>rustnzb 1.4.1</td><td class="num">441&ndash;463 &rarr; 75&ndash;76 s&sup2;</td><td class="num">53&ndash;99 &rarr; 18&ndash;19 s&sup3;</td><td>נפגע מהסוקטים, בשתי המשימות</td></tr>
+        <tr><td><b>nzbfast 1.2.2, ברירת מחדל (25 חיבורים)</b></td><td class="win">302 s</td><td class="win num">191 MB</td><td class="win num">194.0 s</td><td class="win num">32.5</td><td class="num">34.4</td></tr>
+        <tr><td>nzbfast 1.2.2, וסת כבוי (360)</td><td class="win">302 s</td><td class="num">465 MB</td><td class="num">205.4 s</td><td class="num">32.9</td><td class="num">34.4</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">306 s</td><td class="num">900 MB</td><td class="num">221.3 s</td><td class="num">68.1</td><td class="num">34.4</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">308 s</td><td class="num">1,607 MB</td><td class="num">356.5 s</td><td class="num">72.5</td><td class="num">34.4</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">343 s</td><td class="num">445 MB</td><td class="num">332.6 s</td><td class="num">69.8</td><td class="num">37.8</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">511 s</td><td class="num">1,076 MB</td><td class="num">373.8 s</td><td class="num">98.0</td><td class="num">34.4</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>נמדד מול</b> SABnzbd 5.1.0, NZBGet 26.3-testing, Weaver 0.7.8 ו-rustnzb 1.4.1 ב-10 באוגוסט 2026: M1 Ultra באירופה, חמישה ספקים, הכול ב-TLS, שתי הסריקות באותו ערב, כשהגדרת הסוקטים הוחלה על כל לקוח ולא רק על שלנו. &sup2; ‏rustnzb לא סיפק שום קובץ שמיש במשימה המעורפלת באף אחת מההגדרות, ולכן השורה שלו נקראת כרגישות ולא כדירוג. הזמנים שלו גם משתנים בין חזרה לחזרה במקום שהאחרים יציבים: שלוש חזרות זהות של 6.6 GB במקסימום מדדו 91, 53 ו-99 שניות, פיזור של 1.9x, ולכן כל מספר של rustnzb כאן הוא טווח ולא מספר יחיד. NZBGet הולך לכיוון ההפוך בתור הארכיונים המאוחסנים בהמשך העמוד, בנייה ישנה יותר ומשימה אחרת, וזו בדיוק הנקודה: הכיוון אינו תכונה של ההגדרה. כשזמן סיום מיטלטל כל כך בגלל מספר יחיד בקובץ הגדרות, המספר הזה הוא חלק מהתוצאה. &sup3; המחלץ בעמודה של rustnzb היה עלינו לארוז, וארזנו אותו לא נכון: עד 11 באוגוסט מערך הבדיקה שלנו שם <code>unrar</code> בגרסת x86_64 על הנתיב שלו, ולכן במכונת ה-Apple Silicon הזו החילוץ שלו רץ בתרגום בעוד של כל שאר הלקוחות רץ באופן טבעי. מדדנו במקום לנחש: זה עולה 2.6x במחלץ אבל רק כמה שניות מעבד, ובלי זמן שאפשר להפריד. בהרצה מחודשת עם מחלץ טבעי אותה משימה חוזרת ב-16-19 שניות מול ה-18-19 שמוצג. העמודה המעורפלת לעולם אינה מגיעה למחלץ, ולכן היא ללא שינוי.</p>
-    <div class="callout">בהורדה תקינה, העיבוד המהיר ביותר שאחרי ההורדה הוא זה שאינו קיים. אנחנו משיגים את אותו זמן ובודקים כל בלוק עם הגעתו: <b>מהיר כמו לדלג על הבדיקה, מפני שאנחנו לעולם לא מדלגים עליה.</b></div>
+    <p class="note" style="text-align:start"><b>נמדד 23 באוגוסט 2026</b> מול
+    SABnzbd 5.1.1, NZBGet 26.3-testing, rustnzb 1.4.5 ו-Weaver 0.7.8, חציונים
+    של שלוש עם כל מקטע נבדק בית-בית, חמישה ספקים, הכול ב-TLS. זרועות ה-nzbfast
+    רצו על הבנייה ששוחררה שעות אחר כך באותו לילה בתור v1.2.2. &sup1; החציון של
+    המעבד של Weaver בתרחיש ה-6.5 GB נמוך ב-2% משלנו (34.9 מול 35.7) כששלושת
+    המקטעים שלו עצמו נעים בין 34.1 ל-56.1 s, כך שכדאי לקרוא זאת כתיקו סטטיסטי;
+    זהו התא היחיד בכל אחת מהטבלאות שמתחרה מחזיק, והוא חוזר תחת <a
+    href="#legs-we-lose">המקטעים שבהם איננו מנצחים</a>. בתרחיש ה-34 GB המעבד
+    שלנו הוא הנמוך ביותר באופן מוחלט. הגרסה החדשה יותר של Weaver, 0.8.3, אינה
+    משחררת שום בינארי; הבנייה שלנו מהמקור שלה מדדה דפוס מעבד שלא נוכל לייחס
+    בבירור לגרסה ולא לבנייה, ולכן הטבלה הזו מריצה את נכס השחרור 0.7.8 המוכח
+    בגיבוב ואומרת זאת במקום לפרסם מספר מבולבל. rustnzb 1.4.5 השלים כל מקטע
+    כאן, כולל תרחיש הערפול.</p>
+    <p class="note" style="text-align:start"><b>עמודת הקו, בדיוק.</b>
+    ‏6.5 GB בתרחיש הנקי - אותו מספר ש-NZBGet ו-SABnzbd מדווחים על עצמם. המקרה
+    הגרוע ביותר שאנחנו מכירים הוא פוסט מעורפל שממוספר מחדש בכוונה, שבו הניווט
+    סביב המספור המעורבב עולה מאמרה נוספת אחת לכל ניווט: נמדד ב-1.10-1.20
+    מהתוכנית המינימלית בשתי הצורות כאלה שהצלחנו לבנות. תאי ה-7.2 וה-37.8 GB של
+    rustnzb הם עודף משלו, עם אזהרה ביומן שלו בשני מקטעים.</p>
+    <p class="note" style="text-align:start"><b>מה שעמודת הזיכרון אומרת
+    בברירות המחדל:</b> הוסת הוא רוב הסיבה לכך שהשורה הנשלחת מחזיקה 143-191 MB
+    - פחות חיבורים זה פחות בתעופה - וכיבוי שלו (השורה השנייה) הוא הגשר ההוגן
+    לכל טבלה ישנה יותר של 360 סוקטים בעמוד הזה. אפילו ב-360 סוקטים אנחנו שווים
+    למתחרה הרזה ביותר (583 MB מול 628 של rustnzb בתרחיש הקטן, 465 מול 445 שלו
+    בגדול); בברירות המחדל שנשלחות לא נותר שום תיקו.</p>
+  </div>
+</section>
+
+<section id="subgig">
+  <div class="wrap">
+    <p class="kicker">קווים איטיים יותר &middot; נמדד 24 באוגוסט 2026 על nzbfast 1.2.2</p>
+    <h2>ככל שהקו איטי יותר, כך הפער במהירות בין הקליינטים קטן - והחשבון גדל</h2>
+    <p class="lead">על קו איטי מספיק, זמן הסיום של כל קליינט הוא הקו עצמו ולא
+    יותר, כך שקו איטי מסתיר הרבה חטאים. מה שהוא לא יכול להסתיר הוא מה שכל
+    קליינט שורף כדי למלא אותו. עיצבנו את מתקן ה-1 Gbit לשני קצבים שתוכניות
+    אמיתיות באמת מציעות והרצנו את כל שש הזרועות בכל אחד - אותה מכונה, אותם
+    חמישה ספקים, שלוש חזרות לכל קליינט כשהסדר מסתובב, כל מקטע נבדק בית-בית, 36
+    מתוך 36 נכונים לאורך שני הסבבים. זרוע ה-nzbfast ב-500 Mbit היא בניית
+    השחרור של v1.2.2 עצמה.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>קו 500 Mbit, פרסום של 6.5 GB</th><th>זמן לקובץ שמיש</th><th>שיא זיכרון (RSS)</th><th>זמן מעבד</th><th>קלט/פלט לדיסק (GiB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast 1.2.2, ברירת מחדל</b></td><td class="win">109 s</td><td class="win num">142 MB</td><td class="win num">45.4 s</td><td class="win num">6.2</td></tr>
+        <tr><td>nzbfast 1.2.2, וסת כבוי</td><td class="num">115 s</td><td class="num">592 MB</td><td class="num">59.0 s</td><td class="num">6.2</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">125 s</td><td class="num">1,665 MB</td><td class="num">99.2 s</td><td class="num">14.2</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">131 s</td><td class="num">626 MB</td><td class="num">92.6 s</td><td class="num">14.5</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">138 s</td><td class="num">564 MB</td><td class="num">48.5 s</td><td class="num">12.4</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">145 s&sup1;</td><td class="num">846 MB</td><td class="num">64.3 s</td><td class="num">13.2</td></tr>
+      </tbody>
+    </table></div>
+    <div class="tblwrap"><table>
+      <thead><tr><th>קו 250 Mbit, אותו פרסום</th><th>זמן לקובץ שמיש</th><th>שיא זיכרון (RSS)</th><th>זמן מעבד</th><th>קלט/פלט לדיסק (GiB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast, ברירת מחדל</b></td><td class="win">217 s</td><td class="win num">144 MB</td><td class="win num">53.3 s</td><td class="win num">6.2</td></tr>
+        <tr><td>nzbfast, וסת כבוי</td><td class="num">219 s</td><td class="num">651 MB</td><td class="num">67.9 s</td><td class="num">6.2</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">227 s</td><td class="num">826 MB</td><td class="num">78.4 s</td><td class="num">13.3</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">230 s</td><td class="num">1,667 MB</td><td class="num">162.4 s</td><td class="num">15.2</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">230 s</td><td class="num">789 MB</td><td class="num">62.0 s</td><td class="num">12.9</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">256 s</td><td class="num">644 MB</td><td class="num">122.4 s</td><td class="num">15.4</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>קראו את שתי הטבלאות כמדרג.</b> ב-250 Mbit כל השדה נוחת בתוך 18% על
+    השעון ואנחנו מובילים את המתחרה הקרוב ביותר ב-4.4%; ב-500 Mbit הפער נפתח
+    ל-14.7%; בקצבי הגיגה-ביט וה-10 GbE בטבלאות שלמעלה ולמטה הוא נפתח עוד יותר.
+    הפערים במהירות גדלים עם הקו. עמודות המשאבים לא מחכות לקו מהיר: בכל קצב
+    שנמדד, כל מתחרה החזיק לפחות פי 3.9 מהזיכרון, הוציא יותר מעבד, והזיז בערך
+    פי שניים מבייטי הדיסק לאותו קובץ זהה בית-בית.</p>
+    <p><b>וסת החיבורים מוכיח את עצמו בקווים איטיים, ומונה הזריקות של המעצב
+    עצמו אומר למה.</b> ברירות המחדל שנשלחות החזיקו 25 חיבורים במקום שכל מתחרה
+    הריץ מאות; אותו בינארי עם הוסת כבוי הריץ 360. פחות זרימות דרך תור קבוע
+    פירושו פחות אובדן ופחות שליחה חוזרת: המעצב רשם כ-4,200 זריקות למקטע מוגבל
+    מול כ-155,000 לא-מוגבל ב-500 Mbit, והזרוע המוגבלת הייתה מהירה יותר, קלה פי
+    4.2 בזיכרון וקלה פי 1.3 במעבד מהעמדה שלנו עצמנו ב-360 סוקטים. יותר חיבורים
+    אינם יותר מהירות; מתחת לגיגה-ביט זה מדיד להיפך.</p>
+    <p class="note" style="text-align:start"><b>נמדד 24 באוגוסט 2026</b>,
+    חציונים של שלוש, על מכונת Apple Silicon עם 20 ליבות שהקו שלה עוצב לכל קצב
+    (הקצב המעוצב אומת בבדיקה עצמאית לפני כל סבב: 248 ו-496 Mbit). זרוע
+    ה-nzbfast ב-500 Mbit היא בניית תגית השחרור v1.2.2; הסבב ב-250 Mbit רץ שעות
+    קודם לכן על אותה שורת קוד. ספירת הבייטים על קו מעוצב נקראת ממונה הקליינט
+    עצמו, לעולם לא מממשק הרשת (המעצב זורק ו-TCP שולח מחדש, כך שהממשק סופר את
+    שני העותקים). הזמנים ברי-השוואה בתוך כל טבלה, לא בין סבבים מעוצבים באופן
+    שונה. &sup1; שלושת המקטעים של NZBGet ב-500 Mbit נעו בין 114-158 s עם
+    קריאות משאבים שטוחות - פיזור אמיתי, כך שהחציון מצוטט והפיזור מוצהר במקום
+    לצמצם אותו.</p>
+  </div>
+</section>
+
+<section class="alt" id="bigfile">
+  <div class="wrap">
+    <p class="kicker">הקובץ הגדול &middot; נמדד 24 באוגוסט 2026 על nzbfast 1.2.2</p>
+    <h2>פרסום של 87 GB לקובץ שמיש של 77 GB, ב-10 GbE</h2>
+    <p class="lead">הקצה השני של סיפור קצב הקו: מכונת 10 GbE, חמישה ספקים,
+    פרסום של 87 GB שהמטען שלו הוא סרטון וידאו יחיד של 76.6 GB, שש זרועות, שלוש
+    חזרות מסתובבות, והפלט של כל מקטע נבדק בית-בית - 18 מתוך 18 מקטעים הפיקו
+    את הקובץ הזהה, כל שישה הקליינטים מסכימים על הצ'קסום שלו. זרועות ה-nzbfast
+    הן בניית השחרור v1.2.2.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>פרסום של 87 GB, 10 GbE</th><th>זמן לקובץ שמיש</th><th>שיא זיכרון (RSS)</th><th>זמן מעבד</th><th>קלט/פלט לדיסק (GiB)</th><th>קו (GB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast 1.2.2 (50 חיבורים)&sup1;</b></td><td class="win">70 s</td><td class="num">415 MB</td><td class="num">144 s</td><td class="win num">72.9</td><td class="num">77.2</td></tr>
+        <tr><td>nzbfast 1.2.2, וסת החיבורים דלוק (25)</td><td class="num">90 s</td><td class="win num">336 MB</td><td class="win num">130.5 s</td><td class="win num">72.9</td><td class="num">77.4</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">93 s</td><td class="num">1,195 MB</td><td class="num">443 s</td><td class="num">183.7</td><td class="num">77.2</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">113 s</td><td class="num">1,910 MB</td><td class="num">234 s</td><td class="num">235.1</td><td class="num">77.2</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">645 s</td><td class="num">1,825 MB</td><td class="num">631 s</td><td class="num">435.1&sup2;</td><td class="num">77.3</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">869 s&sup3;</td><td class="num">681 MB</td><td class="num">2,444 s</td><td class="num">216.1</td><td class="num">86.9</td></tr>
+      </tbody>
+    </table></div>
+    <p><b>סיפור הדיסק בקנה המידה הגדול ביותר עד כה.</b> שיא הדיסק שלנו במהלך
+    המשימה הוא 70.8 GiB - <b>מתחת</b> לפלט של 76.6 GB, כי הזנב של המטען עדיין
+    מגיע בזמן שהראש כבר סופי - וסך קלט/פלט הדיסק הוא פי 1.00 מהמטען. המתחרים
+    מזיזים פי 2.5 עד פי 6.0 מהבייטים לאותו קובץ. והזרוע המהירה ביותר מחזיקה
+    כ-8.7 Gbps <em>כולל</em> אימות וחילוץ בזרם; ברגע שמד ההורדה מתמלא, הקובץ
+    מוכן.</p>
+    <p class="note" style="text-align:start">&sup1; כל קליינט בעמוד הזה
+    מתחרה בהגדרות הטובות ביותר המתועדות שלו, ובקו 10 GbE שלנו זה 50 חיבורים
+    בסך הכול - 10 לכל שרת, חוגה שכל דרגת חשבון מגיעה אליה - אותו כיוונון
+    בהגדרה אחת שאנחנו נותנים לכל מתחרה (SABnzbd את הצנרת שלו, NZBGet את
+    מטמון המאמרים שלו). חמישים אינו נכות: סריקה של שש מדרגות על אותו תרחיש
+    מצאה את התקרה זהה מ-50 חיבורים עד למקסימום החשבון של 360, בזמן שעלות
+    המעבד עולה פי 2.3 לאורך הטווח הזה בלי כלום, כך שהמקסימום לא קונה שום דבר
+    שהטבלה הזו הייתה מראה. שורת 50 החיבורים נמדדה אז מחדש באיכות מלאה של שלוש
+    חזרות באותו יום, על אותה מכונה, מול אותו צ'קסום פלט: 70 / 70 / 70 s, כל
+    השלושה נבדקו בית-בית. שורת הוסת נמצאת כאן כי היא המעניינת יותר: בכל קצב
+    עד גיגה-ביט 25 החיבורים שלה חינם-עד-מהיר-יותר, ואפילו כאן, שבו הם עולים
+    בערך חמישית מהזמן, הם קונים 336 מול 415 MB זיכרון ו-130 מול 144
+    שניות-מעבד. כיוונון הוסת אוטומטית לפי קצב הקו - כך שההתנהגות הטובה ביותר
+    היא גם ברירת המחדל, בברך ולא במקסימום - נמצא בתור לגרסה הבאה.
+    &sup2; ה-435 GiB של קלט/פלט הדיסק של Weaver להורדה של 77 GB הם אחסון
+    המוצפן-במנוחה שלו קורא וכותב מחדש כמעט הכול ככל שהמשימה גדלה - הדפוס
+    העל-ליניארי שהסבבים המכשירים שלנו ביולי מדדו, עדיין נוכח בבנייה הנוכחית.
+    &sup3; ‏rustnzb 1.4.5 מסיים נכון בית-בית והעלות שלו היא זמן מעבד וקו:
+    כ-2,444 שניות-מעבד מול שעון של 869 s לאורך כל שלוש החזרות, ו-86.9 GB
+    שנמשכו במקום שהתוכנית הלהוטה היא 77.2 (הוא מושך את מערך השחזור המלא ללא
+    תנאי). נמדד 24 באוגוסט 2026, חציונים של שלוש, כל בנייה עדכנית; חזרה 3
+    בשלוש הזרועות המהירות ביותר רצה כ-40 דקות אחרי השאר (שומר שטח פנוי השהה
+    את הסבב; ההיסט לא הזיז אף חציון ביותר מפיזור החזרות).</p>
+    <h3>אותם 87 GB על Windows טבעי, מול הדגל המסחרי</h3>
+    <p class="lead">הקליינט המסחרי הראשון בעמוד הזה: Newsbin Pro, הקליינט
+    המשולם הוותיק ביותר ל-Windows, מתחרה מול הבנייה הרשמית שלנו ל-Windows על
+    מכונת Windows טבעית עם 10 GbE שכונן המערכת שלה מסוג TLC מחזיק 0.99 GB/s
+    של כתיבות - הדיסק האיטי ביותר בצי הבדיקה שלנו, מה שהופך אותו למקום ההוגן
+    להריץ בו קליינט דו-שלבי. אותו פרסום של 87 GB, שלוש חזרות משולבות, הפלט של
+    כל מקטע נבדק בית-בית מול אותו צ'קסום כמו בטבלה שלמעלה: 6 מתוך 6 זהים.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>פרסום של 87 GB, Windows, דיסק TLC</th><th>זמן לקובץ שמיש</th><th>שיא זיכרון (RSS)</th><th>זמן מעבד</th><th>קלט/פלט לדיסק (GiB)</th><th>קו (GB)</th></tr></thead>
+      <tbody>
+        <tr><td><b>nzbfast 1.2.2 (50 חיבורים)</b></td><td class="win">105 s</td><td class="win num">469 MB</td><td class="win num">154 s</td><td class="win num">84.5</td><td class="num">76.7</td></tr>
+        <tr><td>Newsbin Pro 6.90 (360 חיבורים)</td><td class="num">477 s</td><td class="num">881 MB</td><td class="num">1,862 s</td><td class="num">154.1</td><td class="num">76.7</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start">נמדד 24 באוגוסט 2026, חציונים של
+    שלוש, שני הקליינטים עדכניים. Newsbin רץ במקסימום החיבורים המוגדר לכל שרת
+    שלו עצמו - 360 סוקטים מול ה-50 שלנו - והזמנים שלו לא כוללים את 90 שניות
+    ההתייצבות שהמתקן שלנו מחכה לפני שהוא מכריז שקליינט מנוטר סיים, כך
+    שההשוואה נוטה לכיוונו פעמיים והתוצאה עומדת בכל זאת: פי 4.5 בשעון, פי 12
+    בשניות-מעבד, ופי 1.9 בזיכרון לאותו קובץ זהה. אף צד לא מוגבל-דיסק כאן -
+    הזרוע החד-מעברית צריכה כ-0.73 GB/s מתוך ה-0.99 של הכונן, ו-Newsbin ממוצע
+    שליש מכך בזמן שהיא מחזיקה כמעט ארבע ליבות מעבד עסוקות במשך שמונה דקות -
+    כך שהפער הוא הקליינט, לא החומרה. שני הקליינטים משכו את אותם בייטי קו
+    למטען. Newsbin הוא סימן מסחרי רשום של CMCE, Inc.; הקליינט מפורסם על ידי
+    DJI Interprises, LLC.</p>
   </div>
 </section>
 
 <section class="alt" id="census">
   <div class="wrap">
     <p class="kicker">המפקד</p>
-    <h2>שתי צורות הן 98.6% מהנתונים</h2>
-    <p>רוב ההשוואות בוחרות קובץ אחד. אנחנו התחלנו במקום אחר: <b>איזו צורה יש לתוכן שאנשים באמת מורידים?</b> בדקנו 890,852 פרסומים, 1.6 מיליון קבצים ו‑79.6 טרה‑בייט בשתי קבוצות הסרטים והסדרות העמוסות ביותר, ואז קראנו את כותרות הארכיון של אלף פרסומים אמיתיים כדי לאמת את מה ששמות הקבצים רק רמזו. נספר לפי <b>בייטים</b> ולא לפי פרסום, כי מיליון קבצים זעירים שוקלים פחות מקובץ גדול אחד.</p>
+    <h2>מה באמת מתפרסם ביוזנט, וכמה מזה עובר במעבר אחד</h2>
+    <p><b>נשקל מחדש באוגוסט 2026 על אוכלוסייה גדולה בהרבה.</b> מפקד יולי
+    שלמטה קרא שתי קבוצות; האינדקס שמאחוריו מחזיק כעת 13.2 מיליון פרסומים
+    ו-174.7&nbsp;TB על פני 114 קבוצות, והתמהיל זז - ארכיוני 7z גדלו מפחות
+    מ-2% מהבייטים לנתח משמעותי. נמדד מחדש על האוכלוסייה הזו, <b>כ-95%</b>
+    מבייטי הפרסומים השלמים עוברים במעבר אחד (94.3% עד 96.3% על פני ארבע דרכים
+    לחתוך את האוכלוסייה), והמסמן שבאמת חשוב אינו צורת הארכיון אלא
+    <b>הסיסמה</b>: כשליש מהבייטים צריכים אחת כדי להפיק פלט בכלל, לא משנה איזה
+    קליינט אתם מריצים. תמונת המצב של יולי נשארת למטה כתמונת המצב שהיא.</p>
+    <p>למפקד יולי בדקנו 890,852 פרסומים, 1.6 מיליון קבצים ו-79.6&nbsp;TB בשתי
+    קבוצות הסרטים והסדרות העמוסות ביותר, ואז קראנו את כותרות הארכיון של אלף
+    פרסומים אמיתיים כדי לאמת את מה ששמות הקבצים רק רמזו. נספר לפי
+    <b>בייטים</b> ולא לפי פרסום, כי מיליון קבצים זעירים שוקלים פחות מקובץ
+    גדול אחד.</p>
     <ul class="plain">
-      <li><b>2.5% מהפרסומים הם ארכיוני RAR מרובי חלקים, והם 84% מכלל הנתונים.</b> כל השאר הוא זנב ארוך של קבצים קטנים.</li>
-      <li>בתוכם: <b>84% מאוחסנים</b> (ארוזים ללא דחיסה) ו‑<b>14% מוצפנים</b>. יחד, <b>98.6%</b>.</li>
-      <li>ארכיונים דחוסים הם <b>1.4%</b>. ארכיונים מוצקים, האיטיים ביותר לחילוץ, התגלו כ<b>נכחדים</b>: אף לא אחד מתוך כ‑700 ארכיונים שקראנו.</li>
+      <li><b>2.5% מהפרסומים הם ארכיוני RAR מרובי חלקים, והם 84% מכלל
+      הנתונים.</b> כל השאר הוא זנב ארוך של קבצים קטנים.</li>
+      <li>בתוכם: <b>84% מאוחסנים</b> (ארוזים ללא דחיסה) ו-<b>14% מוצפנים</b>.
+      יחד, <b>98.6%</b>.</li>
+      <li>ארכיונים דחוסים הם <b>1.4%</b>. ארכיונים מוצקים, האיטיים ביותר
+      לחילוץ, התגלו כ<b>נכחדים</b>: אף לא אחד מתוך כ-700 ארכיונים שקראנו.</li>
     </ul>
-    <p>זה שינה את מה שאנחנו עובדים עליו. אין טעם רב לייעל נתיב דחיסה שנושא 1.4% מהנתונים, ולכן ייעלנו את השניים שנושאים את כל השאר.</p>
+    <p>זה שינה את מה שאנחנו עובדים עליו. אין טעם רב לייעל נתיב דחיסה שנושא
+    1.4% מהנתונים, ולכן ייעלנו את השניים שנושאים את כל השאר.</p>
+
     <p>גם ההצפנה אינה מתחלקת באופן אחיד. היא גדלה עם הגודל:</p>
     <div class="tblwrap"><table>
-      <tr><th>גודל הפרסום</th><th class="num">חלק מכלל הנתונים</th><th class="num">מאוחסנים</th><th class="num">מוצפנים</th></tr>
-      <tr><td>1-5 ג"ב</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr><tr><td>5-20 ג"ב</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr><tr><td>20-60 ג"ב</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr><tr><td>מעל 60 ג"ב</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
+      <tr><th>גודל הפרסום</th><th class="num">חלק מכלל הנתונים</th><th class="num">מאוחסן</th><th class="num">מוצפן</th></tr>
+      <tr><td>1-5 GB</td><td class="num">29%</td><td class="num">94%</td><td class="num">2%</td></tr>
+      <tr><td>5-20 GB</td><td class="num">39%</td><td class="num">97%</td><td class="num">2%</td></tr>
+      <tr><td>20-60 GB</td><td class="num">20%</td><td class="num">67%</td><td class="num">33%</td></tr>
+      <tr><td>מעל 60 GB</td><td class="num">12%</td><td class="num">51%</td><td class="num"><b>49%</b></td></tr>
     </table></div>
-    <p class="note">הורדות רגילות הן כמעט תמיד ארכיונים מאוחסנים פשוטים. בגדולות זו הטלת מטבע בין מאוחסנים למוצפנים. להלן כיצד nzbfast מטפל בכל אחת מהן.</p>
+    <p class="note">הורדות רגילות הן כמעט תמיד ארכיונים מאוחסנים פשוטים.
+    הגדולות הן הטלת מטבע בין מאוחסן למוצפן. הצורה המאוחסנת היא מה שכל טבלה
+    נוכחית בעמוד הזה מריצה; סיפור הדיסק של הצורה המוצפנת נמדד במדור שלה
+    למטה.</p>
   </div>
 </section>
 
-<section class="alt" id="huge-190">
-  <div class="wrap">
-    <p class="kicker">תרחיש 1 · נקי, ענק</p>
-    <h2>169.7 GB → קובץ של 157 GB, בחצי משטח הדיסק (אירופה, 10 GbE)</h2>
-    <p class="lead">nzbfast מסיים את המשימה הזו ראשון, אבל המספר ששווה להסתכל עליו הוא הדיסק. הוא
-    כותב למעשה את המטען בלבד, פעם אחת. הקליינטים שכותבים כל חלק ארכיון לדיסק ורק אז פורקים אותו
-    משלמים על אותם בייטים פי שניים וחצי עד פי שלושה, וזקוקים לפי שניים שטח פנוי רק כדי להריץ את
-    המשימה בכלל.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5.1.0RC2</th><th>NZBGet 26.3</th><th>‏Weaver 0.7.8</th><th>rustnzb 1.3.9</th></tr></thead>
-      <tbody>
-        <tr><td>דיסק שנכתב עבור קובץ של 157 GB</td><td class="win num">159.0 GB (1.0&times;)</td><td class="num">458.3 GB (2.9&times;)</td><td class="num">387.4 GB (2.4&times;)</td><td class="num">&ndash;</td><td class="num">73.8 GB&sup1;</td></tr>
-        <tr><td>שטח פנוי נדרש</td><td class="win num">156.3 GB</td><td class="num">312.7 GB</td><td class="num">313.0 GB</td><td class="num">&ndash;</td><td class="num">70.9 GB&sup1;</td></tr>
-        <tr><td>זמן לקובץ שמיש</td><td class="win">3m 14s</td><td class="lose">4m 06s (+27%)</td><td class="lose">7m 40s (+137%)</td><td class="lose">22m 57s (+610%)</td><td class="bad">אין&sup1;</td></tr>
-        <tr><td>זמן מעבד</td><td class="win num">312 s</td><td class="num">418 s</td><td class="num">771 s</td><td class="num">&ndash;</td><td class="num">3,822 s</td></tr>
-        <tr><td>שיא זיכרון (RSS)</td><td class="num">1.1 GB&sup2;</td><td class="num">1.9 GB</td><td class="num">1.3 GB</td><td class="num">1.9 GB</td><td class="win num">0.5 GB</td></tr>
-      </tbody>
-    </table></div>
-    <div class="bars">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:14%"></i></span><span class="t">3m 14s</span></div>
-      <div class="bar"><span>SABnzbd 5.1.0RC2</span><span class="trk"><i style="width:18%"></i></span><span class="t">4m 06s &middot; +27%</span></div>
-      <div class="bar"><span>NZBGet 26.3</span><span class="trk"><i style="width:33%"></i></span><span class="t">7m 40s &middot; +137%</span></div>
-      <div class="bar"><span>‏Weaver 0.7.8</span><span class="trk"><i style="width:100%"></i></span><span class="t">22m 57s &middot; +610%</span></div>
-      <div class="bar"><span>rustnzb 1.3.9</span><span class="trk dnf"><i style="width:25%"></i></span><span class="t">אין פלט&sup1;</span></div>
-    </div>
-    <p class="note" style="text-align:start">נמדד ב-6 באוגוסט 2026 על הבנייה המשוחררת. כל חמשת
-    הקליינטים רצו באותו לילה על אותו קו, לסירוגין קליינט אחר קליינט בתוך כל סבב, כך שמעטפת
-    הספקים - שנעה בין פי שניים לפי שלושה מדקה לדקה - מתקזזת במקום להעדיף את מי שבמקרה רץ
-    ראשון. כל מקטע התחיל רק אחרי שבדיקה חיה הראתה שכל ששת השרתים מאומתים, ובניות המתחרים היו המשוחררות באותו יום.
-    &sup1; rustnzb משך 186.5 GB, ‏16.8 GB יותר מהמטען, והשאיר <b>אף לא קובץ פלט אחד</b>; נתוני
-    הדיסק שלו קטנים כי דבר מעולם לא הופק. זה משחזר תוצאה זהה שנרשמה מולו מוקדם יותר. &middot; &sup2; הזיכרון של nzbfast עוקב אחר
-    <em>התקציב המוגדר</em> שלו, לא אחר המשימה: תקציב ברירת המחדל האוטומטי הגיע לשיא של 1.1 GB,
-    ומוגבל ל-<b>1 GB</b> אותה משימה עדיין מסתיימת (ראו את סולם הזיכרון-הנמוך למטה). בסבב
-    המוקדם יותר של החוף המזרחי (קו ~2.4-3.0 Gbps) אותו תרחיש רץ 9m 00s מול ‎+30% ו-‎+111%;
-    הפער מחזיק לאורך מהירויות קו.</p>
-  </div>
-</section>
 
-<section id="by-job-size">
-  <div class="wrap">
-    <p class="kicker">תרחיש 2 · הפער גדל עם הגודל</p>
-    <h2>זמן לקובץ שמיש, לפי גודל משימה</h2>
-    <p class="lead">מעבר יחיד פירושו בלי מעבר אימות/פריקה לאחר הורדה, כך שככל שהמשימה גדולה יותר,
-    כך היא נוחתת רחוק יותר קדימה. הרצות סדרתיות באותה מכונה, שנמדדו מחדש ב-31 ביולי 2026 על
-    הבנייה המשוחררת (אירופה, ‏10 GbE, הכול מעל TLS) אלא אם צוין אחרת:</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>משימה</th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>‏Weaver v0.7.5 (מחומם)</th></tr></thead>
-      <tbody>
-        <tr><td>7.4 GB REMUX (סבב ישן יותר)</td><td class="win">13.7 s</td><td class="lose">17.3 s (+26%)</td><td class="lose">19.0 s (+39%)</td><td class="num">–</td></tr>
-        <tr><td>35 GB 4K מעורפל</td><td class="win">39 s</td><td class="lose">85 s (+118%)</td><td class="lose">217 s (+456%)</td><td class="lose">258 s (+562%)</td></tr>
-        <tr><td>77 GB 4K</td><td class="win">90 s</td><td class="lose">206 s (+129%)</td><td class="lose">504 s (+460%)</td><td class="lose">509 s (+466%)</td></tr>
-        <tr><td>87 GB על דיסק עם 97 GB פנויים (סבב ישן יותר)</td><td class="win">3m 08s</td><td class="bad">לא יכול לרוץ²</td><td class="bad">לא יכול לרוץ²</td><td class="bad">לא יכול לרוץ²</td></tr>
-        <tr><td>190.6 GB</td><td class="win">4m 47s</td><td class="lose">9m 06s (+90%)</td><td class="lose">19m 29s (+307%)</td><td class="lose">23m 38s (+394%)</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>נמדד מול</b> NZBGet 26.2, SABnzbd 5.0.4 ו-Weaver v0.7.5 ב-31 ביולי 2026, ומוצמד לאותן בניות. ‏SABnzbd 5.1 מוותר על מעבר האימות שאחרי ההורדה שחלק גדול מהתוצאה שלו כאן משלם עליו; מאז יצאה 5.1.0 כגרסה יציבה והורצה: כשכל לקוח בהגדרת החיבורים הטובה ביותר שלו עצמו, הפער בהפצה המעורפלת קרוב יותר ל-+19% שנמדדו בראש העמוד. השורות האלה שומרות על הבניות שמולן רצו במקום שייערכו.</p>
-    <p class="note" style="text-align:start">rustnzb הריץ כל מקטע ולא סיפק קובץ שמיש באף אחד מהם,
-    ולכן אין לו עמודה כאן; הפרטים נמצאים במדור העלות שלמטה. ‏Weaver נמדד לפי פרוטוקול המקרה הטוב
-    המחומם שלו (דמון מתמיד, משימת חימום שנזרקת, חיבורים שמטפסים ל-120 לפני שהשעון מתחיל).
-    ² טביעת הרגל השיא שלהם (כרכים + פלט מפורק בו-זמנית, ~156 GB) עברה את 97 GB הפנויים. מעבר
-    יחיד צריך פי 1 מגודל התוכן: הוא מקצץ בחצי את הדיסק שאתם צריכים, לא רק את הזמן. הרצות nzbfast
-    חוזרות על קורפוסי ה-35 וה-77 GB באותו בוקר נתנו ממוצע של 39.7 s ו-94 s (3 מקטעים לכל אחד),
-    כך שהמספרים החד-פעמיים שלמעלה אינם הרצות מהירות שנבחרו בקפידה.</p>
-  </div>
-</section>
 
-<section class="alt" id="hash-named-35">
-  <div class="wrap">
-    <p class="kicker">תרחיש 3 · פוסט מעורפל</p>
-    <h2>35 GB 4K בעל שם-גיבוב → mkv שמיש (החוף המזרחי)</h2>
-    <p class="lead">כל קובץ בפרסום הוא גיבוב הקסדצימלי; המטען מקבל את שמו האמיתי רק ממטא-נתוני PAR2. הורץ מחדש ב-31 ביולי 2026 על הבנייה המשוחררת, כל חמשת הלקוחות, הכול מעל TLS (תקלת המתקן שמאחורי אות הסיום של SABnzbd - ממשק ההיסטוריה שלו מחזיר 10 משבצות כברירת מחדל - תוקנה, ולכן כל מספר להלן עדכני):</p>
-        <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>NZBGet 26.2</th><th>SABnzbd 5.0.4</th><th>Weaver v0.7.5 (מחומם)</th><th>rustnzb 1.3.4</th></tr></thead>
-      <tbody>
-        <tr><td>זמן לקובץ שמיש</td><td class="win">76&ndash;83 s</td><td class="lose">125 s (+57%)</td><td class="lose">245 s (+208%)</td><td class="lose">261 s (+228%)</td><td class="bad">אין קובץ שמיש³</td></tr>
-        <tr><td>זמן מעבד</td><td class="win num">55&ndash;56 s</td><td class="num">113 s</td><td class="num">369 s</td><td class="num">240 s</td><td class="num">124&ndash;131 s</td></tr>
-        <tr><td>שיא זיכרון (RSS)</td><td class="num">0.45 GB</td><td class="num">1.31 GB</td><td class="num">1.98 GB</td><td class="num">1.13 GB</td><td class="win num">0.15 GB</td></tr>
-        <tr><td>שיא דיסק נוסף</td><td class="win num">31.8 GB (1.0×)</td><td class="num">62.8 GB (2.0×)</td><td class="num">63.6 GB (2.0×)</td><td class="num">64.4 GB (2.0×)</td><td class="num">35.4 GB†</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>נמדד מול</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ו-rustnzb 1.3.4 ב-31 ביולי 2026, ומוצמד לאותן בניות. ‏SABnzbd 5.1 מוותר על מעבר האימות שאחרי ההורדה שחלק גדול מהתוצאה שלו כאן משלם עליו; מאז יצאה 5.1.0 כגרסה יציבה והורצה: כשכל לקוח בהגדרת החיבורים הטובה ביותר שלו עצמו, הפער בהפצה המעורפלת קרוב יותר ל-+19% שנמדדו בראש העמוד. השורות האלה שומרות על הבניות שמולן רצו במקום שייערכו.</p>
-    <p class="note" style="text-align:start">³ rustnzb הוריד ב-97 שניות, סימן את העבודה כ<i>מוכנה</i> וסיפק את הכרכים המעורפלים הגולמיים: בלי שינוי שם, בלי חילוץ - גם ב-1.3.4 וגם ב-1.3.9 († מספר הדיסק שלו הוא ההורדה בלבד). nzbfast פענח את הערפול ממטא-נתוני PAR2 וחילץ תוך כדי ההורדה, אפס בלוקים שנקראו מחדש; הטווח 76&ndash;83 שניות הוא המקטע הראשון והאחרון שלו בסבב. מול הגרסה מ-23 ביולי של טבלה זו, הבנייה המשוחררת מהירה כאן יותר עם פי 3.4 פחות זיכרון (1.55 → 0.45 GB): עבודת המעבר היחיד מסוף יולי, שנמדדה על אותה מכונה ואותו מאגר.</p>
-  </div>
-</section>
-
-<section id="job-cost">
-  <div class="wrap">
-    <p class="kicker">הסבב עם המדידים</p>
-    <h2>מה משימה עולה למכונה: מעבד, זיכרון, דיסק וקלט/פלט</h2>
-    <p class="lead">השעון לבדו מסתיר לאן הלכה העבודה, ולכן ב-31 ביולי 2026 כל קליינט הריץ את אותן
-    שלוש משימות כשהמדידים דולקים: שניות-מעבד של עץ התהליכים (בלתי תלויות במהירות הקו), שיא זיכרון
-    (RSS), קו-השיא של הדיסק מעל נקודת ההתחלה של המקטע (בדגימה כל 2 s), ותעבורת קלט/פלט כוללת אל
-    הדיסק. אותה מכונה, אותם שישה ספקים, הכול מעל TLS, מקטע מדוד אחד לכל קליינט לכל משימה. זו
-    הטענה על מעבר יחיד נמדדת ולא מוצהרת: שיא הדיסק של nzbfast הוא המטען עצמו, והקלט/פלט שלו שווה
-    לכתיבת כל בייט פעם אחת.</p>
-
-    <p class="note" style="text-align:start"><b>נמדד מול</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ו-rustnzb 1.3.4 ב-31 ביולי 2026, ומוצמד לאותן בניות. ‏SABnzbd 5.1 מוותר על מעבר האימות שאחרי ההורדה שחלק גדול מהתוצאה שלו כאן משלם עליו; מאז יצאה 5.1.0 כגרסה יציבה והורצה: כשכל לקוח בהגדרת החיבורים הטובה ביותר שלו עצמו, הפער בהפצה המעורפלת קרוב יותר ל-+19% שנמדדו בראש העמוד. השורות האלה שומרות על הבניות שמולן רצו במקום שייערכו.</p>
-
-    <div class="tblwrap"><table>
-      <thead><tr><th>35 GB מעורפל (מטען 32 GB)</th><th>זמן</th><th>מעבד</th><th>שניות-מעבד/GB</th><th>שיא זיכרון (RSS)</th><th>שיא דיסק נוסף</th><th>קלט/פלט לדיסק</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">39 s</td><td class="win num">59 s</td><td class="win num">1.7</td><td class="num">0.41 GB</td><td class="win num">31.8 GB (1.0×)</td><td class="win num">31.9 GB</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">85 s</td><td class="num">157 s</td><td class="num">4.6</td><td class="num">1.45 GB</td><td class="num">62.0 GB (1.9×)</td><td class="num">66.2 GB</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">217 s</td><td class="num">416 s</td><td class="num">12.1</td><td class="num">1.38 GB</td><td class="num">63.6 GB (2.0×)</td><td class="num">66.1 GB</td></tr>
-        <tr><td>‏Weaver (מחומם)</td><td class="num">258 s</td><td class="num">304 s</td><td class="num">8.8</td><td class="num">1.21 GB</td><td class="num">64.2 GB (2.0×)</td><td class="num">94.4 GB</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="bad">לא הושלם† (75 s)</td><td class="bad num">1,201 s</td><td class="bad num">31.7</td><td class="num">0.19 GB</td><td class="num">34.8 GB†</td><td class="num">35.6 GB†</td></tr>
-      </tbody>
-    </table></div>
-
-    <div class="tblwrap"><table>
-      <thead><tr><th>77 GB (מטען 72 GB)</th><th>זמן</th><th>מעבד</th><th>שניות-מעבד/GB</th><th>שיא זיכרון (RSS)</th><th>שיא דיסק נוסף</th><th>קלט/פלט לדיסק</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">90 s</td><td class="win num">135 s</td><td class="win num">1.7</td><td class="num">0.57 GB</td><td class="win num">71.3 GB (1.0×)</td><td class="win num">71.5 GB</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">206 s</td><td class="num">348 s</td><td class="num">4.5</td><td class="num">1.30 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">171.5 GB</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">504 s</td><td class="num">978 s</td><td class="num">12.6</td><td class="num">3.03 GB</td><td class="num">142.8 GB (2.0×)</td><td class="num">258.5 GB</td></tr>
-        <tr><td>‏Weaver (מחומם)</td><td class="num">509 s</td><td class="num">635 s</td><td class="num">8.2</td><td class="num">1.53 GB</td><td class="num">145.3 GB (2.0×)</td><td class="num">315.2 GB</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="bad">לא הושלם† (166 s)</td><td class="bad num">2,665 s</td><td class="bad num">31.3</td><td class="num">0.36 GB</td><td class="num">80.0 GB†</td><td class="num">80.8 GB†</td></tr>
-      </tbody>
-    </table></div>
-
-    <div class="tblwrap"><table>
-      <thead><tr><th>190 GB (מטען 157 GB)</th><th>זמן</th><th>מעבד</th><th>שניות-מעבד/GB</th><th>שיא זיכרון (RSS)</th><th>שיא דיסק נוסף</th><th>קלט/פלט לדיסק</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">287 s</td><td class="win num">290 s</td><td class="win num">1.7</td><td class="num">1.11 GB</td><td class="win num">156.6 GB (1.0×)</td><td class="win num">159.0 GB</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">546 s</td><td class="num">764 s</td><td class="num">4.5</td><td class="num">1.93 GB</td><td class="num">312.9 GB (2.0×)</td><td class="num">393.0 GB</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">1,169 s</td><td class="num">2,081 s</td><td class="num">12.3</td><td class="num">1.80 GB</td><td class="num">312.8 GB (2.0×)</td><td class="num">586.8 GB</td></tr>
-        <tr><td>‏Weaver (מחומם)</td><td class="num">1,418 s</td><td class="num">1,625 s</td><td class="num">9.6</td><td class="num">2.04 GB</td><td class="num">317.3 GB (2.0×)</td><td class="num">808.9 GB</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="bad">לא הושלם† (348 s)</td><td class="bad num">5,745 s</td><td class="bad num">30.8</td><td class="num">0.54 GB</td><td class="bad">אין פלט†</td><td class="num">74.0 GB†</td></tr>
-      </tbody>
-    </table></div>
-
-    <p><b>אותה משימה, מצוירת.</b> מעבד ושיא דיסק במשימת ה-190 GB, מוקנים ביחס לקליינט הכבד
-    ביותר:</p>
-    <div class="bars wide">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:5%"></i></span><span class="t">290 שניות-מעבד</span></div>
-      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:13%"></i></span><span class="t">764 שניות-מעבד</span></div>
-      <div class="bar"><span>‏Weaver (מחומם)</span><span class="trk"><i style="width:28%"></i></span><span class="t">1,625 שניות-מעבד</span></div>
-      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:36%"></i></span><span class="t">2,081 שניות-מעבד</span></div>
-      <div class="bar"><span>rustnzb</span><span class="trk dnf"><i style="width:100%"></i></span><span class="t">5,745 שניות-מעבד · אין פלט†</span></div>
-    </div>
-    <div class="bars wide" style="margin-top:14px">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:49%"></i></span><span class="t">156.6 GB שיא דיסק · 1.0×</span></div>
-      <div class="bar"><span>SABnzbd</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.8 GB · 2.0×</span></div>
-      <div class="bar"><span>NZBGet</span><span class="trk"><i style="width:99%"></i></span><span class="t">312.9 GB · 2.0×</span></div>
-      <div class="bar"><span>‏Weaver (מחומם)</span><span class="trk"><i style="width:100%"></i></span><span class="t">317.3 GB · 2.0×</span></div>
-    </div>
-
-    <p class="note" style="text-align:start">† rustnzb לא חילץ באף אחת משלוש העבודות אף שדיווח <i>מוכן</i> בכל פעם; מספרי הדיסק שלו משמיטים את עותק החילוץ שכל לקוח אחר שילם, המעבד שלו (כ-16 ליבות רוויות לאורך מקטעים שלמים, פי 20 מ-nzbfast לכל GB במקטעים אלה) נראה כטחינת תיקון מתמשכת שמעולם לא הפיקה את המטען - הרצה חוזרת באותו יום והמרוץ החוזר על 1.3.9 מדדו שניהם את הטחינה הזו כנעדרת, ולכן זהו מצב שההרצות שלו עלולות להיתקל בו ולא קבוע, והתאים האלה הם מה שהמקטעים המנוטרים שלנו רשמו ולא תעריף שהוא תמיד משלם; ובעבודת 190 GB תיקיית הפלט שלו הייתה ריקה. קריאות על פני שלושת הגדלים: nzbfast נשאר שטוח על <b>1.7 שניות מעבד לכל GB ושיא דיסק של פי 1.0 מהמטען</b> מ-35 עד 190 GB; NZBGet ו-SABnzbd שומרים על שיא נקי של פי 2.0; הקלט/פלט של Weaver גדל באופן על-ליניארי (94 → 315 → 809 GB, 3.0× → 5.1× משלנו) משום שאחסונו המוצפן במנוחה קורא וכותב מחדש כמעט הכול, וזו גם הסיבה לכך שהזמן שהוא לוקח גדל כפי שהוא גדל. ועמודת הדיסק היא אילוץ קשיח, לא העדפה: המשימה של 190 GB דורשת ~313 GB פנויים בכל לקוח שכותב ואז פורק, ו-157 GB ב-nzbfast. לפרסומים פגומים יש כעת סבב משלהם, שנמדד מחדש על הגרסה הנוכחית: ראו <a href="#damaged">כשיש חורים בפרסום</a>.</p>
-  </div>
-</section>
-
-<section id="queue">
-  <div class="wrap">
-    <p class="kicker">תרחיש 4 · תור של שלושה</p>
-    <h2>לשמור על הקו דולק לאורך תור (החוף המזרחי, ~43 GB)</h2>
-    <p class="lead">שלוש עבודות שנוספו בבת אחת - REMUX של 7.4 GB, מהדורת ה-4K בגודל 35 GB עם שמות גיבוב ופרסום קטן של 0.35 GB - והשעון רץ עד שכל מטען נמצא על הדיסק, מאומת ומחולץ. נמדד מחדש ב-31 ביולי 2026 על הבנייה המשוחררת, כל חמשת הלקוחות; אחד מששת הספקים דחה את האימות לאורך כל הסבב, באופן זהה לכל לקוח.</p>
-        <div class="tblwrap"><table>
-      <thead><tr><th></th><th>nzbfast</th><th>rustnzb 1.3.4 / 1.3.9</th><th>NZBGet</th><th>SABnzbd</th><th>Weaver (מחומם)</th></tr></thead>
-      <tbody>
-        <tr><td>זמן לסיום התור</td><td class="win">144&ndash;148 s</td><td class="bad">לא הושלם¹ (138 / 125 s)</td><td class="num">164 s</td><td class="num">249 s</td><td class="num">328 s</td></tr>
-        <tr><td>עבודות שסופקו כשמישות</td><td class="win">3/3</td><td class="bad">2/3¹ (שתי הגרסאות)</td><td class="num">3/3</td><td class="num">3/3</td><td class="num">3/3</td></tr>
-        <tr><td>קו בטל (&lt;20 MB/s)</td><td class="num">49 s (34%)²</td><td class="bad">23 s (16%)¹</td><td class="win">6 s (3%)</td><td class="bad">158 s (63%)</td><td class="num">139 s (42%)</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start">nzbfast מסיים ראשון מבין הלקוחות שמספקים את כל שלושת המטענים. ¹ העמודה של rustnzb היא פרישה, לא תוצאה: השעון שלו נעצר ראשון (138 שניות ב-1.3.4, 125 שניות ב-1.3.9, החדשה ביותר אז, שהורץ כדי לתת לו את הסיכוי הטוב ביותר) משום שסיפק את עבודת 35 ה-GB ככרכים מעורפלים גולמיים המסומנים <i>Completed</i> - בלי שינוי שם, בלי חילוץ, בשתי הגרסאות (ראו את מקטע המעקב להלן). קו סיום שהוא לא חצה אינו בר-השוואה ללקוחות שחצו אותו, ולכן כל תא בעמודה ההיא מסומן כלא תקף ולא כמהיר. SABnzbd משאיר שוב את הקו <b>חשוך ב-63% מהריצה</b> בזמן עיבוד סופי טורי - המספר היחיד כאן שנשאר יציב בכל גרסה של טבלה זו. NZBGet לעולם אינו בטל אך משלם על החילוץ המקבילי בזמן הסיום שלו. ² חלק הבטלה שלנו כן ועדכני, והוא המספר שזז הכי הרבה: שניים מששת הספקים לא היו זמינים בסבב הזה, והחפיפה בין עבודות זקוקה לשרת פנוי שעליו תרוץ העבודה הבאה - המדידה הזאת תפסה את המנוע בונה את העבודה הבאה על שרת מת, והתיקון שבא בעקבותיה עושה משהו טוב יותר מנסיגה: כשכל שרת פנוי מסרב לענות, המנוע שואל פרוסה תחומה של חיבורים מהשרתים העסוקים ושומר על החפיפה. נמדד מחדש במבחן ספיגה ב-2 באוגוסט 2026 באותו מצב של ספק מת: הפערים באמצע הריצה שהרכיבו את התא הזה נעלמו (49 שניות של בטלה בין עבודות אז, פחות מ-6 שניות עכשיו), כשהעבודה הבאה רוכבת כולה על חיבורים שאולים. בגרסת החוסן (עבודה אחת עם כותרות RAR מוצפנות, סבב ישן יותר), התור של SABnzbd נתקע על העבודה המוצפנת ורק עבודה 1 מתוך 3 הסתיימה אי פעם; nzbfast החנה אותה עם הודעה ברורה וסיים את השאר.</p>
-  </div>
-</section>
 
 <section id="damaged">
   <div class="wrap">
-    <p class="kicker">תרחיש 5 &middot; פרסום פגום</p>
-    <h2>כשיש חורים בפרסום: 6.5 GB עם 60 מאמרות מתות</h2>
-    <p class="lead">כל התרחישים שלמעלה מניחים שהפרסום מגיע שלם. רבים אינם מגיעים כך - מאמרות פגות, שרת מפיל אותן בשקט, העלאה נוחתת חלקית - וזה בדיוק המקרה שסביבו תוכנן המנוע הזה. זה גם המקום שבו הפער בין הלקוחות רחב ביותר. נמדד ב-11 באוגוסט 2026 על המכונה של 10 GbE, כל שש הזרועות התחרו בסבב מתחלף אחד, שלוש חזרות לכל אחת, 20 חיבורים לכל שרת, חמישה ספקים. אותו REMUX של 6.5 GB בשלושה מצבים: 60 מאמרות מתות, 5 מאמרות מתות, ותקין כביקורת. הפלט של כל מקטע חושב לתקציר מול הקובץ הידוע כתקין, ו-53 מתוך 56 המקטעים חזרו זהים בית-בית.</p>
-
+    <p class="kicker">הפוסט הפגום &middot; הורץ מחדש 24 באוגוסט 2026, כל בנייה עדכנית</p>
+    <h2>כשיש חורים בפרסום: 6.5 GB עם 60, 20 ו-5 מאמרות מתות</h2>
+    <p class="lead">מאמרות פגות, שרתים משמיטים אותן בשקט, העלאות נוחתות באופן
+    חלקי - והנזק הוא המקום שבו הפער בין הקליינטים הרחב ביותר, ולכן הוא מקבל
+    סבב משלו על הבנייה החדשה ביותר של כל קליינט, nzbfast v1.2.2 כלול: מכונת
+    אירופה 10 GbE, חמישה ספקים, 100 חיבורים לכל קליינט, אותו פרסום של 6.5 GB
+    מורעל בשלוש רמות נזק, שלוש חזרות לכל זרוע כשהסדר מתחלף, כל מקטע נבדק
+    בית-בית מול הקובץ הנקי. 63 מתוך 65 מקטעים חזרו זהים בית-בית; השניים שלא,
+    שמם מוזכר למטה, כי הם תוצאות.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>זמן עד קובץ מאומת ושמיש</th><th class="num">60 מאמרות מתות</th><th class="num">5 מאמרות מתות</th><th class="num">תקין</th></tr></thead>
+      <thead><tr><th>זמן לקובץ מאומת ושמיש (ממוצע של 3)</th><th>60 מאמרות מתות</th><th>20 מתות</th><th>5 מתות</th></tr></thead>
       <tbody>
-        <tr><td><b>nzbfast 1.0.24</b></td><td class="win">13 s</td><td class="win">9 s</td><td class="win">7 s</td></tr>
-        <tr><td>NZBGet 26.3-testing</td><td class="num">30 s</td><td class="num">18&ndash;21 s</td><td class="num">12 s</td></tr>
-        <tr><td>SABnzbd 5.1.0</td><td class="num">34 s</td><td class="num">23 s</td><td class="num">14&ndash;20 s</td></tr>
-        <tr><td>rustnzb 1.4.4</td><td class="num">102 s</td><td class="num">45 s</td><td class="num">17&ndash;19 s</td></tr>
-        <tr><td>Weaver 0.7.8</td><td class="bad">לא סיים¹</td><td class="num">194 s</td><td class="num">32&ndash;65 s</td></tr>
+        <tr><td><b>nzbfast 1.2.2</b></td><td class="win">13.0 s</td><td class="win">10.0 s</td><td class="win">8.7 s</td></tr>
+        <tr><td>nzbfast 1.2.2, תיקון מוקדם כבוי</td><td class="num">29.3 s</td><td class="num">19.0 s</td><td class="num">12.3 s</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">33.0 s</td><td class="num">23.7 s</td><td class="num">23.0 s</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">48.0 s&sup1;</td><td class="num">28.0 s</td><td class="num">24.3 s</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">107.3 s&sup2;</td><td class="num">51.3 s</td><td class="num">47.0 s</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="bad">לא הסתיים&sup3;</td><td class="bad">לא הסתיים&sup3;</td><td class="num">194.0 s</td></tr>
       </tbody>
     </table></div>
-
-    <p>קראו לאורך השורה ולא במורד העמודה. בפרסום תקין הפער רגיל: אנחנו מסיימים משימה של 6.5 GB ב-7 שניות מול 12 של NZBGet, בערך פי 1.7&times;. הכניסו 60 מאמרות מתות לאותו פרסום והפער מתרחב לפי <b>2.3&times;</b>, וכל לקוח מלבד שלנו מבלה את רוב הזמן הנוסף בלא לעשות דבר. נזק אינו מקרה קצה שעולה לכולם באותה מידה; הוא המקרה שמפריד בין התכנונים.</p>
-
-    <p><b>מהי ההמתנה הזאת באמת.</b> כשמאמרה חסרה, לקוח שואל את השרת הבא, ואז את הבא, עד שכל שרת סירב לה. המעבר הזה טורי והוא איטי מסיבות שאינן בשליטת איש: סירוב לוקח בין 79 ms ל-2.2 שניות תלוי איזו עמוד שדרה עונה, ומעבר מלא על חמישה מהם מגיע לכ-5 שניות. עשו זאת עבור הזנב של פרסום פגום וההורדה תעמוד על אפס בזמן שהשעון רץ. רוב 30 השניות של NZBGet ו-23 השניות הישנות שלנו הן בדיוק זה, לא חשבון תיקון - התיקון עצמו לוקח כ-2.3 שניות בכל גרסה שמדדנו.</p>
-
-    <p><b>מה שינתה הגרסה הזאת.</b> הגרסה של היום מפסיקה לשאול. ברגע שנתוני הזוגיות שכבר בידיה מכסים את מה שעדיין חסר, אין דבר להרוויח מהשלמת המעבר, ולכן היא מתקנת מיד במקום זאת. שתי הגרסאות שלמטה התחרו באותו סבב עצמו, כך שזה לפני ואחרי ולא שני מספרים מימים שונים:</p>
-
-    <div class="tblwrap"><table>
-      <thead><tr><th></th><th class="num">60 מאמרות מתות</th><th class="num">5 מאמרות מתות</th><th class="num">תקין</th></tr></thead>
-      <tbody>
-        <tr><td>nzbfast 1.0.23 (הגרסה של אתמול)</td><td class="num">23 s</td><td class="num">16 s</td><td class="num">7 s</td></tr>
-        <tr><td><b>nzbfast 1.0.24 (הגרסה הזאת)</b></td><td class="win">13 s</td><td class="win">9 s</td><td class="num">7 s</td></tr>
-      </tbody>
-    </table></div>
-
-    <p>פרסום פגום קשות מסתיים בקצת יותר ממחצית הזמן שלקח לו אתמול, ופרסום תקין נשאר ללא שינוי על 7 שניות, וזו בדיוק הנקודה: השינוי עושה משהו רק כשמאמרות באמת חסרות. אישרנו זאת ישירות ולא בהיסק, על ידי הרצת אותה גרסה חדשה כשההתנהגות מכובה - היא חוזרת ל-23&ndash;25 שניות, ונוחתת כמעט בדיוק על הגרסה הישנה.</p>
-
-    <p><b>מה זה עולה, כי זה אינו חינם.</b> תיקון מוקדם פירושו להחזיק את נתוני השחזור בזיכרון במקום להביא אותם אחר כך, כך שבפרסום פגום קשות שיא הזיכרון (RSS) עולה מכ-0.8 GB לכ-1.3 GB, ואנחנו מושכים מהשרתים בערך 400 MB יותר. בפרסום תקין דבר אינו משתנה: שיא הזיכרון הוא 0.24 GB כך או כך, כמו בגרסה הישנה. אם האילוץ שלכם הוא טביעת הזיכרון הקטנה ביותר האפשרית דווקא בפרסומים פגומים, העסקה הזאת הולכת אצלנו כעת לכיוון השני, וההגדרה נמצאת בלוח המחוונים.</p>
-
-    <p class="note" style="text-align:start">¹ Weaver לא סיים אף אחד משלושת המקטעים ב-60 מאמרות מתות, 20 דקות כל אחד. זו אינה תוצאה איטית אלא תקועה: הוא השלים 1 מתוך 73 הקבצים בפרסום בתוך השנייה הראשונה, ואז לא התקדם עוד ב-18&nbsp;הדקות הנותרות בזמן שהחזיק חיבורים פתוחים, והשאיר כרכים חלקיים על הדיסק. העמודה מסומנת כאי-סיום ולא נמדדת בזמן, לפי אותו כלל שאנחנו מחילים כאן על כל לקוח. זה ייחודי לנזק כבד - ב-5 מאמרות מתות הוא השלים נכון ב-194 שניות, ותקין ב-32 שניות - כך שזו צורה אחת שהוא אינו מצליח לעבור כרגע ולא כשל כללי. <b>עמודת 5 המאמרות של NZBGet ניתנת כטווח בכוונה.</b> בהגדרת החיבורים הזאת שלושת המקטעים שלו היו צמודים (18, 21, 18 שניות), אך במספרי חיבורים גבוהים יותר מדדנו שוב ושוב את אותו לקוח מתפצל לשתי קבוצות על החומר הזה, בערך 18 שניות ו-28 שניות בלי דבר ביניהן, כך שמספר ממוצע יחיד היה מציג אותו באור מטעה לכיוון זה או אחר. לא קבענו את הסיבה ואיננו טוענים לאחת. <b>102 השניות של rustnzb</b> מגיעות עם כל בית נכון, והמחיר יושב בזמן מעבד ולא באמינות: כ-1,630 שניות מעבד מול שעון של 102 שניות, בערך שש עשרה ליבות עסוקות לאורך כל המקטע, כשאותו פלט עולה לנו 52 שניות מעבד. גרסאות הלקוחות והנתונים המלאים לכל מקטע נמצאים בהערת השוליים.</p>
+    <p><b>למה הפוסט הפגום מהיר כאן.</b> כשמאמרה חסרה, קליינט בדרך כלל שואל
+    את השרת הבא, ואז את הבא, עד שכל שרת סירב אותה - הליכה טורית שהסירובים
+    שלה לוקחים בין עשרות מילישניות לכמה שניות כל אחד, ובזמן הזה ההורדה יושבת
+    על אפס. ‏nzbfast מפסיק לשאול: ברגע שנתוני הזוגיות שכבר בידיים מכסים את מה
+    שעדיין חסר, הוא מתקן מיד במקום לסיים את ההליכה. זו השורה השנייה - אותו
+    בינארי עם ההתנהגות הזו כבויה איטי פי 1.4 עד פי 2.3 בהתאם לנזק - והסבב
+    אימת שהמנגנון פעל בכל מקטע מופעל ואף פעם לא במקטע מושבת. מול המתחרה
+    הקרוב ביותר המרווח הוא פי 2.4 עד פי 2.7, בלי חפיפה באף אחד מתשעה זוגות
+    החזרות.</p>
+    <p><b>הדיסק הוא המקום שבו המרווח הרחב ביותר, וזה לא תרגיל התיקון.</b> כל
+    זרוע שסיימה הפיקה את אותו קובץ של 6.48 GB; שלנו הזיז 6.2-6.8 GB של
+    קלט/פלט דיסק כדי לעשות זאת, NZBGet ‏12.7-18.5 GB, SABnzbd ‏13.9-20.3 GB
+    ו-rustnzb ‏12.8-13.1 GB. זה צינור המעבר האחד - השורה הכבויה מזיזה את אותם
+    6.2 GB - כך שזה מחזיק גם בפוסטים פגומים וגם בשלמים.</p>
+    <p class="note" style="text-align:start">&sup1; שלושת המקטעים של
+    SABnzbd בנזק הכבד ביותר רצו 43, 41 ו-60 s - פיזור אמיתי על קלטים זהים,
+    כך שהממוצע מצוטט עם הטווח מוצהר. &sup2; ‏rustnzb 1.4.5 סיפק כל מקטע נכון
+    בית-בית, והעלות שלו יושבת בזמן מעבד ולא באמינות: כ-1,620 שניות-מעבד מול
+    שעון של 107 s בנזק הכבד ביותר - בערך חמש עשרה ליבות עסוקות לאורך כל
+    המקטע - כשאותו פלט מתוקן עולה לנו כ-50 שניות-מעבד. &sup3; Weaver הזיז
+    1.5 GB ו-4.9 GB מתוך ה-6.5 בתוך מגבלת 20 הדקות שלנו בשתי רמות הנזק
+    הכבדות יותר - אותה אי-סיום בכל שלושת הסבבים שהריצו אותו, בשלושה לילות
+    נפרדים; המגבלה היא שלנו והתוצאה היא אי-הסיום. ב-5 מאמרות מתות הוא סיים
+    נכון בכל שלוש הפעמים. עלות המעבד שלו שם היא סיפור בפני עצמו: כ-2,325
+    שניות-מעבד למקטע של 194 s, מול ה-20 שלנו.</p>
+    <p class="note" style="text-align:start">נמדד 24 באוגוסט 2026, כל
+    הבניות עדכניות: nzbfast v1.2.2 (תגית השחרור עצמה), NZBGet 26.3-testing
+    (בנייה מ-20 באוגוסט), SABnzbd 5.1.1, rustnzb 1.4.5, Weaver 0.7.8. זרוע
+    רציפות הריצה את בניית ה-nzbfast של הלילה הקודם בתוך אותו סבב עצמו ונחתה
+    בתוך שנייה מ-v1.2.2 בכל תרחיש, כך ששום דבר כאן לא רוכב על לילה בר-מזל;
+    והתצורות של המתחרים נבדלות מאלה של הסבב הקודם רק בנתיב היישום, נבדקו
+    מפתח למפתח לפני שהסבב רץ.</p>
   </div>
 </section>
 
 <section class="alt" id="legs-we-lose">
   <div class="wrap">
-    <p class="kicker">הטור הכן</p>
+    <p class="kicker">העמודה הכנה</p>
     <h2>המקטעים שבהם איננו מנצחים</h2>
-    <div>
-    </div>
-    <p class="lead">כל מקטע שישב במקטע הזה נמדד בסופו של דבר מחדש על בנייה משוחררת חדשה יותר, והסבב הזה רוקן אותו, וזו סיבה לזהירות יותר מאשר לשביעות רצון. מה שיצא, כל מקרה מוסבר לצד הטבלה שלו במקום להיערך בשקט: תיקון ה-PAR2 הכבד ביותר, שישב כהפסד על שתי מכונות לאורך שתי גרסאות של העמוד הזה; בנייה מחדש של כרכי שחזור <code>.rev</code> חסרים, ההפסד הגדול ביותר שהעמוד הזה נשא, באיטיות פי 6.6 מהכלי של RARLab עצמה וכעת ניצחון צר; ושלוש צורות חילוץ שפיגרו אחרי unrar בין אחוזים בודדים לשליש, שבהן הסיבה התבררה כצרה יותר מההסבר שפרסמנו לה.</p>
 
-    <p class="lead">מה ש<em>לא</em> נעלם הוא חילופי התמורה שמאחורי המספרים האלה, וזה מה שהמקטע הזה אומר עכשיו: <b>אנחנו צורכים יותר זיכרון מהכלים העצמאיים</b>, והתיקון הכבד ביותר צורך עכשיו יותר מבעבר. המחלץ והמתקן שלנו בנויים לנסוע עם הורדה פעילה ולא לרוץ פעם אחת משורת פקודה, וזה עולה בזיכרון תושב; הפירוט נמצא לצד טבלאות הרכיבים. אם האילוץ שלכם הוא טביעת הרגל הקטנה ביותר האפשרית לעבודה חד-פעמית, הכלים הייעודיים מנצחים בעמודה הזו ואנחנו לא נעמיד פנים אחרת.</p>
-    <div class="callout">למה בכלל להראות הפסד? כי הניצחונות אמינים רק לצדו. כל מספר בעמוד הזה מגיע מאותן הרצות משולבות, וסבב שאנחנו מפסידים נשאר מפורסם עד שהרצה חדשה מחליפה אותו.</div>
+    <p class="lead">המדור הזה קיים למען המקטעים שמתחרה מנצח בהם, והוא נמדד
+    מחדש בכל סבב במקום להיערך: כל מה שאנחנו מפסידים בו מגיע לכאן, בשם, לצד
+    הטבלה שמראה אותו. בבנייה הנוכחית, בסבב הזה, הוא ריק מהפסדי מהירות - וזה
+    שווה זהירות יותר מסיפוק, כך שהעסקאות שנותרות מוצהרות למטה במקום זאת.</p>
+
+    <p class="lead">מה ש<em>לא</em> נעלם הוא העסקה שמאחורי המספרים האלה, אז
+    זה מה שהמדור הזה אומר עכשיו: <b>אנחנו מוציאים יותר זיכרון מהכלים
+    העצמאיים</b>, ונתיב התיקון הכבד המהיר מוציא הכי הרבה. המחלץ והמתקן שלנו
+    בנויים לרכוב על הורדה חיה ולא לרוץ פעם אחת משורת פקודה, וזה עולה זיכרון
+    שוכן; הפירוט נמצא לצד טבלאות הרכיבים. אם האילוץ שלכם הוא טביעת הרגל
+    הקטנה ביותר האפשרית למשימה חד-פעמית, הכלים הייעודיים מנצחים בעמודה הזו
+    ואנחנו לא נעמיד פנים אחרת.</p>
+
+    <p class="lead">והסבב מ-23 באוגוסט 2026 מוסיף רשומה, שהיינו מעדיפים
+    לרשום כאן מאשר להשאיר בהערת שוליים: בתרחיש ה-6.5 GB, החציון של המעבד של
+    Weaver נמוך ב-2% משלנו - 34.9 מול 35.7 שניות-מעבד, כששלושת המקטעים שלו
+    עצמו נעים בין 34.1 ל-56.1 s - כך שאנחנו קוראים לזה תיקו סטטיסטי, וזה
+    יושב ב<a href="#cost">טבלת העלות</a> מסומן כתא היחיד שאיננו מחזיקים.
+    בתרחיש ה-34 GB באותו סבב המעבד שלנו הוא הנמוך ביותר באופן מוחלט.</p>
+    <div class="callout">למה בכלל להראות הפסד? כי הניצחונות אמינים רק לצדו.
+    כל מספר בעמוד הזה מגיע מאותן הרצות משולבות, ומקטע שאנחנו מפסידים נשאר
+    מפורסם עד שהרצה חוזרת מחליפה אותו.</div>
   </div>
 </section>
 
 <section id="low-memory">
   <div class="wrap">
-    <p class="kicker">תרחיש 6 · הרעב אותו מ-RAM</p>
-    <h2>סולם הזיכרון-הנמוך: 190 GB ב-~1.1 GB של RAM</h2>
-    <p>אותן ארבע משימות, מורצות מחדש בתקציבי זיכרון קשיחים של 2 GB, ‏1 GB ו-256 MB:
-    מה שמכוונן הגודל האוטומטי היה בוחר על מכונת 8 GB, מכונת 4 GB, ו-NAS של 2 GB. כל
-    מקטע הפיק קובץ נכון, מאומת במלואו, מחולץ; שיא RSS עקב אחר
-    <em>התקציב</em>, לא אחר המשימה. זמן לקובץ שמיש, קו 10 GbE:</p>
+    <p class="kicker">הרעיבו אותו מ-RAM &middot; נמדד 24 באוגוסט 2026 על nzbfast 1.2.2</p>
+    <h2>סולם הזיכרון הנמוך: 87 GB ב-~0.3 GB של RAM</h2>
+    <p>אותה משימה של 87 GB כמו בסבב שלמעלה, הורצה מחדש בתקציבי זיכרון קשיחים
+    של 2 GB, ‏1 GB ו-256 MB - מה שקובע הגודל האוטומטי היה בוחר במכונה של
+    8 GB, במכונה של 4 GB, וב-NAS של 2 GB. כל מקטע הפיק את אותו קובץ זהה
+    בית-בית, ועמודת הזיכרון עקבה אחרי <em>התקציב</em>, אף פעם לא אחרי
+    המשימה:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>גודל משימה</th><th>שפע RAM</th><th>תקציב 2 GB</th><th>תקציב 1 GB</th><th>תקציב 256 MB</th></tr></thead>
+      <thead><tr><th>משימה של 87 GB, 10 GbE</th><th>אוטומטי</th><th>תקציב 2 GB</th><th>תקציב 1 GB</th><th>תקציב 256 MB</th></tr></thead>
       <tbody>
-        <tr><td>7 GB</td><td class="num">15 s</td><td class="num">15 s</td><td class="num">15 s</td><td class="num">15 s</td></tr>
-        <tr><td>35 GB</td><td class="num">65 s</td><td class="num">70 s</td><td class="num">70 s</td><td class="num">65 s</td></tr>
-        <tr><td>87 GB</td><td class="num">148 s</td><td class="num">206 s</td><td class="num">196 s</td><td class="num">180 s</td></tr>
-        <tr><td>190 GB</td><td class="num">330 s</td><td class="num">427 s</td><td class="num">402 s</td><td class="num">411 s</td></tr>
+        <tr><td>זמן לקובץ שמיש</td><td class="num">94 s</td><td class="num">87 s</td><td class="num">94 s</td><td class="num">102 s</td></tr>
+        <tr><td>שיא זיכרון (RSS)</td><td class="num">286 MB</td><td class="num">558 MB</td><td class="num">336 MB</td><td class="num">284 MB</td></tr>
+        <tr><td>קלט/פלט לדיסק (GiB)</td><td class="num">73.2</td><td class="num">73.2</td><td class="num">72.8</td><td class="num">72.7</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">הפרמיה של 20-40% על המשימות הגדולות היא
-    ארטיפקט של 10 GbE: בלוקים שגלשו עולים זמן רק כשהקו מקדים את הדיסק. אותה
-    משימת 87 GB באותם תקציבים על קו ~2.4 Gbps נמדדה ‎−1% עד ‎+7%, רעש.
-    בחיבור ביתי טיפוסי תקציב קטן הוא כמעט חינם בכל גודל משימה. פרופיל
-    NAS (2 חיבורים, תקציב 256 MB) סיים את משימת ה-35 GB ב-0.4 GB שיא
-    RSS. ‏NAS של 2 GB יכול להריץ את זה. שום קליינט אחר לא מציע תקרת זיכרון בכלל.</p>
+    <p class="note" style="text-align:start">מקטע יחיד לכל תקציב על בניית
+    השחרור, נשער מול אותו צ'קסום פלט כמו סבב שש הזרועות. התקציב ההדוק ביותר
+    עולה כ-9% מהזמן, ורק כי הקו הזה הוא 10 GbE - בלוקים שנשפכים עולים זמן רק
+    כשהקו עוקף את הדיסק, כך שבחיבור בית טיפוסי תקציב קטן קרוב לחינם. הסולם
+    כולו, כולל הורדה של 87 GB, נכנס ל-0.3-0.6 GB זיכרון; בברירות המחדל
+    שנשלחות המשימה רצה ב-286 MB. שום קליינט אחר לא מציע תקציב זיכרון קשיח
+    לכל התהליך; הדבר הקרוב ביותר הוא חוגות גודל-מטמון, והסבב שלמטה מודד מה
+    הן עולות.</p>
+    <p><b>המהדק התחרה מול החוגות של השדה עצמו.</b> בתרחיש ה-34 GB (23
+    באוגוסט 2026, מכונת 1 Gbit, חמישה ספקים, 30 מתוך 30 מקטעים נכונים
+    בית-בית), החזקת NZBGet למהדק מטמון שווה-ערך יותר מהכפילה את המעבד שלו
+    (215.5 ל-453.0 שניות-מעבד, פי 2.10) כדי לקנות קיצוץ של 52% בשיא הזיכרון
+    שלו, והמהדק של SABnzbd היה כמעט חינם אך הגיע רק לחלק מטביעת הרגל שלו.
+    הגדרת המטמון של rustnzb הייתה קישוטית בבנייה שהתחרתה, ול-Weaver אין שום
+    חוגת זיכרון בכלל, כך ששניהם רצו לא-מהודקים כעמודות ייחוס במקום להיבדק
+    בתקציב שהם לא יכולים להחזיק. הצד שלנו עצמנו באותו סבב הוחלף על ידי סולם
+    v1.2.2 שלמעלה, שאומר את אותו הדבר בפי 2.5 מהגודל: התקציב לעולם אינו
+    האילוץ המגביל, כי מעבר-אחד מחזיק כל כך מעט מלכתחילה.</p>
   </div>
 </section>
 
-<section class="alt" id="nested">
+<section id="floor">
   <div class="wrap">
-    <p class="kicker">תרחיש 7 · ארכיונים בתוך ארכיונים</p>
-    <h2>עשר צורות מקוננות: מי מסיים בלעדיך</h2>
-    <p class="lead">פוסטים מגיעים מקוננים יותר ויותר: RAR בתוך RAR, ‏7z תחוב בארכיון אחסון,
-    סולם של שכבות, שרשרת סיסמאות. הסבב הזה מדרג מה נשאר למפעיל.
-    <b>אוטומטי</b> פירושו שכל מטען חולץ, זהה-בייט, בלי ידיים; <b>ידני</b> פירושו שהקליינט
-    דיווח על הצלחה אך השאיר ארכיון פנימי בתיקיית הפלט כדי שתפתח אותו בעצמך.
-    הורץ מחדש ב-2 באוגוסט 2026 על הבנייה הנוכחית, כעת עם חמישה קליינטים.</p>
+    <p class="kicker">שטח פנוי &middot; נמדד למגה-בייט</p>
+    <h2>כמה מעט שטח פנוי משימה צריכה</h2>
+    <p class="lead">קליינט של כתיבה-ואז-פריקה צריך מקום לכרכי הארכיון
+    ולמטען המפורק בו-זמנית, כך שמשימה לא תתחיל בלי בערך פי שניים מההורדה
+    פנוי. מעבר-אחד צריך את המטען - והסבב הזה מדד כמה מעט יותר, על ידי כיווץ
+    נפח היעד עד שכל קליינט נכשל. התשובה של nzbfast היא <b>קבוע של כ-50 MB
+    רזרבה</b>, לא יחס, והיא מחזיקה ממשימה של 6.5 GB עד 34 GB.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>צורה</th><th>nzbfast</th><th>SABnzbd</th><th>NZBGet</th><th>rustnzb</th><th>Weaver</th></tr></thead>
+      <thead><tr><th>שטח פנוי שהמשימה צריכה</th><th>משימה של 6.5 GB</th><th>משימה של 34 GB</th></tr></thead>
       <tbody>
-        <tr><td>RAR אחסון בתוך RAR אחסון</td><td class="win">אוטומטי</td><td>אוטומטי</td><td class="bad">ידני</td><td class="bad">ידני</td><td class="bad">DNF¹</td></tr>
-        <tr><td>RAR דחוס בתוך RAR אחסון</td><td class="win">אוטומטי</td><td>אוטומטי</td><td class="bad">ידני</td><td class="bad">ידני</td><td class="bad">DNF¹</td></tr>
-        <tr><td>7z בתוך RAR אחסון</td><td class="win">אוטומטי</td><td>אוטומטי</td><td class="bad">ידני</td><td class="bad">ידני</td><td class="bad">DNF¹</td></tr>
-        <tr><td>סולם של 5 רמות, 6 מטענים</td><td class="win">אוטומטי · 6/6</td><td class="bad">ידני · 3/6</td><td class="bad">ידני · 1/6</td><td class="bad">ידני · 1/6</td><td class="bad">DNF¹</td></tr>
-        <tr><td>פגום בכל שלוש הרמות</td><td class="win">אוטומטי</td><td class="bad">ידני</td><td class="bad">ידני</td><td class="bad">ידני</td><td class="bad">DNF¹</td></tr>
-        <tr><td>שרשרת סיסמאות, 3 רמות מוצפנות</td><td class="win">אוטומטי · 3/3</td><td class="bad">ויתר (פסק זמן)</td><td class="bad">מבקש סיסמה</td><td class="bad">מבקש סיסמה</td><td class="bad">DNF¹</td></tr>
-        <tr><td><b>השלמה אוטומטית, כל עשר הצורות</b></td><td class="win"><b>9/10</b></td><td class="num">5/10</td><td class="num">2/10</td><td class="num">2/10</td><td class="bad">0/10¹</td></tr>
+        <tr><td><b>nzbfast 1.2.2</b></td><td class="win num">הפלט + 48.6 MB</td><td class="win num">הפלט + 51.0 MB</td></tr>
+        <tr><td>NZBGet 26.3-testing</td><td class="num">~פי 2.1 מהמטען</td><td class="num">~פי 2.1 (37.6 GB מעל הפלט)</td></tr>
+        <tr><td>SABnzbd 5.1.1</td><td class="num">~פי 2.1 מהמטען</td><td class="num">~פי 2.1 (37.6 GB מעל הפלט)</td></tr>
+        <tr><td>rustnzb 1.4.5</td><td class="num">~פי 2.25 מהמטען</td><td class="num">~פי 2.25 (42.7 GB מעל הפלט)</td></tr>
+        <tr><td>Weaver 0.7.8</td><td class="num">~פי 2.25 מהמטען</td><td class="bad">לא נפתר&sup1;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">מתקן loopback, קורפוס שנוצר במכונה, כל חמשת
-    הקליינטים על אותה מכונה, מדורג לפי גיבוב תוכן, כך שקליינט שמשנה את שם המטען עדיין מקבל
-    קרדיט. מכיוון ששכבות פנימיות נפתחות מהקינון תוך כדי תנועה, nzbfast מחזיק עותק אחד של
-    ‎~1.5 GB על הדיסק במקום שקליינטים של כתוב-ופרוק מחזיקים ‎~3 GB, ומסיים את המקטעים האלה
-    ב-1-4 שניות מול 4-10. בשרשרת הסיסמאות, הסיסמה של כל שכבה מגיעה בקובץ שהשכבה שמעליה
-    מחלצת: nzbfast קורא אותו ופותח את כל שלוש הרמות; האחרים עוצרים ומחכים שתקליד אותה.
-    חדש מאז הגרסה הקודמת: הפוסט הפגום בכל שלוש הרמות שלו מסתיים עכשיו בלי עזרה - תיקון
-    PAR2 חיצוני, אחר כך תיקון PAR2 של השכבה האמצעית מכרכים שנארזו לצדה, ואז רשומת השחזור
-    של הארכיון הפנימי ביותר עצמו, מעבר אחד, 4 שניות. הצורה היחידה שנותרה היא סולם 10 הרמות,
-    וזו הגדרה, לא מגבלה: בתקרת העומק המוגדרת כברירת מחדל, 5, המשימה מסתיימת נקי עם 9 מתוך
-    11 מטענים והשכבה העמוקה ביותר נשארת כארכיון תקין - עדיין יותר מכפי שמשחזר כל קליינט
-    אחר - ואותה משימה עם <code>nested_max_depth</code> שהועלה ל-10 משלימה את כל 11
-    אוטומטית. ¹ Weaver ‏(v0.7.5, הגרסה האחרונה שלו, פעם ראשונה בטבלה הזו) לא סיים אף אחד
-    מעשרת המקטעים, והמקום שבו הוא טועה גלוי ביומן שלו עצמו: כל מקטע מסתיים ב-&quot;not repairable:
-    2013 damaged slices, only 0 recovery blocks available in NZB&quot;. שני חלקי השורה הזו מופרכים
-    על המתקן הזה - ארבעת הקליינטים האחרים מפענחים ומאמתים את אותם מאמרים זהים-בייט (ה-yEnc של
-    הקורפוס נושא חתימות CRC בסופו), כך שהנתונים שהוא שופט כפגומים תקינים; וכל אחד מה-NZB-ים
-    האלה נושא סט PAR2 של 10% שפורסם בפועל, כך שבלוקי השחזור שהוא מדווח כנעדרים נמצאים שם.
-    הוא שופט בטעות מאמרים שלמים כפגומים, ואז אינו מוצא את נתוני התיקון שהיו מצילים אפילו פוסט
-    פגום באמת. שני מקטעים נתקעים במקום להיכשל. לפי הכלל של העמוד הזה עצמו, קליינט שלעולם
-    אינו מפיק את המטען מקבל עמודה אדומה, לא זמן. הספירה של
-    SABnzbd יורדת מ-6 ל-5 כי מקטע השחזור מ-PAR בלבד, כפי שנמדד על המתקן הזה, ננטש אחרי
-    2 שניות בלי ששוחזר דבר; השחזור הקודם שלו ב-390 שניות היה על מכונה אחרת ואנחנו מדרגים
-    את מה שהסבב הזה מדד.</p>
+    <p class="note" style="text-align:start">נמדד על מכונת Apple Silicon עם
+    20 ליבות, קו 1 Gbit, חמישה ספקים, שלוש חזרות בכל גבול, כל מקטע שהושלם
+    נבדק בית-בית - שורות המתחרים ב-22-23 באוגוסט 2026, ושורת nzbfast נחתכה
+    מחדש על בניית השחרור v1.2.2 ב-24 באוגוסט, ששיחזרה את שני הגבולות בדיוק,
+    12 מתוך 12 מקטעים פה-אחד על פני שני התרחישים. התאים שלנו הם רצפה נמדדת:
+    המשימה מסתיימת 3 מתוך 3 עם 48.6 MB ו-51.0 MB רזרבה, ומסרבת 3 מתוך 3
+    בערך 17 MB מתחת לכך - כך שהרצפה אמיתית בשני הכיוונים. מה שהמשימה בפועל
+    מחזיקה מתייצב על הפלט ועוד כ-3 MB; הרזרבה משלמת עבור הרגעים האחרונים של
+    הצינור, לעולם לא עבור עותק שני. התאים של המתחרים הם הרצפה הנמדדת שלהם
+    במשימה של 6.5 GB ומספיקות מאושרת באותו יחס במשימה של 34 GB (3 מתוך 3
+    נכונים בית-בית באותו יחס בדיוק); לא ירדנו בסולם שלהם עוד יותר בגודל
+    הגדול, כך שהרצפה האמיתית שלהם שם עשויה לשבת מעט מתחת ליחס, ואנחנו
+    אומרים זאת במקום לעגל לטובתנו.</p>
+    <p class="note" style="text-align:start">מה שהיגמרות שטח פנוי נראית
+    כמוה בפועל חשוב לא פחות מהמספר. ב-17 MB מתחת לרצפה שלו nzbfast פוגע
+    בסירוב הדיסק על כתיבה, נעצר בניקיון עם "אין שטח פנוי בדיסק", שומר את כל
+    מה שנחת ביומן, והרצה חוזרת ממשיכה בלי להוריד מחדש - חלקי שאתם שומרים,
+    לא משימה שנכשלה. &sup1; העמודה של Weaver בתרחיש הגדול לא נפתרת מסיבה
+    שאין לה שום קשר לדיסק: שניים משלושת המקטעים שלו נתקעו במהירות של ספרה
+    בודדת MB/s עם יותר מ-60 GB עדיין פנויים ופגעו במגבלת 40 הדקות של הסבב,
+    בזמן שהשלישי סיים נכון באותו ~פי 2.25 שהוא צריך במשימה הקטנה. תקיעה
+    אינה פסק דין על שטח פנוי, כך שאנחנו מסמנים את התא כלא-נפתר במקום לתת לו
+    ציון לכאן או לכאן.</p>
   </div>
 </section>
 
-<section id="disk-cost">
+<section class="alt" id="diskspeed">
   <div class="wrap">
-    <p class="kicker">מה עולה לך עבודה</p>
-    <h2>שיא שימוש בדיסק ל-1.5 GB</h2>
-    <p class="lead">ההבטחה של מעבר יחיד נוגעת לדיסק לא פחות מאשר למהירות, ולכן הנה היא נמדדת ולא מוצהרת: הנקודה הגבוהה ביותר שאליה הגיעה תיקיית העבודה במהלך ההרצות המקוננות, בדגימה פעמיים בשנייה. קריאה אחת בסוף לא הייתה אומרת דבר, כי לקוח שמוחק את הכרכים שלו אחרי החילוץ היה נראה כאילו מעולם לא כתב אותם.</p>
+    <p class="kicker">התוצאה של המכפיל</p>
+    <h2>הדיסק שלכם קובע את תקרת המהירות שלכם</h2>
+    <p class="lead"><b>לכל כונן, קצב הקו שהוא יכול להחזיק לאורך הורדה,
+    אימות ופריקה הוא הקצב האמיתי של הכונן חלקי מכפיל הקלט/פלט של
+    הקליינט.</b> טבלאות העלות שלמעלה מודדות את שלנו בכ-פי 1.0 - כל בייט חוצה
+    את הדיסק פעם אחת בערך - וכל מתחרה בפי 2.0 עד פי 3.0 לפלט זהה בית-בית. אז
+    אותו כונן מחזיק פי שניים עד פי שלושה מקצב הקו תחת nzbfast ממה שהוא היה
+    מחזיק תחת קליינט דו-שלבי. החשבון, כשהמכפילים לקוחים מהטבלאות הנמדדות
+    שלמעלה:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>צורה</th><th>nzbfast</th><th>NZBGet 26.2</th><th>rustnzb 1.3.4</th><th>SABnzbd 5.0.4</th></tr></thead>
+      <thead><tr><th>קו</th><th>קצב המטען</th><th>דיסק נדרש ב-~פי 1.0 שלנו</th><th>בפי 2.2</th><th>בפי 3.0</th></tr></thead>
       <tbody>
-        <tr><td>‏RAR store בתוך RAR store</td><td class="win num">1538</td><td class="num">1538</td><td class="num">1774</td><td class="num">3080</td></tr>
-        <tr><td>שכבה פנימית דחוסה</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1674</td><td class="num">3102</td></tr>
-        <tr><td>‏RAR בתוך RAR, עומק 2</td><td class="win num">1536</td><td class="num">1536</td><td class="num">1714</td><td class="num">3076</td></tr>
-        <tr><td>‏7z עטוף ב-RAR store</td><td class="win num">1503</td><td class="num">1536</td><td class="num">1722</td><td class="num">3102</td></tr>
+        <tr><td>100 Mbit</td><td class="num">12.5 MB/s</td><td class="win num">~13 MB/s</td><td class="num">~28 MB/s</td><td class="num">~38 MB/s</td></tr>
+        <tr><td>1 Gbit</td><td class="num">125 MB/s</td><td class="win num">~130 MB/s</td><td class="num">~275 MB/s</td><td class="num">~375 MB/s</td></tr>
+        <tr><td>5 Gbit</td><td class="num">625 MB/s</td><td class="win num">~650 MB/s</td><td class="num">~1,400 MB/s</td><td class="num">~1,900 MB/s</td></tr>
+        <tr><td>10 Gbit</td><td class="num">1.25 GB/s</td><td class="win num">~1.3 GB/s</td><td class="num">~2.75 GB/s</td><td class="num">~3.75 GB/s</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">מגה-בייט, נמוך יותר טוב יותר. <b>‏NZBGet משתווה לנו כאן</b> וכדאי לומר מדוע: הוא רץ עם <code>DirectUnpack</code> ו-<code>DirectWrite</code> דלוקים, כפי שאנחנו מגדירים כל מתחרה, ובצורות האלה זה מספיק לעותק אחד על הדיסק. ‏SABnzbd מחזיק שניים. הפער שנותר הוא זה שלשמו נבנה הצינור: אנחנו כלל לא ממשים את הכרכים, ולכן השיא הוא המטען עצמו ולא המטען בתוספת הארכיון שנשא אותו.</p>
+    <p>הציבו את העמודות האלה מול מה שכוננים באמת מחזיקים. כונן NAS בסיבוב
+    5400/5900 סל"ד מחזיק בערך 100-140 MB/s על המסלולים החיצוניים שלו, דועך
+    לכיוון 80-100 ככל שהוא מתמלא - כך שגיגה-ביט כבר גבולי בפי 1.0 במחלקה
+    האיטית ביותר, מה שאנחנו אומרים בגלוי, ומחוץ להישג יד בפי 2-3. כונן
+    בסיבוב 7200 סל"ד מחזיק בערך 160-220 MB/s. ה-~550 MB/s של SSD מסוג SATA
+    מגביל קליינט בפי 2.2 לקרוב ל-2 Gbit ונושא כ-3.5-4 Gbit בפי 1.0. כונני
+    SMR, שנמכרים לתוך תושבות NAS שנים רבות, הם המקרה הגרוע ביותר עבור דפוס
+    הדו-שלביות בפרט: כתיבה מתמשכת עם קריאה-חזרה יכולה לקרוס לעשרות MB/s
+    ברגע שמטמון ה-reshingling של הכונן מתרוקן. וקו מרובה-גיגה הוא אותה חומה
+    גבוה יותר: 10 Gbit במכפיל פי 2-3 דורש 2.75-3.75 GB/s <em>מתמשכים</em>,
+    מעבר לכל כונן SATA ומעבר לכוננים רבים מסוג NVMe ברגע שמשימה גדולה עוקפת
+    את אזור המטמון המהיר שלהם, בזמן שבפי 1.0 SSD של ~2 GB/s עומד בקצב הקו
+    עם מקום לרזרבה.</p>
+    <p><b>נמדד ולא מוצהר, על דיסק מוגבל.</b> הגבלנו דיסק ל-150 MB/s - קצב
+    ממחלקת 5400 סל"ד - והרצנו את אותה הורדה פעמיים: פעם אחת במעבר-אחד, פעם
+    אחת בעקבות דפוס הדו-שלביות של כתיבה-החוצה, קריאה-חזרה ופריקה. הזרוע
+    החד-מעברית עמדה בקצב קו ה-1 Gbit ב-109.9 MB/s, 0.2% מתחת לקצב
+    הלא-מוגבל שלה עצמה; דפוס הדו-שלביות נפל ל-59.0 MB/s, 54% מהקו. בסריקה
+    פרמטרית בלי הגבלת קו, הזרוע החד-מעברית לקחה 97% ממה שהדיסק הציע בכל
+    הגבלה (290.7 MB/s מתוך הגבלה של 300 MB/s, ‏145.6 מתוך 150) בקלט/פלט דיסק
+    נמדד של פי 1.00-1.03, ודפוס הדו-שלביות לקח 47-48% בפי 3.02 נמדד - היחס
+    קבוע לאורך ההגבלות, וזה החשבון שלמעלה משוחזר כמדידה. 32 מקטעים, כל פלט
+    נבדק בית-בית.</p>
+    <p><b>ופעם אחת על חומרה אמיתית, לא מוגבלת.</b> הכונן האיטי ביותר בצי
+    הבדיקה שלנו הוא דיסק מערכת מסוג TLC על מכונת Windows טבעית עם 10 GbE,
+    מחזיק 0.99 GB/s של כתיבות שבו המכונה המהירה ביותר שלנו מחזיקה 5.97. <a
+    href="#bigfile">סבב ה-Windows של 87 GB שלמעלה</a> רץ עליו: הזרוע
+    החד-מעברית הזדקקה לכ-0.73 GB/s מתוך ה-0.99 כדי להחזיק 105 s של זמן -
+    רזרבה לפזר על הדיסק הגרוע ביותר בצי - וזה התא הימני-עליון של הטבלה
+    שלמעלה נוחת על כונן אמיתי במקום מוגבל. והקצה המהיר של הצי סוגר את
+    הטיעון מהצד השני: אותה משימה של 87 GB, בקצב מלא ב-10 GbE, מסתיימת באותן
+    70-71 שניות על כונן של 1.24 GB/s ועל כונן של 5.97 GB/s - כונן מהיר פי
+    4.8 מזיז את הזמן באפס, כי במכפיל פי 1.0 הקו נגמר הרבה לפני שהדיסק נגמר.
+    עבור קליינט דו-שלבי שני הכוננים האלה הם עולמות שונים.</p>
+    <p class="note" style="text-align:start"><b>מה המתקן הזה הוא, ומה הוא
+    אינו.</b> הדיסק הוגבל עם בקר קלט/פלט של מערכת ההפעלה בתוך מכונה
+    וירטואלית על מכונת Apple Silicon עם 32 ליבות, וזרוע הדו-שלביות היא
+    הבינארי שלנו עצמו שנעשה לכתוב, לקרוא-חזרה ולכתוב מחדש בדרך שבה קליינט
+    דו-שלבי עושה. אף מתחרה לא רץ בו - הקו המדומה של המתקן מגיש קבצים פשוטים
+    שמתחרה גם היה מטפל בהם במעבר אחד, כך שהפניית אחד אליו לא הייתה מדגימה
+    שום דבר - מה שאומר שהטבלה שלמעלה היא חשבון מעוגן בזוג אחד נמדד, כשהמכפילים
+    של המתחרים לקוחים מהטבלאות האמיתיות של חמשת הקליינטים שלמעלה, ואנחנו
+    מתייגים אותה כך בכוונה. שלוש הערות יושר מתלוות אליה. הבקר מתקצב קריאות
+    וכתיבות בנפרד, מה שמחמיא לזרוע הדו-שלבית; על התקן בעל תקציב יחיד, שהוא
+    כל דיסק מסתובב, החלק שלה היה נמוך עוד יותר. מכפיל הדו-שלביות הוא כ-פי 2
+    כשהכרכים עדיין במטמון העמודים בזמן הקריאה-חזרה ופי 3 כשלא, כך שמשימה
+    גדולה על מכונה רגילה יושבת בקצה הפי 3. ועלות החיפוש של כתיבה, קריאה-חזרה
+    ומחיקה של מאות קבצי כרך - מול קובץ אחד שנכתב פעם אחת בסדר - היא טיעון
+    מצורת התעבורה, לא מדידה עדיין: היא צריכה דיסק מסתובב, ואנחנו מצטטים
+    אותה כטיעון עד שיהיה לה אחד.</p>
   </div>
 </section>
 
-<section id="client-ceiling">
-  <div class="wrap">
-    <p class="kicker">תרחיש 8 · חמישה קליינטים, תוכן שניתן לשחזר</p>
-    <h2>תקרת הקליינט: ‏9.68 GB מוגשים מ-RAM, ואפשר לשחזר את זה</h2>
-    <p class="lead">כל מקטע למעלה רץ מול ספקים מסחריים, ולכן עליכם להאמין לנו לגבי תנאי הקו. את זה אפשר לשחזר בעצמכם: התוכן הוא הסרטים הפתוחים של Blender (‏Tears of Steel 4K, ‏Sintel, ‏Big Buck Bunny 4K ב-60 וב-30 fps), ברישיון CC-BY 3.0, ארוזים ל-RAR במצב store בתוספת 10% PAR2 ל-53 קבצים ו-14,521 מאמרים, ומוגשים מ-RAM דרך NNTP על loopback על ידי מתקן שנמצא במאגר הזה. <b>שום ספק אינו מעורב</b>, ולכן זה מודד את הקליינט עצמו, כששונות הספק מוסרת ולא ממוצעת החוצה.</p>
-    <p class="note" style="text-align:start">מכיוון שהמאמרים מגיעים מהזיכרון, הזמנים המוחלטים קצרים בהרבה מכל הורדה אמיתית ו<b>אינם</b> ברי-השוואה למקטעי הספקים שלמעלה. קראו את היחסים ואת עמודת הדיסק, לא את השניות.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>קליינט</th><th>זמן לסיום</th><th>חיבורים</th><th>שיא דיסק</th><th>מול nzbfast</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td><b>7 s</b></td><td>8</td><td><b>8.8 GB</b></td><td>בסיס</td></tr>
-        <tr><td>‏Weaver (מחומם)</td><td>11 s</td><td>‏120 (טיפוס אוטומטי)</td><td>17.9 GB</td><td>‏1.6× איטי יותר</td></tr>
-        <tr><td>NZBGet 26.2</td><td>14 s</td><td>16</td><td>17.6 GB</td><td>‏2.0× איטי יותר</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td>22 s</td><td>8</td><td>18.3 GB</td><td>‏3.1× איטי יותר</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td>57 s</td><td>8 (16 זהה)</td><td>17.6 GB</td><td>‏8.1× איטי יותר</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>נמדד מול</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ו-rustnzb 1.3.4 ב-31 ביולי 2026, ומוצמד לאותן בניות. המערך הזה לא הורץ מחדש מול SABnzbd 5.1; כש-5.1.0 תצא כגרסה יציבה נריץ מחדש את כל הטבלה במקום לערוך תא בודד.</p>
-    <p class="note" style="text-align:start"><b>נמדד מחדש ב-31 ביולי 2026</b>, אותו מתקן, אותו מאגר, לאחר עדכון מערכת ההפעלה על המכונה. ארבעה לקוחות זזו שנייה עד שלוש; SABnzbd לא: הוא לוקח עכשיו 57 שניות במקום ש-14 שניות נרשמו בגרסת 24 ביולי של הטבלה הזו, שוחזר שמונה פעמים בשני גרסאות מתקן, הצנרת אומתה ל-8 בקריאה חוזרת מה-API בכל הרצה, וזהה ב-16 חיבורים. תוצאותיו במקטעי החווה במקומות אחרים בעמוד הזה אינן מושפעות, ולכן זה נראה ייחודי לקצבים המוזנים דרך לולאה מקומית במערכת ההפעלה הנוכחית של המכונה הזו; אנחנו מפרסמים את מה שהמתקן מודד היום ונבדוק שוב במהדורות הבאות של מערכת ההפעלה ושל SABnzbd.</p>
 
-    <p class="note" style="text-align:start"><b>זמן לסיום</b> נמדד מרגע התחלת המשימה ועד שכל ארבעת הסרטונים על הדיסק, מאומתים ומחולצים. <b>שיא דיסק</b> הוא הנפח הגדול ביותר שהקליינט תפס בכל רגע נתון, בדגימה פעמיים בשנייה, והוא העמודה החשובה ביותר כאן: מעבר יחיד צריך בערך פי 1 מגודל התוכן, כל השאר בערך פי 2. כל החמישה סיימו כשהם מחזיקים את אותם 8.6 GB לאחר שניקו אחריהם, ובדיוק לכן השיא הוא המספר המעניין. כל קליינט הפיק את כל ארבעת המטענים זהים-sha256 למקור. כל אחד מוצג במספר החיבורים שהפך <i>אותו</i> למהיר ביותר (‏8, ‏16 ו-32 נוסו בכל אחד; nzbfast היה שטוח בכל השלושה, ולכן יותר חיבורים לא היו עוזרים לו).</p>
-    <p class="note" style="text-align:start"><b>כל מתחרה במיטבו המתועד.</b> מתחרה לעולם לא אמור להפסיד בגלל שהגדרנו אותו לא נכון, ולכן ההגדרות של כל קליינט מתפרסמות יחד עם הסבב. שתיים מהן קל לפספס וכדאי להכיר אם אתם מריצים בעצמכם: ‏SABnzbd כותב מחדש את קובץ ה-ini שלו באתחול ומחזיר את <code>pipelining_requests</code> לערך <code>1</code> שאיתו הוא מגיע, ולכן צריך להגדיר את הצנרת דרך ה-API לאחר מכן ולקרוא בחזרה כדי לוודא; ותצורת <code>-c</code> עצמאית של NZBGet יורשת את ברירות המחדל המובנות של NZBGet במקום את הערכים שבקובץ ה-conf שמצורף אליו, מה שמשאיר את מטמון המאמרים כבוי בשקט. שניהם רצו עם התיקונים האלה. ‏Weaver נמדד מחומם, כי הוא מטפס אוטומטית במספר החיבורים ומכוונן את הבריכות שלו במשימה הראשונה, ופקודת ה-<code>download</code> שלו לעולם אינה יוצאת, ולכן הוא רץ כדמון מתמיד עם מעבר חימום שנזרק. לכן 8 השניות שלו הן דמון מחומם ב-120 חיבורים מול הרצה קרה וחד-פעמית שלנו ב-8. זה כל קליינט במיטבו לפי הכלל שלנו עצמנו, אבל האסימטריה אמיתית ואנחנו מעדיפים לומר אותה מאשר להסתיר אותה.</p>
-    <p class="note" style="text-align:start">שיא הדיסק נדגם פעמיים בשנייה במקום להיקרא פעם אחת בסוף, וזה חשוב יותר משנשמע: כל קליינט כאן מוחק את הכרכים שלו אחרי החילוץ, ולכן כל החמישה מסיימים כשהם מחזיקים את אותם 8.6 GB וארבעה מהם נראים כמו מעבר יחיד אם מודדים רק את מה שנשאר בסוף. בדגימה לאורך ההרצה, ארבעה מגיעים לשיא של כמעט 18 GB. לכל דבר שמנקה אחרי עצמו, דווחו את השיא ולא את השאריות.</p>
-  </div>
-</section>
 
-<section id="shape-store">
-  <div class="wrap">
-    <p class="kicker">צורה 1 &middot; 84% מהנתונים</p>
-    <h2>ארכיונים מאוחסנים: תור משימות</h2>
-    <p>שלושה פרסומים אמיתיים, שהוכנסו לתור בזה אחר זה כך שכל אחד ממתין לסיום הקודם. כך תור מתרוקן במציאות, ושם מתגלה המחיר של <i>התחלת</i> כל משימה. שישה ספקים, אותו מספר חיבורים לכל לקוח, אותה מכונה ואותה רשת.</p>
-    <div class="bars wide">
-      <div class="bar me"><span>nzbfast</span><span class="trk"><i style="width:36%"></i></span><span class="t">7.05 s</span></div>
-      <div class="bar"><span>NZBGet 26.2</span><span class="trk"><i style="width:55%"></i></span><span class="t">10.66 s &middot; 1.51x</span></div>
-      <div class="bar"><span>SABnzbd 5.0.4</span><span class="trk"><i style="width:92%"></i></span><span class="t">17.96 s &middot; 2.55x</span></div>
-    </div>
-    <p><b>nzbfast מהיר פי 1.51 מ‑NZBGet 26.2 ופי 2.55 מ‑SABnzbd 5.0.4</b> בצורה הנפוצה ביותר ביוזנט.</p>
-    <p class="note" style="text-align:start"><b>נמדד מול</b> NZBGet 26.2 ו-SABnzbd 5.0.4 ב-27 ביולי 2026, ומוצמד לאותן בניות. ‏SABnzbd 5.1 מוותר על מעבר האימות שאחרי ההורדה שחלק גדול מהתוצאה שלו כאן משלם עליו; מאז יצאה 5.1.0 כגרסה יציבה והורצה: כשכל לקוח בהגדרת החיבורים הטובה ביותר שלו עצמו, הפער בהפצה המעורפלת קרוב יותר ל-+19% שנמדדו בראש העמוד. השורות האלה שומרות על הבניות שמולן רצו במקום שייערכו.</p>
-    <p>כל לקוח נבדק עם 8, 16 ו‑32 חיבורים לשרת ומוצג בהגדרה הטובה ביותר שלו עצמו, כי מתחרה לעולם אינו אמור להפסיד בגלל הגדרה גרועה. כדאי לדעת אם אתם מכווננים בעצמכם: <b>NZBGet נעשה איטי בערך פי שניים ב‑32 חיבורים</b>, ו‑SABnzbd התנהג באותו אופן בבדיקות הקודמות שלנו. יותר חיבורים אינם יותר מהירות. nzbfast נשאר יציב לאורך כל הטווח, כך שההגדרה הזו לא תפיל אתכם.</p>
-    <p class="note">אנחנו גם בודקים שכל לקוח באמת יצר את הקבצים, במקום להאמין לו כשהוא מדווח על הצלחה. בבדיקות שלנו לקוח אחד דיווח על שלוש הורדות שהושלמו בכשנייה כל אחת, ולא כתב דבר.</p>
-  </div>
-</section>
 
 <section class="alt" id="shape-encrypted">
   <div class="wrap">
-    <p class="kicker">צורה 2 &middot; 14% מהנתונים, מחצית מכל מה שמעל 60 ג"ב</p>
-    <h2>ארכיונים מוצפנים, וחצי מהכתיבה</h2>
-    <p>בפרסום מוצפן אמיתי בגודל 94 ג"ב, nzbfast כותב כעת <b>90 ג"ב</b> לדיסק שלכם במקום <b>180 ג"ב</b> בעבר, ומסיים ברגע שההורדה מסתיימת במקום לעצור למעבר פענוח נפרד.</p>
-    <p>ארכיונים מוצפנים היו הצורה האחרונה שלא הצלחנו לטפל בה במעבר יחיד. nzbfast היה צריך לכתוב את הנתונים הנעולים לדיסק, לקרוא את הכול בחזרה, לפענח ולכתוב שוב. פי שניים כתיבה, פי שניים דיסק, והמתנה בסוף שגדלה עם הפרסום. כעת כל פיסה מפוענחת עם הגעתה, כך שהנתונים הנעולים לעולם אינם מגיעים לדיסק.</p>
-    <div class="bars wide">
-      <div class="bar"><span>לפני</span><span class="trk"><i style="width:92%"></i></span><span class="t">179.8 GB</span></div>
-      <div class="bar me"><span>עכשיו</span><span class="trk"><i style="width:46%"></i></span><span class="t">90.1 GB</span></div>
-    </div>
+    <p class="kicker">צורה שנייה &middot; הטלת המטבע של הפרסום הגדול</p>
+    <h2>ארכיונים מוצפנים: מעבר אחד, כמו כל השאר</h2>
+    <p>חצי מכל מה שמתפרסם מעל 60 GB הוא ארכיון מוצפן, וזו הצורה שבה
+    קליינטים דו-שלביים משלמים הכי הרבה: הנתונים הנעולים צריכים להיכתב
+    החוצה, להיקרא חזרה, להיפתח ולהיכתב שוב. ‏nzbfast פותח כל חלק עם הגעתו,
+    כך שהנתונים הנעולים אף פעם לא מגיעים לדיסק בכלל. נמדד על פרסום מוצפן
+    אמיתי של 94&nbsp;GB:</p>
     <div class="tblwrap"><table>
-      <tr><th></th><th class="num">לפני</th><th class="num">עכשיו</th><th class="num">שינוי</th></tr>
-      <tr><td><b>נכתב לדיסק</b></td><td class="num">179.8 GB</td><td class="num">90.1 GB</td><td class="num win">חצי</td></tr>
-      <tr><td><b>שיא השימוש בדיסק</b></td><td class="num">166 GB</td><td class="num">89.6 GB</td><td class="num win">פחות ב‑46%</td></tr>
-      <tr><td><b>השהיה אחרי ההורדה</b></td><td class="num">19.9 s</td><td class="num">0.6 s</td><td class="num win">בוטלה</td></tr>
-      <tr><td>זמן כולל</td><td class="num">255.8 s</td><td class="num">241.4 s</td><td class="num">מהיר ב‑5.6%</td></tr>
+      <tr><th>פרסום מוצפן של 94 GB, מעבר אחד</th><th class="num">נמדד</th></tr>
+      <tr><td><b>נכתב לדיסק</b></td><td class="win num">90.1 GB - בערך המטען, פעם אחת</td></tr>
+      <tr><td><b>הכי הרבה דיסק בשימוש בו-זמנית</b></td><td class="win num">89.6 GB - קובץ הפלט עצמו</td></tr>
+      <tr><td><b>השהיה אחרי ההורדה</b></td><td class="win num">0.6 s</td></tr>
     </table></div>
-    <p>שיא השימוש בדיסק עומד כעת על 89.6 ג"ב, בדיוק גודל הקובץ שביקשתם. אין עוד רגע במהלך הורדה מוצפנת שבו nzbfast זקוק למקום לעותק שני.</p>
-    <h3>איך זה נראה</h3>
+    <p>הכי הרבה דיסק בשימוש בו-זמנית הוא גודל הקובץ שביקשתם. אין רגע במהלך
+    הורדה מוצפנת שבו nzbfast צריך מקום לעותק שני, ואין מעבר פתיחה אחרי שמד
+    ההורדה מתמלא - קליינט דו-שלבי משלם בערך כפול בשלוש השורות האלה, וזה אותו
+    פי 2 שטבלאות העלות שלמעלה מודדות בכל צורה אחרת.</p>
+    <h3>הצורה שלה</h3>
     <div class="shot" style="background:transparent;padding:10px">
-      <img src="assets/disk-occupancy-encrypted.svg" alt="שימוש בדיסק במהלך הורדה מוצפנת אחת של 94 ג"ב. ההתנהגות הישנה והחדשה עוקבות אחר אותה עקומה בדיוק עד סוף ההורדה, ואז הישנה מזנקת ל‑166 ג"ב בעוד החדשה נשארת ב‑90 ג"ב.">
+      <img src="assets/disk-occupancy-encrypted.svg" alt="דיסק בשימוש במהלך הורדה מוצפנת אחת של 94 GB. דפוס הדו-שלביות והקו החד-מעברי עוקבים זה אחר זה בדיוק עד שההורדה מסתיימת, ואז הדפוס הדו-שלבי קופץ ל-166 GB בזמן שהקו החד-מעברי נשאר שטוח על 90 GB.">
     </div>
-    <p class="note">שימוש בדיסק במהלך הורדה אחת, נדגם כל חמש שניות. שני הקווים זהים עד לרגע שבו ההורדה מסתיימת. אז הישן מטפס ל‑166 ג"ב: זהו מעבר הפענוח, שכותב את הקובץ המוגמר בזמן שהעותק הנעול עדיין על הדיסק. החדש פשוט נעצר, כי הקובץ שהוא כתב כבר היה מפוענח.</p>
+    <p class="note">דיסק בשימוש במהלך הורדה אחת, נדגם כל חמש שניות. הקו
+    השטוח הוא nzbfast; הקו שמטפס ל-166 GB בסוף הוא דפוס
+    הכתיבה-החוצה-ואז-פתיחה, משלם עבור הקובץ המוגמר בזמן שהעותק הנעול עדיין
+    על הדיסק - נמדד על ידי הרצת שני הדפוסים על אותו פרסום.</p>
   </div>
 </section>
 
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">למה זה חשוב</p>
-    <h2>הדיסק שלכם עושה חצי מהעבודה</h2>
-    <p>זיכרון פלאש נשחק מכתיבה. הורדת פרסום של 94 ג"ב עלתה לדיסק שלכם 180 ג"ב של כתיבה; כעת היא עולה 90 ג"ב. ב‑NAS עם דיסקים קשיחים אותו שינוי מבטל מעבר ארוך וחד‑חוטי בסוף כל הורדה מוצפנת, שבמכונה איטית יותר אורך דקות במקום 20 השניות שמדדנו כאן.</p>
-    <h3>מה איננו טוענים</h3>
-    <ul class="plain">
-      <li>ההשהיה של 20 שניות שמדדנו היא <b>המקרה הטוב ביותר עבור ההתנהגות הישנה</b>. היא נמדדה בתחנת עבודה מהירה בעלת 32 ליבות עם האצת חומרה לפענוח. ב‑NAS חסכוני, שם רוב האנשים מריצים את זה, המעבר הישן איטי בהרבה והרווח גדול בהתאם. אנחנו מציינים את המספר הקטן יותר כי זה מה שמדדנו.</li>
-      <li>השיפור של 5.6% בזמן הכולל אמיתי אך צנוע, והוא נובע <b>כולו</b> מההשהיה שבוטלה בסוף. ההורדה עצמה אינה מהירה יותר. בהרצות שלנו שלב ההורדה של ההתנהגות החדשה היה למעשה איטי במעט מזה של הישנה, ולכן אנחנו בטוחים שאותם 5.6% אינם סטיית מדידה המחמיאה לנו.</li>
-    </ul>
+    <h2>הכונן שלכם עושה חצי מהעבודה</h2>
+    <p>אחסון פלאש מתבלה מכתיבה אליו. פרסום של 94&nbsp;GB עולה לכונן שלכם
+    כ-90&nbsp;GB של כתיבה תחת nzbfast; תחת קליינט שעושה שלבים ופורק, אותו
+    פרסום עולה בערך כפול. ב-NAS עם דיסקים קשיחים הצורה החד-מעברית גם מסירה
+    את המעבר החד-הליכי הארוך בסוף כל הורדה מוצפנת - השהיה שנמדדה ב-20 שניות
+    על תחנת עבודה מהירה עם 32 ליבות עם פתיחה מואצת-חומרה, וארוכה בהתאם על
+    המכונות חלשות-ההספק שרוב האנשים בפועל מריצים את זה עליהן. אנחנו מצטטים
+    את המספר הקטן כי הוא זה שמדדנו.</p>
   </div>
 </section>
 
 <section id="unpack-repair">
   <div class="wrap">
-    <p class="kicker">דו-קרב רכיבים</p>
+    <p class="kicker">השוואות רכיבים</p>
     <h2>בדיקות הביצועים הטכניות יותר, למי שאוהב עוד נתונים</h2>
-    <p class="lead">התיקון (PAR2) והפריקה (RAR) הם קוד מקורי שלנו ולא בינאריים של צד שלישי שמצורפים לחבילה, ולכן אנחנו גם מריצים אותם בנפרד מול הכלים הייעודיים על קורפוסים זהים, על ארבע מכונות שמכסות את מה שקורא עשוי באמת להחזיק. זמן נספר רק כשהפלט זהה-בייט למטען המקור: כל מספר RAR למטה נבדק ב-sha256 מול המקור, וכל קובץ מתוקן מול הסט התקין.</p>
+    <p class="lead">תיקון (PAR2) ופריקה (RAR) הם קוד ילידי משלנו ולא
+    בינאריים ארוזים של צד שלישי, אז אנחנו גם מריצים אותם בעצמאות מול הכלים
+    הייעודיים על קורפוסים זהים, על ארבע מכונות שמשתרעות על מה שקורא אולי
+    באמת מחזיק. זמן נספר רק כשהפלט זהה בית-בית למטען המקור: כל מספר RAR
+    למטה נבדק ב-sha256 מול המקור, וכל קובץ מתוקן מול המערך הטהור.</p>
     <div class="chips">
-      <span class="chip"><b>4</b> מכונות, ממחשב נייד ועד 32 ליבות</span>
+      <span class="chip"><b>4</b> מכונות, לפטופ עד 32 ליבות</span>
       <span class="chip"><b>7</b> צורות ארכיון RAR</span>
-      <span class="chip"><b>6</b> כלי חילוץ במרוץ</span>
-      <span class="chip"><b>1 GB</b> נתונים לכל צורה</span>
-      <span class="chip"><b>הטוב מתוך 3</b> משולבים, מטמון חם</span>
+      <span class="chip"><b>6</b> מחלצים בתחרות</span>
+      <span class="chip"><b>1 GB</b> מטען לכל צורה</span>
+      <span class="chip"><b>הטוב מבין 3</b> משולב, מטמון חם</span>
     </div>
 
     <h3 style="margin:38px 0 4px">חילוץ RAR: 7 צורות ארכיון, 6 כלים</h3>
-    <p class="note" style="text-align:start;margin-top:6px">הסבב הקודם של הטבלה הזו השתמש ב-100 עד 200 מגה-בייט לכל צורה, וזו הייתה טעות: כ-28 מילישניות של הפעלת תהליך היו 40% מקטע האחסון, והסדר שיצא ממנו אינו שורד בגודל ריאלי. הסבב הזה משתמש ב-<b>1 ג׳יגה-בייט נתונים לכל צורה</b>, וזה משנה כמה תשובות, חלקן לכיוון ההפוך. הארכיונים נוצרו עם <code>rar</code> 7.23 הרשמי, כך שאף כלי אינו נשפט על קלט מהמקודד שלו עצמו, ואותם בייטים בדיוק רצים בכל מכונה.</p>
+    <p class="note" style="text-align:start;margin-top:6px">הסבב הקודם של
+    הטבלה הזו השתמש ב-100 MB עד 200 MB לכל צורה, וזו הייתה טעות: כ-28 ms של
+    הפעלת תהליך היו 40% ממקטע ה-store, והסדר שהם הפיקו לא שורד בגודל ריאלי.
+    הסבב הזה הוא 1 GB מטען לכל צורה, וזה משנה כמה תשובות, כולל כמה בכיוון
+    ההפוך. הארכיונים נוצרים על ידי <code>rar</code> 7.23 הרשמי, כך ששום כלי
+    לא נשפט על קלט מהמקודד שלו עצמו, ואותם בייטים מתחרים על כל מכונה.</p>
 
-    <p class="note" style="text-align:start"><b>מה שיש בנתונים חשוב יותר ממה שזה נראה.</b> נתונים הבנויים מהעתקות בלוקים הופכים כל צורה דחוסה למבחן העתקת זיכרון; נתונים של טקסט בלבד הופכים אותה למבחן ליטרלים והופמן; מדדנו את שניהם והם אינם מסכימים מי מנצח. לכן ארבע הצורות הדחוסות בנויות משלישים שווים של טקסט, רשומות מובנות ובייטים בלתי ניתנים לדחיסה, ושתי הצורות בקצות הטווח הן קטעים נפרדים בכוונה: <code>store</code> אינו ניתן לדחיסה ו<code>repetitive</code> הוא כמעט כולו התאמות. המחולל ומתקן הבדיקה נמצאים במאגר, כך שאפשר לבנות את הקורפוס מחדש בייט אחר בייט.</p>
+    <p class="note" style="text-align:start"><b>מה שיש במטען חשוב יותר
+    משזה נראה.</b> מטען בנוי מעותקי בלוקים הופך כל צורה דחוסה למבחן
+    העתקת-זיכרון; מטען של טקסט טהור הופך אותו למבחן ליטרלים-והפמן; מדדנו את
+    שניהם והם לא מסכימים מי מנצח. אז ארבע הצורות הדחוסות משתמשות בשלישים
+    שווים של טקסט, רשומות מובנות ובייטים בלתי-דחיסים, ושתי הצורות בקצוות
+    הטווח הזה הן מקטעים נפרדים בכוונה: <code>store</code> אינו דחיס
+    ו-<code>repetitive</code> הוא כמעט כולו התאמות. הבונה והמתקן נמצאים
+    במאגר, כך שאפשר לבנות מחדש את הקורפוס בית לבית.</p>
 
-    <p class="note" style="text-align:start"><b>כל השדה, בשניות, נמוך יותר טוב יותר.</b> הטוב מתוך שלושה, הכלים משולבים בתוך כל סבב במקום להיות מורצים בגושים, והפלט נבדק מול נתוני המקור בכל הרצה בודדת. כלי שמייצר בייטים שגויים מקבל הערת נכונות, לעולם לא זמן מהיר. <code>rarpar</code> הוא הקוד של Weaver ל-RAR ול-PAR2, נבנה מהמקור ב-<code>bd87611</code>; אנחנו מקבעים את הקומיט ולא גרסה, כי החבילות שלו נושאות שלושה מספרי גרסה שונים.</p>
+    <p class="note" style="text-align:start"><b>הורץ מחדש 23 באוגוסט 2026
+    על המנוע 1.2.2, והסקירה עומדת.</b> שלושת הכלים ששוקל קורא הכי הרבה -
+    שלנו, ‏unrar 7.23 ו-rarpar 0.2.5 - הורצו מחדש על שולחן העבודה עם 32
+    הליבות על מנוע השחרור (קוד החילוץ שהתחרה זהה בית-בית לתגית 1.2.2), שישה
+    סבבים משולבים, מינימום לכל כלי, הפלט של כל מקטע נבדק מול מניפסט המטען.
+    שניות, נמוך יותר טוב יותר:</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>צורה</th><th>nzbfast</th><th>unrar 7.23</th><th>rarpar</th><th>unar 1.10.7</th><th>bsdtar</th><th>7-Zip</th></tr></thead>
+      <thead><tr><th>מטען של 1 GB, 32 ליבות (23 באוגוסט 2026)</th><th>store</th><th>400 קבצים קטנים</th><th>solid</th><th>repetitive</th><th>גדול, 3 כרכים</th><th>מוצפן</th><th>מילון 128 MiB</th></tr></thead>
       <tbody>
-        <tr><td colspan="7" class="grp">שולחני עילית, 32 ליבות</td></tr>
-        <tr><td>store, 1 ג׳יגה-בייט</td><td>0.21</td><td><b>0.21</b></td><td>0.23</td><td>0.60</td><td>0.34</td><td>0.30</td></tr>
-        <tr><td>400 קבצים קטנים</td><td><b>0.47</b></td><td>2.02</td><td>2.55</td><td>6.40</td><td>13.67</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>מוצק</td><td><b>1.26</b></td><td>1.62</td><td>2.22</td><td>5.29</td><td>11.48</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>חוזר</td><td><b>0.14</b></td><td>0.16</td><td>0.26</td><td>0.69</td><td>1.86</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>גדול, 4 כרכים</td><td><b>1.08</b></td><td>1.61</td><td>1.75</td><td>5.41</td><td class="no">פלט שגוי²</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>מוצפן</td><td><b>1.09</b></td><td>1.82</td><td>1.74</td><td>6.88</td><td class="no">אין הצפנה³</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>מילון 128 מיבי</td><td><b>1.07</b></td><td>1.37</td><td>1.64</td><td>4.03</td><td class="no">אין מילון גדול⁴</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td colspan="7" class="grp">שולחני ישן יותר, 20 ליבות</td></tr>
-        <tr><td>store, 1 ג׳יגה-בייט</td><td><b>0.16</b></td><td>0.25</td><td>0.28</td><td>0.67</td><td>0.33</td><td>0.33</td></tr>
-        <tr><td>400 קבצים קטנים</td><td><b>0.57</b></td><td>2.48</td><td>3.15</td><td>7.49</td><td>15.58</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>מוצק</td><td><b>1.83</b></td><td>2.31</td><td>3.00</td><td>6.93</td><td>13.97</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>חוזר</td><td><b>0.15</b></td><td>0.20</td><td>0.31</td><td>0.85</td><td>2.18</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>גדול, 4 כרכים</td><td><b>1.50</b></td><td>2.28</td><td>2.26</td><td>6.85</td><td class="no">פלט שגוי²</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>מוצפן</td><td><b>1.51</b></td><td>2.49</td><td>2.26</td><td>8.49</td><td class="no">אין הצפנה³</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td>מילון 128 מיבי</td><td><b>1.40</b></td><td>1.84</td><td>1.97</td><td>5.29</td><td class="no">אין מילון גדול⁴</td><td class="no">לא נתמך¹</td></tr>
-        <tr><td colspan="7" class="grp">נייד, 14 ליבות / 20 תהליכונים, Windows⁵</td></tr>
-        <tr><td>store, 1 ג׳יגה-בייט</td><td><b>0.35</b></td><td>0.63</td><td>0.74</td><td class="no">אין שורת פקודה⁵</td><td>0.81</td><td>0.76</td></tr>
-        <tr><td>400 קבצים קטנים</td><td><b>1.05</b></td><td>6.37</td><td>11.58</td><td class="no">אין שורת פקודה⁵</td><td>16.72</td><td>5.45</td></tr>
-        <tr><td>מוצק</td><td><b>2.92</b></td><td>6.14</td><td>9.76</td><td class="no">אין שורת פקודה⁵</td><td>15.14</td><td>5.79</td></tr>
-        <tr><td>חוזר</td><td><b>0.32</b></td><td>0.62</td><td>0.54</td><td class="no">אין שורת פקודה⁵</td><td>1.13</td><td>0.65</td></tr>
-        <tr><td>גדול, 4 כרכים</td><td><b>2.32</b></td><td>2.92</td><td>2.72</td><td class="no">אין שורת פקודה⁵</td><td class="no">פלט שגוי²</td><td>4.21</td></tr>
-        <tr><td>מוצפן</td><td><b>2.22</b></td><td>3.33</td><td>2.85</td><td class="no">אין שורת פקודה⁵</td><td class="no">אין הצפנה³</td><td>4.13</td></tr>
-        <tr><td>מילון 128 מיבי</td><td><b>2.04</b></td><td>2.44</td><td>2.38</td><td class="no">אין שורת פקודה⁵</td><td class="no">אין מילון גדול⁴</td><td>2.51</td></tr>
-        <tr><td colspan="7" class="grp">נייד, Apple M5 Max⁶</td></tr>
-        <tr><td>store, 1 ג׳יגה-בייט</td><td><b>0.10</b></td><td>0.16</td><td>0.11</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td></tr>
-        <tr><td>400 קבצים קטנים</td><td><b>0.40</b></td><td>1.94</td><td>2.09</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td></tr>
-        <tr><td>מוצק</td><td><b>1.15</b></td><td>1.87</td><td>1.97</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td></tr>
-        <tr><td>חוזר</td><td><b>0.10</b></td><td>0.15</td><td>0.18</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td></tr>
-        <tr><td>גדול, 4 כרכים</td><td><b>0.98</b></td><td>1.75</td><td>1.54</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td></tr>
-        <tr><td>מוצפן</td><td><b>0.99</b></td><td>1.91</td><td>1.55</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td></tr>
-        <tr><td>מילון 128 מיבי</td><td><b>0.94</b></td><td>1.52</td><td>1.33</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td><td class="no">לא הורץ⁶</td></tr>
+        <tr><td><b>nzbfast 1.2.2</b></td><td><b>0.119</b></td><td><b>0.474</b></td><td><b>1.515</b></td><td><b>0.120</b></td><td><b>1.118</b></td><td><b>1.137</b></td><td><b>1.146</b></td></tr>
+        <tr><td>unrar 7.23</td><td>0.190</td><td>2.032</td><td>1.784</td><td>0.139</td><td>1.655</td><td>1.846</td><td>1.420</td></tr>
+        <tr><td>rarpar 0.2.5</td><td>0.206</td><td>2.563</td><td>2.395</td><td>0.237</td><td>1.852</td><td>1.857</td><td>1.725</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>היכן השדה לא יכול היה להתחרות, ולמה.</b> ¹ ה-7-Zip שרץ כאן הוא חבילת Homebrew, שדוחה כל צורה דחוסה עם <code>ERROR: Unsupported Method</code> וקוראת ב-macOS רק את הצורה המאוחסנת. גרסה קודמת של הדף הזה תלתה את זה בבניין macOS של 7-Zip, וזו הייתה טעות: Homebrew בונה אותו בלי קודק unRAR הלא-חופשי, ואילו בניין macOS ש-7-zip.org מפיץ כולל אותו ומפענח את כל שבע הצורות, בדיוק כמו בניין Windows. נמדד מחדש ב-14 באוגוסט 2026. מי שמתקין את 7-Zip מהפרויקט ולא מ-Homebrew, העמודה הזאת לא מתארת את מה שיש לו. ² ל-bsdtar אין תמיכה בארכיוני RAR5 מרובי כרכים והוא יצר קובץ קטוע בלי לדווח על שגיאה; הקטע הזה הוא אפוא כשל נכונות ולא זמן איטי. מתקן הבדיקה שלנו תפס זאת מפני שהוא בודק את הפלט, וזו בדיוק הסיבה שכדאי לבדוק את הפלט. ³ <code>bsdtar: Encryption is not supported</code>. ⁴ <code>bsdtar: Declared dictionary size is not supported</code>. ⁵ unar אינו מספק כלי שורת פקודה ל-Windows, ולכן השדה במחשב הנייד מונה חמישה. ⁶ שורות ה-M5 Max מריצות את שלושת הכלים שקורא macOS באמת היה פונה אליהם - unrar, <code>rarpar</code> ואנחנו; unar, ‏bsdtar ו-7-Zip לא הורצו על המכונה הזו. ‏unrar בשורות האלה הוא 7.22, הבנייה החדשה ביותר שרצה שם ללא התערבות.</p>
+    <p class="note" style="text-align:start">כל שבע הצורות שלנו, במינימום
+    ובחציון, פי 1.16 עד פי 4.29 מול unrar. הזמנים האלה לא ברי-השוואה תא-לתא
+    עם הטבלה הרחבה יותר למטה - המתקן עודכן מאז הסבבים של אותה טבלה ומספרי
+    הסבבים שונים - כך שכל טבלה נקראת מול עצמה. הטבלה הרחבה שומרת על
+    התאריכים שלה עצמה ועל שדה ששת הכלים שלה, ועמודת ה-nzbfast שלה מתארת את
+    המנוע ש-1.2.2 שולח: המרוץ החוזר שלמעלה מדד את רמת המנוע הנוכחית מול
+    הבנייה של אותה טבלה על כל שבע הצורות, הוכרע לפי ספירת פקודות חומרה
+    (0.14% פחות לאותו זמן), כך שהתאים האלה אינם מספרים של בנייה שהוחלפה עם
+    תווית עדכנית. <b>המרוץ החוזר הזה הוא גם המקום שבו כלל ה-A/A במדור
+    המערך הרוויח את מקומו.</b> מעבר של אותו יום דיווח לראשונה על צורה אחת
+    כנסיגה קטנה מול הבנייה הקודמת שלנו עצמנו, והקריאה שרדה הרצה של שני
+    סדרי הזרועות. בקרת A/A - אותו בינארי מתחרה מול עותק זהה-בית של עצמו -
+    הראתה את המתקן נותן לזרוע שרצה ראשונה קנס של כ-1.5%: הבינארי הזהה ניצח
+    רק 6 מתוך 15 סבבים מהמשבצת הראשונה, והחלפת סדר לא מבטלת הטיה שנוחתת
+    תמיד על מי שראשון. ספירות פקודות החומרה הכריעו את השאלה שהמתקן לא יכול:
+    הבנייה החדשה יותר מוציאה לפועל 0.14% פחות פקודות לאותו שעון קיר, כך
+    שלא הייתה נסיגה. כל השוואת בנייה-שלנו-מול-בנייה-שלנו שאנחנו מפרסמים
+    עכשיו נושאת את הבקרה הזו.</p>
 
-    <p class="note" style="text-align:start"><b>כל צורה בכל מכונה חוץ מאחת, והאחת הזו היא תיקו.</b> הגרסה הקודמת של העמוד הזה הפסידה בחמישה מהתאים האלה, והסיבה שהם זזו ראויה לאמירה, משום שאין זו הסיבה שנתנו תחילה. האשמנו את שגרת העתקת הזיכרון של הפלטפורמה, והפרופיל אמר משהו צר יותר: התאמה של שניים עד שלושים ושניים בתים שילמה קריאה מלאה לשגרה הזו, והקריאה עלתה יותר מההעתקה. העתקה של שלושים ושניים בתים קבועים דרך אוגר במקום זאת ביטלה אותה, ולכן <code>repetitive</code>, <code>solid</code> ומילון 128 ה-MiB זזו כולם בבת אחת - אלה שלוש הצורות הבנויות מהתאמות קצרות. בנפרד, סכום הביקורת רץ על חוט הכותב ועיכב אותו; העברתו במורד הזרם עשתה את השאר. התא היחיד שאינו שלנו הוא הצורה המאוחסנת במחשב השולחני בעל 32 הליבות, שם unrar ואנחנו מרוחקים שלוש אלפיות שנייה במקטע שכל כולו העברת בתים.</p>
+    <p class="note" style="text-align:start"><b>כל השדה, שניות, נמוך יותר
+    טוב יותר.</b> הטוב מבין שלוש, הכלים משולבים בתוך כל סבב במקום לרוץ
+    בבלוקים, הפלט נבדק מול מטען המקור בכל הרצה בודדת. כלי שהפיק בייטים
+    שגויים מקבל הערת נכונות, אף פעם לא זמן מהיר. <code>rarpar</code> הוא
+    קוד ה-RAR וה-PAR2 של Weaver עצמה, נבנה מהמקור ב-<code>bd87611</code>;
+    אנחנו מצמידים את ה-commit ולא גרסה כי החבילות (crates) שלו נושאות
+    שלושה מספרי גרסה שונים.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th>שניות, 1 GB לכל צורה</th><th>store</th><th>400 קבצים קטנים</th><th>solid</th><th>repetitive</th><th>גדול, 4 כרכים</th><th>מוצפן</th><th>מילון 128 MiB</th></tr></thead>
+      <tbody>
+        <tr><td colspan="8" class="grp">שולחן עבודה high-end, 32 ליבות</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.21</b></td><td><b>0.47</b></td><td><b>1.26</b></td><td><b>0.14</b></td><td><b>1.08</b></td><td><b>1.09</b></td><td><b>1.07</b></td></tr>
+        <tr><td>unrar 7.23</td><td><b>0.21</b></td><td>2.02</td><td>1.62</td><td>0.16</td><td>1.61</td><td>1.82</td><td>1.37</td></tr>
+        <tr><td>rarpar</td><td>0.23</td><td>2.55</td><td>2.22</td><td>0.26</td><td>1.75</td><td>1.74</td><td>1.64</td></tr>
+        <tr><td>unar 1.10.7</td><td>0.60</td><td>6.40</td><td>5.29</td><td>0.69</td><td>5.41</td><td>6.88</td><td>4.03</td></tr>
+        <tr><td>bsdtar</td><td>0.34</td><td>13.67</td><td>11.48</td><td>1.86</td><td class="no">פלט שגוי&sup2;</td><td class="no">אין הצפנה&sup3;</td><td class="no">אין מילון גדול&#8308;</td></tr>
+        <tr><td>7-Zip</td><td>0.30</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td></tr>
+        <tr><td colspan="8" class="grp">שולחן עבודה ישן יותר, 20 ליבות</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.16</b></td><td><b>0.57</b></td><td><b>1.83</b></td><td><b>0.15</b></td><td><b>1.50</b></td><td><b>1.51</b></td><td><b>1.40</b></td></tr>
+        <tr><td>unrar 7.23</td><td>0.25</td><td>2.48</td><td>2.31</td><td>0.20</td><td>2.28</td><td>2.49</td><td>1.84</td></tr>
+        <tr><td>rarpar</td><td>0.28</td><td>3.15</td><td>3.00</td><td>0.31</td><td>2.26</td><td>2.26</td><td>1.97</td></tr>
+        <tr><td>unar 1.10.7</td><td>0.67</td><td>7.49</td><td>6.93</td><td>0.85</td><td>6.85</td><td>8.49</td><td>5.29</td></tr>
+        <tr><td>bsdtar</td><td>0.33</td><td>15.58</td><td>13.97</td><td>2.18</td><td class="no">פלט שגוי&sup2;</td><td class="no">אין הצפנה&sup3;</td><td class="no">אין מילון גדול&#8308;</td></tr>
+        <tr><td>7-Zip</td><td>0.33</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td><td class="no">לא נתמך&sup1;</td></tr>
+        <tr><td colspan="8" class="grp">לפטופ, 14 ליבות / 20 תהליכונים, Windows&#8309;</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.35</b></td><td><b>1.05</b></td><td><b>2.92</b></td><td><b>0.32</b></td><td><b>2.32</b></td><td><b>2.22</b></td><td><b>2.04</b></td></tr>
+        <tr><td>unrar 7.23</td><td>0.63</td><td>6.37</td><td>6.14</td><td>0.62</td><td>2.92</td><td>3.33</td><td>2.44</td></tr>
+        <tr><td>rarpar</td><td>0.74</td><td>11.58</td><td>9.76</td><td>0.54</td><td>2.72</td><td>2.85</td><td>2.38</td></tr>
+        <tr><td>unar</td><td class="no">אין CLI&#8309;</td><td class="no">אין CLI&#8309;</td><td class="no">אין CLI&#8309;</td><td class="no">אין CLI&#8309;</td><td class="no">אין CLI&#8309;</td><td class="no">אין CLI&#8309;</td><td class="no">אין CLI&#8309;</td></tr>
+        <tr><td>bsdtar</td><td>0.81</td><td>16.72</td><td>15.14</td><td>1.13</td><td class="no">פלט שגוי&sup2;</td><td class="no">אין הצפנה&sup3;</td><td class="no">אין מילון גדול&#8308;</td></tr>
+        <tr><td>7-Zip</td><td>0.76</td><td>5.45</td><td>5.79</td><td>0.65</td><td>4.21</td><td>4.13</td><td>2.51</td></tr>
+        <tr><td colspan="8" class="grp">לפטופ, Apple M5 Max&#8310;</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.10</b></td><td><b>0.40</b></td><td><b>1.15</b></td><td><b>0.10</b></td><td><b>0.98</b></td><td><b>0.99</b></td><td><b>0.94</b></td></tr>
+        <tr><td>unrar 7.22</td><td>0.16</td><td>1.94</td><td>1.87</td><td>0.15</td><td>1.75</td><td>1.91</td><td>1.52</td></tr>
+        <tr><td>rarpar</td><td>0.11</td><td>2.09</td><td>1.97</td><td>0.18</td><td>1.54</td><td>1.55</td><td>1.33</td></tr>
+      </tbody>
+    </table></div>
+    <p class="note" style="text-align:start"><b>היכן שהשדה לא הצליח
+    להתחרות, ולמה.</b> ¹ ה-7-Zip שמתחרה כאן הוא חבילת Homebrew, שמסרבת לכל
+    צורה דחוסה עם <code>ERROR: Unsupported Method</code> וקוראת רק את
+    הצורה המאוחסנת ב-macOS. גרסה קודמת של העמוד הזה תלתה זאת בבנייה של
+    7-Zip ל-macOS, מה שהיה שגוי: Homebrew בונה אותו בלי הקודק unRAR
+    הלא-חופשי, בזמן שבניית ה-macOS ש-7-zip.org משחררת נושאת את הקודק
+    ומפענחת את כל שבע הצורות, כמו בניית Windows. נמדד מחדש 14 באוגוסט 2026.
+    אם אתם מתקינים את 7-Zip מהפרויקט ולא מ-Homebrew, העמודה הזו לא מתארת
+    את מה שיש לכם. ² ל-bsdtar אין תמיכה ב-RAR5 מרובה-כרכים והוא הפיק קובץ
+    קטוע בלי לדווח שגיאה, כך שהמקטע הזה הוא כשל נכונות ולא זמן איטי; המתקן
+    שלנו תפס את זה על ידי בדיקת הפלט, וזו הסיבה שכדאי לבדוק את הפלט. ³
+    <code>bsdtar: Encryption is not supported</code>. ⁴
+    <code>bsdtar: Declared dictionary size is not supported</code>. ⁵
+    ‏unar לא משחררת שום כלי שורת-פקודה ל-Windows, כך ששדה הלפטופ הוא חמישה.
+    ⁶ קבוצת ה-M5 Max מריצה את שלושת הכלים שקורא ב-macOS באמת היה פונה
+    אליהם - unrar, ‏<code>rarpar</code> ואנחנו; unar, ‏bsdtar ו-7-Zip לא
+    התחרו על המכונה הזו. ה-unrar שלה הוא 7.22, הבנייה החדשה ביותר שרצה שם
+    ללא השגחה.</p>
 
-    <p class="note" style="text-align:start">הצורה שבה אנחנו מנצחים בפער הגדול ביותר היא זו שיוזנט באמת מפרסם ממנה מאות בבת אחת: <b>400 קבצים קטנים, פי 4.3 ופי 4.4 מול unrar</b> ופי 5.4 עד 5.5 מול <code>rarpar</code>. זהו מקביליות בין החברים בארכיון, וזה ההבדל בין כלי חילוץ שנכתב לתור הורדות לבין אחד שנכתב לשורת פקודה. הצורה המאוחסנת, שלפי <a href="#census">הסקירה שלמעלה</a> היא 84% מהבייטים על הקו, היא כמעט תיקו עבור שלושת הכלים הרציניים, כי בנקודה הזו כולם רק מזיזים בייטים.</p>
+    <p class="note" style="text-align:start"><b>כל צורה על כל מכונה חוץ
+    מאחת, וזו תיקו.</b> צורות ההתאמה-הקצרה מגיעות לשני דברים ספציפיים
+    במפענח שלנו. התאמה של שניים עד שלושים ושניים בייטים נהגה לשלם עבור
+    קריאה מלאה לשגרת העתקת-הזיכרון של הפלטפורמה, והקריאה עלתה יותר
+    מההעתקה; העתקת שלושים ושניים בייטים קבועים דרך רגיסטר במקום זאת היא
+    הסיבה ש-<code>repetitive</code>, ‏<code>solid</code> ומילון ה-128 MiB -
+    שלוש הצורות הבנויות מהתאמות קצרות - כולן מהירות בבת אחת. והצ'קסום רץ
+    במורד הזרם של תהליכון הכותב ולא עליו. התא היחיד שאיננו מנצחים בו באופן
+    מוחלט הוא הצורה המאוחסנת בשולחן העבודה עם 32 הליבות, שבו unrar ואנחנו
+    במרחק שלוש מילישניות זה מזה במקטע שהוא טהור הזזת בייטים - זהה ברמת
+    הדיוק של הטבלה הזו, כך ששני התאים מסומנים וזה מקבל ציון תיקו, לא הפסד
+    ולא ניצחון.</p>
 
-    <p class="note" style="text-align:start"><b>בחירה אחת שראויה להצהרה.</b> הארכיונים נארזים כשהמכווץ מקובע לארבעה חוטים. אחרת חלוקת הבלוקים של RAR עוקבת אחר מספר הליבות של המכונה שארזה את הארכיון, כך שמכונה בעלת 32 ליבות ומכונה בעלת 20 ליבות מפיקות בתים שונים מאותו קלט והמכונות חדלות להיות ברות-השוואה. הקיבוע הופך את מאגר החילוץ לזהה בית-בית בכל מקום, וזו המטרה, אך הוא גם מגביל כמה מהפענוח יכול לרוץ במקביל - ולכן, כששתי הצורות הקרובות ביותר עדיין היו הפסדים, הרצנו אותן מחדש מול ארכיונים שנארזו בכל 32 החוטים, כדי לבדוק שהקיבוע אינו הסיבה. הוא לא היה: solid עבר מפיגור של 4.2% לפיגור של 2.4% ומילון 128 ה-MiB מ-6.6% ל-6.3%, אותו סדר בשני המקרים. שתיהן כעת ניצחונות על המאגר המקובע, במרווח רחב יותר משהבדיקה ההיא יכולה להסביר.</p>
+    <p class="note" style="text-align:start">הצורה שבה אנחנו מנצחים הכי
+    הרבה היא זו שיוזנט באמת מפרסמת מאות ממנה בכל פעם: <b>400 קבצים קטנים,
+    פי 4.3 ופי 4.4 מול unrar</b> ופי 5.4 עד פי 5.5 מול <code>rarpar</code>.
+    זו מקביליות לפי-חבר, וזה ההבדל בין מחלץ שנכתב לתור הורדות לבין אחד
+    שנכתב לשורת פקודה. הצורה המאוחסנת, שה<a href="#census">מפקד שלמעלה</a>
+    אומר שהיא 84% מהבייטים על הקו, היא כמעט תיקו עבור שלושת הכלים
+    הרציניים, כי בשלב הזה כולם פשוט מזיזים בייטים.</p>
 
-    <p class="note" style="text-align:start"><b>למה אין שורת RAR4, ומה קורה לפוסטים האלה.</b> כל צורה למעלה היא RAR5 או RAR7, כי זה מה שיוזנט מפרסם היום. ארכיוני RAR4 ישנים עדיין מופיעים, ואותו מנוע קורא אותם, כולל הצורות הדחוסות והמוגנות בסיסמה, באותו מעבר יחיד כמו החדשים ולא בכתיבת הכרכים לדיסק ופריקה אחר כך. שורה משלהם אין כאן, כי <code>rar</code> 7.23 הרשמי כבר אינו יכול ליצור RAR4, ולכן אין קורפוס ניטרלי שאפשר להריץ עליו את השדה; העבודה הזאת נבדקת במקום זאת מול ארכיונים שנכתבו ב-WinRAR 3.00, בית אחר בית מול unrar.</p>
+    <p class="note" style="text-align:start"><b>בחירה אחת ששווה להצהיר
+    עליה.</b> הארכיונים ארוזים כשהדחוס מוצמד לארבעה תהליכונים. פיצול
+    הבלוקים של RAR אחרת עוקב אחרי מספר הליבות של המכונה שארזה את הארכיון,
+    כך שמכונה עם 32 ליבות ומכונה עם 20 ליבות מייצרות בייטים שונים מאותו
+    קלט והמכונות מפסיקות להיות ברות-השוואה. הצמדה הופכת את קורפוס החילוץ
+    לזהה-בית בכל מקום, וזו הנקודה, אבל היא גם מגבילה כמה מהפענוח יכול לרוץ
+    במקביל - אז כששתי הצורות הקרובות ביותר היו הפסדים הרצנו אותן מחדש מול
+    ארכיונים שנארזו עם כל 32 התהליכונים, כדי לבדוק שההצמדה לא הייתה הגורם.
+    היא לא הייתה: solid זזה מ-4.2% מאחור ל-2.4% מאחור ומילון ה-128 MiB
+    מ-6.6% ל-6.3%, אותו סדר בשני המקרים. שתיהן עכשיו ניצחונות בקורפוס
+    המוצמד במרווח רחב יותר ממה שהבדיקה הזו יכלה להסביר.</p>
 
-    <h3 style="margin:44px 0 4px">אימות ותיקון PAR2: ערכה של 1 גיבי, ארבע רמות נזק</h3>
-    <p class="note" style="text-align:start;margin-top:6px">מאגר: 1 GiB של מטען אקראי שנארז במצב אחסון ב-21 כרכי RAR, לאחר מכן שתי ערכות PAR2 ביתירות של 10%, אחת בבלוקים של 1 MiB ואחת של 64 KiB, ולאחר מכן מפות נזק קבועות. כל הרצה משתמשת באותו נוהל: עותק טרי, קריאת המאגר כולו פעם אחת לחימום המטמון, ואז מדידה. הטוב מבין שלושה סבבים משולבים; כל כרך מתוקן מושווה לערכה השלמה בכל סבב. נמוך יותר טוב יותר.</p>
+    <p class="note" style="text-align:start"><b>למה אין שורת RAR4, ומה
+    קורה לפרסומים האלה.</b> כל צורה שלמעלה היא RAR5 או RAR7, וזה מה
+    שיוזנט מפרסמת היום. ארכיוני RAR4 ישנים יותר עדיין צצים, ואותו מנוע
+    קורא אותם, כולל הצורות הדחוסות והמוגנות-בסיסמה, באותו מעבר יחיד כמו
+    החדשים יותר במקום לכתוב את הכרכים לדיסק ולפרוק אותם אחר כך. הם לא
+    מקבלים שורה כאן כי <code>rar</code> 7.23 הרשמי כבר לא יכול ליצור RAR4,
+    כך שאין קורפוס ניטרלי להתחרות בו על השדה; העבודה הזו נבדקת מול
+    ארכיונים שנכתבו על ידי WinRAR 3.00 במקום זאת, בית בבית מול unrar.</p>
 
-    <p class="note" style="text-align:start"><b>תיקון בנוגע למאגר, משום שגרסה קודמת של העמוד הזה הגזימה.</b> אמרנו שכל מכונה מריצה מאגר זהה בית-בית, שנבדק בגיבוב. חישוב גיבוב לכל כרך בכל ערכה מראה שזה נכון לגבי המחשב השולחני בעל 32 הליבות והמחשב הנייד עם Windows, המתאימים במדויק, ולא לגבי המחשב השולחני בעל 20 הליבות, המחזיק הגרלה אקראית שונה של אותה צורה: אותם 21 כרכים באותם גדלים, אותם שני גדלי בלוק, ונזק שאומת באותם 3, 101 ו-1,500 בלוקים הפרוסים על פני אותו מספר קבצים. כל מספר בתוך שורה עדיין נמדד על בתים שכל כלי באותה שורה חולק, וזה מה שכל השוואה נשענת עליו. אך השורות אינן ארבעה מבטים על קלט אחד, ומאחר שאופי המטען שווה כ-7% לסריקה של מתחרה אחד, ראוי לומר זאת ולא לטשטש.</p>
+    <h3 style="margin:44px 0 4px">אימות ותיקון PAR2: מערך של 1 GiB, ארבע רמות נזק</h3>
+    <p class="note" style="text-align:start;margin-top:6px">קורפוס: 1 GiB
+    של מטען אקראי ארוז במצב store לתוך 21 כרכי RAR, ואז שני מערכי PAR2
+    ברדונדנטיות של 10%, אחד בבלוקים של 1 MiB ואחד ב-64 KiB, ואז מפות נזק
+    קבועות. כל הרצה משתמשת באותו פרוטוקול: עותק טרי, קריאת הקורפוס כולו
+    פעם אחת לחימום המטמון, ואז תזמון. הטוב מבין שלושה סבבים משולבים; כל
+    כרך מתוקן מושווה מול המערך הטהור בכל סבב. נמוך יותר טוב יותר.</p>
 
-    <p class="note" style="text-align:start"><b>איזה par2 הוא איזה.</b> <code>par2cmdline</code> המקורי הוא מימוש הייחוס שכולם הסתעפו ממנו. <code>par2cmdline-turbo</code> הוא ההסתעפות שכוללת את גרעיני שדה גלואה של <b>ParPar</b>, כתובים ביד ב-SIMD: זו בדיוק המשמעות של «turbo», ולכן turbo, ולא המקור, הוא הכלי שכדאי למדוד מולו. שני עמודות turbo שלמטה מריצות את אותם גרעיני ParPar. מה שמפריד ביניהן אינו החשבון אלא הבנייה והדגלים.</p>
+    <p class="note" style="text-align:start"><b>תיקון לגבי הקורפוס, כי
+    גרסה קודמת של העמוד הזה הגזימה בו.</b> אמרנו שכל מכונה הריצה קורפוס
+    זהה-בית, נבדק בגיבוב. גיבוב כל כרך בכל מערך מראה שזה נכון לגבי שולחן
+    העבודה עם 32 הליבות ולפטופ ה-Windows, שתואמים בדיוק, ולא לגבי שולחן
+    העבודה עם 20 הליבות, שמחזיק הגרלה אקראית שונה של אותה צורה: אותם 21
+    כרכים באותם גדלים, אותם שני גדלי בלוק, ונזק מאומת באותם 3, 101 ו-1,500
+    בלוקים פרושים על פני אותו מספר קבצים. כל מספר בתוך שורה עדיין נמדד על
+    בייטים שכל כלי באותה שורה חולק, וזה מה שכל השוואה נשענת עליו. אבל
+    השורות אינן ארבע תצוגות של קלט אחד, ומכיוון שאופי המטען שווה כ-7%
+    לסריקה של מתחרה אחד, זה שווה הצהרה ולא טשטוש.</p>
 
-    <p class="note" style="text-align:start"><b>כך שהמתחרה מופיע פעמיים, ואחת מהעמודות היא המקרה הטוב שלו ולא ברירת המחדל שלו.</b> הקובץ הבינארי של הגרסה שהייתם מורידים מהודר למעבד גנרי ומגבב רק כמה קבצים בכל פעם; אותו מקור בנוי למעבד האמיתי של המכונה ומופעל עם <code>-T16</code> משתמש בפקודות שיש למכונה הזו באמת ומגבב שישה-עשר קבצים בבת אחת. בנייד זה שווה עד פי 2.6, רק מהבנייה והדגלים. שפטו אותנו לפי העמודה המכווננת, שהיא ההשוואה הקשה יותר; העמודה «כפי שמופץ» היא מה שמי שמוריד באמת חווה. <code>par2cmdline</code> הוא המקורי, גרסה 1.2.0, נבנה מהמקור בכל מכונה. <code>rarpar</code> הוא מימוש ה-PAR2 של Weaver, נבנה מהמקור עם מנוע ה-GPU של Metal מופעל. ל-<code>par2j</code> של MultiPar יש רק גרסת Windows, ולכן הוא מופיע בשורות הנייד עם Windows בלבד. שורות ה-M5 Max מריצות את שני הכלים שיש להם בניות macOS arm64 עדכניות לצד שתי עמודות ה-turbo; <code>par2cmdline</code> הקלאסי לא הורץ על המכונה הזו.</p>
+    <p class="note" style="text-align:start"><b>איזה par2 הוא איזה.</b>
+    ‏<code>par2cmdline</code> המקורי הוא היישום הייחוס שכולם פיצלו ממנו.
+    ‏<code>par2cmdline-turbo</code> הוא הפיצול שמארח את הגרעינים המכתובים
+    ביד ב-SIMD של שדה גלואה של <b>ParPar</b>: זה בדיוק מה ש"טורבו" אומר,
+    וזו הסיבה שטורבו, ולא המקורי, הוא הכלי ששווה למדוד מולו. שתי עמודות
+    הטורבו למטה מריצות את אותם גרעיני ParPar. מה שמפריד ביניהן הוא לא
+    החשבון אלא הבנייה והדגלים.</p>
+
+    <p class="note" style="text-align:start"><b>אושר על בניית השחרור מול
+    המתחרה העדכני, 24 באוגוסט 2026.</b> הטבלאות האלה נמדדו לפני שנחתכה
+    1.2.2 ולפני ש-<code>par2cmdline-turbo</code> שחררה 1.5.0 (20 באוגוסט
+    2026), כך שעמודת 20 הליבות הורצה מחדש על שתיהן: בניית השחרור 1.2.2
+    שלנו מול טורבו 1.5.0, שלושה סבבים משולבים לכל מקטע, כל קובץ מתוקן
+    מושווה מול המערך הטהור. כל ארבעת המקטעים משוחזרים - שלנו 0.18 / 0.30 /
+    0.75 / 2.02 מול ה-0.19 / 0.33 / 0.74 / 2.07 המודפסים כאן, וטורבו 1.5.0
+    נוחת בתוך כמה אחוזים מהבנייה שבטבלה בכל מקטע ובשתי התצורות. התאים
+    עומדים כפי שפורסמו; שלוש המכונות האחרות שומרות על התאריכים שלהן עצמן.</p>
+
+    <p class="note" style="text-align:start"><b>אז המתחרה מופיע פעמיים,
+    ואחת מהעמודות האלה היא המקרה הטוב ביותר שלו ולא ברירת המחדל שלו.</b>
+    הבינארי המשוחרר שהייתם מורידים מקומפל למעבד בסיסי גנרי ומגבב רק כמה
+    קבצים בכל פעם; בניית אותו מקור למעבד המארח האמיתי והעברת
+    <code>-T16</code> נותנת לו להשתמש בפקודות שלמכונה הזו יש באמת ולגבב
+    שישה עשר קבצים בבת אחת. בלפטופ זה שווה עד פי 2.6, כולו מבנייה ומדגלים.
+    שפטו אותנו על העמודה המכוונת, שהיא ההשוואה הקשה יותר; העמודה
+    כפי-שנשלח היא מה שמישהו שמוריד אותו באמת חווה. <code>par2cmdline</code>
+    הוא המקורי, גרסה 1.2.0, נבנה מהמקור על כל מכונה. <code>rarpar</code>
+    הוא יישום ה-PAR2 של Weaver עצמה, נבנה מהמקור עם קצה ה-GPU מסוג Metal
+    שלו מופעל. ה-<code>par2j</code> של MultiPar הוא Windows-בלבד, כך שהוא
+    מופיע רק בשורות לפטופ ה-Windows. שורות ה-M5 Max מריצות את שני הכלים
+    עם בניות arm64 עדכניות ל-macOS לצד שתי עמודות הטורבו;
+    <code>par2cmdline</code> הקלאסי לא התחרה על המכונה הזו.</p>
 
     <div class="tblwrap"><table>
-      <thead><tr>
-        <th>נזק</th><th>מכונה</th><th>nzbfast</th>
-        <th>par2-turbo<br><span class="note">מכוונן</span></th>
-        <th>par2-turbo<br><span class="note">כפי שמופץ</span></th>
-        <th>par2cmdline</th>
-        <th>rarpar</th>
-        <th>MultiPar</th>
-      </tr></thead>
+      <thead><tr><th>שניות, מערך של 1 GiB</th><th>שולחן עבודה, 32 ליבות</th><th>שולחן עבודה, 20 ליבות</th><th>לפטופ, 14 ליבות</th><th>לפטופ, M5 Max</th></tr></thead>
       <tbody>
-        <tr><td rowspan="4">אין<br><span class="note">אימות נקי</span></td>
-            <td>שולחני, 32 ליבות</td><td><b>0.11</b></td><td>0.31</td><td>0.86</td><td>3.03</td><td>2.62</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>שולחני, 20 ליבות</td><td><b>0.19</b></td><td>0.38</td><td>1.12</td><td>3.84</td><td>3.45</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>נייד, 14 ליבות</td><td><b>0.23</b></td><td>0.42</td><td>1.06</td><td>3.81</td><td>2.96</td><td>1.34</td></tr>
-        <tr><td>נייד, M5 Max</td><td><b>0.18</b></td><td>0.28</td><td>0.80</td><td class="no">לא הורץ</td><td>2.32</td><td class="no">Windows בלבד</td></tr>
-
-        <tr><td rowspan="4">3 בלוקים<br><span class="note">כמה מאמרים מתים</span></td>
-            <td>שולחני, 32 ליבות</td><td><b>0.22</b></td><td>0.51</td><td>1.08</td><td>3.64</td><td>4.27</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>שולחני, 20 ליבות</td><td><b>0.33</b></td><td>0.66</td><td>1.46</td><td>4.58</td><td>5.53</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>נייד, 14 ליבות</td><td><b>0.46</b></td><td>0.78</td><td>1.42</td><td>4.98</td><td>4.99</td><td>1.71</td></tr>
-        <tr><td>נייד, M5 Max</td><td><b>0.26</b></td><td>0.48</td><td>1.00</td><td class="no">לא הורץ</td><td>3.64</td><td class="no">Windows בלבד</td></tr>
-
-        <tr><td rowspan="4">101 בלוקים</td>
-            <td>שולחני, 32 ליבות</td><td><b>0.48</b></td><td>0.88</td><td>2.04</td><td>5.57</td><td>4.73</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>שולחני, 20 ליבות</td><td><b>0.74</b></td><td>1.17</td><td>2.65</td><td>7.57</td><td>5.73</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>נייד, 14 ליבות</td><td><b>0.96</b></td><td>1.40</td><td>2.69</td><td>11.7</td><td>5.74</td><td>2.65</td></tr>
-        <tr><td>נייד, M5 Max</td><td><b>0.66</b></td><td>0.85</td><td>1.84</td><td class="no">לא הורץ</td><td>4.17</td><td class="no">Windows בלבד</td></tr>
-
-        <tr><td rowspan="4">1,500 בלוקים<br><span class="note">91% מנתוני השחזור נוצלו</span></td>
-            <td>שולחני, 32 ליבות</td><td><b>1.00</b></td><td>3.00</td><td>5.21</td><td>67.7</td><td>7.15</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>שולחני, 20 ליבות</td><td><b>2.07</b></td><td>5.52</td><td>8.20</td><td>86.1</td><td>11.49</td><td class="no">Windows בלבד</td></tr>
-        <tr><td>נייד, 14 ליבות</td><td><b>2.46</b></td><td>6.73</td><td>9.30</td><td>403</td><td>14.22</td><td>5.40</td></tr>
-        <tr><td>נייד, M5 Max</td><td><b>1.61</b></td><td>4.07</td><td>6.01</td><td class="no">לא הורץ</td><td>6.91</td><td class="no">Windows בלבד</td></tr>
+        <tr><td colspan="5" class="grp">ללא נזק - אימות נקי</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.11</b></td><td><b>0.19</b></td><td><b>0.23</b></td><td><b>0.18</b></td></tr>
+        <tr><td>par2-turbo, מכוונן</td><td>0.31</td><td>0.38</td><td>0.42</td><td>0.28</td></tr>
+        <tr><td>par2-turbo, כפי שנשלח</td><td>0.86</td><td>1.12</td><td>1.06</td><td>0.80</td></tr>
+        <tr><td>par2cmdline</td><td>3.03</td><td>3.84</td><td>3.81</td><td class="no">לא התחרה</td></tr>
+        <tr><td>rarpar</td><td>2.62</td><td>3.45</td><td>2.96</td><td>2.32</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows בלבד</td><td class="no">Windows בלבד</td><td>1.34</td><td class="no">Windows בלבד</td></tr>
+        <tr><td colspan="5" class="grp">3 בלוקים פגומים - כמה מאמרות מתות</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.22</b></td><td><b>0.33</b></td><td><b>0.46</b></td><td><b>0.26</b></td></tr>
+        <tr><td>par2-turbo, מכוונן</td><td>0.51</td><td>0.66</td><td>0.78</td><td>0.48</td></tr>
+        <tr><td>par2-turbo, כפי שנשלח</td><td>1.08</td><td>1.46</td><td>1.42</td><td>1.00</td></tr>
+        <tr><td>par2cmdline</td><td>3.64</td><td>4.58</td><td>4.98</td><td class="no">לא התחרה</td></tr>
+        <tr><td>rarpar</td><td>4.27</td><td>5.53</td><td>4.99</td><td>3.64</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows בלבד</td><td class="no">Windows בלבד</td><td>1.71</td><td class="no">Windows בלבד</td></tr>
+        <tr><td colspan="5" class="grp">101 בלוקים פגומים</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.48</b></td><td><b>0.74</b></td><td><b>0.96</b></td><td><b>0.66</b></td></tr>
+        <tr><td>par2-turbo, מכוונן</td><td>0.88</td><td>1.17</td><td>1.40</td><td>0.85</td></tr>
+        <tr><td>par2-turbo, כפי שנשלח</td><td>2.04</td><td>2.65</td><td>2.69</td><td>1.84</td></tr>
+        <tr><td>par2cmdline</td><td>5.57</td><td>7.57</td><td>11.7</td><td class="no">לא התחרה</td></tr>
+        <tr><td>rarpar</td><td>4.73</td><td>5.73</td><td>5.74</td><td>4.17</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows בלבד</td><td class="no">Windows בלבד</td><td>2.65</td><td class="no">Windows בלבד</td></tr>
+        <tr><td colspan="5" class="grp">1,500 בלוקים פגומים - 91% מהשחזור בשימוש</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>1.00</b></td><td><b>2.07</b></td><td><b>2.46</b></td><td><b>1.61</b></td></tr>
+        <tr><td>par2-turbo, מכוונן</td><td>3.00</td><td>5.52</td><td>6.73</td><td>4.07</td></tr>
+        <tr><td>par2-turbo, כפי שנשלח</td><td>5.21</td><td>8.20</td><td>9.30</td><td>6.01</td></tr>
+        <tr><td>par2cmdline</td><td>67.7</td><td>86.1</td><td>403</td><td class="no">לא התחרה</td></tr>
+        <tr><td>rarpar</td><td>7.15</td><td>11.49</td><td>14.22</td><td>6.91</td></tr>
+        <tr><td>MultiPar</td><td class="no">Windows בלבד</td><td class="no">Windows בלבד</td><td>5.40</td><td class="no">Windows בלבד</td></tr>
       </tbody>
     </table></div>
 
-    <p class="note" style="text-align:start">כל שש-עשרה השורות שלנו, כמה מהן ביותר מפי 2 מול הבנייה המכווננת ובפי 2.3 עד 7.7 מול זו שהייתם מורידים בפועל. שתי שורות הנזק הכבד שישבו כאן כהפסדים בגרסה הקודמת של העמוד הזה הן ניצחונות עכשיו, וההערה שלמטה מסבירה מה השתנה, כי הפסד שהתהפך זכאי להסבר ולא לעריכה שקטה.</p>
+    <p class="note" style="text-align:start">כל שישה עשר תאי nzbfast -
+    ארבע מכונות בארבע רמות נזק - הם שלנו, כמה מהם ביותר מפי 2 מול הבנייה
+    המכוונת ובפי 2.3 עד פי 7.7 מול זו שהייתם באמת מורידים. תאי הנזק הכבד
+    הם המעניינים, וההערה למטה מסבירה את האלגוריתם שמאחוריהם.</p>
 
-    <p class="note" style="text-align:start"><b>המקור חזר לטבלה, וכדאי לראות למה ההסתעפות קיימת.</b> גרסה קודמת של העמוד הזה הסירה את עמודת <code>par2cmdline</code> בנימוק שהיא איטית מכל השאר בסבב, וזה נכון ואינו סיבה מספקת: זהו המימוש שכמעט כל שאר הכלים צאצאים שלו, והקוראים ראויים לנקודת הייחוס עצמה ולא לטענה שלנו עליה. ברמת הנזק הכבדה ביותר הוא לוקח כ-69 שניות, שם ההסתעפות עם SIMD לוקחת 3.2 שניות ואנחנו 3.1. הפי-עשרים הזה הוא כל הטיעון בעד גרעיני שדה גלואה הכתובים ביד, וזה בדיוק הטיעון שאנחנו מעלים עבור שלנו.</p>
+    <p class="note" style="text-align:start"><b>המקורי חזר לטבלה, וכדאי
+    לראות למה הפיצול קיים.</b> גרסה קודמת של העמוד הזה הסירה את עמודת
+    <code>par2cmdline</code> בטענה שהיא הייתה איטית יותר מכל השאר בסבב,
+    וזה נכון ולא סיבה מספיק טובה: זה היישום שכמעט כל כלי אחר צאצא ממנו,
+    וקוראים ראויים לקו הבסיס במקום לטענה שלנו עליו. ברמת הנזק הכבדה ביותר
+    זה לוקח כ-69 s שבו הפיצול ה-SIMD לוקח 3.2 s ואנחנו לוקחים 3.1 s.
+    המקדם עשרים הזה הוא כל הטיעון עבור הגרעינים המכתובים ביד של שדה
+    גלואה, וזה אותו טיעון שאנחנו עושים עבור שלנו.</p>
 
-    <p class="note" style="text-align:start"><b>נזק קל הוא המקרה שחשוב.</b> קומץ מאמרים כושלים טיפוסי הרבה יותר מ-101 בלוקים מתים, ובוודאי מ-1,500. רוב תיקון קל אינו מתמטיקת ריד-סולומון כלל, אלא קריאה וחישוב MD5 של ג׳יגה-בייט, ולכן שורת שלושת הבלוקים עוקבת אחר שורת האימות הנקי ולא אחר שורות התיקון.</p>
+    <p class="note" style="text-align:start"><b>נזק קל הוא המקרה שחשוב.</b>
+    כמה מאמרות שנכשלו הרבה יותר טיפוסי מ-101 בלוקים מתים, ולא כלום כמו
+    1,500. רוב תיקון קל אינו מתמטיקת Reed-Solomon בכלל, זו קריאה וגיבוב
+    MD5 של גיגה-בייט, וזו הסיבה ששורת 3 הבלוקים עוקבת אחרי שורת
+    האימות-הנקי ולא אחרי שורות התיקון.</p>
 
-    <p class="note" style="text-align:start"><b>השורה הכבדה ביותר הייתה זו שאנחנו מפסידים, והגרסה הקודמת של העמוד הזה אמרה שהתיקון יהיה "אלגוריתם אחר ולא סבב כוונון". זה האלגוריתם הזה.</b> הרמה האחרונה פוגעת ב-1,500 בלוקים על פני כל 21 הכרכים וצורכת כ-91% מנתוני השחזור, ושם חשבון ריד-סולומון, ולא הגיבוב או הדיסק, הופך כמעט לכל העבודה. הבנייה המשוחררת מחשבת כעת את התיקונים הכבדים ביותר בעזרת המרה תורת-מספרית במקום קיפול שדה גלואה הקלאסי - אותה מתמטיקה, מוערכת בצורה שמתרחבת הרבה יותר טוב במספרי בלוקים גבוהים - וכל שורה כבדה התהפכה: פי 2.7 לפני הבנייה המכווננת בשולחני בעל 20 הליבות שהיה ההפסד הצמוד ביותר שלנו, ופי 2.7 בנייד שהיה הגרוע ביותר. נזק קל עדיין רץ בנתיב הקלאסי, ולכן שאר השורות כמעט לא זזו. בנייד עם Windows זה גם פי 2.2 לפני MultiPar. ההמרה משתלמת רק מעל כ-512 בלוקים פגומים, ומתחת לזה המנתב לא בוחר בה.</p>
+    <p class="note" style="text-align:start"><b>רמת הנזק הכבדה ביותר היא
+    סוג עבודה שונה, והיא מקבלת אלגוריתם שונה.</b> הרמה האחרונה הזו פוגעת
+    ב-1,500 בלוקים על פני כל 21 הכרכים וצורכת כ-91% מנתוני השחזור, וזה
+    המקום שבו החשבון של Reed-Solomon, ולא הגיבוב או הדיסק, הופך כמעט לכל
+    העבודה. בניית השחרור מחשבת את התיקונים הכבדים ביותר עם התמרה
+    תורת-מספרית במקום קיפול שדה-גלואה הקלאסי - אותה מתמטיקה, מוערכת בצורה
+    שמתרחבת הרבה יותר טוב במספרי בלוקים גבוהים: פי 2.7 לפני הבנייה
+    המכוונת בשולחן העבודה עם 20 הליבות, ובלפטופ ה-Windows פי 2.7 לפני
+    הבנייה המכוונת ופי 2.2 לפני MultiPar. נזק קל עדיין רץ בנתיב הקלאסי,
+    וזו הסיבה שהרמות האחרות בקושי זזו: ההתמרה משתלמת רק מעל כ-512 בלוקים
+    פגומים, כך שמתחת לזה המתזמן לא משתמש בה.</p>
 
-    <p class="note" style="text-align:start"><b>מסלול מהיר יותר שווה רק אם אינו יכול לטעות.</b> שני המסלולים מחשבים את אותו גודל והם זהים סיבית-סיבית מעצם בנייתם, וכל תיקון בעמוד הזה הותנה בכך שהקבצים שנבנו מחדש תואמים לערכה השלמה: 228 תיקונים מתוזמנים על פני המכונות בסבב הזה, אפס אי-התאמות. הבנייה המשוחררת אינה נשענת על הרקורד הזה. כל תיקון מאמת את הפלט שלו מול גיבובי הקבצים, ותיקון שהיה נכשל היה נעשה מחדש אוטומטית במסלול הקלאסי, מתעד את הסטייה ושומר על המסלול הקלאסי לשארית אותה הרצה. ההגדרה נמצאת בלוח הבקרה בשם <b>מצב PAR מהיר</b> אם אתם מעדיפים לא להשתמש בו כלל, ומכונות עם מעט מדי זיכרון עבורו דוחות אותו מעצמן במקום לנסות ולהיכשל. נמדד מחדש ב-2 באוגוסט על הבנייה הנוכחית: שני המחשבים השולחניים נוחתים בטווח של אחוזים בודדים מהטבלה הזו, ועם <b>מצב PAR מהיר</b> כבוי זה בעל 20 הליבות חוזר בדיוק להפסד שפרסם קודם, וזה מה שמראה שהיתרון נעוץ בשיטה ולא בתנאים.</p>
+    <p class="note" style="text-align:start"><b>נתיב מהיר יותר שווה רק אם
+    הוא לא יכול להיות שגוי.</b> שני הנתיבים מחשבים את אותה כמות והם
+    זהים-סיבית מבנייתם, וכל תיקון בעמוד הזה נשער מול הקבצים שנבנו מחדש
+    תואמים למערך הטהור: 228 תיקונים מתוזמנים על פני המכונות בסבב הזה,
+    אפס אי-התאמות. בניית השחרור לא נשענת על השיא הזה. כל תיקון מאמת את
+    הפלט שלו עצמו מול גיבובי הקבצים, ואחד שנכשל יבוצע מחדש אוטומטית
+    בנתיב הקלאסי, ירשום ביומן את הסטייה, וישמור על הנתיב הקלאסי לשארית
+    ההרצה הזו. ההגדרה נמצאת בלוח המחוונים בתור <b>מצב PAR מהיר</b> אם
+    הייתם מעדיפים לא להחזיק אותה בכלל, ומכונות עם מעט מדי זיכרון עבורה
+    מסרבות לה מעצמן במקום לנסות ולהיכשל. נמדד מחדש ב-2 באוגוסט על הבנייה
+    הנוכחית: שני שולחנות העבודה נוחתים בתוך כמה אחוזים מהטבלה הזו, ועם
+    <b>מצב PAR מהיר</b> כבוי שולחן העבודה עם 20 הליבות נופל בחזרה בדיוק
+    לזמן האיטי יותר של הנתיב הקלאסי, וזה מה שאומר שהניצחון הוא השיטה ולא
+    התנאים.</p>
 
-    <p class="note" style="text-align:start"><b>שורת הנייד הצריכה תיקון, והוא פועל נגדנו.</b> Windows מוריד עבודת רקע מתמשכת לליבות היעילות שלו אחרי כמה שניות. הדימון שלנו מסיר את עצמו מזה בעת ההפעלה ואף אחד מהכלים האחרים אינו יכול, ולכן גרסה קודמת של העמוד הזה פרסמה את הזמנים המחונקים שלהם כאילו היו הזמנים של הכלים עצמם. הרצה חוזרת של אותה מכונה כשכל כלי מורם לעדיפות גבוהה מזיזה את כל השדה: ברמת הנזק הכבדה ביותר <code>par2-turbo</code> יורד מ-22.4 שניות ל-6.41, <code>rarpar</code> מ-59.2 שניות ל-14.4, ולמשך גרסה אחת של העמוד הזה זה הפך את השורה משלנו לשורה שהפסדנו. כל שורת הנייד נמדדת כך עכשיו - התיקון נשאר גם אחרי שהשורה הוחזרה אלינו בזכות שינוי האלגוריתם שלמעלה, כי הזמנים של השדה במכונה הזו כנים רק כשהחנק מוסר.</p>
+    <p class="note" style="text-align:start"><b>עמודת לפטופ ה-Windows
+    הזדקקה לתיקון, והוא פועל נגדנו.</b> Windows מוריד עבודת רקע מתמשכת
+    לליבות היעילות שלו אחרי כמה שניות. הדימון שלנו יוצא מכך בהפעלה ושום
+    כלי אחר לא יכול, כך שגרסה קודמת של העמוד הזה פרסמה את הזמנים
+    המוגבלים שלהם כאילו היו הזמנים של הכלים עצמם. הרצה חוזרת של המכונה
+    הזו עם כל כלי מורם לעדיפות גבוהה מזיזה את כל השדה: ברמת הנזק הכבדה
+    ביותר <code>par2-turbo</code> זז מ-22.4 s ל-6.41 ו-<code>rarpar</code> מ-59.2 s ל-14.4, ובחתך
+    אחד של העמוד הזה זה הפך את העמודה משלנו לכזו שאיבדנו. עמודת הלפטופ
+    כולה נמדדת כך עכשיו - התיקון נשאר גם ששורה זו נכבשה מחדש מאז על ידי
+    שינוי האלגוריתם שלמעלה, כי הזמנים של השדה על המכונה הזו הוגנים רק
+    כשההגבלה מוסרת.</p>
 
-    <h3 style="margin:44px 0 4px">רשומות שחזור של RAR: תיקון בלי PAR2</h3>
-    <p class="note" style="text-align:start;margin-top:6px">כאשר PAR2 אינו יכול לכסות את הנזק, רשומת השחזור שבתוך קובץ ה-RAR עצמו היא קו ההגנה האחרון. עד 1.0.8 שלנו נכשלה בכל ארכיון מעל כ-13 מגה-בייט, ולכן לא היה אפשר להריץ את הקטע הזה כלל. הנזק הוא שלושה חורים של 3,000 בייט ב-20%, 50% ו-80% מהאזור המוגן. שני הכלים ייצרו פלט זהה בייט-בייט לקובץ השלם, ושלנו זהה בייט-בייט למה ש-<code>rar r</code> עצמו כותב. הטוב מתוך שלושה, שולחני בעל 32 ליבות. שני הכלים הורצו מחדש יחד ב-2 באוגוסט.</p>
+    <h3 style="margin:44px 0 4px">רשומות שחזור RAR: תיקון בלי PAR2</h3>
+    <p class="note" style="text-align:start;margin-top:6px">כש-PAR2 לא יכול
+    לכסות את הנזק, רשומת השחזור בתוך ה-RAR עצמו היא קו ההגנה האחרון. עד
+    1.0.8 שלנו נכשל בכל ארכיון מעל כ-13 MB, כך שהמקטע הזה לא היה יכול לרוץ
+    בכלל. הנזק הוא שלושה חורים של 3,000 בייט ב-20%, 50% ו-80% דרך האזור
+    המוגן. שני הכלים הפיקו פלט זהה בית-בית לקובץ הטהור, ושלנו זהה בית-בית
+    למה ש-<code>rar r</code> עצמו כותב. הטוב מבין שלושה, שולחן עבודה עם 32
+    ליבות, שני הכלים הורצו מחדש יחד ב-2 באוגוסט.</p>
     <div class="tblwrap"><table>
-      <thead><tr><th>ארכיון</th><th>nzbfast</th><th>תיקון rar 7.23</th><th></th></tr></thead>
+      <thead><tr><th></th><th>16 MB</th><th>32 MB</th><th>128 MB</th><th>512 MB</th><th>2 GB</th></tr></thead>
       <tbody>
-        <tr><td>16 MB</td><td><b>0.049</b></td><td>0.278</td><td>5.7× מהיר יותר</td></tr>
-        <tr><td>32 MB</td><td><b>0.059</b></td><td>0.466</td><td>7.9× מהיר יותר</td></tr>
-        <tr><td>128 MB</td><td><b>0.130</b></td><td>1.065</td><td>8.2× מהיר יותר</td></tr>
-        <tr><td>512 MB</td><td><b>0.400</b></td><td>2.291</td><td>5.7× מהיר יותר</td></tr>
-        <tr><td>2 GB</td><td><b>1.527</b></td><td>6.400</td><td>4.2× מהיר יותר</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.049</b></td><td><b>0.059</b></td><td><b>0.130</b></td><td><b>0.400</b></td><td><b>1.527</b></td></tr>
+        <tr><td>rar 7.23 repair</td><td>0.278</td><td>0.466</td><td>1.065</td><td>2.291</td><td>6.400</td></tr>
+        <tr><td>יתרון</td><td>5.7&times;</td><td>7.9&times;</td><td>8.2&times;</td><td>5.7&times;</td><td>4.2&times;</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">גרסה קודמת של העמוד הזה הציגה את שורת 512 מגה-בייט כהפסד והסבירה אותו כמחיר של מעבר על הכרך בחלקים במקום להחזיק אותו כולו בזיכרון. ההסבר היה נכון אז והוא מיושן היום: העלות הייתה CRC64 סדרתי-ביט בנתיב התיקון, שהוחלף באחד מבוסס-טבלה, וההפסד הלך איתו. אין יותר נקודת חיתוך, וקבוצת העבודה המוגבלת נשמרה. שורת 2 ג׳יגה-בייט כאן מפני שהכרכים שדימון באמת פוגש הם 8 עד 20 ג׳יגה-בייט ולא 512 מגה-בייט, וקטע שנעצר מתחת לטווח האמיתי אינו מבחן גדול.</p>
-    <p class="note" style="text-align:start"><b>מה זז בגרסה הזו, והבקרה שמראה זאת.</b> איתור הבלוקים הפגומים הפך לשלב הגדול ביותר בתיקון הזה - גדול יותר מחשבון התיקון עצמו - והוא רץ על חוט יחיד, שקרא 64 ק"ב מכל קבוצה לאורך הקובץ, פעם אחת לכל קבוצה. עכשיו הוא עושה מעבר רציף אחד בסדר הקובץ, כשסכומי הביקורת לכל מקטע מחושבים במקביל, והכרך המתוקן משוכפל במקום להיות מועתק היכן שמערכת הקבצים מאפשרת זאת. האיתור לבדו ירד מכ-300 מילישניות ל-18 מילישניות בארכיון של 512 מ"ב, וזה רוב מה שזז למעלה. הבקרה היא הטור שלצד שלנו: <code>rar r</code> הורץ מחדש באותן סבבים ועל אותה מכונה וחזר עד כדי אחוזים בודדים מהזמנים הקודמים שלו, כך שהשינוי בפער הוא שלנו ולא של מתקן המדידה.</p>
-    <p class="note" style="text-align:start">ה-M5 Max חוזר על הדפוס, הורץ ב-31 ביולי עם אותו מאגר ואותם תנאים: 0.050 / 0.066 / 0.171 / 0.581 שניות מול 0.211 / 0.335 / 0.751 / 1.735 של <code>rar r</code> בין 16 MB ל-512 MB - מהיר פי 3.0&times; עד 5.1&times;; הגודל 2 GB לא הורץ על אותה מכונה. הנתונים האלה קודמים לכתיבה מחדש של האיתור שתוארה למעלה, ולכן הם של הבנייה הישנה יותר ומופיעים כאן כמכונה השנייה ולא כנתון עדכני.</p>
-    <p class="note" style="text-align:start"><code>rarpar</code> של Weaver נעדר מהטבלה הזו בלבד, ולא מבחירה: הוא אינו מממש את התיקון הזה. כשמבקשים ממנו לתקן אחד מהארכיונים האלה הוא עונה <i>«embedded Rar5 recovery record detected ... this API restores standalone .rev recovery volumes only and does not consume embedded RR/protect data»</i> ומשאיר את הקובץ פגום. הוא מופיע בכל השוואה אחרת בעמוד הזה: כל ארבעת קטעי ה-PAR2 שלמעלה, כל שבע צורות החילוץ מעליהם, וקטע כרכי השחזור מיד מתחת, שהוא בדיוק העבודה שהוא מצהיר שהוא עושה, ושבה הוא מנצח.</p>
+    <p class="note" style="text-align:start">גרסה קודמת של העמוד הזה
+    הראתה את הגודל 512 MB כהפסד, והסבירה אותו כמחיר של עבודה דרך הכרך
+    בחלקים במקום להחזיק את כולו בזיכרון. ההסבר הזה היה נכון אז ומיושן
+    עכשיו: העלות הייתה CRC64 סיבית-טורית בנתיב התיקון, שהוחלפה באחת
+    מונחית-טבלה, וההפסד הלך איתה. אין יותר הצטלבות, ומערך העבודה החסום
+    נשמר. הגודל 2 GB נמצא כאן כי הכרכים שדימון באמת פוגש הם 8 GB עד 20 GB,
+    לא 512 MB, ומקטע שנעצר מתחת לטווח האמיתי הוא לא הרבה מבחן.</p>
+    <p class="note" style="text-align:start"><b>מה הזיז את החתך הזה,
+    והבקרה שאומרת כך.</b> מציאת אילו בלוקים פגומים הפכה לשלב הגדול ביותר
+    בתיקון הזה - גדול יותר מחשבון התיקון עצמו - והיא רצה על תהליכון יחיד,
+    קוראת 64 KB מכל קבוצה על פני הקובץ, פעם אחת לקבוצה. היא עכשיו עושה
+    מעבר סדרתי אחד בסדר הקובץ עם צ'קסומים לפי-רסיס מחושבים במקביל, והכרך
+    המתוקן משוכפל ולא מועתק היכן שמערכת הקבצים יכולה לעשות זאת. האיתור
+    לבדו ירד מכ-300 ms ל-18 ms בארכיון של 512 MB, וזה רוב מה שזז למעלה.
+    הבקרה היא העמודה לצד שלנו: <code>rar r</code> הורץ מחדש באותם סבבים
+    על אותה מכונה וחזר בתוך כמה אחוזים מהזמנים הקודמים שלו, כך שהשינוי
+    בפער הוא שלנו ולא של הספסל.</p>
+    <p class="note" style="text-align:start">ה-M5 Max חוזר על הדפוס,
+    התחרה 31 ביולי עם אותו קורפוס ואותם שערים: 0.050 / 0.066 / 0.171 /
+    0.581 s מול ה-0.211 / 0.335 / 0.751 / 1.735 של <code>rar r</code> על
+    פני הגדלים 16 MB עד 512 MB - מהיר פי 3.0 עד פי 5.1; הגודל 2 GB לא
+    התחרה על המכונה הזו. המספרים האלה קודמים לשכתוב האיתור שתואר למעלה,
+    כך שהם של הבנייה הישנה יותר, נשמרים כאן כמכונה השנייה ולא כמספר
+    עדכני.</p>
+    <p class="note" style="text-align:start"><code>rarpar</code> של
+    Weaver נעדר מהטבלה הזו בלבד, ולא מבחירה: הוא לא מיישם את התיקון הזה.
+    כשמתבקש לתקן אחד מהארכיונים האלה הוא עונה <i>"embedded Rar5 recovery
+    record detected ... this API restores standalone .rev recovery
+    volumes only and does not consume embedded RR/protect data"</i>,
+    ומשאיר את הקובץ פגום. הוא מופיע בכל השוואה אחרת בעמוד הזה: כל ארבעת
+    מקטעי ה-PAR2 שלמעלה, כל שבע צורות החילוץ מעל זה, ומקטע כרכי-השחזור
+    מיד למטה, שהיא העבודה שהוא אומר שהוא עושה - ואותה הוא מנצח.</p>
 
-    <h3 style="margin:44px 0 4px">כרכי שחזור: בנייה מחדש של קבצי <code>.rev</code> חסרים לגמרי</h3>
-    <p class="note" style="text-align:start;margin-top:6px">המחצית השנייה של סיפור השחזור של RAR עצמו, ועד לסבב הזה ההפסד הגדול ביותר בעמוד הזה. קובץ <code>.rev</code> הוא כרך שחזור עצמאי: שלושה כאלה לצד ערכה של 21 כרכים יכולים לבנות מחדש כל שלושה כרכים שמעולם לא הגיעו. מאגר: 1 GiB שאוחסן ב-21 כרכים של 50 MB עם <code>rar rv3</code>, ולאחר מכן הכרכים 4, 11 ו-19 נמחקו - שלושה אבודים מול שלושה כרכי שחזור, המקרה הגרוע ביותר שהערכה עדיין שורדת. הטוב מבין שלושה, כל כרך שנבנה מחדש הושווה לזה השלם.</p>
-        <div class="tblwrap"><table>
-      <thead><tr><th>מכונה</th><th>nzbfast</th><th>rar 7.23 <code>rc</code></th><th>rarpar <code>restore-volumes</code></th></tr></thead>
+    <h3 style="margin:44px 0 4px">כרכי שחזור: בנייה מחדש של קבצי <code>.rev</code> חסרים שלמים</h3>
+    <p class="note" style="text-align:start;margin-top:6px">החצי השני של
+    סיפור השחזור העצמי של RAR, ועד הסבב הזה ההפסד הגדול ביותר בעמוד הזה.
+    קובץ <code>.rev</code> הוא כרך שחזור עצמאי: שלושה מהם לצד מערך של 21
+    כרכים יכולים לבנות מחדש כל שלושה כרכים שאף פעם לא הגיעו. קורפוס:
+    1 GiB מאוחסן לתוך 21 כרכים של 50 MB עם <code>rar rv3</code>, ואז
+    כרכים 4, 11 ו-19 נמחקו - שלושה אבודים מול שלושה כרכי שחזור, שזה המקרה
+    הגרוע ביותר שהמערך עדיין יכול לשרוד. הטוב מבין שלושה, כל כרך שנבנה
+    מחדש מושווה מול הטהור.</p>
+    <div class="tblwrap"><table>
+      <thead><tr><th></th><th>שולחן עבודה, 32 ליבות</th><th>שולחן עבודה, 20 ליבות</th></tr></thead>
       <tbody>
-        <tr><td>שולחני, 32 ליבות</td><td><b>0.44</b></td><td>0.46</td><td>0.48</td></tr>
-        <tr><td>שולחני, 20 ליבות</td><td><b>0.50</b></td><td>0.58</td><td>0.61</td></tr>
+        <tr><td><b>nzbfast</b></td><td><b>0.44</b></td><td><b>0.50</b></td></tr>
+        <tr><td>rar 7.23 <code>rc</code></td><td>0.46</td><td>0.58</td></tr>
+        <tr><td>rarpar <code>restore-volumes</code></td><td>0.48</td><td>0.61</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start"><b>השורה הזו עמדה על 3.12 שניות מול 0.47 של <code>rar rc</code> בגרסה הקודמת של העמוד הזה, ופורסמה כאיטית פי 6.6 וכמספר הגרוע ביותר שבו.</b> הסיבה הייתה שפתרון המחיקה רץ בכ-48 MB/s של פלט משוחזר במקום ש-RARLab החזיקה 320; הוא רץ עכשיו על אותה אריתמטיקה מבוססת טבלאות כמו שאר קוד השחזור, וזהו שיפור פי שבעה שהופך את ההפסד לניצחון בשתי המכונות. המרווחים הם 3% ו-14%, ולכן זהו ניצחון שראוי לציין ביובש ולא לשים בכותרת, והסיבה שהוא מצוין בכלל היא שההפסד צוין קודם.</p>
-    <p class="note" style="text-align:start">המקטע הזה קיים משום ש-<code>rarpar</code> של Weaver עושה בדיוק את זה וביקש להימדד בו. הוא ניצח בו בנוחות כשפרסמנו אותו לראשונה, ופרסמנו אותו אז בדיוק מהסיבה הזו.</p>
-    <p class="note" style="text-align:start">התאמת הקבצים מעולם לא הייתה העלות, וזה ראוי לתיעוד משום שהיא הייתה החשודה האינטואיטיבית: כרכי שחזור אינם נושאים שמות קבצים, ולכן אנו מזהים אילו משבצות שרדו על ידי חישוב סכום ביקורת לכל כרך על הדיסק במקום להאמין לשמותיהם, ומול ערכה שלמה, שבה מתבצעת רק התאמה, המעבר כולו אורך 0.18 שניות.</p>
+    <p class="note" style="text-align:start"><b>התא של 32 הליבות כאן היה
+    3.12 s מול ה-0.47 של <code>rar rc</code> בחתך האחרון של העמוד הזה,
+    פורסם כאיטי פי 6.6 והמספר הגרוע ביותר עליו.</b> הסיבה הייתה פתרון
+    המחיקה רץ בכ-48 MB/s של פלט שנבנה מחדש שבו RARLab ניהלה 320; זה עכשיו
+    רץ על אותו חשבון מונחה-טבלה כמו שאר קוד השחזור, וזה שיפור פי שבעה
+    והופך את ההפסד לניצחון בשתי המכונות. המרווחים הם 3% ו-14%, כך שזה
+    ניצחון שכדאי להצהיר עליו בפשטות ולא לכותרת, והסיבה שהוא מוצהר בכלל
+    היא שההפסד הוצהר קודם.</p>
+    <p class="note" style="text-align:start">המקטע הזה קיים כי
+    <code>rarpar</code> של Weaver מיישם בדיוק את זה וביקש להימדד עליו.
+    הוא ניצח בנוחות כשפרסמנו אותו לראשונה, ופרסמנו אותו אז מהסיבה הזו.</p>
+    <p class="note" style="text-align:start">התאמת הקבצים אף פעם לא
+    הייתה העלות, וכדאי לרשום זאת כי זה היה החשוד האינטואיטיבי: כרכי
+    שחזור לא נושאים שמות קבצים, כך שאנחנו מזהים אילו משבצות שרדו על ידי
+    גיבוב כל כרך על הדיסק במקום לסמוך על איך שהם נקראים, ומול מערך
+    לא-פגום, שבו התאמה היא כל מה שקורה, המעבר כולו לוקח 0.18 s.</p>
 
-    <p class="note" style="text-align:start"><b>מה עוד זז, והיכן זה לא נראה.</b> נחתו עוד שני שינויי מנוע שהקורפוסים האלה אינם יכולים להראות, מפורטים כאן כדי שהמספרים שלמעלה לא ייקראו כסיפור המלא: ארכיוני RAR5 עם עשרות אלפי חברים פותרים כל חבר פעם אחת במקום לעבור על הרשימה לכל עובד, וזה פי 3 פחות זמן מעבד ב-40,000 חברים; וקורא הביטים של RAR1.3 עובד מילה בכל פעם, וזה פי 2. אף אחד מהם אינו מופיע למעלה, כי לצורות כאן יש 400 חברים ואין בהן RAR1.3.</p>
+    <p class="note" style="text-align:start"><b>מה עוד זז, והיכן זה לא
+    מוצג.</b> נחתו שני שינויי מנוע נוספים שהקורפוסים האלה לא יכולים
+    לראות, רשומים כאן כדי שהמספרים למעלה לא ייקראו כל הסיפור: ארכיוני
+    RAR5 עם עשרות אלפי חברים פותרים כל חבר פעם אחת במקום להלך על הרשימה
+    לכל עובד, וזה פי 3 פחות זמן מעבד ב-40,000 חברים; וקורא הביטים של
+    RAR1.3 עובד מילה בכל פעם, וזה פי 2. אף אחד מהם לא מופיע למעלה, כי
+    לצורות כאן יש 400 חברים ובלי RAR1.3.</p>
 
-    <p class="note" style="text-align:start"><b>מה שאנחנו במכוון לא עושים:</b> אנחנו לעולם לא <i>יוצרים</i> PAR2. אין לתוכנת הורדה סיבה לכך, והמקטע הזה שייך ל-ParPar. אנחנו גם קונים מהירות בזיכרון בשני המנועים: החילוץ מגיע לשיא של כ-240 MB מול 41 MB של unrar, והאימות לכ-126 MB מול 7 MB של turbo, משום שאלה המנועים המשובצים הנוסעים עם הורדה פעילה ולא הרצות עצמאיות חד-פעמיות. הצורה עם מילון 128 MiB היא המקרה הגרוע ביותר, בכ-304 MB מול 139 MB של unrar. <b>התיקון הכבד ביותר עולה עכשיו גם בזיכרון:</b> השיטה המהירה יותר ל-512 בלוקים חסרים ומעלה עובדת מנתוני השחזור המוחזקים בזיכרון, ולכן מותר לה עד רבע מזיכרון המכונה, בתקרה של 4 GB, ומכונה שאינה יכולה להרשות זאת נוקטת בשקט בשיטת הזרימה - אותה אריתמטיקה ואותם זמנים כמו השורות האמצעיות בטבלת PAR2, רק בלי פי 3 שבאחרונה. אם אתם רוצים את טביעת הזיכרון הקטנה ביותר האפשרית לעבודה עצמאית, הכלים הייעודיים עדיין מנצחים בעמודה הזו.</p>
-    <div class="callout">כל מספר בעמוד הזה הוא הרצה מתוארכת שהפקודה המדויקת והתנאים שלה מתועדים, כולל תוצאות שליליות וגישות שנזנחו. הדפים האלה הם הרשומה המפורסמת, והם מתמלאים ככל שסבבים נוספים נוחתים.</div>
+    <p class="note" style="text-align:start"><b>מה שאנחנו בכוונה לא
+    עושים:</b> אנחנו אף פעם לא <i>יוצרים</i> PAR2. למוריד אין סיבה לכך,
+    ו-ParPar מחזיקה במקטע הזה. אנחנו גם קונים מהירות בזיכרון בשני
+    המנועים: החילוץ מגיע לשיא של סביב 240 MB מול 41 MB של unrar, והאימות
+    סביב 126 MB מול 7 MB של טורבו, כי אלה המנועים המשולבים שרוכבים על
+    הורדה חיה ולא ריצות עצמאיות חד-פעמיות. צורת מילון ה-128 MiB היא
+    הגרועה ביותר מבחינה זו, בכ-304 MB מול 139 MB של unrar. <b>התיקון
+    הכבד ביותר עולה עכשיו זיכרון גם הוא:</b> השיטה המהירה יותר עבור
+    512-ומעלה בלוקים חסרים עובדת מנתוני השחזור שמוחזקים שוכנים, כך שהיא
+    מורשית עד רבע מה-RAM של המכונה, מוגבלת ב-4 GB, ומכונה שלא יכולה
+    לוותר על כך שקטה לוקחת את שיטת הזיכרון-הנמוך במקום זאת - אותו חשבון
+    ואותם זמנים כמו השורות האמצעיות של טבלת ה-PAR2, פשוט לא פי 3 על
+    האחרונה. אם אתם רוצים את הקבוצה השוכנת הקטנה ביותר האפשרית למשימה
+    עצמאית, הכלים הייעודיים עדיין מנצחים בעמודה הזו.</p>
+    <div class="callout">כל מספר בעמוד הזה הוא הרצה מתוארכת עם הפקודה
+    והתנאים המדויקים שלה רשומים, כולל תוצאות שליליות וגישות שננטשו.
+    העמודים האלה הם הרשומה המפורסמת, והם מתמלאים בפירוט ככל שסבבים
+    נוספים נוחתים.</div>
   </div>
 </section>
-
 
 <section class="alt" id="client-matrix">
   <div class="wrap">
@@ -689,168 +1119,84 @@
     <div class="tblwrap"><table>
       <thead><tr><th></th><th>nzbfast</th><th>SABnzbd 5</th><th>NZBGet 26</th><th>rustnzb</th><th>Weaver</th><th>Usenapp</th><th>Newsbin</th></tr></thead>
       <tbody>
-        <tr><td>NNTP בצנרת</td><td class="yes">כן</td><td class="half">כבוי כברירת מחדל</td><td class="no">לא</td><td class="yes">כן</td><td class="no">-⁷</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>אימות מלא תוך כדי הורדה</td><td class="yes">כל בלוק</td><td class="no">אחרי</td><td class="half">בדיקה מהירה</td><td class="no">אחרי</td><td class="no">אחרי</td><td class="no">אחרי</td><td class="no">אחרי</td></tr>
-        <tr><td>חילוץ תוך כדי הורדה</td><td class="yes">בזרם, בלי כרכים בדיסק</td><td class="half">פריקה ישירה⁴</td><td class="half">פריקה ישירה⁴</td><td class="half">לא אמין⁵</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td></tr>
-        <tr><td>דיסק נדרש לפוסט של N-GB</td><td class="yes">~1×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td><td class="no">~2×N</td></tr>
-        <tr><td>פסק דין השלמה טרם-הורדה</td><td class="yes">מדויק-בלוקים</td><td class="no">לא</td><td class="half">אחוז תקינות</td><td class="no">לא</td><td class="no">-⁷</td><td class="yes">בדיקת מאמרים</td><td class="no">לא</td></tr>
-        <tr><td>זיכרון חסום (לעולם לא swap)</td><td class="yes">מתוקצב</td><td class="no">9.3 GB @ 190 GB</td><td class="half">הגדרת מטמון</td><td class="no">לא</td><td class="no">לא</td><td class="no">-</td><td class="no">-</td></tr>
-        <tr><td>מעלה בעצמו את מגבלת הקבצים הפתוחים</td><td class="yes">כן, בעלייה</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td><td class="no">-⁸</td></tr>
-        <tr><td>בדיקת הקובץ בכל נקודה תוך כדי הורדה</td><td class="yes">כן</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="half">סדרתי</td><td class="no">לא</td></tr>
-        <tr><td>אינדקסר מובנה + קיר פוסטרים</td><td class="yes">כן, ללא מפתח</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="half">ממשק חיפוש</td><td class="half">דפדפן קבוצות</td></tr>
-        <tr><td>תוסף Sonarr/Radarr</td><td class="yes">SAB API + Newznab</td><td class="yes">מקורי</td><td class="yes">מקורי</td><td class="half">חלקי</td><td class="half">‏RPC תואם-NZBGet⁷</td><td class="no">לא</td><td class="no">לא</td></tr>
-        <tr><td>שלטי טלפון (nzb360/LunaSea)</td><td class="yes">כן</td><td class="yes">כן</td><td class="yes">כן</td><td class="no">לא</td><td class="no">-⁷</td><td class="no">לא</td><td class="no">לא</td></tr>
-        <tr><td>תפיסה אוטומטית ברשימת מעקב + שדרוגים</td><td class="yes">מובנה</td><td class="no">דרך *arr</td><td class="no">דרך *arr</td><td class="no">לא</td><td class="no">לא</td><td class="yes">Watchdog</td><td class="half">כללים</td></tr>
-        <tr><td>בינארי עצמאי יחיד</td><td class="yes">כן</td><td class="no">Python</td><td class="yes">כן</td><td class="yes">כן</td><td class="yes">כן</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
-        <tr><td>קוד פתוח</td><td class="yes">GPL⁶</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">כן</td><td class="yes">כן</td><td class="no">בתשלום</td><td class="no">בתשלום</td></tr>
-        <tr><td>פלטפורמות</td><td class="yes">mac/win/linux/docker</td><td class="yes">mac/win/linux</td><td class="yes">mac/win/linux</td><td class="half">linux/win</td><td class="half">בנייה מהמקור⁷</td><td class="no">mac בלבד</td><td class="no">win בלבד</td></tr>
+        <tr><td>NNTP בצנרת</td><td class="yes">כן</td><td class="half">כבוי כברירת מחדל</td><td class="no">לא</td><td class="yes">כן</td><td class="no">-&sup7;</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>אימות מלא במהלך ההורדה</td><td class="yes">כל בלוק</td><td class="no">אחרי</td><td class="half">בדיקה-מהירה</td><td class="no">אחרי</td><td class="no">אחרי</td><td class="no">אחרי</td><td class="no">אחרי</td></tr>
+        <tr><td>חילוץ במהלך ההורדה</td><td class="yes">בזרם, בלי כרכים בדיסק</td><td class="half">פריקה ישירה&sup4;</td><td class="half">פריקה ישירה&sup4;</td><td class="half">שלבים, ואז פורק&sup5;</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td></tr>
+        <tr><td>דיסק נדרש לפרסום של N GB</td><td class="yes">~פי 1×N</td><td class="no">~פי 2×N</td><td class="no">~פי 2×N</td><td class="no">~פי 2×N</td><td class="no">~פי 2×N</td><td class="no">~פי 2×N</td><td class="no">~פי 2×N</td></tr>
+        <tr><td>פסק דין על השלמות לפני ההורדה</td><td class="yes">מדויק-בלוק</td><td class="no">לא</td><td class="half">אחוז בריאות</td><td class="no">לא</td><td class="no">-&sup7;</td><td class="yes">בדיקת מאמרה</td><td class="no">לא</td></tr>
+        <tr><td>זיכרון תחום (אף פעם לא swap)</td><td class="yes">תוקצב</td><td class="half">הגדרת הגבלת-מטמון</td><td class="half">הגדרת מטמון</td><td class="no">לא</td><td class="no">לא</td><td class="no">-</td><td class="no">-</td></tr>
+        <tr><td>מעלה את מגבלת הקבצים-הפתוחים שלו</td><td class="yes">כן, בהפעלה</td><td class="no">-&sup8;</td><td class="no">-&sup8;</td><td class="no">-&sup8;</td><td class="no">-&sup8;</td><td class="no">-&sup8;</td><td class="no">-&sup8;</td></tr>
+        <tr><td>בדיקת הקובץ בכל שלב במהלך ההורדה</td><td class="yes">כן</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="half">רציף</td><td class="no">לא</td></tr>
+        <tr><td>אינדקסר מובנה + קיר פוסטרים</td><td class="yes">כן, בלי מפתח</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="no">לא</td><td class="half">ממשק חיפוש</td><td class="half">דפדפן קבוצות</td></tr>
+        <tr><td>תחליף ל-Sonarr/Radarr</td><td class="yes">API של SAB + Newznab</td><td class="yes">ילידי</td><td class="yes">ילידי</td><td class="yes">API תואם-SAB</td><td class="half">RPC תואם-NZBGet&sup7;</td><td class="no">לא</td><td class="no">לא</td></tr>
+        <tr><td>שלטים לטלפון (nzb360/LunaSea)</td><td class="yes">כן</td><td class="yes">כן</td><td class="yes">כן</td><td class="no">לא</td><td class="no">-&sup7;</td><td class="no">לא</td><td class="no">לא</td></tr>
+        <tr><td>רשימת מעקב אוטומטית + שדרוגים</td><td class="yes">מובנה</td><td class="no">דרך *arr</td><td class="no">דרך *arr</td><td class="no">לא</td><td class="no">לא</td><td class="yes">Watchdog</td><td class="half">כללים</td></tr>
+        <tr><td>בינארי עצמאי יחיד</td><td class="yes">כן</td><td class="half">חבילות אפליקציה; Python בלינוקס</td><td class="yes">כן</td><td class="yes">כן</td><td class="yes">כן</td><td class="yes">.app</td><td class="yes">.exe</td></tr>
+        <tr><td>קוד פתוח</td><td class="yes">GPL&sup6;</td><td class="yes">GPL</td><td class="yes">GPL</td><td class="yes">MIT</td><td class="yes">כן</td><td class="no">בתשלום</td><td class="no">בתשלום</td></tr>
+        <tr><td>פלטפורמות</td><td class="yes">mac/win/linux ‏(x64 + ARM)/docker/flatpak</td><td class="yes">mac/win/linux/docker/חבילות NAS</td><td class="yes">mac/win/linux/docker/NAS + embedded</td><td class="half">linux/win (‏mac מהמקור)</td><td class="half">בינארי mac; מקור במקום אחר&sup7;</td><td class="no">mac בלבד</td><td class="no">win בלבד</td></tr>
       </tbody>
     </table></div>
-    <p class="note" style="text-align:start">⁴ פריקה ישירה עדיין מממשת את הכרכים תחילה:
-    פי 2 כתיבות ופי 2 דיסק. ⁵ rustnzb שלח כרכים מעורפלים המסומנים "הושלמה" בסבב שלנו
-    (הפריקה שלו גם נתקעת עם unrar של RARLab אלא אם מבוטלת). נמדד על 1.3.4 ועל 1.3.9; ‏rustnzb תיקן זאת בגרסה 1.4.5, ולכן התא הזה נשאר נעוץ בגרסאות שמולן נמדדנו עד שסבב חדש יחליף אותו. ⁶ GPL-3.0-or-later.
-    ⁷ ‏Weaver v0.7.5; השורות הנמדדות שלו (אימות, חילוץ, דיסק, זיכרון) מגיעות מהסבב המדוד
-    שלנו מ-31 ביולי, והתאים שמסומנים "-" בעמודת היכולות הם תכונות שלא בדקנו ולא היעדרים
-    שאושרו; הוא מדבר RPC תואם-NZBGet, וכך מתקן הבדיקה שלנו מפעיל אותו, אבל לא ניסינו מולו
-    את שלטי הטלפון.
+    <p class="note" style="text-align:start">&sup4; פריקה ישירה עדיין
+    מממשת את הכרכים קודם: פי 2 כתיבות ופי 2 דיסק. &sup5; ‏rustnzb 1.4.5
+    מספק כל תרחיש נכון בית-בית בסבב מ-23 באוגוסט 2026, וקלט/פלט הדיסק
+    הנמדד שלו שם הוא כ-פי 2.1 מהמטען - כך שהוא עושה שלבים לכרכים ופורק
+    אחרי ההורדה במקום לחלץ בזרם (ראו <a href="#cost">טבלאות העלות</a>).
+    הבניות הישנות יותר שלו (1.3.4-1.3.9) שלחו כרכים מעורפלים מסומנים
+    "Completed" בלי לחלץ; הכשל הזה תוקן במעלה הזרם ב-1.4.5.
+    &sup6; ‏GPL-3.0-or-later.
+    &sup7; ‏Weaver 0.7.8, הבינארי המשוחרר האחרון שלו, זהות מוכחת בגיבוב
+    (ה-sha256 של חבילת השחרור המפורסמת והבינארי בתוכה תואמים את מה
+    שאנחנו מריצים); השורות הנמדדות שלו מגיעות מסבב העלות של 23 באוגוסט,
+    תאי היכולת שלו מסומנים "-" הם תכונות שלא הערכנו ולא היעדרויות
+    מאושרות; הוא מדבר RPC תואם-NZBGet, וכך המתקן שלנו מפעיל אותו, אבל לא
+    ניסינו את השלטים לטלפון מולו.
     Usenapp/Newsbin הם קוראים מסחריים חד-פלטפורמיים עם תכונות מוריד; הם
-    מופיעים כי אנשים שואלים, לא כי הם מתחרים על מהירות.</p>
-    <p class="note" style="text-align:start">⁸ ‏macOS מפעילה תוכנית עם מגבלה של 256 קבצים פתוחים, וסט מלא של חיבורים על פני כמה שרתים עשוי לעבור אותה. ‏nzbfast מעלה את המגבלה שלו עצמו בעלייה ב-macOS וב-Linux: הוא מבקש 65,536, יורד עד שהמערכת מסכימה, לעולם אינו עובר את המגבלה הקשיחה של המערכת, וממשיך עם מה שהיה לו אם כל שלב נדחה. ל-Windows אין מגבלה לכל תהליך מסוג זה. שאר העמודות הן <b>לא נבדקו</b> ולא היעדר מאושר: לא קראנו את קוד העלייה של אף לקוח אחר. כדאי לדעת בגלל אופן הכשל: תוכנית שנגמרים לה הקבצים הפתוחים באמצע משימה נוטה להיעלם במקום לדווח על שגיאה.</p>
+    רשומים כי אנשים שואלים, לא כי הם מתחרים על מהירות.</p>
+    <p class="note" style="text-align:start">&sup8; ‏macOS מתחיל תוכנית
+    עם מגבלה של 256 קבצים פתוחים, ומערך מלא של חיבורים על פני כמה שרתים
+    יכול לעבור אותה. ‏nzbfast מעלה את המגבלה שלו עצמו בהפעלה ב-macOS
+    ובלינוקס: הוא מבקש 65,536, יורד בדרגות עד שהמערכת מסכימה, אף פעם לא
+    עולה מעל המגבלה הקשיחה של המערכת, וממשיך עם מה שהיה לו אם כל שלב
+    מסורב. ל-Windows אין מגבלה מסוג זה לכל תהליך. העמודות האחרות הן <b>לא
+    מוערכות</b> ולא היעדרויות מאושרות: לא קראנו את קוד ההפעלה של שום
+    קליינט אחר. שווה לדעת בגלל איך זה נכשל: תוכנית שנגמרים לה קבצים
+    פתוחים באמצע משימה נוטה להיעלם במקום לדווח שגיאה.</p>
   </div>
 </section>
 
-<section id="weaver-method">
-  <div class="wrap">
-    <p class="kicker">מתודולוגיה &middot; במלואה, משום שהתבקשנו</p>
-    <h2>כיצד בדקנו את Weaver</h2>
-    <p class="lead">המפתח של Weaver אמר בפומבי שנמנענו ממדידתו. ההפך הוא הנכון: הוא מופיע בכל השוואה בעמוד הזה שהוא מסוגל להריץ, לרבות מקטע התיקון בכרכי שחזור, שבו הוא מנצח ושאותו אנו מפרסמים בדיוק מהסיבה הזו. הנה השיטה המלאה, כל תקלה שנתקלנו בה וכל עקיפה שנקטנו, כדי שההרצות יוכלו להיות משוחזרות ומאותגרות.</p>
-    <ul>
-      <li><b>מה הרצנו:</b> קובץ ההפעלה הרשמי arm64 של גרסה v0.7.5. במקום שנדרשה בנייה מהמקור (רכיב <code>rarpar</code> שלו עבור טבלאות PAR2 והחילוץ), אנו מציינים את ה-commit המדויק לצד הטבלה.</li>
-      <li><b>אותם תנאים כמו לכולם:</b> מכונה זהה, אותם שישה שרתים מסחריים, TLS בכל חיבור, עבודות שנשלחו דרך ממשק ה-API התואם ל-NZBGet, ואותו כלל מעבר כמו לכל לקוח בעמוד הזה: מקטע נספר רק כשהמטען המחולץ מאומת בית-בית על הדיסק. יומן הסיום שלו נבדק תמיד בהצלבה, ולעולם לא מתקבל לבדו.</li>
-      <li><b>נמדד במיטבו, לא בשפל שלו:</b> מקטעי הורדה המסומנים <i>מחומם</i> מריצים שירות מתמיד, מזינים לו קודם עבודת חימום אמיתית וממתינים שעליית החיבורים האוטומטית שלו תגיע לתקרה של 120 חיבורים לפני שהעבודה המתוזמנת מתחילה. מספרי התחלה קרה, במקום שהם מוצגים, מסומנים כקרים. בנינו ופרסמנו את מתקן ההתחלה החמה לאחר שהבחנו שהתחלות קרות ממעיטות בערכו.</li>
-      <li><b>תקלות שנתקלנו בהן, ומה עשינו בעניינן:</b> מצב ההורדה החד-פעמי משלים עבודה אך לעולם אינו יוצא (מדדנו במקום זאת את מצב השירות); מחשבי Mac ללא מסך נתקעים על בקשת מחזיק מפתחות (נעקף באמצעות משתנה הסביבה של מפתח ההצפנה); מסד נתונים מתמיד לחסימת כפילויות מסרב לשליחה חוזרת של אותו NZB אפילו לאחר מחיקת נתונים (נעקף באמצעות דגל force); בנייה מהמקור נכשלת ללא ממשק הרשת הנבנה בנפרד (הוחלף בגדם; קובץ ההפעלה הרשמי אינו מושפע); הוא דחה את האישור בחתימה עצמית של מתקן התור שלנו, ולכן מקטע התור לעיל משתמש בלקוחות שהסכימו להתחבר; והרצה קרה אחת של 190 GB ביולי הסתיימה במצב כשל לאחר 33 דקות, ולכן הרצנו אותה מחדש ופרסמנו את ההרצה החוזרת שהושלמה. כל עקיפה מיטיבה עם התוצאה של Weaver, לא עם שלנו.</li>
-      <li><b>מה המספרים אומרים:</b> הוא שומר על אותו שיא דיסק של פי 2.0&times; כמו שאר הלקוחות שכותבים ואז מחלצים, ותעבורת הדיסק שלו גדלה עם גודל העבודה מהר יותר משל כל אחד אחר (פי 2.5&times; משלנו ב-35 GB, פי 5.1&times; ב-190 GB) משום שאחסונו המוצפן במנוחה קורא וכותב מחדש כמעט את כל מה שהוא מוריד. לתכנון הזה יש יתרונות אמיתיים שעמוד מהירות אינו מודד; מה שהוא עולה הוא מה שרואים בעמודת הקלט/פלט.</li>
-      <li><b>שחזרו זאת:</b> מנהלי ההרצה המדויקים, לרבות מתקן ההתחלה החמה וטיפולו באסימונים, נמצאים בתיקיית המדידות של המאגר הציבורי שלנו. כוונו אותם לשרתים שלכם ופרסמו את מה שתקבלו.</li>
-    </ul>
-  </div>
-</section>
 
 <section id="real-lines">
   <div class="wrap">
-    <p class="kicker">הוכחת תעבורה</p>
-    <h2>המנוע מרווה קווים אמיתיים</h2>
+    <p class="kicker">הוכחת תעבורה &middot; נמדד על 1.2.2</p>
+    <h2>המנוע עומד בקצב של קווים אמיתיים</h2>
     <ul class="plain">
-      <li><b>9.0-9.3 Gbps</b> דרך צי של חמישה ספקים על קו 10 GbE שתקרת החומרה שלו נמדדת ב-9.8 Gbps, עם חציונים מתמשכים של 9.5-9.9 (‏M1 Ultra אירופה, 9 באוגוסט 2026). מה שנותר הוא ההתנעה של צי קר במשימה של 33 שניות, לא הקצב.</li>
-      <li><b>4.8-4.9 Gbps מתמשכים</b> על קו כבלים של כ-5 Gbps בצד השני של האוקיינוס, בדגימה כל שנייה לאורך כל המשימה (8 באוגוסט 2026). שתי מחלקות קו, שתיהן בקצב שהחומרה עצמה מספקת.</li>
-      <li><b>5.44 Gbps מתמשך</b> לאורך משימת 20.4 GB מלאה <i>כולל</i> אימות בזרם.</li>
-      <li><b>הצנרת שוחזרה בכל RTT</b>: ‏+64% ב-63 ms Starlink, ‏+170-177% ב-14 ms מרכז נתונים, ‏+270% ב-31 ms החוף המזרחי. היא מביסה את דעיכת חלון הגודש של TCP, לא רק את ההשהיה.</li>
-      <li><b>הוכחת לחץ נגדי</b>: הגבל את שלב הכתיבה פי 4 מתחת לרשת והקלט ננעל לתקרה ±1% תוך 2 שנ', ה-RAM <i>יורד</i>, אפס החלפות. דיסק איטי לעולם לא יכול לנפח את הזיכרון.</li>
-      <li><b>מרווח מעבד</b>: תקרות פענוח+אימות שנמדדו של 86-165 Gbps על מעבדי Apple. הרשת היא צוואר הבקבוק פי 4-50 בכל מכונה שנבדקה.</li>
+      <li><b>כ-8.7 Gbps מוחזקים דרך צי של חמישה ספקים על קו 10 GbE, כולל
+      אימות וחילוץ בזרם</b> - סבב ה-87 GB שלמעלה, 24 באוגוסט 2026, v1.2.2,
+      ‏360 חיבורים: 77.4 GB על הקו ב-71 s כשהמטען מאומת ומחולץ עם הגעתו.
+      לא מספר פרץ: המשימה כולה בקצב הזה.</li>
+      <li><b>ב-1 Gbit ומטה, הקו הוא המגבלה ו-nzbfast יושב עליו</b>: ~96%
+      מקו של 500 Mbit ו-~96% מקו של 250 Mbit לאורך האימות והחילוץ, בשבריר
+      מהזיכרון והדיסק של כל מתחרה - מדור תת-הגיגה-ביט שלמעלה.</li>
+      <li><b>עלות המעבד של המשימה כולה במשימת ה-87 GB היא 1.7 שניות-מעבד
+      לכל GB</b> עם וסת החיבורים דלוק - כולל הורדה מעל TLS, אימות,
+      נכונות-לתיקון וחילוץ - מול 3.0 עד 28 לשדה באותו סבב; הזרוע
+      בקצב-המלא שלמעלה מוציאה 4.3.</li>
     </ul>
-    <p class="note" style="text-align:start"><b>כמה ההורדה עולה במעבד.</b> מערך מקומי אחד מגיש
-    מאמרים מ-RAM כך שרק הקליינט נמדד, וכל שורה מציינת את הסבב שלה. שורות SABnzbd ו-NZBGet לא
-    השתנו מסבב ה-22 ביולי - אותן גרסאות על אותה מכונה, נמדדות ב-cgroup של Linux על ליבת מעבד
-    אחת - והן עומדות עד שגרסה חדשה תשנה אחת מהן. שורות nzbfast, ‏Weaver ו-rustnzb נמדדו
-    ב-31 ביולי 2026 על ה-M3 Ultra של החוף המזרחי, nzbfast על הגרסה הנוכחית, Weaver הופעל
-    מחומם במיטבו המתועד.</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>קליינט</th><th>שניות מעבד לכל GB</th><th>עם TLS</th><th>סבב</th></tr></thead>
-      <tbody>
-                <tr><td><b>nzbfast</b></td><td class="win num">0.43</td><td class="num">&ndash;</td><td>M5 Max, 31 ביולי, צינור מקומי של 64 GB במהירות 76&ndash;79 Gbps, כל הקבצים שלמים</td></tr>
-        <tr><td><b>nzbfast</b></td><td class="num">0.58</td><td class="num">0.80</td><td>M3 Ultra של החוף המזרחי, ‏31 ביולי, הגרסה הנוכחית</td></tr>
-        <tr><td><b>nzbfast</b></td><td class="num">0.74</td><td class="num">1.06</td><td>M1 Ultra של אירופה, ‏31 ביולי, הגרסה הנוכחית</td></tr>
-        <tr><td><b>nzbfast</b></td><td class="num">0.72</td><td class="num">&ndash;</td><td>קונטיינר Linux בליבה אחת, ‏22 ביולי</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">1.5</td><td class="num">&ndash;</td><td>קונטיינר Linux בליבה אחת, ‏22 ביולי</td></tr>
-        <tr><td>‏Weaver (מחומם)</td><td class="num">2.15</td><td class="num">&ndash;</td><td>M3 Ultra של החוף המזרחי, ‏31 ביולי</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">3.0</td><td class="num">&ndash;</td><td>קונטיינר Linux בליבה אחת, ‏22 ביולי</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="num">21.1</td><td class="num">22.2</td><td>M3 Ultra של החוף המזרחי, ‏31 ביולי</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start">TLS עולה מעבד לכל קליינט; שלנו נמדד ב-‏+38% לכל GB
-    על ה-M3 Ultra וב-‏+44% על ה-M1 Ultra, והצנרת עדיין רצה במגבלת ה-~32 Gbps של השקעים
-    המקומיים של מערכת ההפעלה עצמה עם TLS פעיל. תוספת ה-TLS של rustnzb קטנה, אבל היא מעל
-    הבסיס הגבוה ביותר בעמוד ללא TLS; המספר שלו הוא עבודת משימה אמיתית, לא סיבוב סרק -
-    התהליך שקט לחלוטין בין משימות. ‏Weaver סירב לתעודה החתומה-עצמית של המערך, ולכן תא
-    ה-TLS שלו נשאר ריק, ו-SABnzbd ו-NZBGet עוד לא הורצו על מקטע ה-TLS - תאים ריקים הם
-    לא-נמדדים, לעולם לא מוערכים. על מחשב נייד Intel מ-2022 (i7-1280P, Windows 11)
-    העבודה של nzbfast עצמו היא אותן ~0.7 שניות מעבד לכל GB; ליבת Windows והאנטי-וירוס בערך
-    משלשים את הסך הכולל, ונתיב השקעים המקומיים של הפלטפורמה הזו נעצר סמוך ל-8 Gbps.</p>
-    <p class="note" style="text-align:start"><b>ואותה עלות נמדדת על משימות אמיתיות, בכל חמשת
-    הקליינטים.</b> המערך שלמעלה מבודד את התעבורה; הסבב המדוד של 31 ביולי מודד את המשימה כולה -
-    הורדה מעל TLS משישה ספקים, אימות, תיקון, פריקה - כשניות-מעבד לכל GB שהורד. כל קליינט היה
-    שטוח על פני קורפוסי ה-35, ‏77 ו-190 GB, ולכן מספר אחד לכל קליינט הוא מספר כן:</p>
-    <div class="tblwrap"><table>
-      <thead><tr><th>קליינט</th><th>שניות-מעבד לכל GB, למשימה שלמה</th><th>מול nzbfast</th></tr></thead>
-      <tbody>
-        <tr><td><b>nzbfast</b></td><td class="win num">1.7</td><td>בסיס</td></tr>
-        <tr><td>NZBGet 26.2</td><td class="num">4.5&ndash;4.6</td><td class="num">2.7×</td></tr>
-        <tr><td>‏Weaver (מחומם)</td><td class="num">8.2&ndash;9.6</td><td class="num">5.2×</td></tr>
-        <tr><td>SABnzbd 5.0.4</td><td class="num">12.1&ndash;12.6</td><td class="num">7.2×</td></tr>
-        <tr><td>rustnzb 1.3.4</td><td class="num">30.8&ndash;31.7</td><td class="num">‏18×, אין קובץ שמיש</td></tr>
-      </tbody>
-    </table></div>
-    <p class="note" style="text-align:start"><b>נמדד מול</b> NZBGet 26.2, SABnzbd 5.0.4, Weaver v0.7.5 ו-rustnzb 1.3.4 ב-31 ביולי 2026, ומוצמד לאותן בניות. ‏SABnzbd 5.1 מוותר על מעבר האימות שאחרי ההורדה שחלק גדול מהתוצאה שלו כאן משלם עליו; מאז יצאה 5.1.0 כגרסה יציבה והורצה: כשכל לקוח בהגדרת החיבורים הטובה ביותר שלו עצמו, הפער בהפצה המעורפלת קרוב יותר ל-+19% שנמדדו בראש העמוד. השורות האלה שומרות על הבניות שמולן רצו במקום שייערכו.</p>
-    <div class="callout"><b>כלל קבוע: כל טענת ביצועים מציינת את התנאים שבהם רצה</b>, כולל תוצאות שליליות ופניות שגויות.</div>
+    <p class="note" style="text-align:start">חתכים קודמים של העמוד הזה
+    נשאו מערך רחב יותר של הדגמות תעבורה - הרצות רוויה מרובות-קווים, רווחי
+    צנרת לפי-RTT, הוכחת לחץ-נגד, מדידות תקרת-פענוח - שהתחרו על בניות
+    ש-v1.2.2 החליפה מאז. תחת כלל העמוד הזה הן פורשות במקום להישאר
+    להזדקן, וחוזרות כשהן נחתכות מחדש על השחרור הנוכחי; שלוש הטענות
+    שלמעלה הן אלה שכבר נמדדו מחדש על v1.2.2.</p>
+    <div class="callout">כלל קבוע: <b>כל טענת ביצועים מצטטת את התנאים
+    שבהם היא רצה</b>, כולל תוצאות שליליות ופניות שגויות.</div>
   </div>
 </section>
 
-<section class="alt" id="next-releases">
-  <div class="wrap">
-    <p class="kicker">מבט קדימה</p>
-    <h2>מעקב אחרי הגרסאות הבאות</h2>
-    <p>גם הקליינטים האחרים ממשיכים להשתפר, ואנחנו בודקים את גרסאות הקדם שלהם ברגע שהן
-    מופיעות כדי שהטבלאות האלה לעולם לא יפגרו אחרי הגרסה היציבה הבאה של מתחרה. ב-31 ביולי
-    2026 הרצנו את בניית 26.3-testing של NZBGet (‏28 ביולי) ואת 5.1.0RC1 של SABnzbd מול
-    הגרסאות היציבות המקובעות שבעמוד הזה - כל זוג משולב ישן/חדש/חדש/ישן על אותה מכונה עם
-    הגדרות זהות, כל הרצה מאומתת עד לקובץ המחולץ. שני מקטעים: הערכה בת 9.68&nbsp;GB הניתנת
-    לשחזור ומוגשת מ-RAM (אירופה M1 Ultra), והפרסום בגודל ~35&nbsp;GB בעל שם-גיבוב ב-4K מעל
-    ששת הספקים הרגילים.</p>
-
-    <div class="tblwrap"><table>
-      <tr><th>9.68 GB מ-RAM</th><th class="num">זמן לסיום</th><th class="num">מעבד</th><th class="num">שיא זיכרון (RSS)</th></tr>
-      <tr><td>NZBGet 26.2</td><td class="num">12&ndash;13 s</td><td class="num">40 s</td><td class="num">376 MB</td></tr>
-      <tr><td>NZBGet 26.3-testing</td><td class="num">12&ndash;13 s</td><td class="num"><b>28 s</b></td><td class="num"><b>305 MB</b></td></tr>
-      <tr><td>SABnzbd 5.0.4</td><td class="num">55&ndash;57 s</td><td class="num">105 s</td><td class="num">1,737 MB</td></tr>
-      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">55 s</td><td class="num">104 s</td><td class="num">1,758 MB</td></tr>
-    </table></div>
-
-    <div class="tblwrap"><table>
-      <tr><th>~35 GB, ‏6 ספקים</th><th class="num">זמן לסיום</th><th class="num">מעבד</th><th class="num">שיא זיכרון (RSS)</th></tr>
-      <tr><td>NZBGet 26.2</td><td class="num">86&ndash;100 s</td><td class="num">156 s</td><td class="num">1,528 MB</td></tr>
-      <tr><td>NZBGet 26.3-testing</td><td class="num">85&ndash;86 s</td><td class="num"><b>98 s</b></td><td class="num"><b>822 MB</b></td></tr>
-      <tr><td>SABnzbd 5.0.4</td><td class="num">220&ndash;222 s</td><td class="num">416 s</td><td class="num">1,406 MB</td></tr>
-      <tr><td>SABnzbd 5.1.0RC1</td><td class="num">219&ndash;231 s</td><td class="num">416 s</td><td class="num">1,431 MB</td></tr>
-    </table></div>
-
-    <p>מה זז: גרסת הקדם של NZBGet מקצצת את עלות המעבד שלה בכשליש ואת שיא הזיכרון שלה עד
-    לחצי, בזמני סיום שלא השתנו - עבודת יעילות אמיתית (תיקון לולאת המתנה, תיקוני מרוץ נתונים,
-    כלי פריקה מעודכנים). ‏5.1.0RC1 של SABnzbd נמדדת בתוך תחום הרעש של 5.0.4 בשני המקטעים,
-    כך שנכון ל-31 ביולי, זמן לקובץ שמיש, המדד שהעמוד הזה מוביל איתו, לא זז לאף אחד משני
-    הקליינטים באף אחד משני המקטעים.</p>
-
-    <p><b>אחד המספרים האלה זז מאז.</b> הרצנו מחדש את 5.1.0RC2 של SABnzbd ב-7 באוגוסט,
-    אותה מכונה, אותו שילוב: עבודה מעורפלת של 34.5&nbsp;GB, שלוקחת ל-5.0.4 ול-RC1
-    ‏227&ndash;236&nbsp;s, מסתיימת תחת RC2 ב-45&ndash;59&nbsp;s, בכחמישית מעלות המעבד.
-    ההורדה עצמה לוקחת 31&nbsp;s בכל גרסה - מה ש-RC2 מסיר הוא אימות par2 מלא ומיותר
-    שהגרסאות הישנות מריצות אחרי שהארכיון כבר חולץ, כך שזהו שינוי בעיבוד הסופי, לא נתיב
-    רשת מהיר יותר. מרוץ המשך על ארכיונים עם כותרות מוצפנות, שבהם הפריקה הישירה אינה
-    יכולה לפעול, מדד את אותה ירידה: זמני הורדה זהים בשתי הגרסאות, והעיבוד הסופי צונח
-    מאימות ה-par2 לכלום. מה ש-RC2 מוותר עליו הוא הבדיקה עצמה - על סט לא פגום הוא כבר
-    אינו מאמת את הנתונים כלל, בעוד ש-nzbfast מאמת כל בלוק עם הגעתו, ללא מעבר נוסף.
-    הטבלאות היציבות בעמוד הזה עדיין נושאות 5.0.4: גרסה 5.1.0 יצאה כיציבה ב-10 באוגוסט 2026 ואחריה 5.1.1, ולכן הטבלאות נעוצות בגרסה שהוחלפה ומחייבות הרצה מחדש ולא עריכה.</p>
-
-    <p>rustnzb נע מהר מכולם - חמש מהדורות בין 1.3.4 שקיבענו (18 ביולי) ל-1.3.9 (28 ביולי) - ולכן בנינו את 1.3.9 מהמקור והרצנו אותו מחדש באותו יום. יומן השינויים שלו מבטיח תיקונים בדיוק למה שהטבלאות שלנו מדווחות („להפוך את החילוץ הישיר לאמין”, „לדחות עבודות שהושלמו בלי פלט שמיש”): במדידה, מהדורת 35&nbsp;GB המעורפלת עדיין מגיעה ככרכים גולמיים המסומנים <i>מוכן</i>, גם בעבודה הבודדת וגם בתור. מה שהשתנה הוא העלות והקצב: זמנים מהירים בכ-10%, והטחינה שהרוותה את המעבד שמדדנו ב-1.3.4 נעדרה מכל מקטע ב-1.3.9 - אף שגם הרצה חוזרת של 1.3.4 באותו יום מדדה נמוך, ולכן העלות הזו תלויה בתנאים ולא תוקנה בגרסה, ואיננו מצטטים אותה בשום מקום כמספר יחיד.</p>
-
-    <p class="note" style="text-align:start">המספרים במדור הזה הם בניות קדם-גרסה והם ברי-השוואה
-    רק בתוך המדור הזה (מצב המערך שונה מזה של המקטעים שלמעלה - הצמדת יציב מול קדם-גרסה היא כל
-    הנקודה). כשהגרסאות האלה יישלחו כיציבות, נריץ מחדש כל מקטע שפורסם שהן משפיעות עליו ונחליף
-    את המספרים במקום להוסיף אליהם, לפי הכלל הקבוע שבתחתית העמוד.</p>
-  </div>
-</section>
 
 <footer><div class="wrap">
   <div class="cols">
-    <div>⚡ <b>nzbfast</b> - מוריד ה-Usenet במעבר יחיד.</div>
+    <div>⚡ <b>nzbfast</b> - המוריד החד-מעברי ליוזנט.</div>
     <div>
       <a href="index.he.html">בית</a> ·
       <a href="features.he.html">תכונות</a> ·
@@ -861,19 +1207,32 @@
       <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
     </div>
   </div>
-  <p class="fine">נתוני בדיקות: סבבים תחרותיים 19&ndash;31 ביולי 2026. גרסאות קליינט:
-  SABnzbd 5.0.4, NZBGet 26.2 (fork של nzbget.com), rustnzb 1.3.4, Weaver v0.7.5 הרשמי
-  ל-arm64 (מקטע תקרת הקליינט השתמש בבנייה מהמקור שלו מ-23 ביולי, <code>410c114</code>; הוא
-  אינו מדווח מחרוזת גרסה משלו). בנוסף, המקטעים על הבניות הנוכחיות מ-6 עד 9 באוגוסט 2026, מול SABnzbd 5.1.0RC2, NZBGet 26.3-testing, Weaver 0.7.8 ו-rustnzb 1.3.9; כל טבלה שמציינת 5.0.4, 26.2, v0.7.5 או 1.3.4 מוצמדת לאותן בניות ותורץ מחדש, לא תיערך, כשהגרסאות היציבות הבאות ייצאו.
-  אם גרסה חדשה יותר של קליינט כלשהו משנה מהותית תוצאה, נריץ מחדש ונעדכן - המדור
-  "מעקב אחרי הגרסאות הבאות" שלמעלה הוא ההבטחה הזו מקוימת מראש.
-  מקטעי הספקים המובילים (35, ‏77 ו-190 GB) והסבב המדוד של העלות נמדדו מחדש
-  <b>ב-31 ביולי 2026 על הבנייה המשוחררת</b>, כל קליינט, כל מקטע מעל TLS, והחליפו את המספרים
-  מ-20&ndash;24 ביולי במקום להתווסף אליהם. הסבב על פרסום פגום חדש יותר משאר העמוד הזה ועומד בפני עצמו: <b>11 באוגוסט 2026</b>, nzbfast 1.0.24 ו-1.0.23 התחרו לצד SABnzbd 5.1.0 stable, NZBGet 26.3-testing, rustnzb 1.4.4 ו-Weaver 0.7.8, שש זרועות בסבב מתחלף אחד של 56 מקטעים ב-20 חיבורים לכל שרת. כל אחד מ-53 המקטעים שהגיעו לסיום הפיק קובץ זהה בית-בית למקור הידוע כתקין, שנבדק לפי גודל ו-MD5 בכל מקטע ולא על מדגם. המקטעים הבודדים הישנים יותר שנותרו (סבב התור, סולם
-  הזיכרון-הנמוך, שורות החוף המזרחי) קדמו לעבודת המנוע של סוף יולי ומפחיתים מהבנייה הנוכחית
-  במקום להחמיא לה. אנחנו גם מכינים קובצי בדיקה שאת ה-NZB שלהם נוכל לפרסם, כך שמקטעי הספקים
-  ייעשו ניתנים לשחזור עצמאי, בדיוק כפי שמקטעי תקרת הקליינט והרכיבים כבר עכשיו. גרסאות הקליינטים התקדמו מאז הסבבים האלה: ‏SABnzbd שחררה את 5.1.0 ואחריה 5.1.1, ו-rustnzb תיקן בגרסה 1.4.5 את הכישלון בהפצות מעורפלות שהטבלאות שלנו מתעדות. ההרצות מחדש חייבות, ועד שיתבצעו הטבלאות שומרות על הגרסאות שמולן נמדדו.</p>
+  <p class="fine">נתוני בדיקות הביצועים בעמוד הזה: הסבבים של <b>23 ו-24
+  באוגוסט 2026</b> - טבלאות העלות, המרוץ החוזר של הקו, סבב הפוסט הפגום,
+  הרצפה של שטח פנוי, מתקן תקרת-הדיסק והמרוץ החוזר של החילוץ - מתחרים מול
+  SABnzbd 5.1.1 (‏5.1.0 בסבב הפגום), NZBGet 26.3-testing (בנייה מ-20
+  באוגוסט), rustnzb 1.4.5 ו-Weaver 0.7.8 (הבינארי המשוחרר האחרון שלו,
+  זהות מוכחת בגיבוב), חמישה ספקים, הכול ב-TLS - הסבבים החדשים ביותר על
+  <b>בניית השחרור v1.2.2 עצמה</b>, השאר על שורת הקוד ששוחררה כמותה. הרצפה
+  של שטח פנוי נחתכה מחדש על בניית השחרור ב-24 באוגוסט ושיחזרה את הגבולות
+  שלה בדיוק; תאי המתחרים של סבב מהדק-הזיכרון שומרים על התאריך שלהם מ-23
+  באוגוסט, כשהצד שלנו הוחלף על ידי סולם v1.2.2. כל מקטע נבדק בית-בית מול
+  פלט ידוע-כתקין במקום לסמוך על טענת ההשלמה של הקליינט עצמו. מאז 20
+  באוגוסט 2026 כל סבב מריץ חמישה ספקים; שום דבר כאן לא מושווה מול מספר
+  ישן יותר על שישה ספקים.
+  <b>כלל הפרישה שהעמוד הזה עוקב אחריו עכשיו:</b> חתכים קודמים נשאו סבבים
+  שהתחרו על בניות מתחרים שהוחלפו מאז, ובמקום להשאיר את הטבלאות האלה
+  להזדקן אנחנו מפרישים אותן - תרחיש חוזר כשהוא נמדד מחדש על בניות
+  נוכחיות, וכשל קבוע של מתחרה אף פעם לא מצוטט כאילו הוא נוכחי. סבב התור,
+  סולם גודל-המשימה, מתקן תקרת-הקליינט, הדרגות של ארכיון-מקונן ותרחיש
+  הקובץ-הגדול פרושים תחת הכלל הזה היום וחוזרים כשהמרוצים החוזרים שלהם
+  נוחתים; המרוץ החוזר של הקובץ-הגדול כבר בתור. מדורים שלא מתחרים מול שום
+  בנייה של מתחרה (סולם הזיכרון הנמוך, סיפור הדיסק של הצורה המוצפנת,
+  ההשוואות של הרכיבים מול הכלים העצמאיים הנוכחיים) שומרים על התאריכים
+  שלהם עצמם. אנחנו גם מכינים קבצי בדיקה שאת ה-NZB שלהם נוכל לפרסם, כך
+  שמקטעי הספקים יהיו ברי-שחזור באופן עצמאי בדרך שבה מקטעי הרכיבים כבר הם.</p>
 </div></footer>
 
 </body>
 </html>
+
