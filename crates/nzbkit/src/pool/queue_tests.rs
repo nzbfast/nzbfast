@@ -38,6 +38,8 @@ async fn queue_control_promotes_to_front_preserving_order() {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         },
         PoolConfig::default(),
     )];

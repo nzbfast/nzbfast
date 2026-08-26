@@ -67,6 +67,12 @@ pub(super) struct Running {
     /// job's; None until then, and None for a job that was never handed
     /// over (its settle detaches at drain, as before).
     detached: Option<DetachedTail>,
+    /// Retention insurance: this run banks a deferred row's payload
+    /// (`no_extract`) and its tail re-queues the row instead of filing
+    /// it. Threaded as run state rather than read off the record at
+    /// tail time, so a promotion landing mid-fetch cannot change what
+    /// kind of run this WAS.
+    insurance: bool,
 }
 
 /// What `start_next` did.
@@ -202,6 +208,114 @@ pub(in crate::serve) fn spawn_download_worker(
     });
 }
 
+/// The runner's pick, plus the test seam that holds the gap behind it
+/// open.
+///
+/// `pick_job` drops the job lock before it returns, so everything
+/// between that call and the critical section in [`start_next`] that
+/// flips the state to Downloading is a window a whole recategorize
+/// fits inside - which is why that section re-reads
+/// [`Job::relocating`] rather than trusting what the pick saw. The
+/// window is microseconds wide on a live daemon, so nothing can land
+/// in it on purpose and that re-read was pinned by no test at all
+/// (measured 25 Aug 2026: comment the arm out, leave `pick_job`'s in,
+/// and the whole repo stays green - `daemon_relocate`'s existing case
+/// is satisfied by either arm alone and says so). This hook holds the
+/// window open so `daemon_relocate::a_recategorize_inside_the_pick_to_
+/// start_gap_cannot_start_the_job` can publish inside it, and
+/// announces itself on the way in so that case can rendezvous on the
+/// log instead of on a sleep. No effect unless the suite sets it.
+///
+/// A tokio sleep rather than the blocking one the two hooks in
+/// `requeue_category` use: those fire on tiny_http's own thread, this
+/// one is on the runner task and must not pin a runtime worker for the
+/// length of the stall.
+/// The bool is retention insurance: `true` means no ordinary job was
+/// runnable and a deferred row's payload gets banked instead - the
+/// ordinary pipeline with `no_extract`, ending in the queue rather than
+/// in history (see `serve::insurance` for the picker and the cap, and
+/// the insurance arm in `postproc::run_tail`). Behind every ordinary
+/// pick by construction, and never while the queue is paused - a global
+/// pause means stop, background errands included.
+async fn pick_for_start(d: &Arc<Daemon>, only_force: bool) -> Option<(Arc<Mutex<Job>>, bool)> {
+    let (job, insurance) = match d.pick_job(only_force) {
+        Some(j) => (j, false),
+        None => (
+            (!only_force).then(|| d.pick_insurance_job()).flatten()?,
+            true,
+        ),
+    };
+    if let Some(ms) = std::env::var("NZBFAST_TEST_STALL_PICK_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        let id = job.lock_ok().nzo_id.clone();
+        info!(target: "queue", "{id}: test stall in the pick-to-start gap");
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+    Some((job, insurance))
+}
+
+/// What an ORDINARY pick does at the flip to `Downloading`, and a
+/// retention-insurance pick deliberately does not: re-arm the
+/// queue-finished latch, emit `job.started` (a webhook acting on it
+/// would act on a job the user deferred), and take the late-pick stamp.
+///
+/// The late-pick marker: the runner was free when this job arrived, yet
+/// took over 2 s to start it - the signature of the fixed
+/// runner-starvation bug, named so any recurrence attributes itself.
+/// Taken, not read, so a job that requeues can never replay a stale
+/// stamp - and NOT taken by an insurance pick, which runs last by
+/// design (its lateness is not the signature) and must not spend the
+/// real run's stamp.
+fn note_ordinary_start(d: &Daemon, j: &mut Job) {
+    d.queue_idle_latch.store(false, Ordering::Relaxed);
+    emit_started(d, j);
+    if let Some(waited) = j
+        .queued_at
+        .take()
+        .filter(|_| j.idle_at_add)
+        .map(|t| t.elapsed())
+        .filter(|w| *w > std::time::Duration::from_secs(2))
+    {
+        d.note_event(
+            "late",
+            format!(
+                "{} started {:.1} s after it was added with nothing \
+                 ahead of it - the runner was slow to pick it up",
+                j.name,
+                waited.as_secs_f64()
+            ),
+        );
+    }
+}
+
+/// §129 4a: the pick is the "started" moment, as its own kind.
+///
+/// A job that re-enters the runner after a demotion, disk hold or retry
+/// starts again - `resumed` carries the difference. Its own function
+/// only because `start_next` sits one line under the size ceiling; it is
+/// called with the job lock held, exactly where the flip to
+/// `Downloading` happens, so the event cannot describe a state the queue
+/// payload has not reached.
+fn emit_started(d: &Daemon, j: &Job) {
+    // event-arm-gate: a STATE, not a moment - the queue row renders it.
+    // `s.status` reads Downloading from the very next poll, so a toast
+    // would narrate a row the user is already looking at. The rule is
+    // finding (b) of §129 1b: a moment goes on the ring, a state stays
+    // on the queue payload.
+    d.life_emit(
+        "job.started",
+        json!({
+            "nzo_id": j.nzo_id,
+            "name": j.name,
+            "category": j.category,
+            "total_bytes": j.total_bytes,
+            "resumed": j.downloaded_bytes > 0,
+        }),
+    );
+}
+
 /// Run the guards, pick a job, run the three pre-pipeline arms, then
 /// claim the hub and spawn the pipeline.
 ///
@@ -229,7 +343,7 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
         return Start::Nothing;
     };
     d.run_due_auto_retries();
-    let Some(job) = d.pick_job(only_force) else {
+    let Some((job, insurance)) = pick_for_start(&d, only_force).await else {
         if !quick {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
@@ -254,52 +368,32 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
             // or moving `out_dir` right now. Starting the
             // pipeline would point a fresh download at the
             // directory being moved out from under it, so
-            // re-read what we picked on and let the job go if
-            // it is no longer waiting to run.
+            // re-read what we picked on and let the job go if it
+            // is no longer waiting to run (an insurance pick is
+            // paused by design - its stand-down signal is the state).
             let j = job.lock_ok();
-            if j.paused || j.state != JobState::Queued {
+            if (j.paused && !insurance) || j.state != JobState::Queued {
                 return Start::Ended;
             }
         }
     }
     let (nzb_path, out_dir, total, library, nzo_id, name, prio, job_password, eat_ok, failure_host) = {
         let mut j = job.lock_ok();
+        // Codex F-06: [`Job::relocating`], re-read here because this is
+        // the only critical section that can be atomic with the publish
+        // that raises it - `pick_job` drops the job lock before
+        // returning, so a recategorize fits entirely inside the gap
+        // between its check and this flip. Ended, not Nothing: another
+        // job may well be runnable, and `pick_job` skips this one until
+        // the move finishes.
+        if j.relocating > 0 {
+            return Start::Ended;
+        }
         j.state = JobState::Downloading;
-        // §129 4a: the pick is the "started" moment. A job that
-        // re-enters the runner after a demotion, disk hold or
-        // retry starts again - `resumed` carries the difference.
-        d.queue_idle_latch.store(false, Ordering::Relaxed);
-        d.life_emit(
-            "job.started",
-            json!({
-                "nzo_id": j.nzo_id,
-                "name": j.name,
-                "category": j.category,
-                "total_bytes": j.total_bytes,
-                "resumed": j.downloaded_bytes > 0,
-            }),
-        );
-        // Late-pick marker: the runner was free when this job
-        // arrived, yet took over 2 s to start it - the signature
-        // of the fixed runner-starvation bug, named so any
-        // recurrence attributes itself. Taken, not read, so a
-        // job that requeues can never replay a stale stamp.
-        if let Some(waited) = j
-            .queued_at
-            .take()
-            .filter(|_| j.idle_at_add)
-            .map(|t| t.elapsed())
-            .filter(|w| *w > std::time::Duration::from_secs(2))
-        {
-            d.note_event(
-                "late",
-                format!(
-                    "{} started {:.1} s after it was added with nothing \
-                     ahead of it - the runner was slow to pick it up",
-                    j.name,
-                    waited.as_secs_f64()
-                ),
-            );
+        // An insurance pick is a background errand, not the user's
+        // download starting - see the helper for what it skips.
+        if !insurance {
+            note_ordinary_start(&d, &mut j);
         }
         (
             j.nzb_path.clone(),
@@ -379,7 +473,7 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
                         &out_dir,
                         &name,
                         d.scheme(),
-                        d.port,
+                        &pointer_authority(&d.bind, d.port),
                         &nzo_id,
                         &d.stream_token(&nzo_id),
                     ) {
@@ -458,7 +552,10 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
     // `giveup_reason` opens with `post is gone`, so `fail_kind`
     // reads Gone - no automatic retry, FAILURE/HEALTH to the
     // *arr, "find another release" as the suggested move.
-    let giveup: Option<String> = if d.post_health_fail.load(Ordering::Relaxed) {
+    // Neither pre-pipeline verdict arm runs for an insurance pick: both
+    // END the job into history as Failed, and an insurance errand may
+    // only ever put its row back in the queue.
+    let giveup: Option<String> = if !insurance && d.post_health_fail.load(Ordering::Relaxed) {
         let j = job.lock_ok();
         j.health
             .as_ref()
@@ -510,7 +607,7 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
     // "repairable" is what PAR2 is for, and an errored sweep
     // (a provider hiccup mid-probe) must never fail a job the
     // download itself might well complete.
-    if d.preflight.load(Ordering::Relaxed) {
+    if !insurance && d.preflight.load(Ordering::Relaxed) {
         d.hub.activity.lock_ok().insert(nzo_id.clone(), "preflight");
         match crate::check(&config, &nzb_path, 10, 4, 50, true).await {
             Ok(crate::Verdict::Impossible {
@@ -615,6 +712,39 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
     let handoff = nzbkit::pool::handoff::HandoffSignal::new();
     *d.hub.handoff.lock_ok() = d.hub.conn_budget.get().map(|_| handoff.clone());
     let (net_tx, net_rx) = tokio::sync::oneshot::channel::<Instant>();
+    // §293: a switch job (spare promotion, hunt replacement, §284
+    // parked switch - every road stamps `alt_from`) donates from its
+    // failed predecessor's output: the disk repair's adoption scan
+    // reads that directory, so blocks the wire will not serve again
+    // can still be found on disk. Resolved here because only the
+    // daemon knows the predecessor. The row lookup runs under the
+    // history lock; the existence check runs OUTSIDE it (out_dir can
+    // be a network share, and a stat under the history lock stalls
+    // the API behind it). A predecessor that is gone, or whose
+    // directory was cleaned, degrades to an ordinary run - the
+    // adoption walk itself tolerates the directory vanishing later.
+    let donor_dirs: Vec<std::path::PathBuf> = {
+        let alt_from = job.lock_ok().alt_from.clone();
+        (!alt_from.is_empty())
+            .then(|| {
+                d.history.lock_ok().iter().find_map(|j| {
+                    let g = j.lock_ok();
+                    (g.nzo_id == alt_from).then(|| g.out_dir.clone())
+                })
+            })
+            .flatten()
+            .filter(|p| p.is_dir())
+            .into_iter()
+            .collect()
+    };
+    if let Some(p) = donor_dirs.first() {
+        info!(
+            target: "repair",
+            "{nzo_id}: replacement job - the failed predecessor's files at \
+             {} are available to the repair as donors",
+            p.display()
+        );
+    }
     let fetch = {
         let config = config.clone();
         let nzb_path = nzb_path.clone();
@@ -642,11 +772,14 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
                 decoders,
                 fast_verify,
                 verify_lean,
-                false,
+                // no_extract: insurance banks volumes + journal, the
+                // resumable form the promotion run extracts from.
+                insurance,
                 par_cleanup,
                 skip_samples,
                 job_password,
                 eat_ok,
+                donor_dirs,
                 Some(progress),
                 Some(hub),
                 &stream_owner,
@@ -668,6 +801,7 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
         index_job_guard,
         progress,
         detached: None,
+        insurance,
     })
 }
 
@@ -698,6 +832,7 @@ async fn finish(st: &mut Runner, run: Running) {
         index_job_guard,
         progress,
         detached,
+        insurance,
         ..
     } = run;
     // This run was handed over if its figures were detached: the hub,
@@ -781,6 +916,7 @@ async fn finish(st: &mut Runner, run: Running) {
             dl_secs,
             on_disk_bytes,
             index_job_guard,
+            insurance,
             #[cfg(feature = "indexer")]
             oracle_samples,
         })

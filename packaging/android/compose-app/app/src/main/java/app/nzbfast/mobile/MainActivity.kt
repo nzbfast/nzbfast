@@ -1,7 +1,10 @@
 package app.nzbfast.mobile
 
+import android.app.PictureInPictureParams
 import android.content.Intent
+import android.graphics.Rect
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -15,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -32,6 +36,7 @@ import app.nzbfast.mobile.ui.ServerSetupScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -95,6 +100,10 @@ class MainActivity : ComponentActivity() {
 
     private var pollJob: Job? = null
 
+    /** The in-flight on-device startup, so two ways in cannot race one
+     *  another - see [startDeviceEngine]. */
+    private var deviceStartJob: Job? = null
+
     private val client: NzbfastClient?
         get() = connection?.let { NzbfastClient(it.baseUrl, it.apiKey) }
 
@@ -117,24 +126,7 @@ class MainActivity : ComponentActivity() {
                 // The mode is read here but the ENDPOINT is not: the engine
                 // takes an OS-chosen port, so where to send the key is not
                 // known until the proof comes back with it.
-                startForegroundService(Intent(this, EngineService::class.java))
-                screen = Screen.Home
-                busy = true
-                lifecycleScope.launch {
-                    val proven = withContext(Dispatchers.IO) {
-                        EngineIdentity.awaitVerified(this@MainActivity)
-                    }
-                    busy = false
-                    if (proven == null) {
-                        note = "The engine did not start, or something else is using " +
-                            "its port. Check daemon.log in app storage."
-                        screen = Screen.Connect
-                        return@launch
-                    }
-                    note = null
-                    connection = Store.deviceConnection(this@MainActivity, proven)
-                    startPolling()
-                }
+                startDeviceEngine(toHome = true)
             }
             Mode.SERVER -> {
                 val saved = Store.load(this)
@@ -146,6 +138,7 @@ class MainActivity : ComponentActivity() {
             }
             null -> {}
         }
+        watchEngineExits()
         handleIntent(intent)
 
         setContent {
@@ -165,15 +158,40 @@ class MainActivity : ComponentActivity() {
      *  the OS draws its own controls over it. */
     private var inPip by mutableStateOf(false)
 
+    /** The video's current on-screen bounds, reported by [PlayerScreen] via
+     *  [Modifier.onGloballyPositioned] whenever they change. Feeds
+     *  [updatePipParams]'s sourceRectHint. */
+    private var videoRect by mutableStateOf<Rect?>(null)
+
+    /**
+     * Keeps this activity's PictureInPictureParams current with the system.
+     * Android 12+ (API 31) reads setAutoEnterEnabled/setSourceRectHint to
+     * animate the transition into PiP itself - from the actual on-screen
+     * video position - rather than the plain fade you get from calling
+     * enterPictureInPictureMode() by hand in onUserLeaveHint (lint's
+     * PictureInPictureIssue). Below API 31 neither setter exists, so
+     * onUserLeaveHint's manual call remains the only way in.
+     */
+    private fun updatePipParams() {
+        if (Build.VERSION.SDK_INT < 31) return
+        val builder = PictureInPictureParams.Builder()
+            .setAutoEnterEnabled(screen is Screen.Player)
+        videoRect?.let { builder.setSourceRectHint(it) }
+        setPictureInPictureParams(builder.build())
+    }
+
     /** Home button while the test preview is up: keep the picture going
      *  in a PiP window instead of stopping. Only the player earns it -
-     *  minimizing a queue screen should just minimize. */
+     *  minimizing a queue screen should just minimize.
+     *
+     *  On API 31+ this is a no-op in practice: setAutoEnterEnabled (see
+     *  [updatePipParams]) already has the system do this itself, with a
+     *  smoother transition than a manual call can produce. The call here
+     *  is the fallback for API 26-30, which has no auto-enter. */
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (screen is Screen.Player) {
-            enterPictureInPictureMode(
-                android.app.PictureInPictureParams.Builder().build()
-            )
+        if (Build.VERSION.SDK_INT < 31 && screen is Screen.Player) {
+            enterPictureInPictureMode(PictureInPictureParams.Builder().build())
         }
     }
 
@@ -187,7 +205,78 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         pollJob?.cancel()
+        deviceStartJob?.cancel()
         super.onDestroy()
+    }
+
+    /**
+     * The whole on-device startup: ask the service for an engine, wait for
+     * a listener that PROVES it is ours, and only then build the keyed
+     * connection.
+     *
+     * One function because there are now three ways in - a saved on-device
+     * mode at launch, the engine generation ending ([watchEngineExits]),
+     * and a poll that stopped reaching the engine we proved
+     * ([startPolling]) - and every one of them owes the same two things
+     * first: drop the credential, and stop polling with it. A [Connection]
+     * names a PORT, the port outlives the process that bound it, and any
+     * app on the phone may take it the moment it is free, so a connection
+     * kept across a generation addresses the full API key to a stranger
+     * (Codex sweep 26 Aug, P1-2). [EngineIdentity.awaitVerified] is what
+     * earns it back, and it sends no key to do so.
+     */
+    private fun startDeviceEngine(message: String? = null, toHome: Boolean = false) {
+        pollJob?.cancel()
+        pollJob = null
+        deviceStartJob?.cancel()
+        connection = null
+        note = message
+        if (toHome) {
+            snapshot = null
+            screen = Screen.Home
+        }
+        startForegroundService(Intent(this, EngineService::class.java))
+        busy = true
+        deviceStartJob = lifecycleScope.launch {
+            val proven = withContext(Dispatchers.IO) {
+                EngineIdentity.awaitVerified(this@MainActivity)
+            }
+            busy = false
+            if (proven == null) {
+                note = "The engine did not start, or something else is using " +
+                    "its port. Check daemon.log in app storage."
+                screen = Screen.Connect
+                return@launch
+            }
+            note = null
+            connection = Store.deviceConnection(this@MainActivity, proven)
+            startPolling()
+        }
+    }
+
+    /**
+     * Re-enter the proof path when an on-device engine generation ends.
+     *
+     * See [EngineService.engineExits]: the service now waits on its child
+     * and says so, and this is the half that acts on it. Only the DEVICE
+     * mode is ours to restart - a SERVER connection points at a daemon
+     * this app never started and cannot prove that way, and its own
+     * unreachability is already reported as a note.
+     */
+    private fun watchEngineExits() {
+        lifecycleScope.launch {
+            // `drop(1)`: a StateFlow replays its current value to every new
+            // collector, and that value is a count of exits that happened
+            // before this activity existed.
+            EngineService.engineExits.drop(1).collect {
+                if (Store.savedMode(this@MainActivity) == Mode.DEVICE) {
+                    startDeviceEngine(
+                        message = "The engine stopped. Starting it again…",
+                        toHome = true,
+                    )
+                }
+            }
+        }
     }
 
     /**
@@ -238,6 +327,7 @@ class MainActivity : ComponentActivity() {
         BackHandler(enabled = s is Screen.Add || s is Screen.Player) {
             screen = Screen.Home
         }
+        SideEffect { updatePipParams() }
         ImportConfirmation()
         when (s) {
             is Screen.Player -> PlayerScreen(
@@ -248,6 +338,7 @@ class MainActivity : ComponentActivity() {
                 } },
                 telemetry = { snapshot?.stream },
                 inPip = { inPip },
+                onVideoRectChanged = { videoRect = it },
             )
             else -> Scaffold(
                 topBar = {
@@ -429,10 +520,32 @@ class MainActivity : ComponentActivity() {
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
                 // STAGED, not submitted - see PendingImport.
                 when {
-                    uri != null -> pendingImport = PendingImport.File(
-                        uri,
-                        queryDisplayName(uri) ?: "shared.nzb",
-                    )
+                    uri != null -> {
+                        // Staged with a GENERIC label, and the real one
+                        // resolved afterwards OFF the main thread.
+                        // `queryDisplayName` is a query against a
+                        // provider owned by whichever app did the
+                        // sharing, and this activity is exported - so an
+                        // inaccessible, throwing or merely slow provider
+                        // crashed or froze the confirmation screen
+                        // before it had appeared, on a share the user
+                        // had not approved yet. Nothing needs the name
+                        // in the first frame: it is a label on a sheet
+                        // that is still asking.
+                        pendingImport = PendingImport.File(uri, "shared.nzb")
+                        lifecycleScope.launch {
+                            val name = withContext(Dispatchers.IO) {
+                                runCatching { queryDisplayName(uri) }.getOrNull()
+                            }
+                            val staged = pendingImport
+                            if (name != null
+                                && staged is PendingImport.File
+                                && staged.uri == uri
+                            ) {
+                                pendingImport = PendingImport.File(uri, name)
+                            }
+                        }
+                    }
                     text != null && text.contains("nzblnk:") ->
                         pendingImport = PendingImport.Link(text.trim())
                 }
@@ -511,6 +624,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * A provider query, which is a call into ANOTHER app's process:
+     * slow at best, and free to throw. Never call it on the main
+     * thread, and never before the user has approved the import - see
+     * the ACTION_SEND arm of `handleIntent`.
+     */
     private fun queryDisplayName(uri: Uri): String? =
         contentResolver.query(uri, null, null, null, null)?.use { c ->
             val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
@@ -526,7 +645,14 @@ class MainActivity : ComponentActivity() {
             // Row 16 already hands over the tokenized play URL; /m3u is
             // only the fallback for a snapshot that lacked one.
             val url = withContext(Dispatchers.IO) {
-                job.stream.ifEmpty { cl.streamUrl(job.nzoId) }
+                job.stream.ifEmpty { cl.streamUrl(job.nzoId) ?: "" }
+            }
+            // No scoped URL and no /m3u answer: say so rather than
+            // falling back to one carrying the master API key.
+            if (url.isEmpty()) {
+                busy = false
+                note = "Could not open this job for playback."
+                return@launch
             }
             // mode=playback is read-only by design; the probe is what
             // promotes a live job's file index, so fire it once for the
@@ -548,6 +674,8 @@ class MainActivity : ComponentActivity() {
     private fun startPolling() {
         pollJob?.cancel()
         pollJob = lifecycleScope.launch {
+            // Has this poll job ever got an answer? See the failure arm.
+            var reached = false
             while (isActive) {
                 val cl = client
                 // One poll for everything: readiness rides the job rows
@@ -558,9 +686,27 @@ class MainActivity : ComponentActivity() {
                         runCatching { cl.playback() }.getOrNull()
                     }
                     if (snap != null) {
+                        reached = true
                         snapshot = snap
                         speedHistory = (speedHistory + snap.speedBps / 1e6).takeLast(90)
                         if (note?.startsWith("Could not reach") == true) note = null
+                    } else if (reached && connection?.mode == Mode.DEVICE) {
+                        // A call that stopped reaching the engine we proved.
+                        // Both ways that happens say the same thing: a
+                        // transport failure means nothing of ours is on that
+                        // port any more, and an authentication failure means
+                        // something is and it is not ours. Either way the
+                        // credential is now addressed to a stranger, so drop
+                        // it and prove the listener again rather than keep
+                        // sending the key at it every two seconds.
+                        //
+                        // `reached` bounds this to ONE re-prove per streak of
+                        // working polls. A daemon that answers the keyless
+                        // challenge and then refuses the keyed call - a key
+                        // this install no longer shares with it - would
+                        // otherwise re-prove, fail, and re-prove forever.
+                        startDeviceEngine(message = "Reconnecting to the engine…")
+                        return@launch
                     } else {
                         note = "Could not reach the server."
                     }

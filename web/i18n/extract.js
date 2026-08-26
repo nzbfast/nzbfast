@@ -171,6 +171,25 @@ Object.assign(out, {
   'chip.moving.hint': 'moving files',
   'chip.maintenance.hint': 'database upkeep',
   'chip.measuring.hint': 'measuring connections',
+  'chip.listsync': 'lists',
+  'chip.listsync.hint': 'syncing your lists',
+  // ...and what each chip's menu offers. BUSY_ACTS is a table of
+  // [key, English, javascript] rows, so every one of these is a literal
+  // in an ARRAY rather than an argument to t() and the scrape cannot
+  // see it - the same reason SETGROUPS is listed at the top of this
+  // block. chip.nostop is the sentence the three subsystems with no off
+  // switch show in place of one.
+  'chip.act.settings': 'Open its settings',
+  'chip.act.idxoff': 'Turn indexing off',
+  'chip.act.metapause': 'Pause metadata lookups',
+  'chip.act.predboff': 'Turn the release feed off',
+  'chip.act.watch': 'Open the watchlist',
+  'chip.act.lists': 'Open list sources',
+  'chip.act.tuneoff': 'Stop measuring connections',
+  'chip.act.queue': 'Show the queue',
+  'chip.nostop': 'Finishes on its own - nothing to switch off',
+  // The queue pill's own menu, same table shape.
+  'chip.q.pausenow': 'Pause now',
   // TODO 274 drawer file list: the engine's per-file state word, rendered
   // via t(...JF_STATE[state]) from the token the daemon sent, so the key
   // is a table lookup at the call site and the scrape cannot see it.
@@ -180,6 +199,7 @@ Object.assign(out, {
   'drawer.fs.deferred': 'skipped',
   'drawer.fs.damaged': 'damaged',
   'drawer.fs.recovery': 'repair data',
+  'drawer.fs.published': 'at destination',
   // tErr(): fixed daemon error strings (serve.rs), keyed by wire text
   'err.unknown nzo_id': 'unknown nzo_id',
   'err.empty password': 'empty password',

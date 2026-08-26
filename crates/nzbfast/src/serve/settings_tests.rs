@@ -686,6 +686,50 @@ fn arming_the_size_cap_wakes_the_scan_loop() {
     assert!(!woken(&d), "switching eviction off must not wake the loop");
 }
 
+/// The metadata pause is only worth having if the lanes actually read
+/// it. Three places have to agree - the allowlist arm, the atomic, and
+/// `park_metadata_lanes`, which is the one thing the lanes consult - and
+/// a break in any of them is SILENT: the setting saves, `get_config`
+/// echoes it back, the settings row ticks, and TMDB keeps being asked.
+/// So this drives the real `apply_setting` door and asserts on the park.
+#[cfg(feature = "indexer")]
+#[test]
+fn pausing_metadata_parks_the_lanes_and_resuming_releases_them() {
+    let (_t, d) = daemon_in("enrich-pause");
+    // The fixture ships with the indexer OFF, which parks the lanes for
+    // its own reason and would make every arm below read true.
+    //
+    // Every park below is asked for ZERO seconds, so the true arm sleeps
+    // for no time at all and the return value is the whole assertion.
+    d.index_enabled.store(true, Ordering::Relaxed);
+    assert!(
+        !d.park_metadata_lanes(0),
+        "indexer on and nothing paused: the lanes must run"
+    );
+
+    assert!(apply_setting(&d, "enrich_paused", "1").is_ok());
+    assert!(d.enrich_paused.load(Ordering::Relaxed));
+    assert!(
+        d.park_metadata_lanes(0),
+        "the pause must reach the lanes, not just the settings file"
+    );
+
+    // ...and it is a pause, not a one-way switch.
+    assert!(apply_setting(&d, "enrich_paused", "0").is_ok());
+    assert!(
+        !d.park_metadata_lanes(0),
+        "resuming must let the lanes go again"
+    );
+
+    // Independent of the index pause: that one stops NNTP header
+    // traffic and has never had anything to do with these lanes.
+    assert!(apply_setting(&d, "index_paused", "1").is_ok());
+    assert!(
+        !d.park_metadata_lanes(0),
+        "pausing the index must not park the metadata lanes"
+    );
+}
+
 // ---- JSON-blob validators -----------------------------------------------
 
 #[test]

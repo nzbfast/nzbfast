@@ -7,8 +7,132 @@
 
 use super::*;
 
+/// The persisted job record's schema generation. Stamped on every record
+/// [`job_json`] writes, checked by [`job_from_json`].
+///
+/// **Absence is generation 1.** Every record on every disk today was
+/// written before this field existed, and the reader treats a record with
+/// no `schema_version` exactly as it treats one stamped `1` - which is
+/// what makes adding the field a no-op for an existing store. That
+/// equivalence is permanent, not a migration window: nothing rewrites an
+/// old record to add the stamp, so version-less records will keep
+/// arriving for as long as anyone has a spool directory.
+///
+/// **When to bump it, and when emphatically not to.** Same contract as
+/// [`super::histstore::LIFE_SCHEMA_VERSION`]: adding a key never bumps
+/// it, because a reader that has never heard of a key already ignores
+/// it and every field in [`job_from_json`] documents what its own
+/// absence means. It bumps only when an older reader would MISREAD a
+/// record it can still parse - a key renamed, removed, or given a new
+/// meaning.
+///
+/// **What a reader does with a version above its own: it refuses the
+/// record, loudly.** That follows from the paragraph above rather than
+/// from caution - by that contract a higher number is precisely the case
+/// where a best-effort parse is known to be wrong, and the fields this
+/// record decides are not cosmetic (`filed` gates whether a
+/// delete-with-files may `remove_dir_all` a shared season folder;
+/// `move_seq` is the only thing that tells a half-written park from a
+/// half-written retry). Guessing there is worse than not loading.
+///
+/// **The cost of that, stated rather than buried, because it is the one
+/// thing a future bump has to price in.** A refusal is a silent skip at
+/// both production call sites (`job::restore_records` and
+/// `histstore`'s replay `continue` past a `None`), and `queue.json` is
+/// rewritten from whatever loaded - so a downgrade to a binary that
+/// predates the bump does not merely fail to show the queue, it deletes
+/// it on the next save. Two thin nets survive that: `persist`'s `.bak`
+/// still holds the pre-downgrade file for one more load cycle, and
+/// `history.jsonl` is append-only, so its rows outlive the refusal until
+/// a compaction rewrite. Neither is a reason to bump this casually. A
+/// bump is a one-way door for every binary already in the field.
+pub(in crate::serve) const JOB_SCHEMA_VERSION: u64 = 1;
+
+/// A persisted count read back into a field NARROWER than the JSON
+/// number that carries it, saturating instead of wrapping.
+///
+/// Our own serializer can only ever emit a value that fits - the field
+/// it came from is a `u32`/`u8`/`i32` - so a number that does not fit is
+/// by construction corrupt or foreign, and the only question is which
+/// wrong answer to give. `as` gives the worst one available: it WRAPS,
+/// and the direction it wraps in is the dangerous one. Four of the eight
+/// fields read through here are ladder counters compared against a small
+/// give-up constant - `defer_count` (`stall`'s `>= 3`), `move_attempts`
+/// (`MOVE_RETRY_GIVE_UP`), `failure_depth` (`FAILURE_REGRAB_MAX`) and
+/// `refeed_depth` (`refeed::REFEED_MAX_DEPTH`) - and `2^32 as u32` is 0,
+/// a RESET that hands the ladder back its whole budget. That is not
+/// hypothetical damage: `Job::move_attempts` exists because an
+/// unreachable destination with nothing counting the failures logged the
+/// same EACCES 45 times across 15 hours.
+///
+/// Saturating moves such a counter PAST its give-up bound instead, which
+/// stops the ladder - the safe direction, and the one this module
+/// already reaches for elsewhere (a legacy record's empty
+/// `failure_host` "fails the match, so such a job reports nowhere").
+///
+/// The other four are not ladders and the rule is applied to them
+/// anyway, deliberately: `inner_crc` is a lookup key, where a saturated
+/// value can only fail to match (and 0 would be WORSE, because 0 is that
+/// field's documented sentinel for "no CRC" - laundering corruption into
+/// a clean answer); `cleaned_files` and `cleaned_par2` render one
+/// history-drawer line and gate nothing; `priority` is signed and gets
+/// [`nar_i32`]. One rule with no per-field exceptions is the point - a
+/// table of which corrupt values are safe to wrap is a table that goes
+/// stale the first time a field grows a consumer.
+///
+/// **One hazard this introduces, stated rather than left to be found.**
+/// A field saturated to `u32::MAX` that is later INCREMENTED overflows:
+/// `Job::retries` is `+= 1`'d on a manual retry, so a hand-edited
+/// `retries` of 2^32 now panics there in a debug build where wrapping to
+/// 0 did not. Release is unaffected (`overflow-checks` is off there),
+/// and 0 is the worse answer in release anyway - `retries` doubles as
+/// the generation token `sidecar` and `hooks` compare against `gen0` to
+/// tell "this job was retried under me" from "it was not", and a silent
+/// reset makes that comparison lie. A loud debug panic on input nobody
+/// can produce except by hand is the better half of that trade.
+///
+/// It is NOT a rejection, and that is the deliberate half. A rejected
+/// record vanishes: both production readers skip a `None` and the next
+/// save drops it. Losing a user's history row over a cosmetic
+/// `cleaned_files` counter - which renders one drawer line and gates
+/// nothing - would be a far larger fault than the corrupt number it was
+/// reacting to. Only the schema version above is worth a whole record.
+///
+/// The wrong TYPE (a string, a float, a negative in a `u64` field) still
+/// reads as the field's documented default, unchanged from before this
+/// existed: `as_u64` already answered `None` there, and every one of
+/// these fields documents what its own absence means. Pinned by test so
+/// it is a decision rather than an accident.
+fn nar_u32(v: &Value, key: &str) -> u32 {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
+}
+
+/// [`nar_u32`] for a `u8` field. Same rule, same reasons.
+fn nar_u8(v: &Value, key: &str) -> u8 {
+    v.get(key)
+        .and_then(Value::as_u64)
+        .map_or(0, |n| u8::try_from(n).unwrap_or(u8::MAX))
+}
+
+/// [`nar_u32`] for the one SIGNED narrowed field, `priority`. Saturates
+/// at both ends, so a corrupt value keeps its sign and therefore its
+/// ordering against the documented range (2 Force .. -100 Default)
+/// rather than wrapping across it - a wrap is what turns a garbage
+/// negative into a job that outranks Force.
+fn nar_i32(v: &Value, key: &str) -> i32 {
+    v.get(key).and_then(Value::as_i64).map_or(0, |n| {
+        i32::try_from(n).unwrap_or(if n < 0 { i32::MIN } else { i32::MAX })
+    })
+}
+
 pub(in crate::serve) fn job_json(j: &Job) -> Value {
     json!({
+        // First key on the record, so `head -c` on a spool file answers
+        // which generation wrote it. See `JOB_SCHEMA_VERSION` for what
+        // bumping it costs.
+        "schema_version": JOB_SCHEMA_VERSION,
         "nzo_id": j.nzo_id,
         "name": j.name,
         "nzb_path": j.nzb_path.to_string_lossy(),
@@ -33,6 +157,7 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         "dupe_key": j.dupe_key,
         "held_for": j.held_for,
         "library": j.library,
+        "insurance": j.insurance,
         "fetched": j.fetched,
         "downloaded_bytes": j.downloaded_bytes,
         "elapsed_secs": j.elapsed_secs,
@@ -55,6 +180,7 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         "finalizing": j.finalizing,
         "deferred": j.deferred,
         "defer_reason": j.defer_reason,
+        "defer_at": j.defer_at,
         "defer_count": j.defer_count,
         "password": j.password,
         "bad_blocks": j.bad_blocks,
@@ -85,6 +211,14 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         // daily is back to retrying an unreachable NAS forever.
         "move_attempts": j.move_attempts,
         "move_pending": j.move_pending,
+        // §296. Persisted for the reason the field's own comment gives:
+        // it is the only record of which files are ALREADY at the
+        // destination, and a move that forgets publishes them twice.
+        "early_published": j.early_published.iter().map(|e| json!({
+            "name": e.name, "len": e.len, "mtime_ns": e.mtime_ns,
+            "nzf_id": e.nzf_id,
+            "dest": e.dest.as_ref().map(|p| p.to_string_lossy()),
+        })).collect::<Vec<_>>(),
         // §158 item 1: which cross-store move this copy belongs to. The
         // ONE field both stores write for the same nzo_id, and the only
         // thing that tells a half-written park from a half-written retry
@@ -135,6 +269,47 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
 }
 
 pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
+    // The generation gate. Absent is generation 1 (every record written
+    // before the stamp existed), anything at or below ours is readable,
+    // and anything above it is refused rather than guessed at - the
+    // whole argument, including what a refusal costs a downgrade, is at
+    // `JOB_SCHEMA_VERSION`.
+    //
+    // A stamp that is PRESENT but not a number is refused too. Our
+    // writer emits `json!(u64)` and nothing else, so a string or a null
+    // there is not a generation this reader can place, and treating an
+    // unreadable stamp as absence would let exactly the record the gate
+    // exists for walk straight through it.
+    match v.get("schema_version") {
+        None => {}
+        Some(Value::Number(n)) if n.as_u64().is_some_and(|g| g <= JOB_SCHEMA_VERSION) => {}
+        Some(other) => {
+            // One line per refused record, matching what the history
+            // store already prints for a line it cannot read. A whole
+            // store at a future generation is loud, and it should be:
+            // the alternative is a queue that empties with nothing
+            // anywhere saying why.
+            //
+            // It says where the bytes go, because "skipped" would be a
+            // half-truth that matters here. `history.jsonl` is
+            // append-only, so a refused history row really does survive
+            // - until a compaction rewrite, which drops every line that
+            // did not load. `queue.json` is rewritten from whatever
+            // loaded, so a refused queue row is GONE at the next save;
+            // only `persist`'s `.bak` still has it, and only until the
+            // load after this one refreshes that too.
+            warn!(
+                target: "queue",
+                "not loading a persisted job record stamped schema_version \
+                 {other}: this build reads up to {JOB_SCHEMA_VERSION}, so the \
+                 record was written by a later nzbfast (or is corrupt) and \
+                 cannot be read safely. Run that version to load it - the next \
+                 queue save drops it from queue.json, and a history compaction \
+                 drops it from history.jsonl"
+            );
+            return None;
+        }
+    }
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     let out_dir = PathBuf::from(s("out_dir")?);
     let tv_sort = v.get("tv_sort").and_then(Value::as_bool).unwrap_or(false);
@@ -202,7 +377,7 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
             .get("finalizing")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        priority: v.get("priority").and_then(Value::as_i64).unwrap_or(0) as i32,
+        priority: nar_i32(v, "priority"),
         paused: v.get("paused").and_then(Value::as_bool).unwrap_or(false),
         // Monotonic like finished_at, so a restart clears it - the
         // late-pick marker measures THIS process's reaction time.
@@ -211,12 +386,20 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         // the SAB facade reports as `time_added`.
         queued_unix: v.get("queued_unix").and_then(Value::as_i64),
         idle_at_add: false,
-        retries: v.get("retries").and_then(Value::as_u64).unwrap_or(0) as u32,
+        retries: nar_u32(v, "retries"),
         dupe_key: s("dupe_key"),
         held_for: s("held_for").unwrap_or_default(),
         library: v.get("library").and_then(Value::as_bool).unwrap_or(false),
+        // Deferred rows are exactly the kind that sit across restarts,
+        // so the flag survives; the attempt ladder does not (see
+        // `Job::insurance_attempts` - a restart is a new day).
+        insurance: v.get("insurance").and_then(Value::as_bool).unwrap_or(false),
+        insurance_attempts: 0,
         fetched: v.get("fetched").and_then(Value::as_bool).unwrap_or(false),
         tombstone: false,
+        // Never persisted: a relocation cannot outlive the process
+        // that was running it. See `Job::relocating`.
+        relocating: 0,
         del_on_drop: false,
         delete_status: s("delete_status").unwrap_or_default(),
         suspended: false,
@@ -227,7 +410,8 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         elapsed_secs: v.get("elapsed_secs").and_then(Value::as_f64).unwrap_or(0.0),
         deferred: v.get("deferred").and_then(Value::as_bool).unwrap_or(false),
         defer_reason: s("defer_reason").unwrap_or_default(),
-        defer_count: v.get("defer_count").and_then(Value::as_u64).unwrap_or(0) as u32,
+        defer_at: v.get("defer_at").and_then(Value::as_u64).unwrap_or(0),
+        defer_count: nar_u32(v, "defer_count"),
         demote: false,
         password: s("password"),
         // Records written before verification became nullable stored 0
@@ -286,11 +470,44 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         unpack_blocked_by: s("unpack_blocked_by").unwrap_or_default(),
         move_split: s("move_split").unwrap_or_default(),
         move_failed: s("move_failed").unwrap_or_default(),
-        move_attempts: v.get("move_attempts").and_then(Value::as_u64).unwrap_or(0) as u32,
+        move_attempts: nar_u32(v, "move_attempts"),
         move_pending: v
             .get("move_pending")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        // Absent on every record written before §296, which reads as
+        // "nothing was published early" - true of all of them.
+        early_published: v
+            .get("early_published")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| {
+                        Some(crate::serve::earlyfile::EarlyFile {
+                            name: e.get("name").and_then(Value::as_str)?.to_string(),
+                            len: e.get("len").and_then(Value::as_u64)?,
+                            mtime_ns: e.get("mtime_ns").and_then(Value::as_u64).unwrap_or(0),
+                            nzf_id: e
+                                .get("nzf_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            // Absent on a record written before the
+                            // destination was recorded (sweep S6). None
+                            // reads as "re-derive at spend time", which
+                            // is what those records always did.
+                            dest: e
+                                .get("dest")
+                                .and_then(Value::as_str)
+                                .map(std::path::PathBuf::from),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // Not on the wire at all: the refusal is re-derived from the
+        // same `exists()` test on the next publish pass.
+        early_refused: Default::default(),
         // Absent on every record written before §158 item 1. Zero is the
         // right reading of that absence: BOTH copies of a pre-upgrade
         // split-brain id read 0, the comparison ties, and the tie falls
@@ -298,7 +515,7 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         // history wins. Nothing about an old store changes meaning.
         move_seq: v.get("move_seq").and_then(Value::as_u64).unwrap_or(0),
         archive_shape: s("archive_shape").unwrap_or_default(),
-        inner_crc: v.get("inner_crc").and_then(Value::as_u64).unwrap_or(0) as u32,
+        inner_crc: nar_u32(v, "inner_crc"),
         identity_name: s("identity_name").unwrap_or_default(),
         identity_imdb: s("identity_imdb").unwrap_or_default(),
         identity_src: s("identity_src").unwrap_or_default(),
@@ -334,10 +551,10 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
             .get("failure_https")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        failure_depth: v.get("failure_depth").and_then(Value::as_u64).unwrap_or(0) as u8,
+        failure_depth: nar_u8(v, "failure_depth"),
         // Absent on every record written before TODO 280, where 0 - "a
         // job nobody refed" - is the truth for all of them.
-        refeed_depth: v.get("refeed_depth").and_then(Value::as_u64).unwrap_or(0) as u8,
+        refeed_depth: nar_u8(v, "refeed_depth"),
         identify: s("identify").unwrap_or_default(),
         // Absent on every record written before §77, and on any record
         // whose verdict no longer parses: both mean "not sampled", which
@@ -354,8 +571,8 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         // Absent on records written before the cleanup line existed:
         // zero renders no drawer row, which is all those records can
         // truthfully say.
-        cleaned_files: v.get("cleaned_files").and_then(Value::as_u64).unwrap_or(0) as u32,
-        cleaned_par2: v.get("cleaned_par2").and_then(Value::as_u64).unwrap_or(0) as u32,
+        cleaned_files: nar_u32(v, "cleaned_files"),
+        cleaned_par2: nar_u32(v, "cleaned_par2"),
         cleaned_trash: v
             .get("cleaned_trash")
             .and_then(Value::as_bool)

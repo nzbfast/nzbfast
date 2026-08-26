@@ -369,19 +369,34 @@ fn route_m3u(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query: &str) {
     // playlist embeds the per-job stream token (that's what
     // lets the keyless player start a parked library job), so
     // minting one requires either key - the wall's ▶ Play
-    // passes ?apikey=. Keyless installs stay open, as ever.
+    // passes ?apikey= - or that job's own token, which mints
+    // nothing new. Keyless installs stay open, as ever.
     let id = id.trim_matches('/');
     let mut sp = parse_query(query);
     if let Some(k) = header_apikey(&req) {
         sp.entry("apikey".to_string()).or_insert(k);
     }
     let given = sp.get("apikey").map(String::as_str);
-    let ok = {
+    let key_ok = {
         let a = d.apikey.lock_ok().clone();
         let n = d.nzbkey.lock_ok().clone();
         full_key_ok(given, &a, &n)
     };
-    if !ok {
+    // The job's OWN `?t=` capability token authenticates here as well as
+    // the full key, and widens nothing: the whole answer is a
+    // `/stream/<id>?t=` line bearing that same token, so a caller who can
+    // present it already holds everything the playlist would hand back.
+    // What it buys is the one thing the key cannot - `nzbfast stream`
+    // gives this URL to a media player as ARGV, where every other local
+    // account can read it (`/proc/<pid>/cmdline`, `ps`, WMI). That is the
+    // disclosure TODO 23 low1 closed on the browser launch and left open
+    // on the player launch, so the stream=1 add now answers with a
+    // tokened `m3u` link and no credential travels as an argument at all.
+    //
+    // An EMPTY id is the "whatever is downloading now" playlist: not a
+    // job, no per-job token, so it stays full-key.
+    let token_ok = !id.is_empty() && sp.get("t").is_some_and(|t| ct_eq(t, &d.stream_token(id)));
+    if !(key_ok || token_ok) {
         let blocked = d.note_auth_failure(peer_ip(&req), "m3u/watch");
         let _ = req.respond(if blocked {
             tiny_http::Response::from_string("too many bad keys").with_status_code(429)
@@ -459,7 +474,7 @@ fn route_watch(req: tiny_http::Request, d: &Arc<Daemon>, query: &str) {
             .clone()
             .or_else(|| name_from_fetch(&f, &url))
             .unwrap_or_else(|| "watch.nzb".to_string());
-        d.enqueue_fetched(&f, &name, "", 2, None, None, 0, "url", false)
+        d.enqueue_fetched(&f, &name, "", 2, None, None, 0, "url", DupeExempt::Nobody)
     }) {
         Ok(Enqueued { nzo_id: id, .. }) => {
             // Reflect the key into the redirect ONLY when it really
@@ -923,9 +938,6 @@ fn handle_api(
         .find(|h| h.field.equiv("User-Agent"))
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_default();
-    let key_q = given
-        .map(|k| format!("?apikey={}", query_escape(k)))
-        .unwrap_or_default();
     // Client-facing scheme+authority for handed-off links (stream/m3u):
     // forwarded headers win over the raw Host so a reverse-proxied
     // HTTPS deployment gets links its players can actually reach.
@@ -935,7 +947,6 @@ fn handle_api(
         host_hdr: &host_hdr,
         base: &base,
         ua_hdr: &ua_hdr,
-        key_q: &key_q,
         bootstrap_apikey,
         via_add_only,
     };
@@ -1363,6 +1374,11 @@ mod tests {
     fn api_body_caps_by_mode() {
         assert_eq!(api_body_cap("addfile"), API_BODY_MAX);
         assert_eq!(api_body_cap("addfile"), 256 << 20);
+        // Same payload as addfile - a whole NZB, bare or multipart - so
+        // the same ceiling. On the default it truncated at 1 MiB and
+        // then reported a valid NZB as invalid, while addfile took the
+        // identical bytes.
+        assert_eq!(api_body_cap("nzb_preview"), API_BODY_MAX);
         assert_eq!(api_body_cap("backup_import"), 8 << 20);
         assert_eq!(api_body_cap("wall_art"), 10 << 20);
         assert_eq!(api_body_cap("queue"), API_BODY_DEFAULT);

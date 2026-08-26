@@ -258,6 +258,12 @@ pub(crate) fn extract_sfx(
     let options = nzbkit::mem::rar_read_options(password.map(str::as_bytes));
     let mut all_ok = true;
     for path in archives {
+        // TODO 205 follow-up: one SFX archive is one SET on the queue
+        // row's unpack lane, however many ways this loop body tries to
+        // open it - the carve fallback below is a second go at this very
+        // file, and banking it as a new set reported twice the bytes the
+        // archive can produce. See [`crate::unpackprog::mark`].
+        let mark = crate::unpackprog::mark();
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         // A stubbed zip needs no carve and no second reader: the zip
         // reader infers the stub's length from the container's geometry
@@ -284,6 +290,9 @@ pub(crate) fn extract_sfx(
                 continue;
             }
             Err(e) => {
+                // Another go at THIS archive, so the lane goes back to
+                // where the loop body found it (see `mark` above).
+                mark.rewind();
                 // The reader could not seek past this stub - or the
                 // payload is a 7z, which it cannot read at all. Carve
                 // the archive out by signature and extract THAT. Kept

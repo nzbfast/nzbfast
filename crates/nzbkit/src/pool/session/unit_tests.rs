@@ -45,6 +45,8 @@ fn server(host: &str) -> ServerConfig {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     }
 }
 
@@ -196,14 +198,19 @@ async fn the_pre_dial_gates_bow_out_park_and_pace_in_that_order() {
     );
 }
 
-/// The two exits above the dial, and the difference between them: a
-/// worker that finds the queue already drained is holding a validated,
-/// idle session and PARKS it (the warm pool exists to keep exactly
-/// that), while a user abort closes. Parking on abort would hand a
-/// stopped job's sessions to the next one; closing on drain is the
-/// measured erosion that shrank a warm pool over six back-to-back jobs.
+/// The two exits above the dial. Both are holding a validated, idle
+/// session - `take` sent its DATE and read the answer - and both hand it
+/// to the warm pool, because DRAINED is the only question the pool asks.
+///
+/// The abort half is the 25-26 Aug 2026 change and reverses what this
+/// test used to pin. Closing there was justified as "the user is done
+/// with this server", which is what going OFFLINE means and not what
+/// stopping a job means: the same flag is the defer watchdog's teeth and
+/// the job-switch seam, and quitting on it cost a capped provider 9-13
+/// authenticated sessions per defer. Offline and shutdown shut the pool
+/// itself, which the second half below pins.
 #[tokio::test]
-async fn a_drained_worker_parks_its_unused_session_and_an_abort_closes_it() {
+async fn both_exits_above_the_dial_park_their_unused_session() {
     let srv = MockServer::start(std::collections::HashMap::new(), Chaos::default()).await;
     let sc = srv.server_config();
     let warm = WarmPool::new(Duration::from_secs(60), 4);
@@ -224,7 +231,9 @@ async fn a_drained_worker_parks_its_unused_session_and_an_abort_closes_it() {
         "a drained worker's validated session goes back to the pool"
     );
 
-    // Abort: same claimed connection, and it must NOT be parked.
+    // Abort: same claimed connection, same answer. A defer and a job
+    // switch both arrive as this flag, and the session is as reusable
+    // here as it was above.
     let (aborted, _) = Shared::new(fresh(&["<a@x>"]), &servers);
     aborted.aborted.store(true, Ordering::Release);
     let (c, _) = Connection::connect(&sc).await.expect("dial the mock");
@@ -233,9 +242,144 @@ async fn a_drained_worker_parks_its_unused_session_and_an_abort_closes_it() {
     assert!(held.is_none());
     assert_eq!(
         warm.stats.parked.load(Ordering::Relaxed),
-        1,
-        "an abort closes its session - the user is done with this server"
+        2,
+        "an abort keeps its drained session too - stopping a job is not \
+         releasing the account"
     );
+
+    // And releasing the account for real still closes, through the
+    // switch that means it. This is what makes the arm above safe: the
+    // pool refuses the park and QUITs it, so no exit has to guess which
+    // kind of abort it is looking at.
+    warm.set_accepting(false);
+    let (offline, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    offline.aborted.store(true, Ordering::Release);
+    let (c, _) = Connection::connect(&sc).await.expect("dial the mock");
+    let mut held = Some(c);
+    assert!(done_before_dial(&cfg, &sc, &offline, &mut held).await);
+    assert_eq!(
+        warm.stats.parked.load(Ordering::Relaxed),
+        2,
+        "a pool that has gone offline takes no more parks"
+    );
+}
+
+/// The seam the 25-26 Aug 2026 incident is actually about, driven as a
+/// whole fleet: a run is aborted mid-flight and the workers that were
+/// IDLE at that moment keep their authenticated sessions.
+///
+/// One article and four connections builds that population on purpose,
+/// because it is the population a defer finds: the watchdog fires when a
+/// provider has nothing fetchable for the job, so its workers are idle
+/// by definition - the same sockets `idle_turn`'s keepalive probe was
+/// added for. Before this, every one of them was quit and redialled
+/// seconds later, which against a per-account session cap is a dial
+/// storm into a wall the storm keeps up.
+///
+/// The far-end proof is the checkout at the end, and it is a stronger
+/// claim than counting sockets: `take` sends a DATE and requires the
+/// answer, so a session that comes back out is one the provider still
+/// has, still authenticated, and the next job can put a BODY on
+/// immediately.
+///
+/// What the fourth worker pins, and what it does not. It is holding an
+/// unread BODY response, so it must close - and it does, but through the
+/// READ-side exit rather than the loop-top one: `abort` sends `finished`
+/// too, and a worker parked in `read_one` breaks out there and quits
+/// with `release_wire`. So the `inflight.is_empty()` guard at the loop
+/// top is a belt for the same rule and not what this run walks; removing
+/// it leaves this test green. It stays because the rule it enforces is
+/// the pool's own - a socket with responses on it is reusable by nobody
+/// - and the loop top is reachable with a pipeline still on the wire
+/// whenever the flag is read before the next response is.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_run_keeps_the_sessions_its_idle_workers_held() {
+    const CONNS: usize = 4;
+    let mut articles = std::collections::HashMap::new();
+    let payload: Vec<u8> = (0..64_000u32).map(|i| i as u8).collect();
+    make_file_articles("abort.bin", &payload, 64_000, "ab", &mut articles);
+    let ids: Vec<ArticleReq> = articles
+        .keys()
+        .map(|k| ArticleReq::fresh(k.as_str()))
+        .collect();
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            // Long enough that the one fetching worker is still holding
+            // its response when the abort lands, so this pins BOTH
+            // halves of the rule with one run.
+            delay_ms: 60_000,
+            ..Default::default()
+        },
+    )
+    .await;
+    let warm = WarmPool::new(Duration::from_secs(60), 8);
+    let mut sc = srv.server_config();
+    sc.connections = CONNS as u32;
+    let cfg = PoolConfig {
+        connections: CONNS,
+        window: 1,
+        ramp_delay: Duration::from_millis(0),
+        warm: Some(warm.clone()),
+        ..Default::default()
+    };
+    let servers = vec![(sc.clone(), cfg)];
+    let ctl = Arc::new(QueueControl::default());
+    let (tx, mut rx) = mpsc::channel(16);
+    let ctl_fetch = ctl.clone();
+    let fetch =
+        tokio::spawn(async move { fetch_all_multi_ctl(&servers, ids, tx, Some(&ctl_fetch)).await });
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    // Let the fleet dial and settle: one worker takes the article, the
+    // other three find the queue dry with work still pending and idle.
+    for _ in 0..200 {
+        if srv.conns_open() >= CONNS {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        srv.conns_open(),
+        CONNS,
+        "the fleet must be up before the abort, or this proves nothing"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(ctl.abort(), "the run was still live to abort");
+    tokio::time::timeout(Duration::from_secs(30), fetch)
+        .await
+        .expect("an aborted run must return promptly")
+        .expect("the fetch task");
+    drain.await.expect("the collector");
+
+    assert_eq!(
+        warm.idle_count().await,
+        CONNS - 1,
+        "the {} idle workers parked their sessions; the one holding an \
+         unread response could not, and quit",
+        CONNS - 1
+    );
+    assert_eq!(
+        srv.accepted.load(Ordering::Relaxed) as usize,
+        CONNS,
+        "and nothing redialled: the whole point is that the next job \
+         starts on these instead of dialling the account again"
+    );
+    assert_eq!(
+        warm.stats.parked.load(Ordering::Relaxed) as usize,
+        CONNS - 1,
+        "parked, not merely forgotten"
+    );
+    let reused = warm.take(&sc).await;
+    assert!(
+        reused.is_some(),
+        "a parked session must still be the provider's - `take` validates \
+         it with a DATE, so this is the far end agreeing"
+    );
+    if let Some(c) = reused {
+        c.quit().await;
+    }
 }
 
 /// §15e: an AUTHINFO refusal is the server's answer to this ACCOUNT, so
@@ -1006,7 +1150,7 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         false,
         false,
         &mut bare,
@@ -1030,7 +1174,7 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         true,
         false,
         &mut bare,
@@ -1084,7 +1228,7 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
             &sh,
             &tx,
             &mut inflight,
-            Vec::new(),
+            PooledBuf::unpooled(Vec::new()),
             true,
             takedown,
             &mut bare,
@@ -1113,7 +1257,7 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
             &sh,
             &tx,
             &mut inflight,
-            Vec::new(),
+            PooledBuf::unpooled(Vec::new()),
             true,
             false,
             &mut bare,
@@ -1168,7 +1312,7 @@ async fn a_promoted_articles_refusal_goes_back_to_the_promoted_front() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         true,
         false,
         &mut bare,
@@ -1239,7 +1383,7 @@ async fn a_body_that_waits_on_the_write_side_is_timed_and_marked() {
         &sh,
         &tx,
         &mut inflight,
-        vec![7u8; 4_096],
+        PooledBuf::unpooled(vec![7u8; 4_096]),
         &mut losses,
         &mut bytes,
         Instant::now(),
@@ -1296,7 +1440,7 @@ async fn a_served_body_feeds_the_rate_the_oracle_and_the_buffer_pool() {
         &sh,
         &tx,
         &mut inflight,
-        vec![1u8; 2_048],
+        PooledBuf::unpooled(vec![1u8; 2_048]),
         &mut losses,
         &mut bytes,
         Instant::now(),
@@ -1315,13 +1459,19 @@ async fn a_served_body_feeds_the_rate_the_oracle_and_the_buffer_pool() {
     .into_iter()
     .collect();
     sh.charge_wire();
+    // Taken from the pool, like the session loop's own, so the recycle
+    // assertion below is about THIS allocation and not about whatever a
+    // fresh take would have produced anyway.
+    let mut losing = pool.take();
+    losing.extend_from_slice(&[2u8; 2_048]);
+    let losing_alloc = losing.as_ptr();
     handle_body(
         &cfg,
         ctx,
         &sh,
         &tx,
         &mut inflight,
-        vec![2u8; 2_048],
+        losing,
         &mut losses,
         &mut bytes,
         Instant::now(),
@@ -1337,8 +1487,392 @@ async fn a_served_body_feeds_the_rate_the_oracle_and_the_buffer_pool() {
         hits, 2,
         "a 222 is evidence the server holds the article, whoever owns the outcome"
     );
-    assert!(
-        pool.take().capacity() >= 2_048,
+    assert_eq!(
+        pool.take().as_ptr(),
+        losing_alloc,
         "the losing copy's buffer went back to the pool, not to the allocator"
+    );
+}
+
+// ---- The idle keepalive probe (25 Aug 2026 incident) ----------------
+//
+// A worker whose server has nothing fetchable for the job holds its
+// connection in `idle_turn`'s 25 ms look-again loop and, before the
+// probe, never touched the socket again: the provider's idle reaper
+// FIN'd it, the socket sat in CLOSE_WAIT for the life of the job, and
+// the conn gauge kept reporting it live (measured: nine such sockets to
+// a backbone with 100% of the job's articles missing, whyslow conns 9 /
+// reconnects 0). These three pin the probe's verdicts: a FIN'd socket
+// and a black-holed one are Dead on the peer tally, a healthy one is
+// kept and resets the quiet clock.
+
+/// `server("s")` re-pointed at a real local address, for the tests that
+/// dial one of the fake providers below.
+fn at(addr: std::net::SocketAddr) -> ServerConfig {
+    ServerConfig {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        ..server("s")
+    }
+}
+
+/// A provider that greets and immediately hangs up: the accept loop
+/// writes the greeting and drops the socket, so the client ends up
+/// holding a connection the peer has FIN'd - the state a provider's
+/// idle reaper leaves behind, compressed to zero idle time.
+fn greet_then_fin_provider() -> std::net::SocketAddr {
+    use std::io::Write as _;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        while let Ok((mut s, _)) = listener.accept() {
+            let _ = s.write_all(b"200 mock ready\r\n");
+            let _ = s.flush();
+            // Dropped here: FIN. The client keeps the socket.
+        }
+    });
+    addr
+}
+
+/// A provider that greets and then never says another word, holding the
+/// socket open - the NAT/CGNAT eviction shape the warm pool's validate
+/// bound exists for, where the probe's write succeeds locally and the
+/// answer never comes. Blocking std sockets on their own thread, so the
+/// fake peer keeps working under a paused test clock.
+fn greet_then_mute_provider() -> std::net::SocketAddr {
+    use std::io::Write as _;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((mut s, _)) = listener.accept() {
+            let _ = s.write_all(b"200 mock ready\r\n");
+            let _ = s.flush();
+            held.push(s); // open forever, mute forever
+        }
+    });
+    addr
+}
+
+/// A quiet clock already past the keepalive interval, so the very next
+/// idle turn is due to probe.
+fn probe_due() -> Instant {
+    Instant::now()
+        .checked_sub(crate::warmpool::KEEPALIVE_EVERY)
+        .expect("the monotonic clock is older than one keepalive interval")
+}
+
+/// The probe finds the peer gone: the verdict is Dead, tallied as a
+/// `peer` session end, and the caller (not this helper) redials. This is
+/// the CLOSE_WAIT shape itself: without the probe this exact call
+/// returned `Keep` every 25 ms forever.
+#[tokio::test]
+async fn an_idle_probe_reaps_a_socket_the_peer_closed() {
+    let sc = at(greet_then_fin_provider());
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    let cfg = PoolConfig::default();
+    let ctx = ctx_for(&servers, 0);
+    let (conn, _) = Connection::connect(&sc)
+        .await
+        .expect("dial the fake provider");
+    let mut quiet = probe_due();
+    match idle_turn(&cfg, &sc, ctx, &sh, conn, &mut quiet).await {
+        IdleTurn::Dead => {}
+        IdleTurn::Keep(_) => panic!("a FIN'd idle socket was kept as a live connection"),
+        IdleTurn::Retire => panic!("a FIN'd idle socket was parked or quit instead of reported"),
+    }
+    assert_eq!(
+        sh.session_ends(0).peer,
+        1,
+        "the provider hung up on us: that is a peer-flavoured session end"
+    );
+}
+
+/// A black-holed idle socket (no FIN, no RST, no answer) is condemned at
+/// the warm pool's validate bound, not the 60 s command timeout - and
+/// certainly not never. Paused clock: the probe parks on IO, so tokio
+/// auto-advances straight to the deadline and the test spends no real
+/// time waiting.
+#[tokio::test]
+async fn a_black_holed_idle_socket_is_condemned_at_the_validate_bound() {
+    let sc = at(greet_then_mute_provider());
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    let cfg = PoolConfig::default();
+    let ctx = ctx_for(&servers, 0);
+    // The connect needs the real clock to complete; only then pause.
+    let (conn, _) = Connection::connect(&sc)
+        .await
+        .expect("dial the fake provider");
+    tokio::time::pause();
+    let t0 = tokio::time::Instant::now();
+    let mut quiet = probe_due();
+    match idle_turn(&cfg, &sc, ctx, &sh, conn, &mut quiet).await {
+        IdleTurn::Dead => {}
+        IdleTurn::Keep(_) => panic!("a black-holed idle socket was kept as a live connection"),
+        IdleTurn::Retire => panic!("a black-holed idle socket was parked instead of reported"),
+    }
+    assert!(
+        t0.elapsed() < Duration::from_secs(30),
+        "the probe waited {:?}: it must give up at the validate bound, not the \
+         command timeout",
+        t0.elapsed()
+    );
+    assert_eq!(sh.session_ends(0).peer, 1);
+}
+
+/// A healthy idle socket answers the probe: the worker keeps it, the
+/// quiet clock resets (so the next probe is a full interval away, not
+/// due again on the next 25 ms turn), and nothing is tallied as a death.
+/// DATE also resets the provider's own idle clock, which is what lets a
+/// held session survive a job-long wait instead of being reaped and
+/// redialled against a per-account connection cap.
+#[tokio::test]
+async fn an_idle_probe_keeps_a_live_socket_and_resets_the_clock() {
+    let srv = MockServer::start(Default::default(), Chaos::default()).await;
+    let sc = srv.server_config();
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    let cfg = PoolConfig::default();
+    let ctx = ctx_for(&servers, 0);
+    let (conn, _) = Connection::connect(&sc).await.expect("dial the mock");
+    let mut quiet = probe_due();
+    match idle_turn(&cfg, &sc, ctx, &sh, conn, &mut quiet).await {
+        IdleTurn::Keep(c) => c.quit().await,
+        IdleTurn::Dead => panic!("a live socket was reported dead"),
+        IdleTurn::Retire => panic!("a live socket was parked with work still pending"),
+    }
+    assert!(
+        quiet.elapsed() < crate::warmpool::KEEPALIVE_EVERY,
+        "the successful probe resets the quiet clock"
+    );
+    assert_eq!(
+        sh.session_ends(0).peer,
+        0,
+        "a survived probe is not a death"
+    );
+}
+
+/// The other half of the seam `an_aborted_run_keeps_the_sessions_its_idle_workers_held`
+/// pins, and the half no abort can reach: a BUSY fleet.
+///
+/// `8cda45132` made the abort exit park a DRAINED connection, and a
+/// drained worker is one with an empty pipeline - the whole population
+/// of the defer watchdog's capacity arm, whose workers are idle by
+/// definition because the server has nothing fetchable. It is none of
+/// the population of the `share >= 0.90` arm, whose top server is busy
+/// and fast by the arm's own predicate: those workers are mid-BODY when
+/// the flag lands, they exit through the read side with an unread
+/// response on the wire, and every one of them is CORRECTLY quit - a
+/// socket with a response queued on it is reusable by nobody.
+///
+/// So the only way to keep that fleet is to let the responses land,
+/// which is what `drain` is. This drives one rig both ways at the same
+/// instant and asserts the contrast rather than either half alone,
+/// because the claim is comparative: the abort keeps NONE of a busy
+/// fleet and the drain keeps ALL of it.
+///
+/// 200 articles against 4 connections at a 60 ms body delay puts every
+/// worker mid-body with a full window behind it, which is what makes
+/// the abort arm's zero a fact about the pipeline and not about timing.
+/// Measured 26 Aug 2026 on this rig: the abort returned in 7 ms and the
+/// drain in 129 ms - the cost of keeping the fleet is the pipeline's
+/// own drain time, and the grace `serve::tasks::stall` bounds it with
+/// carries that table.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drained_run_keeps_the_sessions_its_busy_workers_held() {
+    async fn run(drain_not_abort: bool) -> (usize, usize) {
+        const CONNS: usize = 4;
+        let mut articles = std::collections::HashMap::new();
+        let payload: Vec<u8> = (0..64_000u32).map(|i| i as u8).collect();
+        for i in 0..200 {
+            make_file_articles(
+                &format!("busy{i}.bin"),
+                &payload,
+                64_000,
+                &format!("b{i}"),
+                &mut articles,
+            );
+        }
+        let ids: Vec<ArticleReq> = articles
+            .keys()
+            .map(|k| ArticleReq::fresh(k.as_str()))
+            .collect();
+        let srv = MockServer::start(
+            articles,
+            Chaos {
+                // Every worker is mid-body when the verb lands, and no
+                // read is anywhere near the pre-byte budget.
+                delay_ms: 60,
+                ..Default::default()
+            },
+        )
+        .await;
+        let warm = WarmPool::new(Duration::from_secs(60), 8);
+        let mut sc = srv.server_config();
+        sc.connections = CONNS as u32;
+        let cfg = PoolConfig {
+            connections: CONNS,
+            window: 3,
+            ramp_delay: Duration::from_millis(0),
+            warm: Some(warm.clone()),
+            // What the daemon runs, and it is the ladder that bounds a
+            // drain against a peer that has stopped answering.
+            adaptive_timeout: true,
+            ..Default::default()
+        };
+        let servers = vec![(sc.clone(), cfg)];
+        let ctl = Arc::new(QueueControl::default());
+        let (tx, mut rx) = mpsc::channel(64);
+        let ctl_fetch = ctl.clone();
+        let fetch =
+            tokio::spawn(
+                async move { fetch_all_multi_ctl(&servers, ids, tx, Some(&ctl_fetch)).await },
+            );
+        let collector = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        for _ in 0..400 {
+            if srv.conns_open() >= CONNS {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(srv.conns_open(), CONNS, "the fleet must be up first");
+        // Long enough that every worker has a full window on the wire -
+        // without it the contrast could be about a worker that happened
+        // to be between articles rather than about the pipeline.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        if drain_not_abort {
+            assert!(ctl.drain(), "the run was still live to drain");
+        } else {
+            assert!(ctl.abort(), "the run was still live to abort");
+        }
+        tokio::time::timeout(Duration::from_secs(60), fetch)
+            .await
+            .expect("neither verb may hang the fetch")
+            .expect("the fetch task");
+        collector.await.expect("the collector");
+        (
+            warm.idle_count().await,
+            srv.accepted.load(Ordering::Relaxed) as usize,
+        )
+    }
+
+    let (aborted_parks, aborted_dials) = run(false).await;
+    let (drained_parks, drained_dials) = run(true).await;
+    assert_eq!(
+        aborted_parks, 0,
+        "an abort of a BUSY fleet keeps nothing: every worker is holding \
+         an unread response, and that socket is reusable by nobody"
+    );
+    assert_eq!(
+        drained_parks, 4,
+        "a drain lets those responses land, so every worker reaches the \
+         pool's own reuse point with an empty pipeline and parks"
+    );
+    assert_eq!(
+        (aborted_dials, drained_dials),
+        (4, 4),
+        "neither verb may redial: the whole point is that the sessions \
+         the fleet already holds are what the next job starts on"
+    );
+}
+
+// ---- The fetch->decode channel's memory-floor charge -----------------
+//
+// `PoolConfig::channel_gauge` charges a body's capacity when it enters
+// the outcome channel and the CONSUMER's drain releases it, so the pair
+// spans a channel and two crates and cannot be one guard. What can be a
+// guard is the sender's half, which had three exits and two of them had
+// to remember a release by hand: the charge is a `memgauge::Charge`, so
+// a send that never lands simply drops it, and only the DELIVERED path
+// acts - handing the charge on to the drain that will release it.
+//
+// Both take `one_gauge_test_at_a_time()` FIRST so it drops LAST:
+// `Sub::Channel` is one process-global counter.
+
+// Not `#[tokio::test]`: the serializer is a std `MutexGuard` and has to
+// span the whole test, which `clippy::await_holding_lock` refuses inside
+// an async fn - rightly, in production. Driving the runtime by hand puts
+// the awaits inside `block_on` instead, where the guard is an ordinary
+// synchronous hold.
+#[test]
+fn a_delivered_body_hands_its_channel_charge_to_the_consumer() {
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
+    crate::memgauge::reset_for_tests();
+    use crate::memgauge::{Sub, cur};
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let cfg = PoolConfig {
+        channel_gauge: Some(Sub::Channel),
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<w@x>"]), &servers);
+    let ctx = ctx_for(&servers, 0);
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut inflight: VecDeque<Work> = [work("<w@x>")].into_iter().collect();
+    sh.charge_wire();
+    let (mut losses, mut bytes) = (0u32, 0u64);
+    let body = PooledBuf::unpooled(vec![3u8; 2_048]);
+    let charged = body.capacity() as u64;
+    rt.block_on(handle_body(
+        &cfg,
+        ctx,
+        &sh,
+        &tx,
+        &mut inflight,
+        body,
+        &mut losses,
+        &mut bytes,
+        Instant::now(),
+    ));
+    assert!(matches!(rx.try_recv(), Ok(FetchOutcome::Done { .. })));
+    assert_eq!(
+        cur(Sub::Channel),
+        charged,
+        "the charge survives the send - the consumer's drain owns it now"
+    );
+}
+
+#[test]
+fn a_body_that_never_entered_the_channel_releases_its_charge() {
+    let _g = crate::memgauge::one_gauge_test_at_a_time();
+    crate::memgauge::reset_for_tests();
+    use crate::memgauge::{Sub, cur};
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime");
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let cfg = PoolConfig {
+        channel_gauge: Some(Sub::Channel),
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<w@x>"]), &servers);
+    let ctx = ctx_for(&servers, 0);
+    let (tx, rx) = mpsc::channel(4);
+    drop(rx); // the consumer is gone: try_send answers Closed
+    let mut inflight: VecDeque<Work> = [work("<w@x>")].into_iter().collect();
+    sh.charge_wire();
+    let (mut losses, mut bytes) = (0u32, 0u64);
+    rt.block_on(handle_body(
+        &cfg,
+        ctx,
+        &sh,
+        &tx,
+        &mut inflight,
+        PooledBuf::unpooled(vec![3u8; 2_048]),
+        &mut losses,
+        &mut bytes,
+        Instant::now(),
+    ));
+    assert_eq!(
+        cur(Sub::Channel),
+        0,
+        "an outcome that dropped at teardown must not leave the gauge charged"
     );
 }

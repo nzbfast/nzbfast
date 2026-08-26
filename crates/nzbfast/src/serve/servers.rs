@@ -217,6 +217,55 @@ pub(super) fn normalized_server(
         }
         None => {}
     }
+    // §291 (issue #60): which address family this server's dials try
+    // first. Absent leaves the stored value alone, "auto" REMOVES the
+    // key rather than writing the default - the config file is
+    // hand-edited, and a key that means "what it did anyway" is noise.
+    // A value outside the three is refused here rather than stored,
+    // because the config loader reads an unknown one as auto (it must
+    // not fail a whole config over one preference) and a silently
+    // ignored save is the worst of both.
+    if let Some(v) = incoming
+        .get("address_family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        match nzbkit::config::AddressFamily::parse(v) {
+            Some(f) if f.is_auto() => {
+                ob.remove("address_family");
+            }
+            Some(f) => {
+                ob.insert("address_family".into(), json!(f.as_str()));
+            }
+            None => return Err("internet address kind: not one of auto, ipv4, ipv6".into()),
+        }
+    }
+    // §291 (issue #60): the name this server's certificate is checked
+    // against, and sent as SNI, when that is not the name we dial.
+    // Blank REMOVES the key - the field is absent by default and a
+    // cleared box must go back to checking the dialled host, not store
+    // an empty name every handshake would then fail on.
+    //
+    // Refused here rather than stored, with rustls' own parser doing
+    // the deciding (`check_tls_hostname`): unlike `address_family`
+    // there is no lenient loader to catch a bad one, so a stored
+    // nonsense name would fail every dial to this provider with a
+    // `TlsName` error and nothing on screen connecting it to the box
+    // that was typed into.
+    match incoming
+        .get("tls_hostname")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some("") => {
+            ob.remove("tls_hostname");
+        }
+        Some(v) => {
+            nzbkit::config::check_tls_hostname(v)?;
+            ob.insert("tls_hostname".into(), json!(v));
+        }
+        None => {}
+    }
     if let Some(addr) = incoming
         .get("socks5")
         .and_then(Value::as_str)

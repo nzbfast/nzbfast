@@ -79,7 +79,17 @@ fn a_history_delete_whose_spool_unlink_is_refused_is_not_re_adopted() {
         }))
         .expect("job"),
     ));
-    d.history.lock_ok().push(job);
+    d.history.lock_ok().push(job.clone());
+    // ON DISK before the folder is taken away, and that is the fixture
+    // and not a convenience. The fault under test is a refused UNLINK,
+    // which on unix needs the DIRECTORY to be read-only - and a
+    // directory that refuses a create refuses `history.jsonl` itself if
+    // the store has never been written, so the delete would (rightly,
+    // since P2-1) refuse rather than destroy anything and this test
+    // would be measuring the wrong refusal. An EXISTING file opens for
+    // append with no directory write at all, so seeding the store
+    // narrows the fault back to the one line this test is about.
+    assert!(d.history_upsert(std::slice::from_ref(&job)));
 
     let was = std::fs::metadata(&d.spool)
         .expect("spool")

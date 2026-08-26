@@ -148,10 +148,38 @@ internal object Http {
         }
     }
 
+    /**
+     * The ceiling on a RESPONSE body held in memory.
+     *
+     * `copyTo` had none: a misconfigured or hostile endpoint - or an
+     * endlessly chunked answer from something else that grabbed the
+     * port on a LAN the app talks to in cleartext - could grow this
+     * until Android killed the process. Every endpoint this client
+     * calls answers with a JSON document; the largest of them by far is
+     * a full mode=queue plus history snapshot, which is measured in
+     * hundreds of kilobytes even on a very deep queue, so 32 MiB is
+     * three orders of magnitude of headroom and still bounded.
+     */
+    private const val RESPONSE_LIMIT = 32L * 1024 * 1024
+
     private fun readAll(s: InputStream?): String {
         if (s == null) return ""
         val buf = ByteArrayOutputStream()
-        s.use { it.copyTo(buf) }
+        val chunk = ByteArray(64 * 1024)
+        var total = 0L
+        s.use {
+            while (true) {
+                val n = it.read(chunk)
+                if (n <= 0) break
+                total += n
+                // Truncate rather than throw: this is also the ERROR
+                // path (`c.errorStream`), and an oversized error body
+                // must still produce the HttpError its caller is
+                // waiting on, with a bounded excerpt in it.
+                if (total > RESPONSE_LIMIT) break
+                buf.write(chunk, 0, n)
+            }
+        }
         return buf.toString("UTF-8")
     }
 }

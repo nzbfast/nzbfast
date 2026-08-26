@@ -118,6 +118,115 @@ pub(super) const INSTANT_PENDING_SECS: i64 = 10 * 60;
 #[cfg(feature = "indexer")]
 pub(super) const INSTANT_RECHECK_SECS: u64 = 30;
 
+/// Test seam: settlement trips it once it holds the superseded
+/// record's custody - the mover claim taken, the sidecar snapshotted -
+/// and before it removes any record or any file. First barrier says the
+/// window is open, second says the test has run whatever it wanted to
+/// race in there and releases it. Same two-stage shape as
+/// `sabcompat::DELETE_PREWRITE_BARRIER` and `daemon_park::PARK_GEN_BARRIER`,
+/// and keyed the same way - by the owning daemon's spool path - so a
+/// watchlist pass belonging to some other test can never wander into a
+/// two-party barrier that is not its own. Unkeyed, a stranger is a third
+/// waiter and the parallel bin run hangs instead of failing.
+#[cfg(test)]
+pub(in crate::serve) static SETTLE_CUSTODY_BARRIER: Mutex<
+    Option<(String, Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+> = Mutex::new(None);
+
+/// The mover's fence, held for the length of one settlement rather than
+/// read once at the top of it.
+///
+/// `d.moving` names the records whose payload is being moved on disk
+/// right now, and settlement used to CONSULT it: read it, find the id
+/// absent, and go on to remove the files. That is a check-then-act, and
+/// `mover_process` fills the gap - it inserts into the same set and runs
+/// `relocate_completed` with no lock held, deliberately, because a move
+/// on a NAS is seconds and the queue must not stall behind it. Landing
+/// in the window deleted the source out from under a move that had just
+/// started: a half-published payload with no record naming either side
+/// (Codex sweep 24 Aug, F-05).
+///
+/// `history_change_cat` had already settled the shape - TAKE the fence,
+/// then re-verify the snapshot the claim was decided on - and this is
+/// that, one caller over. A mover that arrives while it is held gets
+/// `false` from its own insert and requeues itself a moment later, which
+/// is the behaviour it was written for; a mover already in flight is
+/// what makes the insert here fail, and settlement defers exactly as it
+/// did before.
+struct MoveClaim(Arc<Daemon>, String);
+
+impl Drop for MoveClaim {
+    fn drop(&mut self) {
+        self.0.moving.lock_ok().remove(&self.1);
+    }
+}
+
+/// Is the superseded history record's `out_dir` still its own to remove?
+///
+/// TODO 290 F-05a. Asked through `plan_history_delete` - the SAME plan
+/// the REST history delete decides on - rather than a second claimant
+/// test grown beside it. This is an ADAPTER, not a rule: it snapshots
+/// the two stores into the shape that function reads and hands back the
+/// one record's answer.
+///
+/// The rule itself is A6's, and settlement had never consulted it.
+/// `publish_over_previous` hands the CANONICAL directory to a verified
+/// re-download and leaves the superseded record pointing at that same
+/// path, so TWO history records name it and only one of them put the
+/// bytes there. Removing that directory on the older record's behalf
+/// destroys the newer job's payload - the record deleted is not the data
+/// destroyed. A live queue job's directory counts the same way; the
+/// leftover record can always be deleted again, the payload cannot.
+///
+/// The claimant test runs against SURVIVORS, which is why the record
+/// being settled has to still be in history when this is called: it is
+/// `plan_history_delete`'s `value`, so it is the one record marked
+/// doomed and it cannot claim its own directory.
+///
+/// TV-filed records are exempt inside that plan, and stay exempt here:
+/// their `out_dir` IS the shared season folder, every episode of the
+/// season claims it, and `remove_job_files` takes the narrow
+/// per-episode path there. That exemption is why this defect has never
+/// shown up on the TV path.
+///
+/// Not folded into [`Daemon::remove_files_in_custody`], which is the
+/// custody transaction both halves of settlement take: the claimant test
+/// needs the whole DOOMED set to know which records survive, and that
+/// function is handed one directory at a time. A batch caller taking it
+/// per record would see its own siblings as claimants and refuse
+/// everything.
+fn settle_may_remove_files(d: &Arc<Daemon>, nzo_id: &str) -> bool {
+    // Queue before history, the order the REST delete arm takes them in
+    // and the reason it says so: taking the two in one order everywhere
+    // is what keeps them from deadlocking.
+    let queue_dirs: Vec<PathBuf> = d
+        .queue
+        .lock_ok()
+        .iter()
+        .map(|j| j.lock_ok().out_dir.clone())
+        .collect();
+    let records: Vec<DeleteRecord> = d
+        .history
+        .lock_ok()
+        .iter()
+        .map(|j| {
+            let g = j.lock_ok();
+            DeleteRecord {
+                nzo_id: g.nzo_id.clone(),
+                state: g.state,
+                out_dir: g.out_dir.clone(),
+                filed: g.filed,
+                locked: g.password_required,
+            }
+        })
+        .collect();
+    plan_history_delete(&records, nzo_id, &queue_dirs)
+        .iter()
+        .zip(&records)
+        .find(|(_, r)| r.nzo_id == nzo_id)
+        .is_some_and(|(plan, _)| plan.may_remove_files)
+}
+
 /// Step 1 of a watchlist pass: settle the upgrade-deletes left pending
 /// by an earlier pass. The replacement download's fate decides -
 /// Completed means the superseded version goes, Failed or user-deleted
@@ -173,6 +282,50 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                 // the superseded copy finished later and its files sat on
                 // disk forever with nothing reporting it. Keep the entry
                 // and settle it on a later pass instead.
+                //
+                // THE MOVER'S FENCE FIRST, and taken rather than read -
+                // `MoveClaim` carries the argument. Nothing below may
+                // touch the superseded record's files while a move is in
+                // flight over them, and reading `d.moving` once at the
+                // top of the history half left `mover_process` a window
+                // to start one in.
+                if !d.moving.lock_ok().insert(p.old_nzo.clone()) {
+                    info!(
+                        target: "watch",
+                        "upgrade landed, but the superseded {} is being moved - \
+                         deleting it once it settles",
+                        p.prev_stem
+                    );
+                    state.pending.push(p);
+                    continue;
+                }
+                let _move_claim = MoveClaim(d.clone(), p.old_nzo.clone());
+                // A prefetching predecessor reads Queued and not
+                // finalizing, so the busy test below cannot see its live
+                // writers: the sidecar holds the job Arc directly, and
+                // its ownership check is (retries, move_seq, out_dir,
+                // !tombstone) - none of which this delete changes.
+                // Removing the row and its directory under it let the
+                // sidecar recreate files inside the deleted tree, mark
+                // the removed job Completed and park it back into
+                // history after the tombstone (Codex sweep 24 Aug,
+                // F-05).
+                //
+                // Poked and then handed to the DRAIN, which is what the
+                // two delete arms do with the same shape: the row leaves
+                // the queue here under a tombstone, its directory stays
+                // reserved, and `remove_after_sidecar_drain` removes it
+                // the moment the last writer lets go. It used to be
+                // deferred to the next pass instead, which is a minute
+                // of a reservation nobody holds - and the deferral only
+                // ever moved the removal, so the directory sat unclaimed
+                // and unreserved in between.
+                //
+                // Snapshotted BEFORE the queue lock: the sidecar mutex
+                // under queue+job would be a lock edge nothing else in
+                // the daemon has.
+                let sidecar = d.sidecar_owner();
+                let sidecar_old = sidecar.as_ref().is_some_and(|(id, _)| *id == p.old_nzo);
                 // `finalizing` is live for the same reason Downloading
                 // is, and it is NOT covered by it: a Completed job whose
                 // post-processing (unlock, rename, TV filing, NAS move)
@@ -185,32 +338,13 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                 // deferral since the 3 Aug sweep; watch settlement
                 // walked straight past it. Settle on a later pass, the
                 // way a still-downloading predecessor already does.
-                // A prefetching predecessor reads Queued and not
-                // finalizing, so the busy test below cannot see its live
-                // writers: the sidecar holds the job Arc directly, and
-                // its ownership check is (retries, move_seq, out_dir,
-                // !tombstone) - none of which this delete changes.
-                // Removing the row and its directory under it let the
-                // sidecar recreate files inside the deleted tree, mark
-                // the removed job Completed and park it back into
-                // history after the tombstone (Codex sweep 24 Aug,
-                // F-05). Poke it and settle on a later pass, the way
-                // every other live writer in this arm is deferred.
-                // Snapshotted BEFORE the queue lock: the sidecar mutex
-                // under queue+job would be a lock edge nothing else in
-                // the daemon has.
-                let sidecar_old = d.sidecar_owner().is_some_and(|(id, _)| id == p.old_nzo);
-                let old_busy = sidecar_old
-                    || d.queue.lock_ok().iter().any(|j| {
-                        let g = j.lock_ok();
-                        g.nzo_id == p.old_nzo
-                            && (matches!(g.state, JobState::Downloading | JobState::Finishing)
-                                || g.finalizing)
-                    });
+                let old_busy = d.queue.lock_ok().iter().any(|j| {
+                    let g = j.lock_ok();
+                    g.nzo_id == p.old_nzo
+                        && (matches!(g.state, JobState::Downloading | JobState::Finishing)
+                            || g.finalizing)
+                });
                 if old_busy {
-                    if sidecar_old {
-                        d.poke_sidecar(|id| id == p.old_nzo);
-                    }
                     info!(
                         target: "watch",
                         "upgrade landed, but the superseded {} is still \
@@ -219,6 +353,26 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                     );
                     state.pending.push(p);
                     continue;
+                }
+                if sidecar_old {
+                    d.poke_sidecar(|id| id == p.old_nzo);
+                }
+                // §129, as both delete arms do it: a Finishing job's
+                // repair must stop pulling recovery volumes, and the
+                // hub abort cannot reach it - that one is scoped to the
+                // hub's owner and a job in the lane is not that.
+                d.cancel_tail_fetches(|id| id == p.old_nzo);
+                #[cfg(test)]
+                {
+                    let spool = d.spool.display().to_string();
+                    let seam = SETTLE_CUSTODY_BARRIER
+                        .lock_ok()
+                        .clone()
+                        .filter(|(k, _, _)| *k == spool);
+                    if let Some((_, open, release)) = seam {
+                        open.wait();
+                        release.wait();
+                    }
                 }
                 let queued_old = {
                     let mut q = d.queue.lock_ok();
@@ -232,7 +386,7 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                 };
                 if let Some(job) = queued_old {
                     // Tombstoned even though it is leaving the queue
-                    // right here: the sidecar deferral above closes the
+                    // right here: the sidecar handoff above closes the
                     // steady state, and this closes the race window
                     // between its snapshot and the remove - an Ok that
                     // lands after this refuses to run the completion
@@ -254,7 +408,20 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                             t,
                         )
                     };
-                    if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
+                    // Through the delete arms' own custody transaction
+                    // rather than a bare remove beside it: the directory
+                    // is reserved for the length of the removal, so
+                    // `dir_claim` cannot hand it to a new job in the
+                    // window between the row going and the files - a
+                    // window a Trash call wide.
+                    if let Some(FilesGone::Kept(why)) = d.remove_files_in_custody(
+                        sidecar.as_ref(),
+                        &p.old_nzo,
+                        name.clone(),
+                        dir.clone(),
+                        filed,
+                        tail,
+                    ) {
                         d.note_delete_kept(&name, &dir, &why, None);
                     }
                     // Through `drop_spool` rather than a swallowed
@@ -279,21 +446,23 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                 // A history row can be busy too: a password unlock marks
                 // the record `finalizing` while it extracts, renames and
                 // moves on disk. Same deferral as the queue side above.
-                // `d.moving` is the mover's own fence, and it is NOT
-                // covered by `finalizing`: a completed predecessor whose
-                // NAS move is mid-copy is in that set and nothing else,
-                // and deleting through it removed the source out from
-                // under `relocate_completed` - a half-published move
-                // with the record gone too (Codex sweep 24 Aug, F-05).
-                // The SAB and JSON-RPC history deletes have refused this
-                // shape since the 3 Aug sweep; parity here.
-                if old.as_ref().is_some_and(|j| j.lock_ok().finalizing)
-                    || d.moving.lock_ok().contains(&p.old_nzo)
-                {
+                // The mover's own fence is the claim taken at the top of
+                // this arm - it is NOT covered by `finalizing`: a
+                // completed predecessor whose NAS move is mid-copy is in
+                // that set and nothing else, and deleting through it
+                // removed the source out from under `relocate_completed`
+                // - a half-published move with the record gone too
+                // (Codex sweep 24 Aug, F-05). The SAB and JSON-RPC
+                // history deletes have refused this shape since the
+                // 3 Aug sweep; parity here. Read AFTER the claim went
+                // up, which is the re-verify `history_change_cat` makes
+                // for the same reason: the value it decides on has to be
+                // one nothing can move under it.
+                if old.as_ref().is_some_and(|j| j.lock_ok().finalizing) {
                     info!(
                         target: "watch",
                         "upgrade landed, but the superseded {} is being unlocked \
-                         or moved - deleting it once it settles",
+                         - deleting it once it settles",
                         p.prev_stem
                     );
                     state.pending.push(p);
@@ -314,17 +483,85 @@ fn settle_pending_upgrades(d: &Arc<Daemon>, state: &mut crate::watchlist::WatchS
                             t,
                         )
                     };
-                    let outcome = remove_job_files(&dir, &name, filed, &tail);
-                    if let FilesGone::Kept(why) = &outcome {
-                        d.note_delete_kept(&name, &dir, why, None);
-                    }
-                    // Same as the queue half above: a refused unlink
-                    // must not leave the record's spool copy adoptable.
-                    drop_spool(&nzb);
+                    // WHOSE DIRECTORY IS IT (TODO 290 F-05a), asked
+                    // before any of the custody transaction below.
+                    // Settlement removed it unconditionally, and a
+                    // superseded record's `out_dir` is not necessarily
+                    // its own: an A6 publish leaves it pointing at the
+                    // canonical path a verified re-download now lives in.
+                    // Read while the record is still in history, which is
+                    // what makes it the doomed one and everything else a
+                    // survivor.
+                    let outcome = if settle_may_remove_files(d, &p.old_nzo) {
+                        // Same custody transaction as the queue half.
+                        let Some(outcome) = d.remove_files_in_custody(
+                            sidecar.as_ref(),
+                            &p.old_nzo,
+                            name.clone(),
+                            dir.clone(),
+                            filed,
+                            tail,
+                        ) else {
+                            // A history record is not the prefetch
+                            // sidecar's to hold - it runs QUEUED jobs,
+                            // and the queue half above has already
+                            // consumed any row under this id. If that
+                            // ever stops being true the drain owns the
+                            // removal and this pass has removed nothing,
+                            // so settle the record on a later pass rather
+                            // than report a fate its files have not
+                            // reached yet.
+                            state.pending.push(p);
+                            continue;
+                        };
+                        if let FilesGone::Kept(why) = &outcome {
+                            d.note_delete_kept(&name, &dir, why, None);
+                        }
+                        outcome
+                    } else {
+                        // LOGGED, not noticed, which is the REST arm's
+                        // choice on this branch and is deliberate: the
+                        // kept-files strip hands the user a folder and
+                        // invites them to clear it, and this folder is a
+                        // live record's payload. The row that owns it is
+                        // in History and can be deleted there with its
+                        // files, the ordinary way.
+                        //
+                        // The record still goes. It names a directory
+                        // that is not its payload any more, so leaving it
+                        // strands a row whose delete-with-files the plan
+                        // would refuse for the same reason, forever.
+                        info!(
+                            target: "watch",
+                            "upgrade landed - dropped the record for {}, \
+                             files kept: {} belongs to another job now",
+                            p.prev_stem,
+                            dir.display()
+                        );
+                        FilesGone::Kept("the folder belongs to another job now".to_string())
+                    };
                     d.history
                         .lock_ok()
                         .retain(|j| j.lock_ok().nzo_id != p.old_nzo);
-                    d.history_tombstone(std::slice::from_ref(&p.old_nzo));
+                    // The spool copy goes only once the removal is
+                    // DURABLE, which is the other way round from how this
+                    // was written (P2-1): a store that refused the
+                    // tombstone brought the superseded record back at the
+                    // next start with the `.nzb` its retry needs already
+                    // unlinked. Same as the queue half above, a refused
+                    // unlink must not leave the copy adoptable either -
+                    // which is `drop_spool`'s own job.
+                    if d.history_tombstone(std::slice::from_ref(&p.old_nzo)) {
+                        drop_spool(&nzb);
+                    } else {
+                        error!(
+                            target: "watch",
+                            "{}: the upgraded record could not be removed from the \
+                             history store, so it comes back at the next start - its \
+                             spool copy was kept rather than unlinked under it",
+                            p.old_nzo
+                        );
+                    }
                     d.save_queue();
                     // Asked of the REMOVAL, not of the settings. This
                     // read the two globals and inferred a fate from them,
@@ -794,7 +1031,21 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                     // dupe-held junk rows into the queue EVERY pass while
                     // the episode sat Completed in history. Adopt the
                     // completed copy as this slot instead of re-grabbing.
-                    if let Some((h_name, h_nzo)) = completed_in_history(d, &c.stem)
+                    //
+                    // ...and against the QUEUE too, which the history-only
+                    // join could not see: a grab whose slot write was lost
+                    // (a failed `write_atomic`, a crash between the enqueue
+                    // and the persist) is sitting in the queue, not in
+                    // history, so every pass re-grabbed it. Under
+                    // `dupe_action = "discard"` that is a LOOP with no exit
+                    // - the daemon refuses the duplicate, nothing is
+                    // written, and the next pass tries again - and on an
+                    // external candidate each turn spends the indexer's
+                    // daily grab allowance. History first, because a
+                    // Completed copy is the stronger claim on the slot.
+                    if let Some((h_where, h_name, h_nzo)) = completed_in_history(d, &c.stem)
+                        .map(|(n, i)| ("history", n, i))
+                        .or_else(|| queued_dupe(d, &c.stem).map(|(n, i)| ("the queue", n, i)))
                         // ...but only a copy that actually FILLS this slot.
                         // The join is on dupe_key, a separate text parser
                         // from the classified identity used for slots, and
@@ -805,7 +1056,9 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                         // downloads and nothing says so. Reading the reach
                         // off the completed release's own name is the same
                         // check `upgrade_supersedes_all` makes.
-                        .filter(|(h_name, _)| covered_slots(item, &classify(h_name)).contains(&key))
+                        .filter(|(_, h_name, _)| {
+                            covered_slots(item, &classify(h_name)).contains(&key)
+                        })
                     {
                         let hp = classify(&h_name);
                         let h_rank = wl::quality_rank(&hp);
@@ -820,7 +1073,7 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                         if h_rank >= min {
                             info!(
                                 target: "watch",
-                                "{}: already in history as {} - adopted, not re-grabbed",
+                                "{}: already in {h_where} as {} - adopted, not re-grabbed",
                                 item.title, h_name
                             );
                             let slot_val = wl::Slot {
@@ -845,7 +1098,8 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                         }
                         info!(
                             target: "watch",
-                            "{}: history copy {} is below min_quality - grabbing {} instead",
+                            "{}: the copy in {h_where} ({}) is below min_quality - \
+                             grabbing {} instead",
                             item.title, h_name, c.stem
                         );
                     }
@@ -875,6 +1129,8 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                             );
                         }
                         state.slots.insert(key, slot_val);
+                        dirty = true;
+                    } else if remember_refused_grab(&mut state, &key, &c.stem, prev_failed) {
                         dirty = true;
                     }
                 }
@@ -945,6 +1201,8 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
                         }
                         state.slots.insert(key, slot_val);
                         dirty = true;
+                    } else if remember_refused_grab(&mut state, &key, &c.stem, prev_failed) {
+                        dirty = true;
                     }
                 }
             }
@@ -953,8 +1211,25 @@ pub(super) fn watchlist_pass(d: &Arc<Daemon>) {
 
     if dirty {
         let path = d.spool.join("watchlist-state.json");
-        if let Ok(text) = serde_json::to_string_pretty(&state) {
-            let _ = crate::persist::write_atomic(&path, text.as_bytes());
+        // SAY SO when it does not land. The in-memory state below still
+        // carries the pass's decisions, so nothing re-grabs while this
+        // process lives - but across a restart the slots are back to
+        // whatever was last written, and the pass that follows grabs
+        // everything again. A swallowed error made that indistinguishable
+        // from a healthy save; the queue join in the Grab arm is what
+        // stops the re-grab, and this is what says the state was lost.
+        match serde_json::to_string_pretty(&state) {
+            Ok(text) => {
+                if let Err(e) = crate::persist::write_atomic(&path, text.as_bytes()) {
+                    warn!(
+                        target: "watch",
+                        "watchlist state could not be written to {} ({e}) - \
+                         the slots grabbed this pass are live but not durable",
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => warn!(target: "watch", "watchlist state could not be encoded ({e})"),
         }
     }
     *d.watch_state.lock_ok() = state;
@@ -1097,6 +1372,72 @@ pub(super) fn completed_in_history(d: &Arc<Daemon>, stem: &str) -> Option<(Strin
     })
 }
 
+/// [`completed_in_history`] against the QUEUE, on the same `dupe_key`
+/// join and with the same answer shape.
+///
+/// The two together are exactly what the daemon's own duplicate check
+/// looks at (`serve::dupe`: any queued job, plus a Completed history
+/// row), which is what makes the pair a complete answer to "will this
+/// enqueue be refused as a duplicate". History alone was not: a grab
+/// whose slot write never landed is in the QUEUE, and re-grabbing it
+/// under `dupe_action = "discard"` fails forever with nothing recorded.
+///
+/// Any queue state counts, paused and dupe-held included - the copy is
+/// there and the enqueue will collide with it whatever it is doing.
+pub(super) fn queued_dupe(d: &Arc<Daemon>, stem: &str) -> Option<(String, String)> {
+    let key = dupe_key(stem)?;
+    d.queue.lock_ok().iter().find_map(|j| {
+        let g = j.lock_ok();
+        (g.dupe_key.as_deref() == Some(key.as_str())).then(|| (g.name.clone(), g.nzo_id.clone()))
+    })
+}
+
+/// A grab the daemon REFUSED - `watchlist_grab` answered `None`, so
+/// nothing was enqueued and no slot was written.
+///
+/// Without this the pass simply ends and the next one, 60 s later,
+/// finds the same candidate and asks again, forever; an external
+/// candidate spends the indexer's daily grab allowance on every turn.
+/// The stem goes on the slot's never-retry list exactly as a genuinely
+/// failed grab's does (step 1b), and on an EMPTY slot - no nzo_id - so
+/// it claims no coverage: `wl::covering` skips a slot with none, which
+/// leaves the item open for a different release.
+///
+/// THE TRADE, stated rather than left to be found: a refusal that was
+/// TRANSIENT (a full disk, a spool write that failed) bars this stem for
+/// good too. That is the same bar a genuinely failed download takes, and
+/// it is survivable for the same reason - the ranking drops failed stems
+/// rather than skipping the whole slot, so the item is still served by
+/// the best release that is not on the list. The alternative measured
+/// worse: a permanent refusal (which is what a duplicate is, for as long
+/// as the duplicate exists) asked again every 60 s, forever, spending an
+/// indexer's daily grab allowance each time.
+///
+/// Returns whether anything was recorded (a repeat refusal is not).
+fn remember_refused_grab(
+    state: &mut crate::watchlist::WatchState,
+    key: &str,
+    stem: &str,
+    prev_failed: Vec<String>,
+) -> bool {
+    let s = state
+        .slots
+        .entry(key.to_string())
+        .or_insert_with(|| crate::watchlist::Slot {
+            rank: 0,
+            stem: String::new(),
+            quality: String::new(),
+            nzo_id: String::new(),
+            grabbed_at: unix_now(),
+            failed: prev_failed,
+        });
+    if s.failed.iter().any(|f| f == stem) {
+        return false;
+    }
+    s.failed.push(stem.to_string());
+    true
+}
+
 /// Synthesize the NZB for an indexed release and enqueue it. `promote`
 /// lifts the M14f duplicate hold: an intentional upgrade IS a duplicate
 /// of the completed original, that's the point.
@@ -1122,6 +1463,20 @@ pub(super) fn watchlist_grab(
     // spends that account's daily grab allowance. The external path
     // goes through enqueue_fetched so a watchlist grab gets the same
     // X-DNZB failure-link handling a hand-clicked one does.
+    //
+    // Grab-deferred mode: the match is enqueued PAUSED (-2 is SAB's
+    // add-paused flag), which makes it a retention-insurance candidate
+    // when `insurance_cap_gb` is on - the payload is banked in the
+    // background while the articles are still alive, and the user
+    // unpauses when they actually want it. Never for an upgrade
+    // (`promote`): those collide with the completed original and ride
+    // the duplicate-hold machinery, which must not mix with a deferred
+    // add.
+    let priority = if !promote && d.watchlist_deferred.load(Ordering::Relaxed) {
+        -2
+    } else {
+        -100
+    };
     let nzo = match src {
         #[cfg(feature = "indexer")]
         CandSrc::Local(id) => {
@@ -1130,7 +1485,7 @@ pub(super) fn watchlist_grab(
                 xml.as_bytes(),
                 stem,
                 category,
-                -100,
+                priority,
                 None,
                 None,
                 job_origin,
@@ -1192,7 +1547,15 @@ pub(super) fn watchlist_grab(
                 }
             };
             let r = d.enqueue_fetched(
-                &fetched, stem, category, -100, None, None, 0, job_origin, false,
+                &fetched,
+                stem,
+                category,
+                priority,
+                None,
+                None,
+                0,
+                job_origin,
+                DupeExempt::Nobody,
             );
             if r.is_ok() {
                 let mut rt = d.indexer_rt.lock_ok();
@@ -1389,6 +1752,24 @@ mod settle_tests {
         let out = root.join(stem);
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("payload.mkv"), b"x").unwrap();
+        completed_naming(d, root, id, stem, &out);
+        out
+    }
+
+    /// A Completed history record NAMING `out`, leaving whatever is
+    /// already there alone.
+    ///
+    /// An A6 publish is why this is a shape at all: the re-download takes
+    /// the canonical directory over and the superseded record is left
+    /// pointing at it, so two records name one path and only one of them
+    /// put the bytes there.
+    fn completed_naming(
+        d: &Arc<Daemon>,
+        root: &std::path::Path,
+        id: &str,
+        stem: &str,
+        out: &std::path::Path,
+    ) {
         let v = json!({
             "nzo_id": id, "name": stem,
             "out_dir": out.to_string_lossy(),
@@ -1398,7 +1779,20 @@ mod settle_tests {
         std::fs::write(root.join(format!("{id}.nzb")), b"<nzb/>").unwrap();
         let job = Arc::new(Mutex::new(job_from_json(&v).expect("job")));
         d.history.lock_ok().push(job);
-        out
+    }
+
+    /// The pending-delete record a settled upgrade leaves behind, for
+    /// the two ids the test cares about.
+    fn pending(old: &str, new: &str) -> crate::watchlist::PendingDelete {
+        crate::watchlist::PendingDelete {
+            slot: "7:s01e01".to_string(),
+            new_nzo: new.to_string(),
+            new_stem: format!("stem-{new}"),
+            old_nzo: old.to_string(),
+            prev_rank: 3,
+            prev_stem: format!("stem-{old}"),
+            prev_quality: "720p".to_string(),
+        }
     }
 
     /// §129 1b(b): a settled delete_old upgrade narrates itself on the
@@ -1458,5 +1852,307 @@ mod settle_tests {
         assert!(e["seq"].as_u64().unwrap_or(0) > 0);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// TODO 290 F-05a: a directory a SURVIVOR still names is not
+    /// settlement's to remove, and settlement had never asked.
+    ///
+    /// The REST history delete has asked since A6: `plan_history_delete`
+    /// grants `may_remove_files` only to a doomed record whose `out_dir`
+    /// no queue job and no surviving history record also names, precisely
+    /// because `publish_over_previous` hands the CANONICAL directory to a
+    /// verified re-download and leaves the superseded record pointing at
+    /// it. Upgrade settlement removed the directory unconditionally, so
+    /// the record it deleted was not the data it destroyed.
+    ///
+    /// The sharing here is BUILT rather than asserted, through the two
+    /// production functions that make it: `dir_claim` says a completed
+    /// payload claims its directory, `choose_out_dir` refiles the re-add
+    /// beside it and records `replaces`, and `publish_over_previous`
+    /// moves the verified re-download onto the canonical path. What is
+    /// left is the two-record shape, and the bytes under it belong to the
+    /// SURVIVOR.
+    ///
+    /// The `filed` arm is deliberately not the subject: a TV-filed
+    /// record's `out_dir` IS the shared season folder, every episode
+    /// claims it, and `remove_job_files` takes the narrow per-episode
+    /// path there - which is why `plan_history_delete` exempts it and why
+    /// this has never shown up on the TV path.
+    #[test]
+    fn settlement_keeps_a_directory_a_surviving_record_still_claims() {
+        let _steady = crate::smart::trash_globals_steady();
+        let dir = tmp("shareddir");
+        let d = test_daemon(&dir);
+        completed(&d, &dir, "new1", "New.Movie.2024.2160p.WEB-TEST");
+
+        // The superseded release, downloaded once and completed.
+        let stem = "Old.Movie.2024.720p.WEB-TEST";
+        let canon = completed(&d, &dir, "old1", stem);
+
+        // A re-add of that same release, through the production claim
+        // rule: a completed payload claims its directory, so the re-add
+        // downloads beside it and records the canonical path.
+        let (fresh, replaces) = choose_out_dir(&dir.join(stem), stem, &|p| d.dir_claim(p));
+        assert_eq!(
+            replaces.as_deref(),
+            Some(canon.as_path()),
+            "a completed payload claims its directory"
+        );
+        assert_ne!(fresh, canon, "the re-add downloads beside it");
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("payload.mkv"), b"the re-download").unwrap();
+        // ...and takes it over once it verifies, which is the moment two
+        // history records start naming one directory.
+        assert_eq!(
+            publish_over_previous(&fresh, &canon).as_deref(),
+            Some(canon.as_path()),
+            "the verified re-download publishes over the canonical path"
+        );
+        completed_naming(&d, &dir, "re1", stem, &canon);
+        assert_eq!(
+            std::fs::read(canon.join("payload.mkv")).unwrap(),
+            b"the re-download",
+            "the bytes under the shared path are the survivor's"
+        );
+
+        let mut state = crate::watchlist::WatchState::default();
+        state.pending.push(pending("old1", "new1"));
+        assert!(
+            settle_pending_upgrades(&d, &mut state),
+            "a settled upgrade is a state change"
+        );
+        assert!(state.pending.is_empty(), "the entry must not be re-parked");
+
+        // The record goes - it names a directory that is not its payload
+        // any more, so leaving it would strand a row nothing can act on.
+        assert!(
+            !d.history
+                .lock_ok()
+                .iter()
+                .any(|j| j.lock_ok().nzo_id == "old1"),
+            "the superseded record still leaves history"
+        );
+        // The files do NOT.
+        assert_eq!(
+            std::fs::read(canon.join("payload.mkv")).ok().as_deref(),
+            Some(&b"the re-download"[..]),
+            "the surviving record's payload must still be there"
+        );
+
+        let (events, _, _) = d.life_since(0);
+        let e = events
+            .iter()
+            .find(|e| e["kind"] == "watchlist.upgraded")
+            .unwrap_or_else(|| panic!("no watchlist.upgraded on the ring: {events:?}"));
+        assert_eq!(
+            e["fate"], "kept",
+            "a removal that did not happen must not be reported as one"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// One QUEUED record, with a real payload directory - what a
+    /// superseded release the prefetch sidecar is still working on
+    /// looks like from the queue's side.
+    fn queued(d: &Arc<Daemon>, root: &std::path::Path, id: &str, stem: &str) -> PathBuf {
+        let out = root.join(stem);
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("part01.rar"), b"bytes").unwrap();
+        let v = json!({
+            "nzo_id": id, "name": stem,
+            "out_dir": out.to_string_lossy(),
+            "nzb_path": root.join(format!("{id}.nzb")).to_string_lossy(),
+            "state": "Queued",
+        });
+        std::fs::write(root.join(format!("{id}.nzb")), b"<nzb/>").unwrap();
+        let job = Arc::new(Mutex::new(job_from_json(&v).expect("job")));
+        d.queue.lock_ok().push_back(job);
+        out
+    }
+
+    /// Codex sweep 24 Aug, F-05, the sidecar half: settlement must take
+    /// the delete arms' custody transaction over a superseded release
+    /// the prefetch sidecar is still writing into, not remove it beside
+    /// them and not simply come back in a minute.
+    ///
+    /// A prefetching row reads Queued and not `finalizing`, so the busy
+    /// test cannot see its writers. The first half of the repair - the
+    /// snapshot, the poke, and deferring to a later pass - shipped on
+    /// 23 Aug and stopped the sidecar recreating files inside a deleted
+    /// tree. What it left is what this asserts: the row stays in the
+    /// queue for up to a whole pass, the directory is reserved by
+    /// nobody, and the removal happens only when some later pass
+    /// happens to find the sidecar gone. The custody route removes the
+    /// row now, under its tombstone, and hands the FILES to
+    /// `remove_after_sidecar_drain`, which holds the reservation until
+    /// the last writer lets go and then removes them itself.
+    ///
+    /// The sidecar here is blocked exactly where the finding puts it:
+    /// holding the slot, immediately before its final Ok.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settlement_hands_a_prefetching_predecessor_to_the_sidecar_drain() {
+        let _steady = crate::smart::trash_globals_steady();
+        let dir = tmp("sidecar");
+        let d = test_daemon(&dir);
+        completed(&d, &dir, "new2", "New.Show.S01E02.1080p.WEB-TEST");
+        let old_out = queued(&d, &dir, "old2", "Old.Show.S01E02.720p.WEB-TEST");
+
+        // The sidecar is mid-prefetch on the superseded release and
+        // will not return until this test lets it.
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *d.sidecar.lock_ok() = Some(crate::serve::sidecar::Sidecar {
+            nzo_id: "old2".into(),
+            hub: Arc::new(crate::StreamHub::default()),
+            progress: Arc::new(AtomicU64::new(0)),
+            cancelled: cancelled.clone(),
+            task: tokio::spawn(async {}),
+            borrowed: false,
+        });
+
+        let mut state = crate::watchlist::WatchState::default();
+        state.pending.push(pending("old2", "new2"));
+
+        assert!(
+            settle_pending_upgrades(&d, &mut state),
+            "the settlement happened, so it is a state change"
+        );
+        assert!(
+            state.pending.is_empty(),
+            "the superseded row is gone, so there is nothing left to re-park - \
+             deferring the whole settlement to a later pass leaves the directory \
+             claimed by nobody in the meantime"
+        );
+        assert!(
+            d.queue.lock_ok().is_empty(),
+            "the superseded row must leave the queue under this settlement"
+        );
+        assert!(
+            cancelled.load(std::sync::atomic::Ordering::Relaxed),
+            "the sidecar must be told to stop before its directory is taken"
+        );
+        // The FILES are the drain's, and so is the reservation.
+        assert!(
+            old_out.join("part01.rar").exists(),
+            "the files went while the sidecar was still writing into the directory"
+        );
+        assert!(
+            d.reserved.lock_ok().contains(&old_out),
+            "nothing reserved the directory, so `dir_claim` can hand it to a new \
+             job in the window between the row going and the files"
+        );
+
+        // The sidecar winds down and clears its own slot.
+        *d.sidecar.lock_ok() = None;
+        // Wait on the LAST thing the drain does, exactly as
+        // `a_delete_waits_for_the_sidecar_before_removing_its_files`
+        // does and for the reason written there: it removes the files
+        // and only then gives the reservation back.
+        for _ in 0..200 {
+            if !d.reserved.lock_ok().contains(&old_out) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            !old_out.exists(),
+            "the drain never removed the superseded payload once the sidecar let go"
+        );
+        assert!(
+            !d.reserved.lock_ok().contains(&old_out),
+            "the drain owes the reservation back"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex sweep 24 Aug, F-05, the mover half: settlement must HOLD
+    /// the mover's fence for the length of the removal, not read it
+    /// once and act on the answer.
+    ///
+    /// `d.moving` is consulted by every actor that must stand off a
+    /// payload in flight, and `mover_process` joins it by INSERTING and
+    /// then running `relocate_completed` with no lock held - deliberately,
+    /// because a move on a NAS is seconds and the queue must not stall
+    /// behind it. Settlement read the set and went on to remove the
+    /// files, so a move that started in between copied out of a
+    /// directory that was being deleted: a half-published payload with
+    /// no record naming either side.
+    ///
+    /// The mover is held exactly where the finding puts it - mid-copy,
+    /// which here means "admitted and about to walk the source" - by
+    /// running it from this thread while settlement sits on the custody
+    /// seam. It must be REFUSED (`true` = busy, try again shortly),
+    /// which is the answer `mover_process` was written to give and
+    /// requeues the move rather than losing it.
+    #[test]
+    fn settlement_holds_the_movers_fence_while_it_removes() {
+        let _steady = crate::smart::trash_globals_steady();
+        let dir = tmp("mover");
+        let d = test_daemon(&dir);
+        completed(&d, &dir, "new3", "New.Show.S01E03.1080p.WEB-TEST");
+        let old_out = completed(&d, &dir, "old3", "Old.Show.S01E03.720p.WEB-TEST");
+        // A destination to move TO, so an admitted mover really does
+        // relocate the payload rather than finding nothing to do.
+        let done = dir.join("completed");
+        std::fs::create_dir_all(&done).unwrap();
+        *d.move_completed.write_ok() = Some(done.clone());
+        let old_job = d
+            .history
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == "old3")
+            .cloned()
+            .expect("the superseded record");
+        old_job.lock_ok().move_pending = true;
+
+        let open = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        *SETTLE_CUSTODY_BARRIER.lock_ok() =
+            Some((d.spool.display().to_string(), open.clone(), release.clone()));
+
+        let d2 = d.clone();
+        let settler = std::thread::spawn(move || {
+            let mut state = crate::watchlist::WatchState::default();
+            state.pending.push(pending("old3", "new3"));
+            let dirty = settle_pending_upgrades(&d2, &mut state);
+            (dirty, state.pending.len())
+        });
+
+        // Settlement holds the superseded record's custody and has not
+        // removed anything yet. This is the whole window.
+        open.wait();
+        let busy = d.mover_process(&old_job);
+        assert!(
+            busy,
+            "the mover was admitted while settlement held the record - it would \
+             have copied the payload out of a directory that is being deleted, \
+             leaving a half-published move and no record naming either side"
+        );
+        assert!(
+            old_out.join("payload.mkv").exists(),
+            "the mover moved the superseded payload out from under the settlement"
+        );
+        release.wait();
+
+        let (dirty, left) = settler.join().expect("the settlement");
+        *SETTLE_CUSTODY_BARRIER.lock_ok() = None;
+        assert!(dirty, "the settlement happened, so it is a state change");
+        assert_eq!(left, 0, "the entry must not be re-parked");
+        assert!(!old_out.exists(), "the superseded payload should be gone");
+        assert!(
+            !d.history
+                .lock_ok()
+                .iter()
+                .any(|j| j.lock_ok().nzo_id == "old3"),
+            "and its record with it"
+        );
+        assert!(
+            !d.moving.lock_ok().contains("old3"),
+            "the fence has to be given back, or every later mover and retry \
+             stands off this id forever"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

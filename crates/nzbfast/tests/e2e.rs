@@ -8,6 +8,10 @@
 
 mod scratch;
 
+// The shared daemon launcher. `e2e_qprog` is the only child that needs
+// it - every other suite here drives the `get` CLI, which has no queue.
+mod harness;
+
 // §123 chip-6 surfaces (bytes-skew and friends) - a sibling-dir child
 // so this file stays inside its size-gate baseline.
 mod e2e_chaserepair;
@@ -16,6 +20,10 @@ mod e2e_chip6;
 mod e2e_drop;
 mod e2e_faults;
 mod e2e_holdstrace;
+// Round A of the 26 Aug 2026 recovery research: the queue-progress axis
+// on the fault matrix above - a broken post at the HEAD of a real
+// daemon queue, with healthy jobs behind it (sibling dir, size gate).
+mod e2e_qprog;
 mod e2e_repair;
 mod e2e_resume;
 mod e2e_sample;
@@ -319,6 +327,15 @@ fn run_get(config: &Path, nzb: &Path, out: &Path, extra_env: &[(&str, &str)]) ->
     run_get_args(config, nzb, out, extra_env, &[])
 }
 
+/// The fetch pipeline every `run_get` leg dials: `GET_CONNS` sockets per
+/// SERVER (`--connections` is a per-server ceiling - `get/fleet.rs`) each
+/// holding `GET_WINDOW` pipelined requests. Named rather than typed twice
+/// because `rotated_ladder_does_not_fetch_every_article_twice` derives
+/// its BODY bounds from exactly these numbers (TODO 286), and a dial
+/// moved here with a bound left behind would silently widen it.
+const GET_CONNS: u32 = 4;
+const GET_WINDOW: u32 = 3;
+
 fn run_get_args(
     config: &Path,
     nzb: &Path,
@@ -326,7 +343,7 @@ fn run_get_args(
     extra_env: &[(&str, &str)],
     extra_args: &[&str],
 ) -> (String, bool) {
-    run_get_win(config, nzb, out, extra_env, extra_args, 3)
+    run_get_win(config, nzb, out, extra_env, extra_args, GET_WINDOW)
 }
 
 fn run_get_win(
@@ -352,7 +369,7 @@ fn run_get_win(
         .arg("--out")
         .arg(out)
         .arg("--connections")
-        .arg("4")
+        .arg(GET_CONNS.to_string())
         .arg("--window")
         .arg(window.to_string())
         .arg("--decoders")
@@ -7557,6 +7574,37 @@ async fn a_missing_nfo_completes_the_job_but_a_missing_payload_file_still_fails(
     );
 }
 
+/// `dups` and `part steers` off a run's `[pool]` summary line.
+///
+/// A line this cannot find, or a tally it cannot parse, is a PANIC and
+/// never a zero. The bounds these feed are the whole point of the leg
+/// below, and a reader that had quietly stopped matching would satisfy
+/// every one of them for free - the failure mode that let the tv4-rot1
+/// 2x ride five releases with no counter showing it.
+fn pool_dups_and_steers(log: &str) -> (u64, u64) {
+    let line = log
+        .lines()
+        .find(|l| l.contains("[pool]") && l.contains(" dups ("))
+        .unwrap_or_else(|| panic!("no [pool] summary line in:\n{log}"));
+    let tally = |head: &str, what: &str| -> u64 {
+        head.rsplit(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no {what} tally in: {line}"))
+    };
+    let dups = match line.split_once(" dups (") {
+        Some((head, _)) => tally(head, "dup"),
+        None => panic!("no dup tally in: {line}"),
+    };
+    // Absent from the line entirely when the run issued none, which is
+    // what the steer=0 leg expects.
+    let steers = match line.split_once(" part steers") {
+        Some((head, _)) => tally(head, "steer"),
+        None => 0,
+    };
+    (dups, steers)
+}
+
 /// 22 Aug 2026, tv4-rot1: an NZB whose segment ladder is rotated and
 /// renumbered 1..N (the synthesized-numbering shape obfuscated posts
 /// carry) pulled 2x its payload from five real providers on five
@@ -7568,11 +7616,36 @@ async fn a_missing_nfo_completes_the_job_but_a_missing_payload_file_still_fails(
 /// same-host twins; NZBFAST_CRC_STEER=1 is the real-fleet shape. Pins:
 /// the gate stands down once two servers agree on the undeclared part,
 /// the steers it did issue are printed, and the output is byte-exact.
+///
+/// **The bounds below are DERIVED from the pipeline this leg dials, not
+/// measured on one box** (TODO 286). The `+50` they replace was
+/// calibrated here and failed twice on the public Windows runner, at
+/// two different assertions on identical code: 126 BODYs against an
+/// exact `articles`, and 180 against `articles + 50` with 53 steers
+/// logged. Widening 50 was refused - that number pins against the 2x
+/// the gate exists to prevent, and a bound raised until green tests
+/// nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn rotated_ladder_does_not_fetch_every_article_twice() {
+    // Every bound below is arithmetic over the pipeline this leg dials,
+    // read from the dials themselves so a change to them cannot leave a
+    // bound behind: GET_CONNS sockets per SERVER, each holding
+    // GET_WINDOW pipelined requests, over the two servers started
+    // below. Nothing configured lets the fleet hold more bodies on the
+    // wire at once than that.
+    const SERVERS: u64 = 2;
+    const INFLIGHT: u64 = GET_CONNS as u64 * GET_WINDOW as u64 * SERVERS;
     for steer in ["0", "1"] {
         let mut fx = Fixture::new("rot1census");
-        let data = payload(4_000_000, 5);
+        // 500 articles, not the 125 this leg carried until TODO 286.
+        // The steer window is a PIPELINE-sized prefix and does not scale
+        // with the job - measured on the mac dev box at 125/250/500/1000
+        // articles: 13-18, 13-15, 15-17, 12-18 steers, flat across an 8x
+        // - so lengthening the job costs 0.45 s and moves the bound from
+        // 1.77x of the payload to 1.19x, well clear of the 2x it pins
+        // against. That is the honest way to buy the slack a slow runner
+        // needs; widening the constant is not.
+        let data = payload(16_000_000, 5);
         fx.add_file("payload.bin", &data, 32_000);
         for (_, segs) in fx.nzb_files.iter_mut() {
             segs.rotate_left(1);
@@ -7598,19 +7671,69 @@ async fn rotated_ladder_does_not_fetch_every_article_twice() {
             .iter()
             .flat_map(|s| s.serve_counts().into_values())
             .sum();
+        let (dups, steers) = pool_dups_and_steers(&log);
+        // Every BODY on the wire is one of four things: the article
+        // itself, a tail dup the pool CHOSE to race (its own tally), a
+        // part steer (its own tally), or a re-ask after a connection
+        // died under outstanding requests. Only the last has no
+        // counter, and it is bounded by the configured pipeline: a
+        // reset loses at most that connection's window, a whole-fleet
+        // reset at most INFLIGHT. So this is the accounting identity
+        // with one named, derived allowance - it fails on any extra
+        // BODY nothing on the run can explain.
+        //
+        // It replaces `assert_eq!(requests, articles)`, which the
+        // runner broke at 126 of 125: the tail fan-out is a designed
+        // behaviour and a jittery box is exactly what arms it, so an
+        // exact equality was pinning a race, not a rule.
+        assert!(
+            requests <= articles + dups + steers + INFLIGHT,
+            "steer={steer}: {requests} BODYs unaccounted for {articles} articles \
+             ({dups} dups + {steers} steers + {INFLIGHT} reset allowance)\n{log}"
+        );
         if steer == "0" {
-            assert_eq!(requests, articles, "no steer: one BODY per article");
-            assert!(!log.contains("part steers"), "{log}");
+            assert_eq!(steers, 0, "no steer: the gate must not fire at all\n{log}");
             continue;
         }
-        // Before the latch every article steered once (250 of 125).
-        // With it, only the bodies already in flight when the first
-        // refetch reported can steer: 6-19 measured at 4 conns x
-        // window 3 x 2 servers. The bound is the in-flight ceiling
-        // with slack, and well under the 2x it pins against.
+        // Before the latch EVERY article steered once - 250 BODYs for
+        // the 125 this leg used to carry. Still true at this length:
+        // disabling the latch here steers 500 of 500 (measured). The
+        // whole point of the gate is that the count is a bounded PREFIX
+        // rather than a per-article tax.
+        //
+        // What bounds it: the gate stands down when the FIRST steered
+        // article's refetch comes back from a second backbone carrying
+        // the same undeclared part. Every body that reaches a decode
+        // verdict before that one does steers too, so the population is
+        // the pipeline - the INFLIGHT bodies already on the wire, plus
+        // whatever is dispatched while the refetch itself traverses it.
+        // The refetch cannot be starved behind the remaining queue: the
+        // steer inbox drains to the queue FRONT (pool.rs), so it waits
+        // for one worker top-up and one service. Two pipeline
+        // generations is the structural expectation; the bound doubles
+        // that again for a runner whose workers sit longer in a
+        // pipelined read before topping up.
+        //
+        // Measured against it: 9-18 over 18 runs on the mac dev box at
+        // this length, idle and at load average 40, and unmoved by
+        // NZBFAST_CHANNEL_DEPTH swept 8 to 2048 - so the fetch->decode
+        // channel is not the thing that sets it. 53 is the worst
+        // observed anywhere, on the public Windows runner.
+        //
+        // FLOORED as well as capped, and that is not decoration: this
+        // fixture is BUILT to trip the gate, so a zero here means the
+        // tally stopped being printed or stopped being read, and a
+        // ceiling arm that has quietly gone inert reads as a clean run
+        // forever. Verified by renaming the emitter - without the floor
+        // this arm passed and only the neighbouring string assertion
+        // went red.
+        let ceiling = 4 * INFLIGHT;
         assert!(
-            requests <= articles + 50,
-            "steer=1: {requests} BODYs for {articles} articles - the part gate is refetching the ladder\n{log}"
+            steers > 0 && steers <= ceiling,
+            "steer=1: {steers} part steers against a {ceiling}-body ceiling \
+             ({GET_CONNS} conns x window {GET_WINDOW} x {SERVERS} servers x 4) - \
+             zero means the tally is no longer read, over means the gate \
+             is not standing down after one round trip\n{log}"
         );
         assert!(
             log.contains("part steers (gate stood down)"),

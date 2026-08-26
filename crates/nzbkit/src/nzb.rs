@@ -425,6 +425,22 @@ impl Nzb {
                                 // Segments arrive in document order which is not
                                 // guaranteed to be part order.
                                 f.segments.sort_by_key(|s| s.number);
+                                // A `<file>` that declares NO segment at all -
+                                // none fetchable, none dropped - planned as a
+                                // slot with nothing owed: `total_segments` 0,
+                                // `remaining` 0, `missing` 0 (see `get::plan`).
+                                // The census only counts a file incomplete when
+                                // something is missing or unresolved, so the job
+                                // finished GREEN having written nothing for that
+                                // name, and repair never ran because nothing was
+                                // missing. Same reasoning as the self-closing
+                                // `<segment/>` arm below: there is nothing to
+                                // fetch, only something to DECLARE - so declare
+                                // it, and the file either repairs through PAR2
+                                // or fails the job.
+                                if f.segments.is_empty() && f.dropped_segments == 0 {
+                                    f.dropped_segments = 1;
+                                }
                                 files.push(f);
                             }
                         }
@@ -599,6 +615,21 @@ impl NzbFile {
         quoted_filename(&self.subject)
     }
 
+    /// [`Self::filename_hint`], falling back to an UNQUOTED filename
+    /// read out of the subject (issue #55): some posters write
+    /// `subject="10-Track Name-8c63a701.flac (1/0)"`, no quotes at all,
+    /// and the quoted-only read left those slots named `fileNNN` with
+    /// the real name discarded. The fallback is deliberately strict
+    /// (see [`unquoted_filename`]) and this is deliberately a SECOND
+    /// method rather than a change to `filename_hint`: the quoted read
+    /// feeds classification and import paths whose behavior on prose
+    /// subjects is settled, so only callers that would otherwise invent
+    /// an anonymous name opt into the wider parse.
+    pub fn filename_hint_lenient(&self) -> Option<&str> {
+        self.filename_hint()
+            .or_else(|| unquoted_filename(&self.subject))
+    }
+
     pub fn kind(&self) -> FileKind {
         let name = self
             .filename_hint()
@@ -650,6 +681,79 @@ pub fn quoted_filename(s: &str) -> Option<&str> {
         rest = &after[b + 1..];
     }
     first
+}
+
+/// A filename read from a subject that quotes NOTHING - the shape issue
+/// #55's album was posted in: `10-Track Name-8c63a701.flac (1/0)`, the
+/// real name in the clear with a `(part/total)` counter after it.
+///
+/// Strict on purpose, because the subjects this must NOT match are the
+/// prose ones (`Great Album Name yEnc (1/15)`): after cutting the
+/// ` yEnc` marker, stripping trailing `(n/m)` counters and leading
+/// `[..]`/`(..)` index tags, the WHOLE remainder must end in a real
+/// extension - a dot, then 2 to 5 alphanumerics with at least one
+/// letter - or the answer is None. The letter requirement is what keeps
+/// a trailing year (`Movie.2026 (1/3)`) from reading as a file.
+pub fn unquoted_filename(s: &str) -> Option<&str> {
+    // The yEnc marker ends the name; everything after it is decoration.
+    let mut head = match s.find(" yEnc") {
+        Some(i) => &s[..i],
+        None => s,
+    };
+    // Trailing `(n/m)` counters (posts sometimes stack two), with any
+    // whitespace/dash separators around them.
+    fn strip_one_counter(t: &str) -> &str {
+        let t = t.trim_end_matches(|c: char| c.is_whitespace() || c == '-');
+        if let Some(i) = t.rfind('(')
+            && t.ends_with(')')
+        {
+            let inner = &t[i + 1..t.len() - 1];
+            let mut parts = inner.split('/');
+            if let (Some(a), Some(b), None) = (parts.next(), parts.next(), parts.next())
+                && !a.is_empty()
+                && !b.is_empty()
+                && a.bytes().all(|c| c.is_ascii_digit())
+                && b.bytes().all(|c| c.is_ascii_digit())
+            {
+                return &t[..i];
+            }
+        }
+        t
+    }
+    let mut prev = usize::MAX;
+    while head.len() < prev {
+        prev = head.len();
+        head = strip_one_counter(head);
+    }
+    // Leading `[01/30]` / `(01/30)`-style index tags and their ` - `
+    // separators. Bounded per tag so a subject that is one long
+    // bracketed run is not eaten whole.
+    loop {
+        let t = head.trim_start_matches(|c: char| c.is_whitespace() || c == '-');
+        let stripped = match t.as_bytes().first() {
+            Some(b'[') => t.find(']').filter(|&i| i <= 40).map(|i| &t[i + 1..]),
+            Some(b'(') => t.find(')').filter(|&i| i <= 40).map(|i| &t[i + 1..]),
+            _ => None,
+        };
+        match stripped {
+            Some(rest) => head = rest,
+            None => {
+                head = t;
+                break;
+            }
+        }
+    }
+    let name = head.trim();
+    if name.is_empty() || name.len() > 255 || name.contains('"') {
+        return None;
+    }
+    let dot = name.rfind('.')?;
+    let (stem, ext) = (&name[..dot], &name[dot + 1..]);
+    let ext_ok = !stem.is_empty()
+        && (2..=5).contains(&ext.len())
+        && ext.bytes().all(|c| c.is_ascii_alphanumeric())
+        && ext.bytes().any(|c| c.is_ascii_alphabetic());
+    ext_ok.then_some(name)
 }
 
 /// Byte offset of the recovery-volume suffix in a PAR2 filename, or
@@ -899,6 +1003,34 @@ mod tests {
         assert_eq!(
             nzb.files[0].dropped_segments, 1,
             "a declared segment we cannot fetch must be counted, not lost"
+        );
+
+        // 4. And the same file with NO segment element at all. The plan
+        // took that as a slot owing nothing - total 0, remaining 0,
+        // missing 0 - so the census never called it incomplete and the
+        // job finished GREEN with nothing on disk under that name, and
+        // no repair, because nothing was missing.
+        let no_segs = br#"<?xml version="1.0"?>
+<nzb>
+  <file subject="declared but empty" poster="p" date="1">
+    <groups><group>a.b</group></groups>
+    <segments></segments>
+  </file>
+  <file subject="the real one" poster="p" date="1">
+    <groups><group>a.b</group></groups>
+    <segments><segment bytes="700000" number="1">a@b.c</segment></segments>
+  </file>
+</nzb>"#;
+        let nzb = Nzb::parse(no_segs).expect("parses");
+        assert_eq!(nzb.files.len(), 2, "the file is kept, not dropped");
+        assert!(nzb.files[0].segments.is_empty());
+        assert_eq!(
+            nzb.files[0].dropped_segments, 1,
+            "a file that declares no segment at all owes ONE unfetchable one"
+        );
+        assert_eq!(
+            nzb.files[1].dropped_segments, 0,
+            "and a healthy file beside it is untouched"
         );
     }
 
@@ -1160,6 +1292,64 @@ POST]]></segment>
             ..NzbFile::default()
         };
         assert_eq!(g.filename_hint(), Some("some label"));
+    }
+
+    /// Issue #55's exact posting shape: no quotes anywhere, the real
+    /// filename in the clear with a `(part/total)` counter after it.
+    /// The quoted read answers None and the slot was named `fileNNN`,
+    /// the real name discarded - the lenient read is what plan uses.
+    #[test]
+    fn unquoted_subject_filenames_are_recovered() {
+        for (subject, want) in [
+            // The reporter's track and its per-track PAR2 set.
+            (
+                "10-Track Name-8c63a701.flac (1/0)",
+                Some("10-Track Name-8c63a701.flac"),
+            ),
+            (
+                "01-Other One-ea8f7cf8.flac.par2 (1/0)",
+                Some("01-Other One-ea8f7cf8.flac.par2"),
+            ),
+            (
+                "01-Other One-ea8f7cf8.flac.vol00+01.par2 (1/0)",
+                Some("01-Other One-ea8f7cf8.flac.vol00+01.par2"),
+            ),
+            // The yEnc marker ends the name; index tags strip.
+            ("release.part01.rar yEnc (1/2)", Some("release.part01.rar")),
+            ("[01/30] - foo.rar (1/5)", Some("foo.rar")),
+            // Prose subjects must NOT read as filenames: no extension,
+            // or a trailing year where an extension would be.
+            ("Great Album Name yEnc (1/15)", None),
+            ("Movie Title 2026 (1/3)", None),
+            ("Movie.2026 (1/3)", None),
+            ("(1/0)", None),
+            ("", None),
+        ] {
+            assert_eq!(unquoted_filename(subject), want, "subject: {subject:?}");
+        }
+        // A quoted name still wins over anything unquoted beside it,
+        // and the lenient method is quoted-first.
+        let f = NzbFile {
+            subject: r#"decoy.flac - "real.part1.rar" yEnc (1/2)"#.to_string(),
+            ..NzbFile::default()
+        };
+        assert_eq!(f.filename_hint_lenient(), Some("real.part1.rar"));
+        let g = NzbFile {
+            subject: "10-Track Name-8c63a701.flac (1/0)".to_string(),
+            ..NzbFile::default()
+        };
+        assert_eq!(g.filename_hint(), None, "the quoted read stays narrow");
+        assert_eq!(
+            g.filename_hint_lenient(),
+            Some("10-Track Name-8c63a701.flac")
+        );
+        // ...and kind() still classifies the unquoted PAR2 subjects off
+        // the raw-subject fallback, exactly as before this existed.
+        let p = NzbFile {
+            subject: "01-Other One-ea8f7cf8.flac.vol00+01.par2 (1/0)".to_string(),
+            ..NzbFile::default()
+        };
+        assert_eq!(p.kind(), FileKind::Par2Volume);
     }
 
     /// A hostile .nzb can name its volumes anything. `u64::MAX` parses,

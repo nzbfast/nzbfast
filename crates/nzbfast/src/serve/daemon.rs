@@ -1,11 +1,21 @@
 use super::*;
 use tracing::{debug, error, info, warn};
 
-// The index-handle discipline and the M34 size cap - a second `impl Daemon`,
-// moved out bodily (TODO 106). A child module, so it keeps the private
-// fields and the private reader types in scope.
+// The index-handle discipline, the read-connection pool behind it, and
+// the M34 size cap - a second `impl Daemon`, moved out bodily (TODO
+// 106). A child module, so it keeps `Daemon`'s private fields in scope.
+// The pool's own types went with it (TODO 106 again, 25 Aug 2026): they
+// exist for `index_read_acquire`, which is in there, and nothing else
+// in the tree names `Reader`, `IndexReader` or `IndexReadState` - so
+// moving them tightens their visibility instead of widening it, which
+// is the opposite of what a sibling module would have cost.
 #[path = "daemon_index.rs"]
 mod daemon_index;
+// `Daemon`'s own field is typed on this, and `startup.rs` and
+// `testutil.rs` construct it by name, so the pool type keeps the
+// reach it had inline.
+#[cfg(feature = "indexer")]
+pub use daemon_index::IndexReadPool;
 
 // The whole `enqueue` add path, moved out bodily (TODO 106). Same
 // child-module shape as daemon_index for the same reason.
@@ -36,12 +46,63 @@ mod daemon_usage;
 // the top (TODO 106). Same child-module shape.
 #[path = "daemon_idle.rs"]
 mod daemon_idle;
+// How fast the line is running, what it costs in CPU, and what ceiling
+// is imposed on it - the measured rate, the imposed cap, and the AIMD
+// governor that picks its own (TODO 106). Same child-module shape as
+// daemon_index. The governor is a free function, so it and its four
+// constants are re-exported and tasks.rs and tests_index.rs still name
+// them unqualified.
+#[path = "daemon_speed.rs"]
+mod daemon_speed;
+pub(in crate::serve) use daemon_speed::{AUTO_SPEED_TARGET_MS, auto_speed_step};
+// Split from the line above rather than folded into it: production
+// reads only the target and the step, and the three BOUNDS are read
+// only by the arithmetic pin in tests_index.rs. A single re-export is
+// three `unused_imports` in every non-test build, which `-D warnings`
+// makes fatal - so the split is the gate's answer, not a preference.
+#[cfg(test)]
+pub(in crate::serve) use daemon_speed::{AUTO_SPEED_FLOOR, AUTO_SPEED_MAX, AUTO_SPEED_START};
+
+// Which category a job is, and which directory it lands in - the
+// offered set and its defaults, the per-category overrides, and the
+// path routing that reads them (TODO 106). Same child-module shape as
+// daemon_index. `CatMeta` and `DEFAULT_CATS` are named from elsewhere
+// in serve, so those two are re-exported and every call site still
+// spells them exactly as it did inline.
+#[path = "daemon_cats.rs"]
+mod daemon_cats;
+pub(in crate::serve) use daemon_cats::{CatMeta, DEFAULT_CATS};
+
 // How a job stops running - failure report, sidecar abort, delete
 // quarantine, park into history, idle and give-up: one subject, moved
 // whole (TODO 106).
 #[path = "daemon_park.rs"]
 mod daemon_park;
-pub(in crate::serve) use daemon_park::SidecarTailGuard;
+pub(in crate::serve) use daemon_park::{CustodyBatch, SidecarTailGuard};
+
+// Which of the user's indexer accounts a background lane speaks to -
+// the scoreboard's and the confirm lane's reference resolution, the
+// display state of that verdict, and the request-per-day cost of a
+// sample (TODO 106). Same child-module shape as daemon_index.
+#[path = "daemon_indexref.rs"]
+mod daemon_indexref;
+
+// May a background index pass run right now, and how does it say why
+// not - the per-source stand-down reasons, the sentence the log prints,
+// and the job counter both reasons read (TODO 106). Same child-module
+// shape as daemon_index. No cfg on the module: `begin_index_job` is on
+// the download path, so the `indexer` gates stay per-item.
+#[path = "daemon_indexgate.rs"]
+mod daemon_indexgate;
+
+// Winding down the RUNNING TRANSFER without ending the job - the pause
+// button, the *arr remote, the scheduler and the slow-disk hold all
+// land here, and the job stays in the queue and resumes from the
+// article journal (TODO 106). Same child-module shape as daemon_index.
+// Distinct from both neighbours below: daemon_park is how a job stops
+// for good, daemon_shutdown is how the DAEMON stops.
+#[path = "daemon_suspend.rs"]
+mod daemon_suspend;
 
 // How the daemon stops - the graceful wind-down under mode=shutdown and
 // SIGTERM/SIGINT - and the pause timer that stops it temporarily, with
@@ -61,110 +122,6 @@ pub(in crate::serve) use daemon_shutdown::*;
 mod searchlog;
 #[cfg(feature = "indexer")]
 pub use searchlog::*;
-
-/// How many index reads may be in flight at once.
-///
-/// The point is the gap between this and the HTTP worker count (8): a
-/// query surface that has gone slow can occupy at most this many
-/// workers, so `/`, `mode=version`, the queue and the *arr endpoints
-/// keep answering out of the remainder no matter what the index is
-/// doing. WAL readers run concurrently, so these are real parallelism
-/// as well as a ceiling - the single shared read connection they
-/// replace serialized every query handler behind whichever one was
-/// slowest.
-#[cfg(feature = "indexer")]
-pub(super) const INDEX_READ_CONNS: usize = 4;
-
-/// How long a request may wait for a free read connection before it is
-/// told the index is busy.
-///
-/// A healthy read against this database is sub-millisecond, so this is
-/// two orders of magnitude of headroom for an ordinary burst - and a
-/// hard promise that a saturated index costs an HTTP worker a tenth of
-/// a second rather than however long the slowest query runs.
-#[cfg(feature = "indexer")]
-pub(super) const INDEX_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// The read-only connection pool behind [`Daemon::with_index_read`].
-///
-/// Deliberately hand-rolled rather than a channel: `drop_index_read`
-/// has to invalidate connections that are LENT OUT right now (index_wipe
-/// deletes the file under them), which the generation stamp does without
-/// waiting for their queries to end.
-#[cfg(feature = "indexer")]
-#[derive(Default)]
-pub struct IndexReadPool {
-    inner: Mutex<IndexReadState>,
-    /// Signalled every time a connection is handed back.
-    handed_back: std::sync::Condvar,
-}
-
-#[cfg(feature = "indexer")]
-#[derive(Default)]
-struct IndexReadState {
-    /// Open connections nobody is using.
-    idle: Vec<nzbkit::index::Index>,
-    /// How many exist at all - idle plus lent out. The ceiling is
-    /// [`INDEX_READ_CONNS`].
-    live: usize,
-    /// Bumped by `drop_index_read`. A connection handed back carrying an
-    /// older stamp is closed instead of pooled, so a handle opened
-    /// against a since-deleted database can never be served from again.
-    generation: u64,
-}
-
-/// A borrowed read-only connection, returned to the pool on drop - including
-/// on the unwind out of a panicking handler, which is why this is a guard and
-/// not a matched pair of calls. A leaked connection would shrink the pool by
-/// one permanently, and four panics would close the read path for good.
-#[cfg(feature = "indexer")]
-pub(super) struct IndexReader<'a> {
-    pool: &'a IndexReadPool,
-    /// `Some` until dropped.
-    conn: Option<nzbkit::index::Index>,
-    generation: u64,
-}
-
-#[cfg(feature = "indexer")]
-impl std::ops::Deref for IndexReader<'_> {
-    type Target = nzbkit::index::Index;
-    fn deref(&self) -> &Self::Target {
-        // Some until Drop runs, and Drop is the only thing that takes it.
-        self.conn.as_ref().expect("reader used after drop")
-    }
-}
-
-#[cfg(feature = "indexer")]
-impl Drop for IndexReader<'_> {
-    fn drop(&mut self) {
-        let Some(conn) = self.conn.take() else { return };
-        let mut st = self.pool.inner.lock_ok();
-        if self.generation == st.generation {
-            st.idle.push(conn);
-        } else {
-            // Retired mid-query. Closing it here is what keeps `live`
-            // honest; the drop happens under the lock, which is a
-            // sqlite3_close on an idle connection.
-            st.live = st.live.saturating_sub(1);
-            drop(conn);
-        }
-        drop(st);
-        self.pool.handed_back.notify_one();
-    }
-}
-
-/// What [`Daemon::index_read_acquire`] could do for the caller.
-#[cfg(feature = "indexer")]
-enum Reader<'a> {
-    Got(IndexReader<'a>),
-    /// Every connection is in use and none came free in time. The caller
-    /// must NOT fall back to the read-write handle: parking on that mutex
-    /// is the exact failure this path exists to prevent.
-    Busy,
-    /// No read-only connection could be opened at all (no database file
-    /// yet). Startup-shaped, and the caller falls back to `with_index`.
-    Unavailable,
-}
 
 /// RAII claim on "a connection ladder is running".
 ///
@@ -212,45 +169,6 @@ pub struct LadderLive {
     /// time without trusting its own clock against the daemon's.
     pub started: u64,
     pub done: bool,
-}
-
-/// §129 2b (decision 5): one category's real behavior. Stored in
-/// settings.json under `cat_meta` as `{name: {dir, priority, script}}`;
-/// every field defaults to "as before".
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(super) struct CatMeta {
-    /// Subfolder of the download root this category lands in (may
-    /// nest, "tv/anime"). Empty = a subfolder named after the
-    /// category. Absolute destinations stay the mover's job
-    /// (`move_completed_cats`).
-    #[serde(default)]
-    pub dir: String,
-    /// Default priority for adds that did not name one (-100). None =
-    /// no default. SAB range: -1 low, 0 normal, 1 high, 2 force.
-    #[serde(default)]
-    pub priority: Option<i32>,
-    /// Post-processing script for this category; empty = the global
-    /// script setting. A job-level `script=` param still wins.
-    #[serde(default)]
-    pub script: String,
-    /// TODO 142 / issue #32: does a finished job in this category take
-    /// its name from the .nzb file? `None` = follow the global
-    /// [`rename_from_nzb`](Daemon::rename_from_nzb) switch; `Some` is an
-    /// explicit allow or disallow for this category alone, which is the
-    /// control the reporter asked for. Here rather than in a new
-    /// `rename_from_nzb_cats` string because per-category behaviour
-    /// already has a home: this struct, one editor row, one saved map.
-    #[serde(default)]
-    pub nzb_name: Option<bool>,
-    /// TODO 218: auto-assignment. Comma-separated patterns (regex or
-    /// keyword, Smart Folders rules) matched against the NZB's own
-    /// `<meta type="category">` and its newsgroups when an add names no
-    /// category - SABnzbd's "Indexer Categories / Groups" field, which is
-    /// what a reporter moving over from SAB missed first. Matching an
-    /// NZB's meta category to a category's own NAME needs no pattern at
-    /// all (see [`Daemon::infer_category`]).
-    #[serde(default)]
-    pub groups: String,
 }
 
 pub struct Daemon {
@@ -336,6 +254,11 @@ pub struct Daemon {
     /// pick so it can be said again. Without the latch every park of a
     /// quiet queue would repeat it.
     pub queue_idle_latch: AtomicBool,
+    /// §129 1b(b): the pause flag's last ANNOUNCED value - the edge
+    /// `queue.paused` / `queue.resumed` ride. EVERY writer of `paused`
+    /// owes `announce_pause`; the rules, and why they are survivable,
+    /// are at that function in daemon_shutdown.rs.
+    pub(super) pause_announced: AtomicBool,
     /// §129 4a: post-processing tickets the lane has taken custody of
     /// and not yet parked (running + waiting). `PostprocLane` owns the
     /// increments; the counter lives HERE because `note_queue_idle` has
@@ -375,6 +298,18 @@ pub struct Daemon {
     /// the window before `spawn_core_tasks`), `save_queue_soon` degrades
     /// to the synchronous `save_queue` so nothing is ever left unsaved.
     pub(super) saver_armed: AtomicBool,
+    /// When the last `save_queue` FAILED, in unix seconds - 0 while the
+    /// most recent one landed.
+    ///
+    /// A refused queue save is the one degraded state the daemon can be
+    /// in that nothing on the outside could see: the queue keeps
+    /// working, every add is accepted, and only a log line says that
+    /// none of it will survive a restart. `sab_warnings` reads this so
+    /// the pane every remote app and the dashboard render says so too.
+    /// Set by the failing write and cleared by the next one that lands,
+    /// because the condition it reports is "the queue on disk is stale
+    /// RIGHT NOW" and not "a save failed once".
+    pub(super) save_failed_at: AtomicU64,
     /// §129 4a: the lifecycle webhook dispatcher's inbox. None until
     /// the dispatcher is spawned (boot does it; unit tests that want
     /// deliveries call `hooks::spawn_dispatcher`). Offers are try-sends:
@@ -450,6 +385,20 @@ pub struct Daemon {
     /// purpose - fast networks want "full", shared links want a number,
     /// everyone else wants downloads to win.
     pub(super) move_pace: Mutex<String>,
+    /// §296: publish a job's finished, PAR2-vouched plain files to the
+    /// completed folder as they verify, instead of holding every one of
+    /// them until the last file of the job does ("Publish files as they
+    /// finish").
+    ///
+    /// Default OFF, and not because it is unfinished. It only ever
+    /// engages for a job whose finalize tail will not rename, file or
+    /// sweep anything (see `earlyfile::Daemon::early_publish_dest`), so
+    /// a user who has left auto-rename or TV sort on gets nothing from
+    /// it and would be paying a poll and a second read of every finished
+    /// file for that nothing. Turning it on is a statement that the
+    /// *arr on the other side does the renaming - which is what Sonarr
+    /// and Radarr ask for anyway.
+    pub early_file_publish: std::sync::atomic::AtomicBool,
     /// Output directories chosen but not yet owned by any job record.
     ///
     /// `dir_claim` answers from the queue and history, so a directory
@@ -947,6 +896,23 @@ pub struct Daemon {
     /// pass a minute later, so the ceiling costs latency on a busy hour
     /// and can never lose a download.
     pub watchlist_instant_max: std::sync::atomic::AtomicU32,
+    /// Retention insurance (see [`Job::insurance`]): the disk budget, in
+    /// GB, that deferred rows may fetch payload into ahead of promotion.
+    /// 0 (the default) is the master OFF switch - no row is ever
+    /// stamped, picked or fetched, byte-identical to a daemon without
+    /// the feature. At the cap new insurance fetches are REFUSED, never
+    /// evicted: silently deleting one deferred row's bytes to fetch
+    /// another's would be the daemon deciding which post the user loses.
+    pub insurance_cap_gb: AtomicU64,
+    /// Grab-deferred watchlist mode: a watchlist match is enqueued
+    /// PAUSED (an insurance candidate when the cap above is on) instead
+    /// of downloading immediately, so the user chooses when to unpack
+    /// while the payload is banked against takedowns. Off by default -
+    /// the immediate grab is the watchlist's whole point for most
+    /// people. Upgrade grabs (`promote`) are deliberately NOT deferred:
+    /// they collide with the completed original and ride the duplicate
+    /// hold machinery, which must never mix with insurance.
+    pub watchlist_deferred: AtomicBool,
     /// §74: when the instant path last woke the pass, newest last,
     /// trimmed to the last hour - the window `watchlist_instant_max`
     /// applies over.
@@ -1144,6 +1110,22 @@ pub struct Daemon {
     /// worse than no step. Cleared when a run starts, so a stale cancel
     /// cannot kill the next one.
     pub ladder_cancel: std::sync::atomic::AtomicBool,
+    /// §303 grab-time preview: finished verdicts keyed by post identity
+    /// (`spare::post_ids().identity()` - the same "is this the same
+    /// post" question §295 answers, folded to one u64), with the unix
+    /// time each probe ran. This is the preview's WHOLE re-ask budget:
+    /// there is no queue row for `MAX_PROBES` to hang on, so a fresh
+    /// entry answers without a provider round trip, and only an entry
+    /// past `RECHECK_AFTER_SECS` is probed again (a post that was
+    /// mid-propagation has usually landed by then - the prober's own
+    /// recheck reasoning). Bounded; the handler evicts from the front.
+    pub(crate) preview_cache: Mutex<Vec<(u64, i64, Value)>>,
+    /// One preview probe at a time, daemon-wide. A probe opens its own
+    /// connection per server, so N dialog files racing would open N
+    /// fleets of them; the loser answers "busy" and the dialog says it
+    /// could not check, which is the degrade-to-unknown contract. Held
+    /// via an RAII guard in `api/queue/preview.rs`, never bare.
+    pub(crate) preview_busy: std::sync::atomic::AtomicBool,
     /// Tint the media chip by video codec, and the archive-shape chip by
     /// what it took to unpack. Two switches rather than one because they
     /// answer different questions - "what is this file" and "what did
@@ -1221,6 +1203,18 @@ pub struct Daemon {
     /// Manual stop. Clearing the group list was the only way to halt
     /// indexing before, which meant losing the selection to get it back.
     pub(super) index_paused: std::sync::atomic::AtomicBool,
+    /// Manual stop for the METADATA lanes only - the wall enricher, the
+    /// person-photo fetcher and the ratings refresher, everything that
+    /// puts names and artwork on rows the scan already holds.
+    ///
+    /// Separate from [`Self::index_paused`] because the two stop
+    /// different spends. Pausing the index stops NNTP header traffic on
+    /// the provider account; this stops outbound HTTP to TMDB, TVmaze,
+    /// Wikidata, MusicBrainz and friends, which is what someone on a
+    /// metered link or behind a watchful firewall actually wants off.
+    /// Before it existed the only switch that reached these lanes was
+    /// `index_enabled`, which takes the whole feature away.
+    pub(super) enrich_paused: std::sync::atomic::AtomicBool,
     /// The built-in indexer's master switch, OFF by default.
     ///
     /// Pause is a "not right now"; this is a "not at all". Off means the
@@ -1485,10 +1479,24 @@ pub struct Daemon {
     /// makes mid-job billing idempotent against the end-of-job call.
     /// Cleared by the runner at every job start, beside `pool_live`.
     pub(super) run_usage_flushed: Mutex<std::collections::HashMap<String, u64>>,
-    /// Timed pause ("pause for N minutes"): auto-resume deadline. Any
-    /// manual pause/resume bumps pause_gen, cancelling the pending timer.
+    /// Timed pause ("pause for N minutes"): auto-resume deadline, and
+    /// the ONLY thing that decides whether the timer fires. Every
+    /// pause/resume writer clears or replaces it under this mutex (see
+    /// `set_paused_cancel_timer`), so a cancelled or re-armed timer is
+    /// cancelled or re-armed for the one worker that reads it - there is
+    /// no second copy to go stale.
     pub(super) pause_until: Mutex<Option<Instant>>,
-    pub(super) pause_gen: AtomicU64,
+    /// Wakes the auto-resume worker when the deadline above is replaced
+    /// or cleared. Paired with `pause_until`'s mutex: every writer of
+    /// that deadline notifies this, so a re-arm reprograms the sleeping
+    /// worker instead of stacking another one behind it.
+    pub(super) pause_wake: std::sync::Condvar,
+    /// Whether an auto-resume worker is running. Read and written ONLY
+    /// under the `pause_until` lock, which is what makes "the worker
+    /// retires" and "an arm reprograms it" mutually exclusive: the
+    /// worker clears this on its way out under the same lock an armer
+    /// sets it under, so exactly one of the two happens.
+    pub(super) pause_timer_live: std::sync::atomic::AtomicBool,
     // --- M16 settings UI: live-tunable knobs. Each is read at its point
     // of use (per job / per loop tick / per request), so a change from
     // the dashboard takes effect without a restart. Changes are also
@@ -2013,28 +2021,6 @@ pub use daemon_index::shrink_shortfall_reason;
 #[cfg(all(test, feature = "indexer"))]
 pub use daemon_index::{assemble_protected, watch_item_keys};
 
-/// Is this a moment a VACUUM may run in? The engine's `compact()` doc
-/// puts the burden on the caller: it exclusive-locks and rewrites the
-/// whole file, so anything else touching the database waits it out.
-/// Split out from the loop so the "defer while busy, fire when idle"
-/// rule is testable on its own.
-#[cfg(feature = "indexer")]
-#[derive(Debug, PartialEq, Eq)]
-pub enum CompactVerdict {
-    /// Nothing to do - no prune has asked for it.
-    NotNeeded,
-    /// A scan pass or a download is in flight; wait.
-    Busy(&'static str),
-    /// VACUUM wants up to twice the database size in temp space and this
-    /// runs on NAS boxes with 8 GB of headroom. Stay deferred rather
-    /// than half-rewrite the file onto a full volume.
-    NoRoom {
-        need: u64,
-        free: u64,
-    },
-    Go,
-}
-
 /// What one eviction attempt did. Every variant except `Ran` means
 /// nothing was deleted.
 #[cfg(feature = "indexer")]
@@ -2088,181 +2074,27 @@ pub(super) fn wall_tip_body(
     })
 }
 
-/// How often the compact watcher looks for a foreground job. The whole
-/// point is that a download does not visibly stall, so this is the worst
-/// case the user could see - it wants to be well under the moment it
-/// takes them to notice, and it costs one relaxed atomic load per tick.
+// WHEN INDEX MAINTENANCE MAY RUN lives in daemon_maint.rs - the two
+// "is this a moment for it" predicates, the VACUUM disk-space verdict,
+// and the arm/abort rendezvous that stands down a statement already
+// executing. One subject asked at three ranges, moved whole by the size
+// gate on the daemon_evict.rs precedent above. Re-exported so every
+// existing `daemon::` / `super::` path still resolves here.
+#[path = "daemon_maint.rs"]
+mod daemon_maint;
 #[cfg(feature = "indexer")]
-pub(super) const COMPACT_ABORT_POLL_MS: u64 = 100;
-
-/// §95: how much of the freelist one `compact_chunk` reclaims, in pages.
-///
-/// This is the worst case a download can wait for the compactor, so it
-/// is the whole quality of the feature: the loop checks for a job
-/// between chunks, and a chunk cannot be cut short.
-///
-/// 2048 pages is 8 MB at the default 4 KB page size. Measured by
-/// `nzbkit/tests/integration/compact_abort_latency.rs` on a 1.16 GB index: 66
-/// chunks, worst single chunk 169 ms, and across a sweep of arrival
-/// offsets the worst a job actually waited was 113 ms - against 4061 ms
-/// for the VACUUM path it replaces, which also failed to stop at all
-/// for 3 of 9 arrivals. Same order as the COMPACT_ABORT_POLL_MS the old
-/// design already accepted, and far below the moment a user notices.
-///
-/// Chunk cost grows with the FILE, not with this number alone: the same
-/// 2048 pages took 67 ms on a 103 MB index and 169 ms on a 1.16 GB one,
-/// because the pages being moved are scattered further apart. So this
-/// bound is soft at the top end - halve it if a really large index ever
-/// makes the wait visible.
-///
-/// Smaller is not free: each chunk is its own write transaction and
-/// truncate. At this size the whole chunked pass costs ~40% more than
-/// the single VACUUM did (5991 ms vs 4218 ms on that 1.16 GB index),
-/// which is the right trade for idle work that is now both abortable
-/// and resumable.
+pub(in crate::serve) use daemon_maint::{
+    COMPACT_CHUNK_PAGES, MaintenanceArm, abort_compact_when_job_starts,
+};
 #[cfg(feature = "indexer")]
-pub(super) const COMPACT_CHUNK_PAGES: u32 = 2048;
-
-/// The rendezvous between a maintenance statement and the watcher that
-/// may need to abort it (Codex sweep 3 Aug M5).
-///
-/// An interrupt handle is per CONNECTION, not per statement, so handing
-/// the watcher a handle taken during an EARLIER `with_index` call was
-/// two bugs at once: a job starting before the maintenance closure
-/// reacquired the index mutex interrupted whatever unrelated writer
-/// held it in the gap (that write rolled back for nothing), and the
-/// maintenance then began anyway, with the job now active and the
-/// watcher already retired - the multi-minute stall the whole mechanism
-/// exists to prevent.
-///
-/// Both sides go through this one mutex, so exactly one of them wins:
-/// either the statement arms first (and the watcher's interrupt lands
-/// on it and nothing else), or the watcher stands the statement down
-/// first (and it never runs).
-#[cfg(feature = "indexer")]
-#[derive(Default)]
-pub(super) struct MaintenanceArm {
-    inner: Mutex<MaintenanceArmState>,
-}
-
-#[cfg(feature = "indexer")]
-#[derive(Default)]
-struct MaintenanceArmState {
-    handle: Option<nzbkit::index::InterruptHandle>,
-    stood_down: bool,
-}
-
-#[cfg(feature = "indexer")]
-impl MaintenanceArm {
-    /// Called from the blocking task while it HOLDS the index guard,
-    /// immediately before the statement. `false` means a job appeared
-    /// first and the statement must not run at all.
-    pub(super) fn arm(&self, handle: nzbkit::index::InterruptHandle) -> bool {
-        let mut st = self.inner.lock_ok();
-        if st.stood_down {
-            return false;
-        }
-        st.handle = Some(handle);
-        true
-    }
-
-    /// Called from the blocking task once the statement has returned,
-    /// still holding the guard: a later interrupt must not land on
-    /// whatever this connection does next.
-    pub(super) fn disarm(&self) {
-        self.inner.lock_ok().handle = None;
-    }
-
-    /// Called from the watcher when a download starts. Interrupts the
-    /// armed statement if there is one, and in every case makes a
-    /// not-yet-armed statement stand down.
-    pub(super) fn abort(&self) {
-        let mut st = self.inner.lock_ok();
-        st.stood_down = true;
-        if let Some(h) = st.handle.take() {
-            h.interrupt();
-        }
-    }
-}
-
-/// Watch for a download starting while a VACUUM is in flight, and abort
-/// the rewrite when one does. Returns true if it aborted.
-///
-/// `compact_verdict` asks whether a download is running BEFORE the
-/// rewrite begins, and there is nothing it can do about a job that
-/// arrives one moment later - by then the rewrite holds the gate that
-/// the download worker blocks on, so the job sits in `Downloading` with
-/// no progress and no log line for as long as the rewrite lasts. This is
-/// the other half of that check: the same question, asked continuously,
-/// with an answer that can still act.
-///
-/// `abort` is a closure rather than the interrupt handle itself so this
-/// can be tested without a database - and so the caller keeps the
-/// decision about WHICH connection it is entitled to interrupt.
-#[cfg(feature = "indexer")]
-pub(super) async fn abort_compact_when_job_starts(
-    jobs: Arc<AtomicUsize>,
-    done: Arc<AtomicBool>,
-    abort: impl Fn(),
-) -> bool {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(COMPACT_ABORT_POLL_MS)).await;
-        // Checked first: once the rewrite is over there is no statement
-        // to interrupt, and interrupting is per-connection - a late
-        // abort would hit whatever the index is doing next.
-        if done.load(Ordering::Acquire) {
-            return false;
-        }
-        if jobs.load(Ordering::Acquire) > 0 {
-            abort();
-            return true;
-        }
-    }
-}
-
-/// `needs_scratch` is the FullRewrite path: only a VACUUM writes a
-/// second copy of the database beside the original. §95's chunked path
-/// moves pages down inside the file it already has and truncates, so
-/// asking a nearly-full volume for twice the file would defer it
-/// forever - on exactly the small NAS volumes where reclaiming the space
-/// matters most, and where `compact_pending` being sticky means the
-/// deferral is silent and permanent.
-#[cfg(feature = "indexer")]
-pub fn compact_verdict(
-    pending: bool,
-    scanning: bool,
-    downloading: bool,
-    db_bytes: u64,
-    free: Option<u64>,
-    needs_scratch: bool,
-) -> CompactVerdict {
-    if !pending {
-        return CompactVerdict::NotNeeded;
-    }
-    if downloading {
-        return CompactVerdict::Busy("a download is running");
-    }
-    if scanning {
-        return CompactVerdict::Busy("a scan pass is running");
-    }
-    if !needs_scratch {
-        // Chunked: each chunk commits and shortens the file, so the
-        // high-water mark is the file itself. Nothing to reserve.
-        return CompactVerdict::Go;
-    }
-    // SQLite writes the rebuilt database beside the original and only
-    // then swaps, so peak usage is ~2x. The 64 MB on top covers the
-    // journal and keeps a nearly-full volume from being taken to zero.
-    let need = db_bytes.saturating_mul(2).saturating_add(64 << 20);
-    match free {
-        // free_bytes answering None means we could not measure the
-        // volume at all. Proceeding blind is how the min-free guard
-        // once filled the disk it was protecting; stay deferred.
-        None => CompactVerdict::NoRoom { need, free: 0 },
-        Some(f) if f < need => CompactVerdict::NoRoom { need, free: f },
-        Some(_) => CompactVerdict::Go,
-    }
-}
+pub use daemon_maint::{CompactVerdict, compact_verdict};
+// COMPACT_ABORT_POLL_MS has no reader outside its own module in a
+// production build - only `serve::tests_index` reaches it, through
+// serve's `use daemon::*` - so re-exporting it unconditionally is an
+// unused import, and this crate builds with `-D warnings`. Same shape,
+// and the same reason, as the daemon_evict and daemon_index pairs above.
+#[cfg(all(test, feature = "indexer"))]
+pub(in crate::serve) use daemon_maint::COMPACT_ABORT_POLL_MS;
 
 /// RAII half of [`Daemon::bench_begin`]: holds the single-flight latch
 /// for one system-benchmark run and releases it on drop, so a panic in
@@ -2296,245 +2128,6 @@ impl Daemon {
     pub fn record_unlock_password(&self, site: &str, poster: &str, pw: &str) {
         let path = self.password_file.lock_ok().clone();
         crate::smart::record_password_assoc(&path, site, poster, pw);
-    }
-
-    /// Why indexing is standing down, or None if it should run. A reason
-    /// rather than a bool so the UI can say WHICH it is - an index that
-    /// has quietly stopped growing is otherwise a mystery, and the two
-    /// causes need opposite actions from the user.
-    ///
-    /// The download half counts jobs in flight, NOT `started_at`: job
-    /// N's tail overlaps job N+1's network phase, so `started_at` goes
-    /// None between queued jobs while the pipeline is still busy.
-    #[cfg(feature = "indexer")]
-    pub(super) fn indexing_pause_reason(&self) -> Option<&'static str> {
-        // Offline outranks everything: it is a promise that this machine
-        // is touching no provider, and a scan is provider traffic. The
-        // tip watcher already drops and QUITs its held sessions on any
-        // reason here, which is most of what going offline has to do.
-        if self.offline.load(Ordering::Relaxed) {
-            return Some("offline");
-        }
-        // The master switch outranks pause, and reads differently in the
-        // UI: "paused" invites a Resume button, "off" does not - the
-        // whole feature is hidden while this one holds.
-        if !self.index_enabled.load(Ordering::Relaxed) {
-            return Some("off");
-        }
-        if self.index_paused.load(Ordering::Relaxed) {
-            return Some("paused");
-        }
-        if self.index_pause_on_download.load(Ordering::Relaxed)
-            && self.index_jobs_active.load(Ordering::Acquire) > 0
-        {
-            return Some("downloading");
-        }
-        // A QUEUED job outranks background scans exactly as a running
-        // one does. Measured 2026-08-05: four adds sat 38 s before the
-        // runner could pick the first - `index_jobs_active` only rises
-        // AFTER pick, so the scanners' whole 100 ms stand-down
-        // machinery was blind to work the runner had not reached yet.
-        if self.index_pause_on_download.load(Ordering::Relaxed) && self.queue_has_runnable() {
-            return Some("downloading");
-        }
-        None
-    }
-
-    /// The same question for the spot leg. Everything after the master
-    /// switch is shared with indexing - a paused index means "stop
-    /// scanning", and a download outranks every background scan
-    /// regardless of which source it feeds - but the switches are
-    /// independent, so "off" is asked separately.
-    #[cfg(feature = "indexer")]
-    pub(super) fn spot_pause_reason(&self) -> Option<&'static str> {
-        if self.offline.load(Ordering::Relaxed) {
-            return Some("offline");
-        }
-        if !self.spot_enabled.load(Ordering::Relaxed) {
-            return Some("off");
-        }
-        if self.index_paused.load(Ordering::Relaxed) {
-            return Some("paused");
-        }
-        if self.index_pause_on_download.load(Ordering::Relaxed)
-            && self.index_jobs_active.load(Ordering::Acquire) > 0
-        {
-            return Some("downloading");
-        }
-        // A QUEUED job outranks background scans exactly as a running
-        // one does. Measured 2026-08-05: four adds sat 38 s before the
-        // runner could pick the first - `index_jobs_active` only rises
-        // AFTER pick, so the scanners' whole 100 ms stand-down
-        // machinery was blind to work the runner had not reached yet.
-        if self.index_pause_on_download.load(Ordering::Relaxed) && self.queue_has_runnable() {
-            return Some("downloading");
-        }
-        None
-    }
-
-    /// The reason words above, in the words a log reader needs.
-    ///
-    /// The background legs used to print one fixed sentence, "paused for
-    /// foreground job", whichever reason had actually fired. On 11 Aug
-    /// 2026 that sentence was the entire record of a scan loop that had
-    /// been standing down for fourteen hours because the daemon was
-    /// OFFLINE: the log said a download had the line, the queue was
-    /// empty, and the two could not be reconciled without reading the
-    /// source. A stand-down that names the wrong cause is worse than one
-    /// that names none.
-    #[cfg(feature = "indexer")]
-    pub(super) fn pause_phrase(reason: &str) -> &'static str {
-        match reason {
-            "offline" => "the daemon is offline",
-            "off" => "the switch is off",
-            "paused" => "indexing is paused",
-            "downloading" => "a download is running",
-            _ => "standing down",
-        }
-    }
-
-    /// True when some queue entry is ready for the runner (Queued and
-    /// not paused; deferred counts - the runner picks deferred work
-    /// when nothing else is runnable, so it still wants the threads).
-    /// Deliberately cheap and approximate: this feeds the scanners'
-    /// 100 ms stand-down polls, which need "is a download imminent",
-    /// not the runner's full pick logic.
-    #[cfg(feature = "indexer")]
-    pub(super) fn queue_has_runnable(&self) -> bool {
-        self.queue.lock_ok().iter().any(|j| {
-            let g = j.lock_ok();
-            g.state == JobState::Queued && !g.paused
-        })
-    }
-
-    /// Does anything want the index database open? The file backs both
-    /// sources, so it is created and held for as long as EITHER switch
-    /// is on - and with both off it is never opened, never created on a
-    /// fresh install, exactly as when indexing was the only source.
-    ///
-    /// Answers no once the daemon is [`exiting`](Self::exiting),
-    /// whatever the switches say: the wind-down closes the database, and
-    /// a lazy reopen behind it would undo that.
-    #[cfg(feature = "indexer")]
-    pub(super) fn index_db_wanted(&self) -> bool {
-        if self.exiting.load(Ordering::Relaxed) {
-            return false;
-        }
-        self.index_enabled.load(Ordering::Relaxed) || self.spot_enabled.load(Ordering::Relaxed)
-    }
-
-    /// How many of the user's indexer accounts are configured and on.
-    /// The posture question the UI asks in several places: with none of
-    /// these there is nothing to search but the local index, and with one
-    /// or more the local index is the optional extra.
-    pub fn enabled_indexers(&self) -> usize {
-        self.indexers.lock_ok().iter().filter(|i| i.enabled).count()
-    }
-
-    /// The parity scoreboard's effective reference: `(url, apikey)`.
-    ///
-    /// When `scoreboard_source` names one of the user's indexer
-    /// accounts, that entry's saved URL and key are used - resolved
-    /// here, at call time, so a key rotation or URL edit in the indexer
-    /// editor carries over without the scoreboard noticing. A named
-    /// entry that is missing (renamed, deleted) or turned off is an
-    /// error, not a silent fall-through to the manual pair: a disabled
-    /// account must not keep receiving traffic. With no name stored,
-    /// the manual `scoreboard_url`/`scoreboard_key` pair is the
-    /// reference, as before.
-    #[cfg(feature = "indexer")]
-    pub(super) fn scoreboard_reference(&self) -> Result<(String, String), String> {
-        let source = self.scoreboard_source.lock_ok().trim().to_string();
-        if !source.is_empty() {
-            let list = self.indexers.lock_ok();
-            let Some(i) = list.iter().find(|i| i.name == source) else {
-                return Err(format!(
-                    "the reference indexer \"{source}\" is no longer in your indexer list - pick another"
-                ));
-            };
-            if !i.enabled {
-                return Err(format!(
-                    "the reference indexer \"{source}\" is turned off in your indexer list"
-                ));
-            }
-            return Ok((i.url.clone(), i.apikey.clone()));
-        }
-        let url = self.scoreboard_url.lock_ok().trim().to_string();
-        if url.is_empty() {
-            return Err(
-                "no reference indexer configured - pick one of your indexer accounts or paste a newznab URL and API key"
-                    .to_string(),
-            );
-        }
-        let key = self.scoreboard_key.lock_ok().clone().unwrap_or_default();
-        Ok((url, key))
-    }
-
-    /// The indexer account the confirm lane searches, resolved by name
-    /// at call time (a rotated key carries over). Unlike the
-    /// scoreboard there is no manual URL+key fallback: this lane
-    /// FETCHES NZBs, which most indexers meter as grabs, so it only
-    /// ever runs against an account the user manages in the indexer
-    /// editor where those quotas are visible.
-    #[cfg(feature = "indexer")]
-    pub(super) fn corr_confirm_reference(&self) -> Result<crate::newznab::IndexerConfig, String> {
-        let source = self.corr_confirm_source.lock_ok().trim().to_string();
-        if source.is_empty() {
-            return Err(
-                "no confirm indexer configured - pick one of your indexer accounts".to_string(),
-            );
-        }
-        let list = self.indexers.lock_ok();
-        let Some(i) = list.iter().find(|i| i.name == source) else {
-            return Err(format!(
-                "the confirm indexer \"{source}\" is no longer in your indexer list - pick another"
-            ));
-        };
-        if !i.enabled {
-            return Err(format!(
-                "the confirm indexer \"{source}\" is turned off in your indexer list"
-            ));
-        }
-        Ok(i.clone())
-    }
-
-    /// [`Self::corr_confirm_reference`]'s verdict as a display state
-    /// for the stats card, mirroring its rule (exists AND enabled) the
-    /// way `source_ok` mirrors `scoreboard_reference`. Four distinct
-    /// states because each wants a different fix from the user: the
-    /// picker deliberately keeps a vanished account listed, so without
-    /// this the card reads "0 of 24 checks used" while every worker
-    /// tick is refused.
-    #[cfg(feature = "indexer")]
-    pub(super) fn corr_confirm_source_state(&self) -> &'static str {
-        let source = self.corr_confirm_source.lock_ok().trim().to_string();
-        if source.is_empty() {
-            return "none";
-        }
-        match self.indexers.lock_ok().iter().find(|i| i.name == source) {
-            None => "missing",
-            Some(i) if !i.enabled => "disabled",
-            Some(_) => "ok",
-        }
-    }
-
-    /// The categories today's sample will actually ask for, in
-    /// [`SCOREBOARD_CATEGORIES`] order. One request each, so the length
-    /// of this IS the scoreboard's requests-per-day figure.
-    ///
-    /// The stored list can only ever SHRINK this: it is filtered
-    /// against the built-in set rather than read as one, so no stored
-    /// value - not a hand-edited settings.json, not a stale entry from
-    /// a future version - can add a category, and the empty default
-    /// means "all of them", the most this ever asks for.
-    #[cfg(feature = "indexer")]
-    pub(super) fn scoreboard_categories(&self) -> Vec<(u32, &'static str)> {
-        let picked = self.scoreboard_cats.lock_ok().clone();
-        SCOREBOARD_CATEGORIES
-            .iter()
-            .copied()
-            .filter(|(_, label)| picked.is_empty() || picked.iter().any(|p| p == label))
-            .collect()
     }
 
     /// May the watchlist spend the user's indexer accounts? See
@@ -2622,57 +2215,6 @@ impl Daemon {
         true
     }
 
-    /// Safe to run heavy index maintenance (prune, reseed, compact) right
-    /// now? Two separate questions that one pause predicate cannot answer.
-    /// Indexing must be enabled - that is user preference - AND no
-    /// download may be in flight, which is a hard constraint REGARDLESS of
-    /// the pause preference: with "pause while downloading" switched off,
-    /// `indexing_pause_reason()` is None during a job, so gating on it
-    /// alone let a prune run straight through somebody's download.
-    #[cfg(feature = "indexer")]
-    pub(super) fn index_maintenance_ok(&self) -> bool {
-        self.indexing_pause_reason().is_none()
-            && self.index_jobs_active.load(Ordering::Acquire) == 0
-    }
-
-    /// May maintenance of the SHARED index database run right now
-    /// (sweep 8, L12, and its policy half)?
-    ///
-    /// [`index_maintenance_ok`] is the wrong predicate for anything the
-    /// database owns jointly, and wrong in the exact configuration the
-    /// finding is about: it goes through [`indexing_pause_reason`],
-    /// which answers `Some("off")` whenever `index_enabled` is false -
-    /// which is what a Spot-only install IS. Gating on it would leave
-    /// the work permanently paused there, which is the state the
-    /// finding describes, so the suggested fix would have changed
-    /// nothing. That trap is why this is a separate predicate rather
-    /// than a tweak to the one above; the tests in
-    /// `tasks/picker_index_tests.rs` pin the correction as well as the
-    /// fix.
-    ///
-    /// The database is shared: [`index_db_wanted`] keeps it for EITHER
-    /// source, both sources write releases into the same tables, and
-    /// every reader - browse, wall, newznab, the picker - reads it the
-    /// same way whichever filled it. So the gate is "some scan source
-    /// is live and nothing is downloading" - if either pause predicate
-    /// is clear then this machine is not offline, not paused and not
-    /// standing down for a job, because both carry all three of those.
-    ///
-    /// Named for the DATABASE, not the picker, since 22 Aug 2026: the
-    /// retention reap, the planner-statistics refresh and the shatter
-    /// fold are on it too. They are properties of the rows, and a
-    /// spot-promoted release row is the same row a scanned one is.
-    ///
-    /// [`index_maintenance_ok`]: Daemon::index_maintenance_ok
-    /// [`indexing_pause_reason`]: Daemon::indexing_pause_reason
-    /// [`index_db_wanted`]: Daemon::index_db_wanted
-    #[cfg(feature = "indexer")]
-    pub(super) fn db_maintenance_ok(&self) -> bool {
-        self.index_db_wanted()
-            && self.index_jobs_active.load(Ordering::Acquire) == 0
-            && (self.indexing_pause_reason().is_none() || self.spot_pause_reason().is_none())
-    }
-
     /// Should the pre feed be connected right now?
     ///
     /// Two switches, both required. Its own, because it is an outbound
@@ -2683,24 +2225,6 @@ impl Daemon {
     #[cfg(feature = "indexer")]
     pub(super) fn predb_feed_on(&self) -> bool {
         self.predb_enabled.load(Ordering::Relaxed) && self.index_enabled.load(Ordering::Relaxed)
-    }
-
-    /// May the indexer-confirm lane spend an attempt right now?
-    ///
-    /// Two switches, both required - the same rule as the pre feed.
-    /// The lane settles CORRELATION suggestions, and the dashboard
-    /// presents it as a child of the correlation switch: with
-    /// correlation off, the confirm controls grey out. The worker has
-    /// to honour that hierarchy too, or it keeps spending the user's
-    /// indexer quota (up to CONFIRM_PER_DAY lookups a day) on a lane
-    /// the UI says is off and will not let them reach. Requiring both
-    /// flags here, rather than having the correlation setter clear
-    /// this one, keeps the user's confirm preference across a parent
-    /// off/on cycle.
-    #[cfg(feature = "indexer")]
-    pub(super) fn corr_confirm_on(&self) -> bool {
-        self.predb_corr_enabled.load(Ordering::Relaxed)
-            && self.corr_confirm_enabled.load(Ordering::Relaxed)
     }
 
     /// Record what the feed is doing, for the settings card.
@@ -2762,63 +2286,6 @@ impl Daemon {
                 .map(str::to_string)
                 .collect(),
         }
-    }
-
-    pub(super) fn begin_index_job(self: &Arc<Self>) -> IndexJobGuard {
-        let prev = self.index_jobs_active.fetch_add(1, Ordering::AcqRel);
-        // Phase marker on the 0 -> 1 edge only (tails overlap the next
-        // job, so the counter can sit above 1 for a while), and only
-        // when the yield-to-downloads setting actually pauses anything.
-        if prev == 0
-            && self.index_pause_on_download.load(Ordering::Relaxed)
-            && self.index_enabled.load(Ordering::Relaxed)
-        {
-            self.note_event("indexer", "indexing set aside while downloads run");
-        }
-        IndexJobGuard(self.index_jobs_active.clone(), Arc::downgrade(self))
-    }
-
-    /// Route every manual/scheduled cap change through here so the
-    /// governor's ceiling stays in sync.
-    pub(super) fn set_speed_ceiling(&self, bps: u64) {
-        self.set_speed_ceiling_from(bps, "user");
-    }
-
-    /// As [`Self::set_speed_ceiling`], recording WHO chose the number.
-    /// A cap a schedule entry applied was presented as the operator's
-    /// own setting, so an unexpected 4 MB/s at 08:00 looked like a bug
-    /// in the limiter rather than the schedule doing its job.
-    pub(super) fn set_speed_ceiling_from(&self, bps: u64, src: &'static str) {
-        // Marker on change only: startup re-applies the persisted cap
-        // through here, and re-applying the number already in force is
-        // not a change anyone made. The auto-speed governor's AIMD
-        // steps deliberately bypass this method, so they cannot flood
-        // the ring either.
-        let old = self.speed_ceiling.swap(bps, Ordering::Relaxed);
-        if old != bps {
-            let who = match src {
-                "schedule" => " by the schedule",
-                "api" => " by an API client",
-                _ => "",
-            };
-            let detail = if bps == 0 {
-                format!("speed limit removed{who}")
-            } else {
-                format!("speed limit set to {:.1} MB/s{who}", bps as f64 / 1e6)
-            };
-            self.note_event("limit", detail);
-        }
-        *self.limit_source.lock_ok() = src;
-        // The cap and its source ride the revisioned queue payload, and
-        // the two paths that reach here without going through
-        // `apply_and_save` - a schedule entry firing, and the SAB
-        // facade's speedlimit - would otherwise leave every open
-        // dashboard showing the old number until something else moved
-        // the revision. Safe to bump on every call: the auto-speed
-        // governor's per-second AIMD steps bypass this method (see
-        // above), so there is no hot path behind it.
-        self.queue_rev.fetch_add(1, Ordering::Relaxed);
-        self.hub.rate.set(bps);
     }
 
     /// The watch-failed strip rides the revisioned queue payload, so
@@ -2921,49 +2388,6 @@ impl Daemon {
 /// unattended, which is a lot of someone's block account spent on a
 /// title that is evidently not out there.
 pub(super) const FAILURE_REGRAB_MAX: u8 = 3;
-
-/// The categories every install offers before anyone configures one.
-///
-/// These are the *arr family's own out-of-the-box values - Sonarr `tv`,
-/// Radarr `movies`, Lidarr `music`, Readarr `books` - so a default
-/// install of any of them passes its connection test against a default
-/// install of ours. `*` is SABnzbd's "no category" entry and must stay
-/// first. Categories cost nothing until a job uses one: the directory is
-/// created at download time, not here.
-pub(super) const DEFAULT_CATS: &[&str] = &["*", "tv", "movies", "music", "books"];
-
-pub(super) const AUTO_SPEED_TARGET_MS: u64 = 60;
-pub(super) const AUTO_SPEED_FLOOR: u64 = 512_000;
-pub(super) const AUTO_SPEED_START: u64 = 8_000_000;
-pub(super) const AUTO_SPEED_MAX: u64 = 10_000_000_000;
-
-/// M14g3: one 1 Hz auto-speed control step (LEDBAT-flavoured AIMD).
-/// `delay_ms` is smoothed RTT minus the base (uncongested) RTT - the
-/// queueing delay OUR traffic is inflicting on the household. Above
-/// target: multiplicative backoff (yield fast when someone starts a call
-/// or a game). Well below target: additive-ish climb to soak spare
-/// capacity. Never below the floor (downloads always trickle), never
-/// above the user/schedule ceiling.
-pub(super) fn auto_speed_step(delay_ms: u64, target_ms: u64, cap: u64, ceiling: u64) -> u64 {
-    let max = if ceiling == 0 {
-        AUTO_SPEED_MAX
-    } else {
-        ceiling
-    };
-    let cap = if cap == 0 {
-        AUTO_SPEED_START.min(max)
-    } else {
-        cap
-    };
-    let new = if delay_ms > target_ms {
-        (cap as f64 * 0.8) as u64
-    } else if delay_ms < target_ms / 2 {
-        (cap as f64 * 1.10) as u64 + 250_000
-    } else {
-        cap
-    };
-    new.clamp(AUTO_SPEED_FLOOR.min(max), max)
-}
 
 impl Daemon {
     /// Where the newsgroup catalogue cache lives: next to the index db,
@@ -3075,54 +2499,6 @@ impl Daemon {
         set
     }
 
-    /// The categories offered to clients, `*` excluded, as the comma list
-    /// the `categories` setting round-trips.
-    pub(super) fn cat_list(&self) -> String {
-        self.cats
-            .lock_ok()
-            .iter()
-            .filter(|c| *c != "*")
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    /// Remember a category, and write it through to settings the first
-    /// time it is seen.
-    ///
-    /// The list used to live only in memory, rebuilt at startup from the
-    /// categories still present in `queue.json` - so a category survived
-    /// exactly as long as a job carrying it stayed in history, and a
-    /// fresh install offered nothing but the built-ins. Sonarr and Radarr
-    /// validate their configured category against this list and refuse to
-    /// connect when it is absent, so a user whose category was anything
-    /// other than a built-in met "Category does not exist" before they
-    /// could add the first job that would have registered it.
-    pub(super) fn register_cat(&self, cat: &str) {
-        if cat.is_empty() || cat == "*" {
-            return;
-        }
-        if !self.cats.lock_ok().insert(cat.to_string()) {
-            return;
-        }
-        // ADDITIVE, because this is a first-seen registration and the
-        // list it appends to is not this worker's to replace. The old
-        // code took `cat_list()` after dropping the lock and wrote that
-        // snapshot whole, so two workers registering different new
-        // categories could interleave: B wrote {a,b}, then A overwrote
-        // it with {a}. Live memory still held both, so nothing looked
-        // wrong until a restart - and then category B was simply gone,
-        // and an *arr configured against it failed its category test.
-        //
-        // Merging inside the settings critical section makes the write
-        // order stop mattering: whatever else has landed on disk stays.
-        let mine = self.cat_list();
-        update_settings(&self.settings_path, |map| {
-            let on_disk = map.get("categories").and_then(Value::as_str).unwrap_or("");
-            map.insert("categories".into(), json!(merge_cat_list(on_disk, &mine)));
-        });
-    }
-
     /// M29: everything a wall verdict needs - the availability-ledger
     /// snapshot plus the user's enabled backbones. None when the ledger
     /// is still empty or no server is enabled (verdicts all null).
@@ -3201,10 +2577,10 @@ impl Daemon {
         password: Option<&str>,
         depth: u8,
         origin: &str,
-        allow_dupe: bool,
+        exempt: DupeExempt<'_>,
     ) -> Result<Enqueued> {
-        let mut e = self.enqueue(
-            &f.bytes, name, category, priority, pp, password, origin, allow_dupe,
+        let mut e = self.enqueue_as(
+            None, &f.bytes, name, category, priority, pp, password, origin, exempt, None,
         )?;
         let mut stamped = false;
         if !f.failure_link.is_empty() {
@@ -3228,161 +2604,6 @@ impl Daemon {
             e.durable = self.save_queue();
         }
         Ok(e)
-    }
-
-    /// Who, if anyone, already owns `p`. The claim rule `choose_out_dir`
-    /// runs, shared by the enqueue path and by a retry that has to move a
-    /// TV-filed job off the shared season folder.
-    ///
-    /// Takes no job lock it does not release, and must never be called
-    /// while holding one belonging to a job that is still in the queue or
-    /// history - it locks every job in both.
-    pub(super) fn dir_claim(&self, p: &std::path::Path) -> DirClaim {
-        // Reserved but not yet recorded: a recategorize picked this
-        // folder and is moving a payload into it. No record names it
-        // yet, so the queue/history scan below cannot see it.
-        if self.reserved.lock_ok().contains(p) {
-            return DirClaim::Active;
-        }
-        let active = {
-            let q = self.queue.lock_ok();
-            q.iter().any(|j| j.lock_ok().out_dir == *p)
-        } || self.history.lock_ok().iter().any(|j| {
-            let g = j.lock_ok();
-            g.out_dir == *p && !matches!(g.state, JobState::Completed | JobState::Failed)
-        });
-        if active {
-            return DirClaim::Active;
-        }
-        let completed = self.history.lock_ok().iter().any(|j| {
-            let g = j.lock_ok();
-            g.out_dir == *p && g.state == JobState::Completed
-        });
-        // Only while the files are actually there: a result the user
-        // deleted, or that `move_completed` relocated, must release the
-        // name, or every re-add of a popular release would climb .2,
-        // .3, .4 forever.
-        if completed && p.exists() {
-            DirClaim::Payload
-        } else {
-            DirClaim::Free
-        }
-    }
-
-    /// The directory a category's jobs are placed UNDER - the download
-    /// root for an empty category, and otherwise the category's own
-    /// subfolder.
-    ///
-    /// §129 2b: a category can rename that subfolder (SAB's relative
-    /// "Folder"). Sanitized per component so "tv/anime" nests and
-    /// nothing escapes the download root; the default stays the
-    /// category's own name, exactly as before.
-    ///
-    /// Split out because `finalize_names` needs the SAME answer and was
-    /// recomputing it as `out_dir().join(category)` from the raw name -
-    /// which silently re-parented every renamed payload out of the
-    /// folder the user configured, whenever the two disagreed.
-    pub(super) fn cat_dir(&self, category: &str) -> PathBuf {
-        if category.is_empty() {
-            return self.out_dir();
-        }
-        let sub = self
-            .cat_meta
-            .lock_ok()
-            .get(category)
-            .map(|m| m.dir.clone())
-            .unwrap_or_default();
-        if sub.is_empty() {
-            return self.out_dir().join(category);
-        }
-        let mut p = self.out_dir();
-        for c in sub
-            .split(['/', '\\'])
-            .filter(|c| !c.is_empty() && *c != "." && *c != "..")
-        {
-            p = p.join(nzbkit::disk::sanitize_filename(c));
-        }
-        p
-    }
-
-    /// The canonical (pre-collision) output directory for a name+category.
-    pub(super) fn base_out_dir(&self, category: &str, dir_stem: &str) -> PathBuf {
-        self.cat_dir(category).join(dir_stem)
-    }
-
-    /// All-core CPU% (0-100) from the process cpu-time delta since the
-    /// previous call. One getrusage/task_info per call, no sampling
-    /// thread; sub-500 ms re-polls (a second open dashboard, or the
-    /// stats poll landing beside the whyslow ticker) reuse the last
-    /// reading instead of amplifying noise. Shared sample state - both
-    /// consumers reading through here is what keeps them agreeing.
-    pub(super) fn cpu_pct(&self) -> f64 {
-        let now = Instant::now();
-        let cpu = nzbkit::mem::cpu_time_secs().unwrap_or(0.0);
-        let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
-        let mut prev = self.cpu_sample.lock_ok();
-        match *prev {
-            Some((t0, _, last)) if now.duration_since(t0).as_secs_f64() < 0.5 => last,
-            Some((t0, c0, _)) => {
-                let wall = now.duration_since(t0).as_secs_f64();
-                let pct = ((cpu - c0) / wall / ncpu * 100.0).clamp(0.0, 100.0);
-                *prev = Some((now, cpu, pct));
-                pct
-            }
-            None => {
-                *prev = Some((now, cpu, 0.0));
-                0.0
-            }
-        }
-    }
-
-    /// Live download speed (bytes/sec) over a ~5 s rolling window of
-    /// decoded-byte samples (also feeds queue_json's kbpersec).
-    pub(super) fn current_speed_bps(&self) -> f64 {
-        // The whole line: the active job's bytes plus whatever the
-        // previous job is still draining behind it (the cross-job
-        // hand-over), otherwise the figure dips at every queue boundary
-        // while the line is in fact full.
-        let drain = self
-            .drain_dl
-            .lock_ok()
-            .as_ref()
-            .map_or(0, |s| s.progress.load(Ordering::Relaxed));
-        let done = self.progress.load(Ordering::Relaxed).saturating_add(drain);
-        let active = self.started_at.lock_ok().is_some();
-        let mut win = self.speed_win.lock_ok();
-        if !active {
-            win.clear();
-            return 0.0;
-        }
-        let now = Instant::now();
-        if win.back().is_some_and(|&(_, b)| done < b) {
-            win.clear();
-        }
-        win.push_back((now, done));
-        while win
-            .front()
-            .is_some_and(|&(t, _)| now.duration_since(t).as_secs_f64() > 5.0)
-        {
-            win.pop_front();
-        }
-        // Drop the leading no-progress samples: at download start the
-        // window otherwise spans the TLS/connect handshakes, and the
-        // first shown figures are bytes divided by dead time - a rate
-        // that climbs to the truth over five seconds and reads as a slow
-        // ramp-up the line never had. Measured from the first byte that
-        // moved, the first figure is the real one. Steady state is
-        // untouched: consecutive one-second samples always differ while
-        // bytes flow.
-        while win.len() >= 2 && win[0].1 == win[1].1 {
-            win.pop_front();
-        }
-        match (win.front(), win.back()) {
-            (Some(&(t0, b0)), Some(&(t1, b1))) if t1.duration_since(t0).as_secs_f64() > 0.25 => {
-                (b1 - b0) as f64 / t1.duration_since(t0).as_secs_f64()
-            }
-            _ => 0.0,
-        }
     }
 
     /// §129 4c: has this install EVER had a download? The dashboard's
@@ -3432,6 +2653,16 @@ impl Daemon {
             // it is what stops a job whose payload and spooled .nzb have
             // already been unlinked from running one more time.
             if g.paused || g.tombstone || g.state != JobState::Queued {
+                continue;
+            }
+            // Codex F-06: a job whose destination is published but whose
+            // earlier progress is still being merged into it. SKIPPED
+            // rather than refused at the start: `start_next` re-reads
+            // the fence in the critical section that flips the state,
+            // and that arm can only answer "pick again" - so without
+            // this the runner would spin on the same fenced job for the
+            // whole of a large move instead of running the next one.
+            if g.relocating > 0 {
                 continue;
             }
             if queue_paused && g.priority < 2 {
@@ -3613,156 +2844,6 @@ impl Daemon {
                 "finalizing" | "unlocking" | "identifying" | "renaming" | "scripting" | "indexwait",
             ) => Some("Moving"),
             _ => None,
-        }
-    }
-
-    /// Fire the pause signal once. `hard` = the immediate abort (drop
-    /// in-flight reads, they re-download on resume); otherwise the graceful
-    /// drain (admit no new work, let in-flight finish and journal).
-    pub(super) fn fire_pause(&self, hard: bool) {
-        if hard {
-            if let Some(f) = self.hub.abort.lock_ok().as_ref() {
-                f.store(true, Ordering::Relaxed);
-            }
-            if let Some(c) = self.hub.queue_ctl.lock_ok().as_ref() {
-                c.abort();
-            }
-        } else if let Some(c) = self.hub.queue_ctl.lock_ok().as_ref() {
-            c.drain();
-        }
-    }
-
-    /// Pause the active download. `graceful` winds it down - no new
-    /// articles admitted, everything in flight finishes and journals, so a
-    /// resume re-fetches only the unstarted queue. `graceful = false` is
-    /// the immediate abort (frees the line at once; in-flight re-downloads).
-    pub(super) fn suspend_active(self: &Arc<Self>, graceful: bool) {
-        self.suspend_matching(graceful, |_| true)
-    }
-
-    /// Wind down the running transfer, but only for jobs `want` accepts.
-    ///
-    /// M23e: pause means PAUSE. Abort the active transfer (Force jobs
-    /// are exempt, SAB semantics) after marking it suspended - the tail
-    /// handler re-queues it instead of failing it, and the article
-    /// journal makes the eventual resume fetch only what's still
-    /// missing. Bytes already on disk are never re-downloaded.
-    ///
-    /// Pausing ONE job used to set `g.paused` and stop there: the flag
-    /// only takes effect when a job next enters the queue, so pausing the
-    /// item that was actually downloading left it transferring at full
-    /// speed while both API facades answered success and kept reporting
-    /// it as Downloading. Only the global pause was wired to the
-    /// wind-down machinery. The daemon runs one job at a time, so
-    /// scoping that machinery by predicate is all a per-job pause needs.
-    pub(super) fn suspend_matching(self: &Arc<Self>, graceful: bool, want: impl Fn(&Job) -> bool) {
-        let mut paused: Vec<String> = Vec::new();
-        for j in self.queue.lock_ok().iter() {
-            let mut g = j.lock_ok();
-            if !want(&g) {
-                continue;
-            }
-            // A job in its post-network tail has no transfer left to wind
-            // down, and marking it suspended did real damage: it read
-            // "Paused" in every client while its repair and unpack
-            // carried on, and the tail-completion arm treats
-            // `suspended && res.is_err()` as "the user paused this" and
-            // puts the job back in the QUEUE - so a pause-all issued
-            // during an unpack turned that unpack's failure into a
-            // silent re-queue, with no history record and no failure
-            // notification. `state == Downloading` cannot tell the two
-            // apart on its own; the pipeline's phase word can - for the
-            // whole tail, hand-off window included, which is why every
-            // token past the network has an arm in `tail_phase`.
-            if g.state == JobState::Downloading
-                && g.priority < 2
-                && !g.tombstone
-                && self.tail_phase(&g.nzo_id).is_none()
-            {
-                g.suspended = true;
-                paused.push(g.nzo_id.clone());
-                info!(
-                    target: "pause",
-                    "{} {} - resumes from the journal",
-                    if graceful {
-                        "winding down"
-                    } else {
-                        "suspending"
-                    },
-                    g.nzo_id
-                );
-            }
-        }
-        // The wind-down machinery is global - it signals whichever job
-        // owns the hub - so pausing ONE job may only drive it when that
-        // job is the owner. `state == Downloading` is not that test (see
-        // `owns_hub`): pausing job N during its post-network tail drained
-        // job N+1 instead, and N+1's own tail reads N+1's `suspended`
-        // (false), so it was never re-queued - it just failed. The
-        // re-fire loop below made it worse by firing every 250 ms for up
-        // to 60 s and escalating to a hard abort at ~10 s, so a job
-        // started after a quick resume could be killed too. Every matched
-        // job is still marked suspended above; only the SIGNAL is scoped.
-        // The ownership re-check inside the loop is what stops the next
-        // owner inheriting this pause.
-        //
-        // Note `active_stream` is published before the hub handles are
-        // installed, so the "signal landed in the gap" race the loop
-        // exists for is unaffected: ownership is already true while
-        // fire_pause is still a no-op, and the loop keeps retrying.
-        let owner_paused =
-            |d: &Arc<Self>, ids: &[String]| d.owns_hub(|id| ids.iter().any(|s| s == id));
-        if !paused.is_empty() {
-            // The pipeline installs its hub abort/queue-ctl handles
-            // asynchronously after launch (the same race stop_sidecar
-            // re-fires around): a single signal can land in the gap
-            // before QueueControl attaches and no-op, leaving the
-            // transfer running while the job reads as suspended.
-            // Re-fire until the tail handler actually parks it. First
-            // shot goes out inline so the transfer is already stopping
-            // by the time the pause API call returns.
-            if owner_paused(self, &paused) {
-                self.fire_pause(!graceful);
-            }
-            // A job that handed the hub over but is still draining behind
-            // the new one holds its own stop handles in the drain slot,
-            // and they are the ONLY way to wind it down. Aimed by id, so
-            // the successor is never touched.
-            self.fire_drain(!graceful, |id| paused.iter().any(|s| s == id));
-            let d = self.clone();
-            std::thread::spawn(move || {
-                for i in 0..240 {
-                    let live = d.queue.lock_ok().iter().any(|j| {
-                        let g = j.lock_ok();
-                        g.suspended
-                            && g.state == JobState::Downloading
-                            && !g.tombstone
-                            && paused.iter().any(|s| *s == g.nzo_id)
-                    });
-                    if !live {
-                        return;
-                    }
-                    // Ownership can change under us - job N+1 takes the
-                    // hub while N's tail runs - so re-check every pass
-                    // rather than inheriting the pause onto whoever is
-                    // downloading now.
-                    if !d.owns_hub(|id| paused.iter().any(|s| s == id)) {
-                        // Not the hub's - but it may be the job draining
-                        // behind it, whose handles are in the drain slot.
-                        // Same escalation, same aim-by-id.
-                        d.fire_drain(!graceful || i >= 40, |id| paused.iter().any(|s| s == id));
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                        continue;
-                    }
-                    // A graceful pause lets in-flight articles finish, but
-                    // not forever: after ~10 s escalate to a hard abort so
-                    // one pathological article can't stall the pause (what
-                    // already drained is journaled, so nothing extra is
-                    // lost by then aborting the stragglers).
-                    d.fire_pause(!graceful || i >= 40);
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
-            });
         }
     }
 }

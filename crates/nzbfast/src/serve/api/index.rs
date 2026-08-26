@@ -634,6 +634,42 @@ fn m_debug_hold_index_read(
     })
 }
 
+/// Run a query with no end on a pooled read connection, so a test can
+/// prove what TODO 300's budget does to one.
+///
+/// The third of these fixtures and the only one that is actually inside
+/// SQLite. `debug_hold_index_read` above SLEEPS on a borrowed
+/// connection, which is the right shape for "the pool is occupied" and
+/// the wrong one here: a progress callback runs between VM
+/// instructions, so a sleeping handler is not something a budget can
+/// interrupt, and a test built on it would pass against a daemon that
+/// had lost the mechanism entirely.
+fn m_debug_slow_index_read(
+    d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    _params: &std::collections::HashMap<String, String>,
+    _ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    Some({
+        let started = std::time::Instant::now();
+        match d.index_read_checked(|ix| {
+            // Discarded on purpose: this is the `.ok()` every query
+            // endpoint does, and the whole point of the trip stamp is
+            // that it survives the flattening.
+            let _ = ix.debug_endless_query();
+            Some(true)
+        }) {
+            Ok(_) => json!({"status": true, "ran": true, "ms": started.elapsed().as_millis()}),
+            Err(why) => json!({
+                "status": false, "busy": true,
+                "error": why.message(),
+                "ms": started.elapsed().as_millis(),
+            }),
+        }
+    })
+}
+
 /// Arm the read-pool fault injector: the next `value` pooled index
 /// reads succeed, every read after that reports the pool busy.
 ///
@@ -1382,6 +1418,21 @@ fn m_wall2(
                 // the seed; the next wall poll re-offers the
                 // same cards.
                 //
+                // That last clause overstates this seed's role
+                // and is kept only because it is true of the
+                // view where the seed RUNS. The DEFAULT wall is
+                // matched-only, which puts `t.checked > 0 AND
+                // t.poster != ''` in `browse_cards`' WHERE
+                // (`nzbkit::index::cards`), so every card it
+                // returns is already enriched, `seeds` is empty
+                // and the try_lock below is never attempted at
+                // all - measured over 360 consecutive polls on
+                // 22 Aug 2026, empty on every one. What seeds
+                // fresh posts in that view is the tip watcher's
+                // `seed_missing_titles(2, 200)`. This path is
+                // reached by the show-unmatched view and by a
+                // `key=`-scoped fetch.
+                //
                 // ONE transaction for the whole page, not one
                 // autocommit INSERT per card. Winning that
                 // try_lock does not win the SQLite WRITE lock,
@@ -1987,6 +2038,9 @@ pub(in crate::serve) fn dispatch(
         "debug_index_read_busy" if std::env::var_os("NZBFAST_DEBUG_HOOKS").is_some() => {
             return m_debug_index_read_busy(d, _req, params, ctx, _api_body);
         }
+        "debug_slow_index_read" if std::env::var_os("NZBFAST_DEBUG_HOOKS").is_some() => {
+            return m_debug_slow_index_read(d, _req, params, ctx, _api_body);
+        }
         "debug_hold_index_read" if std::env::var_os("NZBFAST_DEBUG_HOOKS").is_some() => {
             return m_debug_hold_index_read(d, _req, params, ctx, _api_body);
         }
@@ -2142,7 +2196,6 @@ mod add_matching_tests {
             host_hdr: "",
             base: "",
             ua_hdr: "",
-            key_q: "",
             bootstrap_apikey: false,
             via_add_only: false,
         };

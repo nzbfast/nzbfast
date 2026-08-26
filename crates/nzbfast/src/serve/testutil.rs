@@ -22,10 +22,39 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
     let _ = std::fs::create_dir_all(&out_root);
     let _ = std::fs::create_dir_all(&spool);
     let config = dir.join("nzbfast.toml");
+    // SEEDED, and it has to be BEFORE the literal below. `Config::load`
+    // answers a MISSING file by going and finding a SABnzbd install's ini
+    // through `sabnzbd_ini_path`, which searches `$HOME` - so a fixture
+    // that leaves this path empty is not testing the daemon, it is
+    // testing the machine. This fleet has SABnzbd installed from the
+    // competitive benchmarking and a CI runner does not, which is how the
+    // same test gave opposite answers on two consecutive days (f63b6a3af,
+    // e0f94fc60) and took `linux-tests`, `unit-one-process` and
+    // `windows-unit` red on main for ninety minutes.
+    //
+    // The metered guard on the alternate-spend doors is only the loudest
+    // reader. `crates/nzbfast/src/serve` reaches that fallback from
+    // thirty-four places - servers, sabcompat, logscrub, report,
+    // groupscan, sidecar, tasks, tuner, health, indexer, locallink,
+    // settings, daemon and nine api/ handlers - and
+    // `seed_tmdb_key(&settings_path, &config)` two dozen lines below is an
+    // ARGUMENT of the `Daemon` literal, so it reads this file as the
+    // Daemon is built. A write placed after the literal would be a write
+    // that construction never sees, which is why `tools/host-config-gate.py`
+    // checks the ORDER as well as the write.
+    //
+    // A test that wants a different server list writes its own over this
+    // one - `flat_rate_config` below, or the block-account config
+    // `a_block_account_refuses_an_unlimited_hunt` writes.
+    let _ = std::fs::write(
+        &config,
+        r#"{"servers":[{"host":"flat.example","enabled":true}]}"#,
+    );
     let settings_path = dir.join("settings.json");
     Arc::new(Daemon {
         hub: Arc::new(crate::StreamHub::default()),
         paused: std::sync::atomic::AtomicBool::new(false),
+        early_file_publish: std::sync::atomic::AtomicBool::new(false),
         offline: std::sync::atomic::AtomicBool::new(false),
         paused_by_offline: std::sync::atomic::AtomicBool::new(false),
         exiting: std::sync::atomic::AtomicBool::new(false),
@@ -38,11 +67,13 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         life_seq: AtomicU64::new(0),
         life_events: Mutex::new(VecDeque::new()),
         queue_idle_latch: AtomicBool::new(true),
+        pause_announced: AtomicBool::new(false),
         postproc_backlog: Arc::new(AtomicUsize::new(0)),
         finish: Default::default(),
         save_soon: AtomicBool::new(false),
         save_wake: tokio::sync::Notify::new(),
         saver_armed: AtomicBool::new(false),
+        save_failed_at: AtomicU64::new(0),
         hooks_tx: Mutex::new(None),
         history_keep_count: AtomicU64::new(0),
         history_keep_secs: AtomicU64::new(0),
@@ -146,6 +177,8 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         indexer_rt: Mutex::new(IndexerRuntime::default()),
         watchlist_instant: AtomicBool::new(true),
         watchlist_instant_max: std::sync::atomic::AtomicU32::new(INSTANT_MAX_DEFAULT),
+        insurance_cap_gb: AtomicU64::new(0),
+        watchlist_deferred: AtomicBool::new(false),
         #[cfg(feature = "indexer")]
         instant_kicks: Mutex::new(std::collections::VecDeque::new()),
         #[cfg(feature = "indexer")]
@@ -183,6 +216,8 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         ladder_live: Mutex::new(None),
         ladder_busy: std::sync::atomic::AtomicBool::new(false),
         ladder_cancel: std::sync::atomic::AtomicBool::new(false),
+        preview_cache: Mutex::new(Vec::new()),
+        preview_busy: std::sync::atomic::AtomicBool::new(false),
         media_chip_color: std::sync::atomic::AtomicBool::new(true),
         shape_chip_color: std::sync::atomic::AtomicBool::new(true),
         rename_junk: std::sync::atomic::AtomicBool::new(true),
@@ -193,6 +228,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         index_retention: seed_index_retention(&settings_path),
         index_pause_on_download: seed_index_pause_on_download(&settings_path),
         index_paused: seed_index_paused(&settings_path),
+        enrich_paused: seed_enrich_paused(&settings_path),
         index_enabled: std::sync::atomic::AtomicBool::new(false),
         predb_enabled: seed_predb_enabled(&settings_path),
         predb_server: seed_predb_server(&settings_path),
@@ -257,7 +293,8 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         usage: Mutex::new(Default::default()),
         run_usage_flushed: Mutex::new(Default::default()),
         pause_until: Mutex::new(None),
-        pause_gen: AtomicU64::new(0),
+        pause_wake: std::sync::Condvar::new(),
+        pause_timer_live: std::sync::atomic::AtomicBool::new(false),
         connections: std::sync::atomic::AtomicUsize::new(20),
         window: std::sync::atomic::AtomicUsize::new(64),
         decoders: std::sync::atomic::AtomicUsize::new(2),
@@ -348,4 +385,77 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         #[cfg(feature = "indexer")]
         oracle_bb_cache: Mutex::new(None),
     })
+}
+
+/// Pin a FLAT-RATE server config at `d.cfg_path`, so the metered guard
+/// on the alternate-spend doors has a real answer to read.
+///
+/// EVERY test that drives an automatic (`Trigger::Auto`) alternate down
+/// `alt_admit` or `hunt_budget` needs this, and a test that skips it is
+/// not testing the daemon, it is testing the machine. `Config::load`
+/// falls back to a SABnzbd install's ini when its own file is missing
+/// (its own doc comment says "every bench box here does" have one), so
+/// the guard reads the DEVELOPER'S SABnzbd server list: flat rate,
+/// therefore not metered, therefore the spend is admitted. On a CI
+/// runner there is no SABnzbd, the load fails, and `hunt_metered`
+/// answers TRUE - which is the right way round, an unreadable config
+/// must not authorise unlimited automatic spend (Codex F-10) - so the
+/// same test says the opposite thing. The failure reads as "CI is
+/// broken" and is not.
+///
+/// It has now happened twice, on two different doors, which is why the
+/// helper lives HERE beside `test_daemon` rather than in the test file
+/// that first needed it. f63b6a3af pinned four hunt tests on 24 Aug
+/// 2026 with a copy private to `hunt_tests.rs`; 486a97584 then put the
+/// same ceilings on the SPARE PROMOTION door the next day, and the two
+/// tests of that door - one of them in `daemon_tests/spare_tests.rs`,
+/// which could not see the private copy - took `linux-tests`,
+/// `unit-one-process` and `windows-unit` red on main while every
+/// machine on this fleet stayed green.
+///
+/// Writing the file is what makes the answer the TEST'S, on any host.
+/// Do not drop it back to relying on the fallback, and do not "fix" a
+/// recurrence by loosening `hunt_metered` - the whole point of that
+/// guard is that it fails closed. A test that wants the metered arm
+/// writes its own block-account config over this one, which is what
+/// `a_block_account_refuses_an_unlimited_hunt` and
+/// `unlimited_is_refused_on_a_block_account_only_when_nobody_clicked`
+/// do.
+///
+/// SINCE 26 Aug 2026 `test_daemon` SEEDS THE SAME CONFIG ITSELF, so the
+/// class is removed rather than reported: no fixture built there can reach
+/// the host's file at all, on any door, and `tools/host-config-gate.py`
+/// refuses the seed being taken away again. Calling this helper is now a
+/// statement of intent rather than a repair, and it stays at the sites that
+/// make one - a test about the metered arm should say which server list it
+/// is asserting against. It is still the right thing to call in a fixture
+/// that builds its own `cfg_path` outside `test_daemon`.
+///
+/// THE PROBE, AND HOW FAR IT HAS ACTUALLY BEEN RUN. Point `HOME` at an
+/// empty directory and run the COMPILED bin test binary: that is a CI
+/// runner's answer, reproduced on this Mac. `cargo test` will not do,
+/// because it rebuilds the world against the new `CARGO_HOME`. On
+/// 25 Aug 2026 the probe was widened off the bin binary to the whole
+/// documented CI sweep, 5,030 tests, and the class came back clean, so
+/// the two doors named above are the only fixtures anywhere that were
+/// reading the host's server list. That is the measurement behind
+/// leaving this a fixture rule rather than a gate; a third door is what
+/// would change the answer.
+///
+/// The three `smart::trash_tests` that also fail under the probe are
+/// its own artefact, but NOT for the reason first recorded. Only
+/// `the_volume_trash_takes_over_when_finder_will_not` carries
+/// `cfg(target_os = "macos")`; the other two compile and run on every
+/// target. What excuses all three is the PATH and not a platform gate:
+/// on macOS the trash lands in `$HOME/.Trash`, which the probe has just
+/// taken away, while on Linux they take another branch and pass, which
+/// is what `linux-tests` green on d90f64cb shows. So do NOT read a
+/// trash-test failure on a LINUX box as this same artefact - there it
+/// is a real defect.
+pub(crate) fn flat_rate_config(d: &Daemon) {
+    std::fs::write(
+        &d.cfg_path,
+        r#"{"servers":[{"host":"flat.example","enabled":true}]}"#,
+    )
+    .expect("config");
 }

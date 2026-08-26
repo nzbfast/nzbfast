@@ -431,6 +431,8 @@ fn srv(host: &str, block: Option<u64>) -> nzbkit::config::ServerConfig {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     }
 }
 

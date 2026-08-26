@@ -338,6 +338,17 @@ Journal fort, ohne etwas zu verlieren. (Jobs mit Priorität „Erzwingen“ lade
 wie bei SABnzbd.)</li>
 <li>Ein <b>Update-Banner</b> erscheint hier, wenn eine neue Version verfügbar ist
 (siehe <a href="#updates">Updates</a>).</li>
+<li>Jeder <b>Hintergrundarbeits-Chip</b> zeigt, was nzbfast gerade tut - Indexierung,
+Metadaten-Abfragen, Release-Feed, Verbindungsmessung, Merkliste,
+Listen-Synchronisierung, Verschieben fertiger Dateien, Datenbank-Wartung. Klicken
+Sie einen an, um zu sehen, was Sie tun können: die Vorgänge mit einem Schalter
+pausieren oder abschalten, oder direkt zur Merkliste, zu den Listenquellen oder
+zur Warteschlange springen. Verschieben, Wartung und Listen-Synchronisierung
+laufen von selbst aus und sagen das, statt einen Schalter anzubieten.</li>
+<li>Die <b>Statusanzeige der Warteschlange</b> öffnet sich genauso, mit
+<b>Pause</b> (lässt bereits laufende Artikel zu Ende laden), <b>Sofort
+pausieren</b> (verwirft sie und gibt die Leitung sofort frei) und
+<b>Fortsetzen</b>.</li>
 </ul>
 <h3>Durchsatz</h3>
 <p>Live-MB/s mit laufendem Diagramm; die gestrichelten Wasserzeichen markieren
@@ -374,7 +385,7 @@ beigetragen hat, und eine „Hinzugefügt von“-Zeile, die sagt, woher der Job 
 nzbfast behält eine eigene Kopie, das funktioniert also für jeden Job, auch wenn
 die Originaldatei längst weg ist.</li>
 <li><b>"Warum ist das langsam?"</b> Während ein Job lädt, trägt die Zeile unter seinem Fortschrittsbalken ein Urteil über <em>diesen</em> Job, nicht über die Maschine: <i>Ihre Anbieter sind die Grenze</i>, <i>diese Maschine ist am CPU-Limit</i>, <i>der Speicher kommt nicht mit</i> und so weiter. Ein Klick darauf öffnet die Zeile mit den Belegen: was deine Leitung kann, was die Anbieter geliefert haben, was gerade ankommt, und eine Tabelle pro Server, in der ein gedrosselter Anbieter auf einen Blick zu sehen ist. Ein Job mit voller Geschwindigkeit sagt hier nichts, und ein Job, dessen Urteil noch entsteht, ebenso wenig.</li>
-<li>Badges zeigen Sonderzustände: <i>zurückgestellt (langsam)</i>, <i>Prefetch</i>,
+<li>Badges zeigen Sonderzustände: <i>versucht, zurückgestellt</i>, <i>Prefetch</i>,
 <i>pausiert</i> (siehe <a href="#performance">Performance-Tools</a>).</li>
 <li>Ein Burn-down-Diagramm verfolgt die verbleibenden GB über die ganze
 Warteschlange.</li>
@@ -826,14 +837,6 @@ Docker, Server ohne Bildschirm und NAS-Geräte, wo es überhaupt keinen Schlüss
 gibt, was zwei verschiedene Speicherpfade hinterließe, die korrekt bleiben müssen.
 Ein einziges, gut verstandenes Format, das sich überall gleich verhält, ist vorerst
 der bessere Handel.</p>
-<p>Zwei weitere Optionen pro Server haben noch kein Bedienelement im Dashboard:
-trage sie von Hand beim Eintrag dieses Servers in <code>config.local.json</code> ein
-(siehe <a href="#files">§17</a>) und starte neu.</p>
-<div class="tblwrap"><table>
-<tr><th>Schlüssel</th><th>Hinweise</th></tr>
-<tr><td><code>bind_ip</code></td><td>Bindet die ausgehenden Verbindungen dieses Servers an eine bestimmte lokale Adresse, für Rechner mit mehreren Anbindungen und VPN-Split-Tunnel. Die Adressfamilie wählt zugleich die Zielfamilie: eine v4-Bindung verbindet sich mit der v4-Adresse des Servers.</td></tr>
-<tr><td><code>socks5</code></td><td>Schickt den NNTP-Verkehr dieses Servers über einen SOCKS5-Proxy: <code>host:port</code> oder <code>user:pass@host:port</code>. Der Hostname wird <em>vom Proxy</em> aufgelöst, es gibt also kein lokales DNS-Leck.</td></tr>
-</table></div>
 <ul>
 <li>Das <b>Häkchen</b> neben jedem Server ist sein Ein/Aus-Schalter: gesetzt heißt, der
 Server ist im Download-Pool, nicht gesetzt heißt deaktiviert. Ein deaktivierter Server
@@ -1062,6 +1065,7 @@ stattdessen mit diesen Konten.</div>
 <tr><td>Ingest-Filter</td><td>JSON-Regeln, die filtern, was in den Index kommt: Arten (verschleierter Müll fliegt standardmäßig raus), Jahr/Auflösung/Sprache, Größengrenzen.</td></tr>
 <tr><td>Jetzt scannen / Tiefenscan</td><td>Sofort einen Durchlauf starten; mit einer Tiefe werden so viele aktuelle Header neu gescannt.</td></tr>
 <tr><td>OMDb-Key / Metadaten erneuern / Index löschen</td><td>Anreicherungs-Regler der Wand (<a href="#wall">§6</a>). Löschen baut die Datenbank von Grund auf neu - der Rettungsweg, falls sie je korrumpiert wird.</td></tr>
+<tr><td>Metadaten pausieren</td><td>Holt keine Titel, Poster und Besetzungen mehr von den Metadaten-Seiten (<a href="#wall">§6</a>), während der Scan selbst weiterläuft. Bereits Geholtes geht nicht verloren; während der Pause gefundene Einträge behalten einfach den Namen, unter dem sie gepostet wurden, bis Sie wieder abschalten. Die einzige Einstellung auf dieser Karte, die keinen Usenet-Anbieter berührt.</td></tr>
 <tr><td>Pre-Feed</td><td><b>Aus, bis du ihn einschaltest.</b> Viele Uploads werden ohne ihren Namen veröffentlicht, ein Scan hat dann nichts zu lesen. Öffentliche Relay-Kanäle kündigen den echten Namen an, der einzige offene Weg, solche Posts zuzuordnen. Einschalten hält eine Verbindung zu einem IRC-Netz offen und hört zu: gesendet wird nie etwas, ein Konto wird nicht angelegt. Braucht den Indexer, denn ein Feed ohne Ablage für das Gehörte ist nur ein offenes Socket.</td></tr>
 <tr><td>Relay-Server, Relay-Kanäle</td><td>Das IRC-Netz, das die Ankündigungen trägt (Host oder Host:Port), und die kommagetrennten Kanäle. Eine Änderung greift beim nächsten Verbinden: Feed aus und wieder an, um sie sofort anzuwenden.</td></tr>
 <tr><td>Über Korrelation benennen</td><td>Die öffentlichen Live-Relays führen keine Dateinamen, die meisten verschleierten Posts lassen sich also nicht direkt zuordnen. Was eine Ankündigung festhält, ist der Zeitpunkt und die Größe. Dies vergleicht Ankündigungszeit und -größe mit namenlosen Posts und schlägt bei Passung den echten Namen unter Durchsuchen vor. Ein Vorschlag ist als solcher markiert, braucht deinen Klick und benennt nie Dateien auf der Platte um.</td></tr>
@@ -1168,7 +1172,7 @@ unangetastet weiter, und das Log sagt warum.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (ein automatischer Neuversuch hat einen fehlgeschlagenen Download erneut
-eingereiht), <code>job.switched</code> (ein Auftrag, der nicht fertig werden
+eingereiht), <code>job.requeued</code> (ein Download hat den Verlauf verlassen und ist wieder in die Warteschlange gekommen - ein Neuversuch, oder ein abgespielter Bibliothekseintrag), <code>job.switched</code> (ein Auftrag, der nicht fertig werden
 konnte, wurde durch eine für ihn zurückgehaltene Alternativkopie ersetzt), <code>job.replaced</code> (dasselbe Ergebnis, nur war keine Kopie
 zurückgehalten, also wurde ein Ersatz gesucht und heruntergeladen) und
 <code>job.delete_kept</code> (ein Löschen hat den Eintrag
@@ -1176,8 +1180,9 @@ entfernt, konnte aber dessen Dateien nicht entfernen), dazu
 <code>watch.picked</code> (eine .nzb wurde aus dem Überwachungsordner geholt),
 <code>nzb.refeed</code> (die eigene NZB-Datei eines fertigen Downloads wurde pausiert in die Warteschlange gelegt), <code>watchlist.upgraded</code> (ein Watchlist-Upgrade ist angekommen und die
 ersetzte Kopie wurde entfernt),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> und <code>quota.reached</code>. Jedes trägt
+<code>queue.idle</code>, <code>queue.paused</code> und <code>queue.resumed</code> (die Warteschlange wurde angehalten oder wieder gestartet, von wem oder was auch immer), <code>queue.finished_action</code>
+(die Aktion bei Warteschlangenende wurde scharfgeschaltet, ausgeführt oder abgebrochen), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> und <code>update.available</code> (eine neuere nzbfast-Version wurde gefunden). Jedes trägt
 <code>schema_version</code> (derzeit 1; neue Schlüssel können ohne Erhöhung
 auftauchen - ignoriere, was du nicht kennst), eine monotone <code>seq</code> und
 einen <code>at</code>-Zeitstempel in Millisekunden.</p>
@@ -1540,7 +1545,7 @@ Keys: der <b>API-Key</b> (volle Kontrolle) und der <b>NZB-Key</b> (nur Hinzufüg
 <tr><td>Automatisierung</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnose</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-Auth: beliebiger Benutzer, API-Key als Passwort)</td></tr>
-<tr><td>Vorschau / Wiedergabe</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-Ranges; das Starten eines geparkten Bibliotheks-Jobs braucht ein <code>?t=</code>-Token oder den Key), <code>/m3u/&lt;id&gt;</code> (braucht den Key; stellt das Token aus), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Vorschau / Wiedergabe</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-Ranges; das Starten eines geparkten Bibliotheks-Jobs braucht ein <code>?t=</code>-Token oder den Key), <code>/m3u/&lt;id&gt;</code> (braucht den Key oder das Token des Jobs; stellt das Token aus), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Dateien &amp; Speicherorte</h2>

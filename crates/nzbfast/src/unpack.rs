@@ -269,6 +269,40 @@ pub(crate) fn extract_nested_why(
         .filter(|p| p.parent() == Some(dir) && is_extractable_archive(p))
         .cloned()
         .collect();
+    // The MEMBERSHIP of any split container among them, captured here for
+    // exactly the reason `entry_archives` is: the sweep below has to know
+    // what a head belongs to before anything moves.
+    //
+    // `is_extractable_archive` is a per-PATH question, and a split
+    // container answers it on part 1 only - part 1 carries the signature
+    // (`.7z.001`, or a bare `hash.001`) and parts 2..=n are raw
+    // continuation bytes with nothing to sniff and, in the obfuscated
+    // shape, nothing in the name either. So the sweep listed the head
+    // alone and deleted the head alone, leaving 61 of a 62-part set on
+    // disk beside the payload: bytes that can no longer be retried,
+    // re-extracted or repaired, because the part it just removed is the
+    // one carrying the container's start header. Measured on a plain
+    // split 7z past the holds slice, `research/SEVENZ-PLAIN-HOLDS-2026-08-26.md`
+    // section 4 - the single-file arm of the same round cleaned its
+    // container up in full, which is what this shape was asking for and
+    // not getting. Sibling of TODO 299/301 and of `container_part_set`'s
+    // own header, which is this defect read from the other end (a sweep
+    // that spared the head and deleted the payload behind it).
+    //
+    // The grammar is the extractor's own - gapless from 1, one file per
+    // index, one numbering width, uniform part sizes, a head on part 1
+    // and on none of the others - rather than a second opinion about the
+    // same files. Asked only where the sweep can fire; depth 0 never
+    // deletes, so it never pays the scan.
+    let entry_split_sets: Vec<Vec<PathBuf>> = if depth == 0 {
+        Vec::new()
+    } else {
+        crate::splitjoin::collect_container_split_sets(dir)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.parts)
+            .collect()
+    };
     let mut refused: Vec<PathBuf> = Vec::new();
     let top = extract_one_level_at(dir, password, depth, true, &mut refused, why)?;
     if top == Some(NestOutcome::Failed) {
@@ -336,11 +370,38 @@ pub(crate) fn extract_nested_why(
             return;
         }
         let stem = stems.into_iter().next().unwrap_or_default();
+        // A head that is part 1 of a split container takes the rest of
+        // its set with it. Expanded HERE - after the refusal filter and
+        // after the stem count - and not into `entry_archives` itself,
+        // so neither of those judgements changes: a refused head expands
+        // to nothing, and "how many release sets were here" still counts
+        // sets rather than parts.
+        //
+        // That ordering is load-bearing rather than tidy, and it is
+        // measured: `release_stem` cuts a numbered tail only when it sits
+        // behind a container extension, so `set.7z.001` and `set.7z.002`
+        // both read `set.7z` while `hash.001` and `hash.002` read
+        // themselves. Expanded into `entry_archives` instead, the
+        // obfuscated shape would present three stems where the extractor
+        // sees one set, trip the ambiguity guard above, and quietly stop
+        // sweeping the very shape this reaches.
+        let spent_volumes: Vec<PathBuf> = {
+            let mut v: Vec<PathBuf> = Vec::new();
+            for p in &entry_archives {
+                v.push(p.clone());
+                if let Some(set) = entry_split_sets.iter().find(|s| s.contains(p)) {
+                    v.extend(set.iter().filter(|q| *q != p).cloned());
+                }
+            }
+            v.sort();
+            v.dedup();
+            v
+        };
         // The spent archive volumes, plus any recovery/verification sidecar
         // for THIS set (`.par2`/`.sfv`/`.rev` sharing the stem). A par2 for a
         // different stem - e.g. the outer post's own `a3.par2` riding along
         // beside a `level2.rar` - has a different stem and is left alone.
-        for p in entry_archives.iter().cloned().chain(
+        for p in spent_volumes.into_iter().chain(
             before
                 .iter()
                 .filter(|p| p.parent() == Some(dir))
@@ -702,15 +763,28 @@ fn unpack_named_rar(
     password: Option<&str>,
     why: &mut Option<String>,
 ) -> NestOutcome {
+    // TODO 205 follow-up: three rungs, all of them at the SAME set. Each
+    // re-enters `try_unrar_outcome`, whose group loop banks one set per
+    // group into the queue row's unpack lane - so without a rewind the
+    // second and third rungs added a whole extra copy of this
+    // directory's totals, and a set that needed a `.rev` reconstruction
+    // reported twice the bytes it can ever produce. Rewinding at the top
+    // of each rung is correct rather than merely harmless on the first:
+    // there it restores the state to what it already is. See
+    // [`crate::unpackprog::mark`].
+    let mark = crate::unpackprog::mark();
     // The spent volumes this arm does not read: `try_unrar` never swept
     // them either, and the nested pass owns its own before/after diff.
-    let mut attempt = |dir: &std::path::Path| match try_unrar_spent_why(dir, password) {
-        Ok(_) => Some(NestOutcome::Produced),
-        Err(Some(w)) => {
-            *why = Some(w);
-            Some(NestOutcome::Failed)
+    let mut attempt = |dir: &std::path::Path| {
+        mark.rewind();
+        match try_unrar_spent_why(dir, password) {
+            Ok(_) => Some(NestOutcome::Produced),
+            Err(Some(w)) => {
+                *why = Some(w);
+                Some(NestOutcome::Failed)
+            }
+            Err(None) => None,
         }
-        Err(None) => None,
     };
     if let Some(o) = attempt(dir) {
         return o;
@@ -721,6 +795,7 @@ fn unpack_named_rar(
         return o;
     }
     warn!(target: "extract", "extraction failed - trying recovery-record self-repair…");
+    mark.rewind();
     match try_rar_rr_repair_why(dir, password) {
         Ok(()) => NestOutcome::Produced,
         Err(Some(w)) => {
@@ -2661,8 +2736,8 @@ pub(crate) fn backfill_slot(
         let mut o = off;
         let end = off + len;
         while o < end {
-            let n = ((end - o) as usize).min(buf.len());
-            if !extractor.covered(sidx, o, n) {
+            let n = nzbkit::disk::chunk_len(end - o, buf.len());
+            if !extractor.covered(sidx, o, n as u64) {
                 break; // not (yet) on disk - leave for settle
             }
             if extractor.read_at(sidx, o, &mut buf[..n]).is_err() {
@@ -2752,6 +2827,10 @@ mod scratch_dir_tests;
 #[cfg(test)]
 #[path = "unpack/backfill_tests.rs"]
 mod backfill_tests;
+
+#[cfg(test)]
+#[path = "unpack/split_set_sweep_tests.rs"]
+mod split_set_sweep_tests;
 
 /// GitHub issue #40: a named `.cbr` comic is a RAR container whose file
 /// IS the deliverable. The ladder used to sniff it into the obfuscated

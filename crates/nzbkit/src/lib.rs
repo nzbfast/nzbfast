@@ -30,6 +30,7 @@ pub mod extract;
 /// `Chaos` knobs apply to. Same status as `mock`: public for the rigs
 /// and the test suites, not a real API.
 #[doc(hidden)]
+pub mod fail;
 pub mod faultplan;
 /// GF(2^16) primitives for the PAR2 engines. Not part of the real API:
 /// public only so nzbkit's own examples (par2_fold_bench, par2_ntt_bench)

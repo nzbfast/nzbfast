@@ -736,6 +736,9 @@ pub struct MockServer {
     /// Shared pacing state, kept so a test can re-provision the line
     /// mid-run - see [`MockServer::set_line_bps`].
     throttle_state: Arc<ThrottleState>,
+    /// The article spool itself, kept so a test can take the post down
+    /// mid-run - see [`MockServer::take_down`].
+    articles: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -787,8 +790,10 @@ impl MockServer {
     ) -> MockServer {
         let listener = TcpListener::bind(bind).await.expect("bind mock");
         let addr = listener.local_addr().unwrap();
-        // Mutex (not plain Arc): POST/IHAVE insert articles at runtime.
+        // Mutex (not plain Arc): POST/IHAVE insert articles at runtime,
+        // and `take_down` removes them (the test-driven DMCA sweep).
         let articles = Arc::new(std::sync::Mutex::new(articles));
+        let articles_handle = articles.clone();
         let plane = Arc::new(HeaderPlane {
             headers,
             overview: std::sync::Mutex::new(overview),
@@ -942,8 +947,24 @@ impl MockServer {
             pause,
             plane: plane2,
             throttle_state: throttle_state2,
+            articles: articles_handle,
             handle,
         }
+    }
+
+    /// Take the whole post down NOW, as a DMCA sweep would: every
+    /// article is removed from the spool, so from the next request on
+    /// every id - including ones served moments ago - answers 430. The
+    /// count-triggered twin is [`Chaos::vanish_after`]; this one is
+    /// test-DRIVEN, for scenarios where the takedown must land between
+    /// two moments the test controls (the retention-insurance A/B: add,
+    /// bank, take down, promote) rather than after N served bodies.
+    /// Returns how many articles the sweep removed.
+    pub fn take_down(&self) -> usize {
+        let mut a = self.articles.lock_ok();
+        let n = a.len();
+        a.clear();
+        n
     }
 
     /// Re-provision the line LIVE (TODO 112 rig 2): from the next 64 KB
@@ -961,6 +982,19 @@ impl MockServer {
     /// cannot borrow the server.
     pub fn line_control(&self) -> LineControl {
         LineControl(self.throttle_state.clone())
+    }
+
+    /// Sessions this server has open RIGHT NOW, as the far end counts
+    /// them - `accepted` is a lifetime total and says nothing about
+    /// what is still there.
+    ///
+    /// The number a provider's connection cap is judged against, and
+    /// the only honest way for a test to wait until a whole fleet is up
+    /// before it does something to it: the client's own conn gauge
+    /// answers from the client's bookkeeping, which is exactly what a
+    /// test about handing sessions back must not take on trust.
+    pub fn conns_open(&self) -> usize {
+        self.throttle_state.active.load(Ordering::Relaxed)
     }
 
     /// Per-message-id REQUEST counts, across every connection, in id
@@ -1057,6 +1091,8 @@ impl MockServer {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         }
     }
 }

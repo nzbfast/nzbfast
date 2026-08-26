@@ -132,6 +132,15 @@ pub(super) fn m_indexer_search(
                         .map(|i| {
                             let query = query.clone();
                             s.spawn(move || {
+                                // TODO 297: an nzbindex entry never
+                                // needs caps. That API has no id search
+                                // and no category space, so there is
+                                // nothing for `plan_query` to decide -
+                                // and probing would spend a real search
+                                // request to learn what this adapter
+                                // already knows.
+                                let wants_caps =
+                                    wants_caps && i.kind == crate::newznab::SourceKind::Newznab;
                                 let caps =
                                     wants_caps.then(|| indexer_caps_cached(d_ref, &i)).flatten();
                                 let planned = crate::newznab::plan_query(caps.as_ref(), &query);
@@ -725,7 +734,15 @@ pub(super) fn m_indexer_grab(
                     // private target it does not own is refused (M12).
                     match fetch_url_from(&h.url, &h.origin) {
                         Ok(f) => match d.enqueue_fetched(
-                            &f, &h.title, "", prio, None, None, 0, "indexer", dupe_ok,
+                            &f,
+                            &h.title,
+                            "",
+                            prio,
+                            None,
+                            None,
+                            0,
+                            "indexer",
+                            DupeExempt::asked(dupe_ok),
                         ) {
                             Ok(Enqueued { nzo_id: id, .. }) => {
                                 d.indexer_rt.lock_ok().usage.count_grab(&h.indexer);

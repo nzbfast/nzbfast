@@ -1056,7 +1056,7 @@ impl SevenZSet {
                 st = self.arrived.wait(st).unwrap();
             }
         };
-        let take = buf.len().min(room as usize);
+        let take = crate::disk::chunk_len(room, buf.len());
         part.read_covered_blocking(local, &mut buf[..take])
     }
 }
@@ -2445,7 +2445,7 @@ mod tests {
         let lo = (base - 4096) as usize;
         let hi = (base + 4096) as usize;
         assert!(
-            ex.covered(0, lo as u64, hi - lo),
+            ex.covered(0, lo as u64, (hi - lo) as u64),
             "straddling window not covered"
         );
         let mut got = vec![0u8; hi - lo];

@@ -826,10 +826,10 @@ impl CryptoState {
             };
             // Walk plaintext from the anchor to the requested window,
             // encrypting as we go; emit the requested slice.
-            let mut buf = vec![0u8; 4096.min((want_hi - cpos) as usize).max(16)];
+            let mut buf = vec![0u8; crate::disk::chunk_len(want_hi - cpos, 4096).max(16)];
             let mut enc = rarcrypt::CbcEncStream::new(&self.key, &chain);
             while cpos < want_hi {
-                let n = buf.len().min((want_hi - cpos) as usize);
+                let n = crate::disk::chunk_len(want_hi - cpos, buf.len());
                 let block = &mut buf[..n];
                 self.read_plain_block(st, w, cpos, block)?;
                 enc.encrypt(block);

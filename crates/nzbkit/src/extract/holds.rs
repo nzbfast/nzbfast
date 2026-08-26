@@ -1346,7 +1346,10 @@ mod tests {
         assert!(ex.holds_paged_total() > 0, "paging never engaged");
         // A mid-volume range that can only live in (paged) holds now.
         let (off, len) = (5_000_000u64, 200_000usize);
-        assert!(ex.covered(1, off, len), "paged span invisible to covered");
+        assert!(
+            ex.covered(1, off, len as u64),
+            "paged span invisible to covered"
+        );
         let mut got = vec![0u8; len];
         ex.read_at(1, off, &mut got).unwrap();
         assert_eq!(&got[..], &vols[1][off as usize..off as usize + len]);

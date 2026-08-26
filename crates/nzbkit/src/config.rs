@@ -208,6 +208,187 @@ pub struct ServerConfig {
     /// when it is set it decides the idle-release default outright.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_source_ips: Option<u32>,
+    /// Which IP address family this server's dials try FIRST when its
+    /// hostname resolves to both (issue #60, TODO 291).
+    ///
+    /// A preference and not a filter: the other family stays on the
+    /// candidate list behind it, so a provider whose IPv6 is down still
+    /// connects. `bind_ip` above outranks it outright, because that one
+    /// is physics rather than taste - a v6 source address cannot reach a
+    /// v4 target, so its family filter has to win.
+    ///
+    /// PER SERVER, for the same reason `idle_release_secs` is: the right
+    /// answer is a property of the path between this machine and THAT
+    /// provider. One provider's IPv6 can be a slow tunnel while
+    /// another's is native.
+    ///
+    /// Absent means [`AddressFamily::Auto`], which is exactly what every
+    /// install did before this existed - an upgrade must not move a
+    /// single dial.
+    #[serde(default, skip_serializing_if = "AddressFamily::is_auto")]
+    pub address_family: AddressFamily,
+    /// The name this server's TLS session is checked against, when that
+    /// is not the name we dial (issue #60, TODO 291).
+    ///
+    /// Absent - and blank, which is what a cleared editor box sends -
+    /// means [`host`](Self::host), which is what every install did
+    /// before this field existed. An upgrade must not move a single
+    /// handshake, so read it through [`tls_name`](Self::tls_name) and
+    /// never as an `Option` at a call site.
+    ///
+    /// It exists because the name you must CONNECT to and the name on
+    /// the certificate legitimately differ on some deployments: a
+    /// self-hosted server reached by its LAN address or a literal, a
+    /// provider behind a reverse proxy or a CDN name, a split-horizon
+    /// DNS where the internal name is not the one the certificate was
+    /// issued for. Without it those setups have only two ways out, and
+    /// both are worse - dial the wrong name and fail verification, or
+    /// stop verifying, which turns TLS into obfuscation on the one
+    /// connection the NNTP credentials ride.
+    ///
+    /// What it is NOT is a way to trust a certificate that does not
+    /// verify. The chain still has to be signed by a real anchor and
+    /// still has to be valid for THIS name; all this moves is which
+    /// name that is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_hostname: Option<String>,
+}
+
+/// Which address family a server's dials prefer ([`ServerConfig::address_family`]).
+///
+/// `Auto` is IPv4-first, and that default is not arbitrary: providers
+/// count simultaneous source IPs per account, and macOS spreads
+/// connections across rotating IPv6 privacy addresses, so a v6-first
+/// default would look to a provider like a machine that keeps changing
+/// identity. The setting exists because that reasoning is wrong for some
+/// links - a 464XLAT network reaches IPv4 only through a translator, so
+/// every v4 byte pays for it - and only the operator knows which they
+/// are on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AddressFamily {
+    /// Today's behaviour: IPv4 first, IPv6 behind it.
+    #[default]
+    Auto,
+    /// IPv4 first, said out loud. Distinct from `Auto` on purpose: it
+    /// survives any future change to what "auto" decides.
+    Ipv4,
+    /// IPv6 first, IPv4 behind it.
+    Ipv6,
+}
+
+impl AddressFamily {
+    /// The default, so `skip_serializing_if` keeps the key out of a
+    /// config file that never asked for it. People hand-edit that file.
+    pub fn is_auto(&self) -> bool {
+        matches!(self, AddressFamily::Auto)
+    }
+
+    /// The wire name, which is also what the dashboard's `<select>`
+    /// sends back.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AddressFamily::Auto => "auto",
+            AddressFamily::Ipv4 => "ipv4",
+            AddressFamily::Ipv6 => "ipv6",
+        }
+    }
+
+    /// Parse a wire name, case-insensitively. `None` for anything else.
+    pub fn parse(s: &str) -> Option<AddressFamily> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Some(AddressFamily::Auto),
+            "ipv4" => Some(AddressFamily::Ipv4),
+            "ipv6" => Some(AddressFamily::Ipv6),
+            _ => None,
+        }
+    }
+}
+
+/// Hand-rolled so an unrecognised value reads as `Auto` instead of
+/// failing the whole config load.
+///
+/// The derived impl would reject the file, and this file holds EVERY
+/// server: one typo in one optional preference would leave the daemon
+/// with no providers at all, which is a far worse outcome than the
+/// setting quietly not taking. The dashboard cannot produce a bad value
+/// (`server_save` refuses one with a form message), so the only way here
+/// is a hand edit - and the editor then shows `auto`, which is the
+/// user's signal that the typo did not take.
+impl<'de> Deserialize<'de> for AddressFamily {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        // Every arm answers `Auto` rather than erroring, including the
+        // wrong-TYPE ones: a number or a bool here is the same hand-edit
+        // mistake as a misspelt name, and refusing it would take the
+        // whole file down with it.
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = AddressFamily;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str(r#"one of "auto", "ipv4", "ipv6""#)
+            }
+            fn visit_str<E>(self, v: &str) -> Result<AddressFamily, E> {
+                Ok(AddressFamily::parse(v).unwrap_or_default())
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<AddressFamily, E> {
+                Ok(AddressFamily::Auto)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<AddressFamily, E> {
+                Ok(AddressFamily::Auto)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<AddressFamily, E> {
+                Ok(AddressFamily::Auto)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<AddressFamily, E> {
+                Ok(AddressFamily::Auto)
+            }
+            fn visit_unit<E>(self) -> Result<AddressFamily, E> {
+                Ok(AddressFamily::Auto)
+            }
+            fn visit_none<E>(self) -> Result<AddressFamily, E> {
+                Ok(AddressFamily::Auto)
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(
+                self,
+                d: D,
+            ) -> Result<AddressFamily, D::Error> {
+                d.deserialize_any(V)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// Is `name` usable as [`ServerConfig::tls_hostname`]? `Err` carries the
+/// message to put in front of whoever typed it.
+///
+/// Validated with rustls' OWN parser, so this refuses exactly what the
+/// handshake would refuse and nothing else - the alternative is a
+/// hand-written hostname rule that drifts from the one that decides,
+/// and a save that stores a name every dial then fails on with a
+/// `TlsName` error hours later and nothing on screen connecting the
+/// two.
+///
+/// An IP literal gets its own refusal rather than falling through to
+/// the generic one, because it is the mistake this box invites and the
+/// generic message would not explain it. Typed here it is never an
+/// improvement on leaving the box blank: rustls turns an address into
+/// an `IpAddress` name, which sends NO SNI and checks the certificate
+/// for an IP SAN - which is precisely what dialling a literal already
+/// does, and precisely what fails against provider certificates. The
+/// name on the certificate is the thing this field wants.
+pub fn check_tls_hostname(name: &str) -> Result<(), &'static str> {
+    let name = name.trim();
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return Err(
+            "certificate name: this box wants the NAME on the certificate, \
+             not an address - leave it blank to check the address you dial",
+        );
+    }
+    match rustls::pki_types::ServerName::try_from(name) {
+        Ok(rustls::pki_types::ServerName::DnsName(_)) => Ok(()),
+        _ => Err("certificate name: not a hostname"),
+    }
 }
 
 /// Does this host belong to a provider that caps concurrent distinct
@@ -274,6 +455,34 @@ pub const MIN_IDLE_RELEASE_SECS: u64 = 60;
 const TIGHT_SOURCE_IPS: u32 = 3;
 
 impl ServerConfig {
+    /// The name this server's TLS handshake uses: BOTH the name the
+    /// certificate is checked against and the name sent as SNI.
+    ///
+    /// ONE accessor, and that is the whole safety argument for the
+    /// feature rather than a tidiness preference. rustls takes a single
+    /// `ServerName` and uses it for both jobs, so the only way to make
+    /// them disagree is to compute the name twice - and a session that
+    /// verifies against one name while announcing another presents as a
+    /// handshake failure the user cannot read, against exactly the
+    /// reverse-proxy and virtual-host deployments
+    /// [`tls_hostname`](Self::tls_hostname) exists to serve, because
+    /// those are the servers that pick their certificate BY the SNI.
+    /// `crates/nzbkit/src/nntp.rs` builds that `ServerName` at one site
+    /// and this is where it gets the name; keep it that way.
+    ///
+    /// Blank reads as unset, so a cleared editor box goes back to the
+    /// dialled host rather than failing every handshake on an empty
+    /// name. Not trimmed beyond that: the stored value has already been
+    /// through `normalized_server`, and `host` itself is not trimmed
+    /// here either, so this cannot change what an existing install
+    /// verifies against.
+    pub fn tls_name(&self) -> &str {
+        match self.tls_hostname.as_deref() {
+            Some(n) if !n.trim().is_empty() => n.trim(),
+            _ => self.host.as_str(),
+        }
+    }
+
     /// May nzbfast spend this server's bytes on its OWN curiosity -
     /// connection-ladder probes, the system benchmark's provider leg,
     /// index header pulls - as opposed to the download the user asked
@@ -746,6 +955,8 @@ pub fn parse_sabnzbd_ini(text: &str) -> Result<Vec<ServerConfig>, ConfigError> {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         });
     }
 
@@ -850,9 +1061,204 @@ pub fn parse_nzbget_conf(text: &str) -> Vec<ServerConfig> {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         });
     }
     out
+}
+
+#[cfg(test)]
+mod address_family_tests {
+    use super::*;
+
+    fn srv(json: &str) -> ServerConfig {
+        serde_json::from_str(json).expect("server parses")
+    }
+
+    /// §291 / issue #60: the absent key means `Auto`, which is what
+    /// every install did before this field existed. A redeploy onto a
+    /// config written by an older build must not move a single dial -
+    /// same contract as `enabled` and `warm_pool` beside it.
+    #[test]
+    fn a_config_that_never_heard_of_the_setting_is_auto() {
+        let s = srv(r#"{"host":"news.example.com"}"#);
+        assert_eq!(s.address_family, AddressFamily::Auto);
+        assert!(s.address_family.is_auto());
+    }
+
+    /// The three wire names, and the case-insensitivity that makes a
+    /// hand-edited "IPv6" work.
+    #[test]
+    fn the_three_values_round_trip() {
+        for (json, want) in [
+            ("auto", AddressFamily::Auto),
+            ("ipv4", AddressFamily::Ipv4),
+            ("ipv6", AddressFamily::Ipv6),
+            ("IPv6", AddressFamily::Ipv6),
+            ("  ipv4  ", AddressFamily::Ipv4),
+        ] {
+            let s = srv(&format!(
+                r#"{{"host":"news.example.com","address_family":"{json}"}}"#
+            ));
+            assert_eq!(s.address_family, want, "{json} must parse");
+        }
+        // Serialize back out under the name the dashboard sends.
+        let s = srv(r#"{"host":"h","address_family":"ipv6"}"#);
+        let out = serde_json::to_string(&s).unwrap();
+        assert!(out.contains(r#""address_family":"ipv6""#), "{out}");
+    }
+
+    /// `Auto` is not written back. The config file is hand-edited, and a
+    /// key spelling out "what it did anyway" is noise the next reader
+    /// has to work out is a no-op.
+    #[test]
+    fn auto_is_left_out_of_the_written_config() {
+        let s = srv(r#"{"host":"h","address_family":"auto"}"#);
+        let out = serde_json::to_string(&s).unwrap();
+        assert!(
+            !out.contains("address_family"),
+            "the default must not be serialized: {out}"
+        );
+    }
+
+    /// An unrecognised value reads as `Auto` rather than failing the
+    /// load. The derived impl would reject the FILE, and that file holds
+    /// every server - one typo in one optional preference would leave
+    /// the daemon with no providers at all, which is far worse than the
+    /// preference quietly not taking. `server_save` refuses a bad value
+    /// with a form message, so this can only be reached by hand edit,
+    /// and the editor then shows `auto`.
+    #[test]
+    fn an_unknown_value_falls_back_to_auto_instead_of_failing_the_file() {
+        for bad in [r#""v6""#, r#""ipv7""#, r#""""#, "null", "6", "true"] {
+            let s = srv(&format!(
+                r#"{{"host":"news.example.com","address_family":{bad}}}"#
+            ));
+            assert_eq!(
+                s.address_family,
+                AddressFamily::Auto,
+                "{bad} must read as auto"
+            );
+        }
+        // And the rest of the config still arrives intact - the point of
+        // not failing the load.
+        let s = srv(r#"{"host":"news.example.com","connections":42,"address_family":"nonsense"}"#);
+        assert_eq!(s.connections, 42);
+    }
+
+    /// [`AddressFamily::parse`] is what `server_save` validates with, so
+    /// its rejection set is pinned separately from the lenient loader
+    /// above: the two deliberately disagree, and a `parse` that started
+    /// accepting nonsense would store it.
+    #[test]
+    fn parse_accepts_only_the_three_names() {
+        assert_eq!(AddressFamily::parse("auto"), Some(AddressFamily::Auto));
+        assert_eq!(AddressFamily::parse(""), Some(AddressFamily::Auto));
+        assert_eq!(AddressFamily::parse("IPV4"), Some(AddressFamily::Ipv4));
+        assert_eq!(AddressFamily::parse("v6"), None);
+        assert_eq!(AddressFamily::parse("ipv46"), None);
+        for f in [
+            AddressFamily::Auto,
+            AddressFamily::Ipv4,
+            AddressFamily::Ipv6,
+        ] {
+            assert_eq!(AddressFamily::parse(f.as_str()), Some(f), "{f:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tls_hostname_tests {
+    use super::*;
+
+    fn srv(json: &str) -> ServerConfig {
+        serde_json::from_str(json).expect("server parses")
+    }
+
+    /// §291 / issue #60: absent means the dialled host, so an upgrade
+    /// onto a config written by an older build verifies against exactly
+    /// the name it verified against yesterday. This is the whole
+    /// upgrade-safety contract of the field and it is the one property
+    /// that must never be quietly relaxed.
+    ///
+    /// The handshake end of it is
+    /// `the_tls_name_override_is_what_the_handshake_verifies_and_announces`
+    /// in `crates/nzbkit/tests/integration/tls.rs`, which asserts the
+    /// name that really reaches rustls. This one is the cheap half and
+    /// is not a substitute for it.
+    #[test]
+    fn a_config_that_never_heard_of_the_setting_verifies_the_dialled_host() {
+        let s = srv(r#"{"host":"news.example.com"}"#);
+        assert_eq!(s.tls_hostname, None);
+        assert_eq!(s.tls_name(), "news.example.com");
+    }
+
+    /// Set, it wins - and blank does NOT, because a cleared editor box
+    /// posts an empty string and an empty TLS name would fail every
+    /// handshake instead of going back to the default.
+    #[test]
+    fn the_override_wins_and_a_blank_one_does_not() {
+        for (stored, want) in [
+            (r#""news.cert.example""#, "news.cert.example"),
+            (r#""  news.cert.example  ""#, "news.cert.example"),
+            (r#""""#, "10.0.0.7"),
+            (r#""   ""#, "10.0.0.7"),
+            ("null", "10.0.0.7"),
+        ] {
+            let s = srv(&format!(r#"{{"host":"10.0.0.7","tls_hostname":{stored}}}"#));
+            assert_eq!(s.tls_name(), want, "{stored} must resolve to {want}");
+        }
+    }
+
+    /// Unset is not written back. The config file is hand-edited, and a
+    /// key restating "check the host we dial" is noise the next reader
+    /// has to work out is a no-op - the same rule `address_family` and
+    /// `warm_pool` follow beside it.
+    #[test]
+    fn an_unset_override_is_left_out_of_the_written_config() {
+        let s = srv(r#"{"host":"news.example.com"}"#);
+        let out = serde_json::to_string(&s).unwrap();
+        assert!(!out.contains("tls_hostname"), "{out}");
+        let s = srv(r#"{"host":"h","tls_hostname":"news.cert.example"}"#);
+        let out = serde_json::to_string(&s).unwrap();
+        assert!(
+            out.contains(r#""tls_hostname":"news.cert.example""#),
+            "{out}"
+        );
+    }
+
+    /// [`check_tls_hostname`] is what the save path refuses with, and it
+    /// answers with rustls' own parser - so what the editor accepts and
+    /// what the handshake accepts are the same set by construction, not
+    /// by two rules kept in step by hand.
+    ///
+    /// An IP literal is refused with its own message. It is never an
+    /// improvement on leaving the box blank (rustls would send no SNI
+    /// and look for an IP SAN, which is exactly what dialling the
+    /// literal already does) and it is the mistake the box invites.
+    #[test]
+    fn the_save_path_refuses_what_the_handshake_would_refuse() {
+        for good in ["news.example.com", "a.b.c.d.example", "xn--80ak6aa92e.com"] {
+            assert!(check_tls_hostname(good).is_ok(), "{good} must be accepted");
+            // And the thing that decides at dial time agrees.
+            assert!(
+                rustls::pki_types::ServerName::try_from(good).is_ok(),
+                "{good} must be a name rustls takes"
+            );
+        }
+        for bad in ["1.2.3.4", "::1", "2001:db8::1"] {
+            let e = check_tls_hostname(bad).expect_err("an address must be refused");
+            assert!(e.contains("not an address"), "{bad}: {e}");
+        }
+        for bad in ["news example.com", "", "-", "a..b", "news.example.com:563"] {
+            assert!(check_tls_hostname(bad).is_err(), "{bad:?} must be refused");
+        }
+        // Deliberately NOT refused: an underscore label. rustls takes
+        // it, real certificates carry it, and the point of borrowing
+        // that parser is that this set is not a second opinion.
+        assert!(check_tls_hostname("news_example.com").is_ok());
+    }
 }
 
 #[cfg(test)]

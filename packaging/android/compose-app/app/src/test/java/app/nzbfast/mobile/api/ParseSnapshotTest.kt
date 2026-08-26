@@ -9,9 +9,18 @@ import org.junit.Test
 
 /**
  * Snapshot tests: the parsers run against responses recorded from a
- * real daemon (1.0.16, chaos_serve-backed; see CONTRACT.md for the
- * recording recipe). If the daemon's shapes drift, these fail before
- * the app does.
+ * real daemon (chaos_serve-backed; see CONTRACT.md for the recording
+ * recipe). If the daemon's shapes drift, these fail before the app
+ * does.
+ *
+ * The recordings are NOT all one vintage, and CONTRACT.md's drift
+ * audit says which is which. The three queue and history ones were
+ * re-recorded from 1.2.3 on 25 Aug 2026, when they were found still
+ * carrying four seen-sets the payload had retired. The rest are 1.0.16
+ * and stay that way while they answer with the same keys and types a
+ * current daemon does - which for the four `playback_*` ones is
+ * load-bearing rather than laziness, because the absence of
+ * `link_peak` is exactly what one of the tests below is about.
  */
 class ParseSnapshotTest {
 

@@ -25,6 +25,7 @@ mod aggregates;
 mod browse;
 mod cards;
 mod claims;
+mod deadline;
 mod encrypted;
 mod evict;
 mod fold;
@@ -134,12 +135,33 @@ pub struct Index {
     /// run with it on - the schema is the flag's persistent half, so a
     /// read-only handle detects it the same way it detects FTS.
     summaries: bool,
+    /// How long the current query on this connection may run, and how
+    /// many have been abandoned for outrunning that. Installed as a
+    /// progress callback by `open_read_only` and by nothing else - see
+    /// [`deadline`], which is where the wall-side measurement that
+    /// motivates it lives.
+    deadline: deadline::QueryDeadline,
     /// TTL memo for [`Index::stats_cached`]: when the figures were
     /// computed and what they were. Per connection like everything
     /// else here (a Cell, because the index is single-threaded behind
     /// its owner's mutex); callers that need the exact answer use
     /// [`Index::stats`].
     stats_cache: std::cell::Cell<Option<(std::time::Instant, (u64, u64))>>,
+    /// TODO 300: the wall page's window fast path is armed on this
+    /// handle. True everywhere in production - the field exists because
+    /// a fast path whose whole contract is "same answer, less work" can
+    /// only be tested by asking ONE database both ways, and the
+    /// eligibility test is otherwise entangled with the request shape
+    /// (see `cards::Index::wall_page_keys`). Same lever `summaries`
+    /// gives the C3 differential tests, for the same reason.
+    pub(crate) wall_window: bool,
+    /// TTL memo for the card wall's `total` - `(computed at, the count
+    /// statement it answers, the answer)`. Per connection, like
+    /// [`Self::stats_cache`] next door and for the same reason, and a
+    /// `RefCell` rather than a `Cell` only because the key is a
+    /// `String`. Written by [`Index::cards_total`], which is also where
+    /// the rule for when a count is worth memoizing at all lives.
+    cards_total_memo: std::cell::RefCell<Option<(std::time::Instant, String, u64)>>,
 }
 
 /// A release a batch just touched that [`Index::set_watch_names`] said

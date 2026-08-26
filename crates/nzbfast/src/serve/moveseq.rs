@@ -87,6 +87,51 @@ pub(in crate::serve) enum MoveWinner {
     History,
 }
 
+/// Which door moved a record out of history and back into the queue.
+///
+/// A TYPE and not the `&str` this was until 25 Aug 2026, because it now
+/// has two readers rather than one. It always chose the verb in the
+/// failure log; since §129 1b(b) it also names the `why` on
+/// `job.requeued`, and a string that two things read by matching on it
+/// is a string somebody eventually spells differently. The two doors
+/// are genuinely different news - one is a failed download being tried
+/// again, the other is a finished one being replayed out of the library
+/// - and `Daemon::commit_to_queue`'s own comment holds the argument for
+/// why that difference belongs on the event rather than in a sentence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::serve) enum Requeue {
+    /// `Daemon::retry`: a Failed record is going round again, either
+    /// because the user pressed the button or because the automatic
+    /// cooldown fell due.
+    Retry,
+    /// `Daemon::activate_parked`: the user pressed play on a parked
+    /// library record (M14i), which is not a retry of anything.
+    Play,
+}
+
+impl Requeue {
+    /// The verb the "could not write the queue" line reads with:
+    /// `<id>: <verb> now, but the queue could not be written`.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Retry => "retrying",
+            Self::Play => "fetching",
+        }
+    }
+
+    /// The `why` a `job.requeued` subscriber filters on. Deliberately
+    /// not the same words as [`Self::verb`]: one is the middle of an
+    /// English sentence, the other is a stable wire value, and a single
+    /// spelling serving both is one rewording away from a broken
+    /// filter.
+    fn why(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Play => "play",
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Harness control arm: force the pre-§158-item-1 rule, "history
@@ -260,8 +305,36 @@ impl Daemon {
     /// Returns whether the queue write landed. Call with no store locks
     /// held, after [`stamp_move`]; `seq` is the stamp this move put on
     /// the record, and bounds the tombstone below.
-    pub(in crate::serve) fn commit_to_queue(&self, nzo_id: &str, seq: u64, why: &str) -> bool {
-        if self.save_queue() {
+    ///
+    /// It also EMITS `job.requeued`, because this is the one place a
+    /// record leaves history and re-enters the queue, and §129 1b(b)
+    /// needed that moment to be an event. The dashboard's "a download
+    /// was added" chime used to be recovered by diffing the queue slots
+    /// against the previous poll's ids, which is a diff that cannot
+    /// survive a windowed queue and cannot say why the row appeared;
+    /// `job.added` alone could not replace it, because a retry never
+    /// goes near `enqueue` and moving the cue there would have silenced
+    /// the chime a manual retry gets today.
+    ///
+    /// [`Requeue`] IS THE DISTINCTION, and it is a type rather than the
+    /// free `&str` this took until 25 Aug 2026 so that nobody has to
+    /// string-match a log fragment to tell a retry from a library play.
+    /// The two really are different news - one is a failed download
+    /// being tried again, the other is a finished one being replayed -
+    /// and the kind carries `why` so a subscriber can tell them apart
+    /// without either door having to grow its own kind.
+    ///
+    /// It is deliberately NOT toasted, and that is what keeps it honest
+    /// about both doors at once. `job.retried`, which the automatic
+    /// cooldown emits on top of this one, owns the sentence "only the
+    /// missing pieces are fetched" - true of a retry, false of a play,
+    /// and false of the manual retry too in the sense that matters
+    /// (the user just clicked it, and a toast a second later clobbers
+    /// the answer their click earned). So this kind carries the
+    /// ARRIVAL, `job.retried` carries the narration, and neither has to
+    /// lie about the other's door.
+    pub(in crate::serve) fn commit_to_queue(&self, nzo_id: &str, seq: u64, why: Requeue) -> bool {
+        let ok = if self.save_queue() {
             #[cfg(test)]
             {
                 let pair = COMMIT_TOMB_BARRIER
@@ -282,17 +355,56 @@ impl Daemon {
             // stores with no crash needed (Codex sweep 13 Aug Q1). The
             // bounded tombstone still buries the seq-N row this move
             // pulled out of history, and can never touch a later one.
-            self.history_tombstone_upto(nzo_id, seq);
+            if !self.history_tombstone_upto(nzo_id, seq) {
+                // The queue save LANDED, so the record is durable in the
+                // store it moved INTO and nothing is at risk of being
+                // lost - what survives is the stale row it moved out of,
+                // which `load_queue`'s move-sequence reconciliation
+                // resolves in the queue's favour at the next start. So
+                // this is reported and the move still stands.
+                error!(
+                    target: "queue",
+                    "{nzo_id}: {} now, but its old history row could not be \
+                     buried - a restart reconciles the two rather than \
+                     showing it parked",
+                    why.verb()
+                );
+            }
             true
         } else {
             error!(
                 target: "queue",
-                "{nzo_id}: {why} now, but the queue could not be written - its \
+                "{}: {} now, but the queue could not be written - its \
                  history record was left in place rather than deleted, so a \
-                 restart before the next successful save shows it parked again"
+                 restart before the next successful save shows it parked again",
+                nzo_id,
+                why.verb()
             );
             false
-        }
+        };
+        // OUTSIDE the branch, on purpose: a queue write that failed is
+        // still a row in the queue. The doc comment above `save_queue`'s
+        // failure arm says it - the move stands, the job is live in
+        // memory and will run, and what was given up is only its
+        // survival across a restart. The user watching the page sees
+        // the row appear either way, so the cue has to fire either way.
+        //
+        // The name is read back out of the queue rather than passed in:
+        // both callers have just pushed the job there, and a lookup on a
+        // path that has already written the whole queue to disk is not
+        // the cost worth threading a second argument for. An empty name
+        // is the honest answer if the row has already been taken away
+        // again (a delete racing the retry) - the event still says a row
+        // arrived, which is what the cue is about.
+        let name = self
+            .queue_job(nzo_id)
+            .map(|j| j.lock_ok().name.clone())
+            .unwrap_or_default();
+        self.life_emit(
+            "job.requeued",
+            json!({"nzo_id": nzo_id, "name": name, "why": why.why()}),
+        );
+        ok
     }
 
     /// M14i: a parked library entry becomes a running download. The
@@ -325,7 +437,7 @@ impl Daemon {
         let seq = job.lock_ok().move_seq;
         self.queue.lock_ok().push_front(job.clone());
         drop(publish);
-        self.commit_to_queue(&nzo, seq, "fetching");
+        self.commit_to_queue(&nzo, seq, Requeue::Play);
     }
 }
 
@@ -684,6 +796,90 @@ mod harness {
                 .any(|x| x.lock_ok().nzo_id == "nzo_a1"),
             "the parked record must be in history"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// §129 1b(b): both doors out of history announce the ARRIVAL, and
+    /// they are told apart by `why` rather than by a sentence.
+    ///
+    /// This is the cue that used to be recovered by diffing the queue
+    /// slots against the previous poll's ids - the "a download was
+    /// added" chime. `job.added` could not take it over, because a
+    /// retry never goes near `enqueue`: moving the cue there would have
+    /// left a manual retry silent, which is the one failure this whole
+    /// item exists to avoid. `commit_to_queue` is the join, so it is
+    /// where the event belongs.
+    ///
+    /// `why` is asserted per door BY VALUE and not just for presence.
+    /// The two are different news - a failed download going round again
+    /// against a finished one being replayed out of the library - and a
+    /// subscriber (or the toast that may one day sit on this) has
+    /// nothing else to tell them apart with: the kind is deliberately
+    /// one kind, and the payload is otherwise identical.
+    #[test]
+    fn both_moves_out_of_history_say_a_row_reached_the_queue() {
+        let requeues = |d: &Arc<Daemon>| -> Vec<(String, String)> {
+            d.life_since(0)
+                .0
+                .iter()
+                .filter(|e| e["kind"] == "job.requeued")
+                .map(|e| {
+                    (
+                        e["nzo_id"].as_str().unwrap_or_default().to_string(),
+                        e["why"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()
+        };
+
+        let dir = tmp("requeued");
+        let d = test_daemon(&dir);
+
+        // Door one: a Failed record the user (or the cooldown) retried.
+        let j = job(&d, "nzo_rq1", JobState::Failed);
+        d.history.lock_ok().push(j.clone());
+        assert!(d.history_upsert(std::slice::from_ref(&j)));
+        assert!(d.retry("nzo_rq1"), "the failed record is retryable");
+        assert_eq!(requeues(&d), [("nzo_rq1".to_string(), "retry".to_string())]);
+
+        // Door two: play on a parked library record. Not a retry, and
+        // the event has to be able to say so.
+        let p = job(&d, "nzo_rq2", JobState::Completed);
+        {
+            let mut g = p.lock_ok();
+            g.library = true;
+            g.fetched = false;
+        }
+        d.history.lock_ok().push(p.clone());
+        assert!(d.history_upsert(std::slice::from_ref(&p)));
+        {
+            let mut g = p.lock_ok();
+            g.state = JobState::Queued;
+            g.priority = 2;
+            g.paused = false;
+        }
+        d.activate_parked(&p);
+        assert_eq!(
+            requeues(&d),
+            [
+                ("nzo_rq1".to_string(), "retry".to_string()),
+                ("nzo_rq2".to_string(), "play".to_string()),
+            ]
+        );
+
+        // The name is read back off the queue rather than passed in, so
+        // it has to actually be there - a nameless event cannot be
+        // spoken ("Download added: ...").
+        let e = d
+            .life_since(0)
+            .0
+            .into_iter()
+            .find(|e| e["kind"] == "job.requeued")
+            .expect("the event is on the ring");
+        assert_eq!(e["name"], "Release.nzo_rq1");
+        assert_eq!(e["schema_version"], 1);
+        assert!(e["seq"].as_u64().unwrap_or(0) > 0);
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

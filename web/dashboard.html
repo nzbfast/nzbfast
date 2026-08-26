@@ -184,6 +184,26 @@ a.pill:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
    = metadata (indexing/enriching/feed/watchlist), green = payload on
    the move, dim = upkeep and measurement. */
 .bchip{display:inline-flex;align-items:center;white-space:nowrap}
+/* Every chip in this strip is a BUTTON: a status you can see and not act
+   on sends people to Settings to find the switch, which is the whole
+   complaint these chips were meant to answer. The element has to look
+   exactly like the pills either side of it, so undo the solid accent
+   button style and take a.pill's hover treatment.
+   `line-height:inherit` matters more than it looks: a button's UA
+   line-height is `normal`, which is taller than the header's, and a
+   single chip appearing at that height pushed the whole row over the
+   wrap threshold that foldBusyChips measures. */
+button.pill{background:transparent;font:inherit;font-size:12px;line-height:inherit;
+  cursor:pointer;color:var(--dim);border:1px solid var(--line);padding:4px 11px}
+/* The update and finish-action chips were clickable spans with a
+   cursor:pointer and no way in from the keyboard - the two things in
+   this header that announce themselves and then can only be reached
+   with a mouse. Buttons now, which needs no JS change (both painters
+   only ever set textContent/title/onclick). `:not(.upd)` above because
+   the update chip is the one solid-filled pill here and the generic
+   hover would put dark text back over its amber. */
+button.pill:not(.upd):hover{color:var(--fg);border-color:color-mix(in srgb,var(--fg) 28%,transparent)}
+button.pill:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
 .bchip::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;
   background:var(--dim);margin-inline-end:6px;vertical-align:middle}
 .bchip.b-meta::before{background:var(--acc)}
@@ -237,7 +257,17 @@ button.dimbtn:hover,button.dimbtn:focus-visible{opacity:1}
 #histhov dd{margin:0;min-width:0;overflow-wrap:anywhere}
 #histhov .foot{color:var(--dim);margin-top:7px;font-size:11.5px}
 #ctxmenu{position:fixed;background:var(--surface);border:1px solid var(--line);border-radius:10px;
-  padding:5px;z-index:99;min-width:220px;box-shadow:0 10px 34px rgba(0,0,0,.5)}
+  padding:5px;z-index:99;min-width:220px;box-shadow:0 10px 34px rgba(0,0,0,.5);
+  max-height:calc(100vh - 16px);overflow-y:auto}
+/* The height cap is not decoration. Every menu here was ~7 rows until
+   the busy strip's "+N" chip started inlining every folded subsystem's
+   actions under its own heading - eight of them is 24 rows and seven
+   separators, ~720px, and ~1050px once the coarse-pointer rule below
+   puts a 44px floor on each row. placeMenu clamps the TOP against
+   offsetHeight, so without a cap a menu taller than the window pins to
+   y=8 and runs off the bottom edge with no way to reach what is down
+   there. Capped, offsetHeight is bounded, that same clamp lands it
+   correctly, and the overflow scrolls. */
 /* The clipboard-refused fallback for a generated report. Centred rather
    than cursor-anchored: it is a block of text to read and select, not a
    menu to click through. */
@@ -1706,8 +1736,18 @@ input.txt.sm{max-width:120px}
   font-size:12px;margin:-1px 0 4px;min-height:20px}
 .fhealth .fhstat{min-width:0;overflow-wrap:anywhere}
 .fhealth button.mini{margin-inline-start:0}
-.idxrow{display:grid;grid-template-columns:120px 1fr 190px 84px 84px auto auto 36px;gap:8px;margin:10px 0 4px;align-items:center}
+.idxrow{display:grid;grid-template-columns:104px 120px 1fr 190px 84px 84px auto auto 36px;gap:8px;margin:10px 0 4px;align-items:center}
 .idxrow [data-k=result]{grid-column:1/-1;min-height:0;font-size:12.5px}
+/* TODO 297: the nzbindex-only knobs. Its own full-width sub-row rather
+   than more columns - they are meaningless for a Newznab entry, and the
+   row above is already nine columns wide. Hidden unless the kind is
+   nzbindex; `.idxrow[data-kind=nzbindex]` is the only thing that shows
+   it, so a Newznab row cannot leave a stale one on screen. */
+.idxrow .nzbopts{display:none}
+.idxrow[data-kind=nzbindex] .nzbopts{display:flex;grid-column:1/-1;flex-wrap:wrap;gap:8px;align-items:center;font-size:12.5px}
+.idxrow .nzbopts .txt{width:96px}
+.idxrow .nzbopts .txt.grp{width:auto;flex:1;min-width:180px}
+.idxrow .nzbopts .rawnote{flex-basis:100%;color:var(--dim)}
 .wlrow{display:grid;grid-template-columns:1fr 88px 64px 64px 78px 84px 84px 92px 112px 92px 32px;gap:7px;margin:10px 0 2px;align-items:center}
 .wlrow .wlst{grid-column:1/-1;font-size:12px;margin:-3px 0 5px}
 .wlrow label{display:flex;gap:5px;align-items:center;font-size:12px;white-space:nowrap}
@@ -2080,7 +2120,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
        Title is set by the poll, not by applyI18n: it says one thing in a
        container and another everywhere else, so a static key here would
        flip it to the wrong wording on every locale change. -->
-  <span class="pill" id="updChip" style="display:none;cursor:pointer"></span>
+  <button type="button" class="pill" id="updChip" style="display:none"></button>
   <!-- After the nav for the reason above: this chip also comes and
        goes. Armed queue-finished action. The setting is two cards deep in
        Settings, and "why did the NAS turn itself off overnight?" has to be
@@ -2088,7 +2128,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
        says so where the user already looks, and switches itself off when
        clicked. Only sleep and shutdown get the chip: a script that runs on
        every drain is not a surprise worth a permanent badge. -->
-  <span class="pill" id="finChip" style="display:none;cursor:pointer"></span>
+  <button type="button" class="pill" id="finChip" style="display:none"></button>
   <span class="grow"></span>
   <span class="selwrap"><svg class="ic selic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-gauge"/></svg>
   <svg class="ic selcaret" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-caret"/></svg>
@@ -2119,7 +2159,15 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
        Browse view - so a whole morning of posts went unindexed with
        nothing on screen saying so. -->
   <button class="ghost" id="idxPill" onclick="toggleIdxPaused()" style="display:none"></button>
-  <span class="pill live" id="statusPill" data-i18n="status.connecting">connecting</span>
+  <!-- Operable for the same reason the chips beside it are: this is the
+       most-looked-at word on the page, and it was the one status here
+       you could not act on. A menu rather than a click-to-toggle - the
+       pill is wide, and "Pause" and "Pause now" are a real choice, not
+       a confirmation. The Pause button next to it keeps its one-click
+       path; nothing moved. -->
+  <button type="button" class="pill live" id="statusPill" aria-haspopup="menu"
+    onclick="queueMenu(event)" data-i18n="status.connecting"
+    data-i18n-title="chip.q.title" title="Click to pause or resume the queue">connecting</button>
   <!-- Background-subsystem chips (stats.busy). Rendered by
        renderBusyChips; empty span costs nothing when the daemon is
        doing nothing in the background. -->
@@ -2703,6 +2751,13 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <span class="hint" id="sv_idlereleff"></span></span></div>
     <div class="row"><label data-i18n="set.srv.idlekeep">Connections to keep warm<span class="hint" data-i18n="set.srv.idlekeep.hint">how many connections survive that hang-up, so the next download still starts warm. Blank = choose for me. On a provider that limits ADDRESSES this makes no difference: this machine is one address whether it holds one connection or sixty, so keeping any at all leaves the account occupied and the sensible answer there is none</span></label>
       <input class="txt sm" type="number" min="0" max="64" id="sv_idlekeep" data-i18n-placeholder="set.srv.auto" placeholder="auto"></div>
+    <div class="row" data-adv="1"><label data-i18n="set.srv.family">Reach this server over<span class="hint" data-i18n="set.srv.family.hint">which kind of internet address to try first, when this server has both an IPv4 and an IPv6 one. Automatic tries IPv4 first, which suits almost everyone. Pick IPv6 first if your home network reaches IPv4 only through your internet provider's translator, where IPv6 is the quicker path. Whichever you pick, the other kind is still tried if the first does not answer. One caution on macOS: it makes itself fresh IPv6 addresses for privacy every so often, so a usenet provider that counts how many places use your account at once can read one machine as several. If yours limits that, set a bind address below as well, to a fixed IPv6 address of this machine</span></label>
+      <select class="sel" id="sv_family" style="max-width:220px">
+        <option value="auto" data-i18n="set.srv.family.auto">Automatic (IPv4 first)</option>
+        <option value="ipv4" data-i18n="set.srv.family.v4">IPv4 first</option>
+        <option value="ipv6" data-i18n="set.srv.family.v6">IPv6 first</option></select></div>
+    <div class="row" data-adv="1"><label data-i18n="set.srv.certname">Name on the certificate<span class="hint" data-i18n="set.srv.certname.hint">only for a server whose security certificate is issued to a different name from the one you connect to. That happens when you reach a server of your own by its address or its name on your own network, or when a provider sits behind another company's front end. Put the name the certificate was issued to here and connect to whatever you like: the certificate is still checked in full, and still has to be issued by a recognised authority - all this changes is which name it has to be issued to. Blank, which is right for almost everyone, checks the name or address you connect to. It takes a name, never an address</span></label>
+      <input class="txt" id="sv_tlsname" data-i18n-placeholder="set.srv.certname.ph" placeholder="e.g. news.example.com"></div>
     <div class="row" data-adv="1"><label data-i18n="set.srv.bindip">Go out from this address<span class="hint" data-i18n="set.srv.bindip.hint">the local IP address this server's connections leave from, for a machine with more than one internet link (two lines on a router, or a VPN alongside the normal one). Blank lets the system choose. The kind of address decides the kind it reaches: an IPv4 address here connects to the server over IPv4</span></label>
       <input class="txt" id="sv_bindip" data-i18n-placeholder="set.srv.bindip.ph" placeholder="e.g. 192.168.1.50"></div>
     <div class="row" data-adv="1"><label data-i18n="set.srv.socks">Through a SOCKS5 proxy<span class="hint" data-i18n="set.srv.socks.hint">send this server's traffic through a SOCKS5 proxy, as host:port. The proxy looks up the server's name for you, so the lookup does not leak past it. Blank connects directly. Each server has its own, so one provider can go through a proxy while the others do not</span></label>
@@ -2999,7 +3054,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 
 <div class="card set" data-sg="organise" data-sk="smart">
   <h3 data-i18n="set.smart.title">Smart folders <span class="badge live" data-i18n="badge.live">live</span></h3>
-  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.smart.rules">Rules<span class="hint" data-i18n="set.smart.rules.hint">each added NZB's name runs through these top to bottom: first match wins. Match/but-not are regexes (plain keywords work too); sizes like 200M, 4G; category picks the subfolder of the download root. TV = when the job finishes, file it as [Show]/Season NN/ and rename the video to "Show - S01E02"</span></label></div>
+  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.smart.rules">Rules<span class="hint" data-i18n="set.smart.rules.hint">each added NZB's name runs through these top to bottom: first match wins. Match/but-not are regexes or wildcards like *anime* (plain keywords work too); sizes like 200M, 4G; category picks the subfolder of the download root. TV = when the job finishes, file it as [Show]/Season NN/ and rename the video to "Show - S01E02"</span></label></div>
   <div id="smartrows"></div>
   <div class="savebar">
     <button class="ghost" onclick="addSmartRow()" data-i18n="set.speed.addrule">+ Add rule</button>
@@ -3025,7 +3080,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <button class="ghost" onclick="addCatFileRow()" data-i18n="set.disk.cats.add">+ Add category</button>
     <button onclick="saveCatFiles(this)" data-i18n="set.disk.cats.apply">Apply categories</button>
   </div>
-  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.cats.title">Your categories<span class="hint" data-i18n="set.cats.rules.hint2">give sport, wrestling, podcasts, audiobooks or anything else its own wall category. Each release name runs through these top to bottom, first match wins, ahead of the built-in Movies/TV classifier. Match rules are regexes (plain keywords work too), same as Smart folder rules. "Treat as" decides what happens when a download finishes: movie-like and TV-like get junk cleanup and renaming; "leave as posted" touches nothing, which is the safe choice for books, comics and audio. Each one is offered to your apps as well, under the short name at the end of its row - add that name to the list above to give it a folder of its own</span></label></div>
+  <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.cats.title">Your categories<span class="hint" data-i18n="set.cats.rules.hint2">give sport, wrestling, podcasts, audiobooks or anything else its own wall category. Each release name runs through these top to bottom, first match wins, ahead of the built-in Movies/TV classifier. Match rules are regexes or wildcards like *anime* (plain keywords work too), same as Smart folder rules. "Treat as" decides what happens when a download finishes: movie-like and TV-like get junk cleanup and renaming; "leave as posted" touches nothing, which is the safe choice for books, comics and audio. Each one is offered to your apps as well, under the short name at the end of its row - add that name to the list above to give it a folder of its own</span></label></div>
   <div id="catrows"></div>
   <div class="savebar">
     <button class="ghost" onclick="addCatRow()" data-i18n="set.cats.add">+ Add category</button>
@@ -3055,6 +3110,10 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 <div class="card set" data-sg="organise" data-sk="pullsearch">
   <h3 data-i18n="set.nnab.title">Search indexers <span class="badge live" data-i18n="badge.live">live</span></h3>
   <div class="row" style="grid-template-columns:1fr"><label data-i18n="set.nnab.list">Indexer accounts<span class="hint" data-i18n="set.nnab.list.hint">your accounts on NZB indexers (NZBGeek, DrunkenSlug, a Prowlarr or NZBHydra instance, …). Searches on the wall can then ask them too and grab results straight into the queue. API keys never leave this machine. The daily limits mirror your account's allowance: 0 means unlimited.</span></label></div>
+  <!-- TODO 297 (issue #57). Its own line rather than an edit to the hint
+       above: rewording that one would leave 27 translations describing
+       the old sentence, with nothing to say so. -->
+  <div class="row" style="grid-template-columns:1fr"><span class="hint" data-i18n="set.nnab.nzbi">Set the first box of a row to nzbindex to search nzbindex.com directly instead, with no account needed. It indexes what was actually posted rather than a curated release list, so it finds things an indexer will not - and many of its results carry scrambled names.</span></div>
   <div id="idxrows"></div>
   <div class="savebar">
     <button class="ghost" onclick="addIdxRow()" data-i18n="set.nnab.add">+ Add indexer</button>
@@ -3155,6 +3214,16 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <input type="checkbox" id="s_index_retention" onchange="setCfg('index_retention',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.idx.pausedl">Pause while downloading<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.pausedl.hint">stop indexing entirely while a download is running. Scanning takes NNTP connections from the same account (up to 15 of 20 at the default parallelism) and its database writes compete with the download for CPU and disk. Off = keep indexing during downloads, so new posts stay visible sooner</span></label>
     <input type="checkbox" id="s_index_pause_dl" onchange="setCfg('index_pause_on_download',this.checked?1:0)"></div>
+  <!-- The metadata lanes' own stop. Two different spends: everything
+       above this row talks to the news provider, this one is the
+       outbound HTTP to TMDB, TVmaze, Wikidata and MusicBrainz that puts
+       names and artwork on what the scan already found. Before it
+       existed the only switch that reached those lanes was the master
+       indexing switch, which takes the whole feature away. Mirrored on
+       the header's "metadata" chip, which is where someone who has just
+       noticed the lookups running will click. -->
+  <div class="row"><label data-i18n="set.idx.enrichpause">Pause metadata lookups<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.enrichpause.hint">stop fetching titles, posters and cast from the metadata sites. What has already been fetched stays; rows found from now on simply keep the name they were posted under until you turn this back off. The index itself carries on scanning - this is the only setting here that touches no news provider at all</span></label>
+    <input type="checkbox" id="s_enrich_paused" onchange="setCfg('enrich_paused',this.checked?1:0)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.idx.gates">Ingest gates<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.idx.gates.hint">optional JSON filter on what gets indexed: kinds/years/resolutions/languages/title patterns/size, e.g. {"kinds":["tv"],"res":["1080p"],"min_size":"200M"}. Empty = index everything</span></label>
     <textarea class="txt" id="s_index_gates" rows="3" style="resize:vertical" onchange="setCfg('index_gates',this.value)"></textarea></div>
   <!-- The pre feed. Its own opt-in inside an opt-in: everything else on
@@ -4685,6 +4754,11 @@ async function cancelFinish(btn){
   // stop and a banner still counting down for another second reads as the
   // button not having worked.
   finishNotice(null);
+  // A write the daemon never took is not "already switched off", and
+  // that is what the arm below would have called it - a red toast whose
+  // words say the click was unnecessary rather than that it failed. Say
+  // what the daemon said; the next poll puts the banner back.
+  if(!reportRefusal(j)){ loadSettings(); return; }
   // Two facts, two sentences: the banner's user stopped a countdown, the
   // header chip's user switched off an arm that had not fired. Telling
   // the second one their countdown had already ended, over a click that
@@ -4970,6 +5044,40 @@ async function api(mode, extra, authKey, post){
   }
   return j;
 }
+// The mutation contract, and the other half of the httpFail/fetchFail
+// decision above. Answering every failure as a RESOLVED {status:false}
+// is right for the ~60 read callers, but it also means `await api(...)`
+// on its own cannot tell a refused write from an accepted one - and a
+// try/catch around one is dead code, because there is nothing left to
+// reject. That is how a rejected save came to toast success and reload
+// the page, and how a grab the daemon never took said "Added to the
+// queue" (Codex F-18).
+//
+// So a write goes through mustOk: it hands back the answer when the
+// daemon took it, and THROWS the daemon's own reason otherwise, which
+// skips every step after the call - the success toast, the reload, the
+// re-poll - and leaves busy() below to report it. Reads stay on plain
+// api(). Outside busy(), wrap it in the try/catch that puts the control
+// back where it was; a control that failed must snap back, not lie.
+function apiErr(j){
+  return t('toast.refused','Failed: {err}',
+           {err: tErr(j&&j.error) || t('err.rejected','rejected')});
+}
+function mustOk(j){
+  if(j && j.status) return j;
+  const e = new Error(apiErr(j));
+  e.refused = true;   // a reported refusal, not a fault - see busy()
+  throw e;
+}
+// The non-throwing half, for a handler that has no busy() around it and
+// no try/catch of its own: an onclick drops the promise, so a throw
+// there would vanish into an unhandled rejection nobody ever sees. Says
+// the same thing and answers whether to carry on.
+function reportRefusal(j){
+  if(j && j.status) return true;
+  toast(apiErr(j), true);
+  return false;
+}
 // Instant click feedback: disable the button and show a status label while
 // its (often multi-second) action runs, then restore it - so a click always
 // visibly "does something", even before results arrive.
@@ -4977,6 +5085,12 @@ async function busy(btn, label, fn){
   if(btn){ btn.dataset.lbl = btn.textContent; btn.disabled = true; btn.textContent = label; }
   try { return await fn(); }
   catch(e){
+    // A refusal from mustOk() has already said everything there is to
+    // say, in the daemon's own words, and the steps it was protecting
+    // were inside fn and are already skipped. Report it once and stop:
+    // re-throwing it would only land in the dropped promise of the
+    // onclick that started this, as an unhandled rejection nobody sees.
+    if(e && e.refused){ toast(e.message, true); return; }
     // Last resort: onclick handlers drop this promise, so anything the
     // action throws used to disappear and the click just looked
     // ignored. api() answers its own failures now, so what lands here
@@ -4995,7 +5109,11 @@ async function togglePause(){
   paused=!paused;
   document.getElementById('pauseBtn').textContent = paused?t('hdr.resume','Resume'):t('hdr.pause','Pause');
   document.body.classList.toggle('paused', paused);
-  await api(paused ? 'pause' : 'resume'); tick();
+  // The optimistic flip is its own rollback: tick() re-derives `paused`
+  // from the daemon's own answer (see the poll), so a refused pause puts
+  // the button back within the second. What it cannot do is say WHY, and
+  // a control that springs back with no word for it reads as a glitch.
+  reportRefusal(await api(paused ? 'pause' : 'resume')); tick();
 }
 let offline=false;
 // Going offline hangs up every provider connection at once. It also
@@ -5010,7 +5128,7 @@ async function toggleOffline(){
     return;
   offline=going;
   paintNet();
-  await api(going ? 'offline' : 'online');
+  reportRefusal(await api(going ? 'offline' : 'online'));
   tick();
 }
 // Single place that renders the state, so the optimistic flip above and
@@ -5035,10 +5153,10 @@ async function pauseNow(){
   paused=true;
   document.getElementById('pauseBtn').textContent=t('hdr.resume','Resume');
   document.body.classList.toggle('paused', true);
-  await api('pause','&value2=now'); tick();
+  reportRefusal(await api('pause','&value2=now')); tick();
 }
 async function pauseFor(mins){
-  if(mins) await api('pause','&value='+mins);
+  if(mins) reportRefusal(await api('pause','&value='+mins));
   document.getElementById('pauseSel').value='';
   tick();
 }
@@ -5049,20 +5167,22 @@ async function setLimit(v){
     // Accepts what the API accepts - 25M, 500K, a bare byte count.
     const typed=prompt(t('hdr.limit.ask','Speed limit - e.g. 25M, 500K, or 0 for no limit'), '');
     if(typed==null||typed.trim()===''){ tick(); return; }  // tick() re-syncs the select
-    await api('config','&name=auto_speed&value=0');
+    if(!reportRefusal(await api('config','&name=auto_speed&value=0'))){ tick(); return; }
     const r=await api('config','&name=speedlimit&value='+encodeURIComponent(typed.trim()));
-    if(r && r.status===false) toast(r.error||t('hdr.limit.bad','Could not set that limit.'));
+    // tErr, not the raw phrase: this was the one site already testing the
+    // status, and it printed the daemon's English straight at the reader.
+    if(!r||!r.status) toast(tErr(r&&r.error)||t('hdr.limit.bad','Could not set that limit.'), true);
     tick(); return;
   }
-  if(v==='auto') await api('config','&name=auto_speed&value=1');
+  if(v==='auto') reportRefusal(await api('config','&name=auto_speed&value=1'));
   else{
-    await api('config','&name=auto_speed&value=0');
+    if(!reportRefusal(await api('config','&name=auto_speed&value=0'))){ tick(); return; }
     // "pct:25" is this page's marker for the daemon's OWN percentage
     // convention: a bare number of 100 or less means percent of the
     // configured line speed (settings.rs). The marker exists only so
     // relabelLimitOptions and the custom-option check can tell a
     // percentage apart from a byte count of 25.
-    await api('config','&name=speedlimit&value='+(String(v).startsWith('pct:')?String(v).slice(4):v));
+    reportRefusal(await api('config','&name=speedlimit&value='+(String(v).startsWith('pct:')?String(v).slice(4):v)));
   }
   tick();
 }
@@ -6012,8 +6132,16 @@ function qCount(q){
   return typeof n==='number' ? n : (((q&&q.slots)||[]).length);
 }
 // True while the queue holds rows this page was not sent. Guards the
-// three places that treat "not in the payload" as "gone from the
-// queue" - a selection, an open drawer, and the added/removed toasts.
+// two places that treat "not in the payload" as "gone from the queue" -
+// a selection and an open drawer.
+//
+// It guarded a THIRD until §129 1b(b) (25 Aug 2026): the arrival and
+// "all done" cues, which compared this poll's slot ids with the last
+// one's and had to sit out entirely while the page was short of the
+// queue - "show more" would otherwise have announced 250 new downloads,
+// and a row falling off the end of the window is not a row that left
+// the queue. Those cues are daemon events now and have no such blind
+// spot, which was the whole prize for moving them.
 function qTruncated(q){ return qCount(q) > (((q&&q.slots)||[]).length); }
 function histWindowExtra(){
   const cur=histFilter();
@@ -6041,6 +6169,12 @@ const BUSY_META={
   moving:    ['chip.moving','moving','chip.moving.hint','moving files','b-net'],
   maintenance:['chip.maintenance','upkeep','chip.maintenance.hint','database upkeep',''],
   measuring: ['chip.measuring','measuring','chip.measuring.hint','measuring connections',''],
+  // Held by the list-source poller (Plex, Trakt, an external watchlist).
+  // The token has existed since §151 and was never added here, so it
+  // rendered as the raw English words `list sync` in all 27 locales -
+  // the fallback path doing exactly what it promises, unnoticed because
+  // nothing goes wrong when it fires.
+  'list sync':['chip.listsync','lists','chip.listsync.hint','syncing your lists','b-meta'],
 };
 // How many chips fit is a question about THIS window, not a constant:
 // the header's fixed furniture (logo, nav, both selects, the pill, and
@@ -6051,25 +6185,192 @@ const BUSY_META={
 // then fold from the end until the header is one row again, and show
 // the remainder as a "+N" chip that names them in its tooltip. Nothing
 // is hidden, only folded.
-let busyShown='', busyAll=[], busyFoldPending=false;
+let busyShown='', busyAll=[], busyFolded=[], busyFoldPending=false;
 function busyLabel(tok){
   const [k,fb]=BUSY_META[tok]||['',tok];
   return k?t(k,fb):fb;
 }
 function busyChipHtml(shown,rest){
+  busyFolded=rest;                    // what the "+N" menu has to reach
   let html=shown.map(tok=>{
     const [k,fb,hk,hfb,cls]=BUSY_META[tok]||['',tok,'','',''];
     const lbl=k?t(k,fb):fb, hint=hk?t(hk,hfb):'';
-    return `<span class="pill bchip ${cls}"${hint?` title="${esc(hint)}"`:''}>${esc(lbl)}</span>`;
+    // The tooltip keeps the sentence AND now says the chip is operable:
+    // a pill that has never been clickable is not one people try.
+    const tip=(hint?hint+' ':'')+t('chip.clickfor','· click for what to do about it');
+    return `<button type="button" class="pill bchip ${cls}" aria-haspopup="menu"`+
+      ` title="${escA(tip)}" onclick="busyMenu(event,${JSON.stringify(tok).replace(/"/g,'&quot;')})">${esc(lbl)}</button>`;
   }).join('');
   if(rest.length)
-    html+=`<span class="pill bchip" title="${esc(rest.map(busyLabel).join(', '))}">+${rest.length}</span>`;
+    html+=`<button type="button" class="pill bchip" aria-haspopup="menu"`+
+      ` title="${escA(rest.map(busyLabel).join(', '))}" onclick="busyMoreMenu(event)">+${rest.length}</button>`;
   return html;
+}
+
+// ---- what a chip lets you DO ------------------------------------------
+// A status you can see and not act on is a status that sends people
+// hunting through twenty settings cards for the switch. Every chip in
+// the strip opens this menu, and the first item is always the thing
+// someone who just noticed the work running actually wants.
+//
+// Each entry is [i18n key, English, javascript]. `null` is a separator,
+// so the way OUT to the settings card sits in its own group below the
+// direct actions rather than competing with them for the first slot.
+// Nothing here reads live state: a chip is only ON SCREEN while its
+// subsystem is running, so the useful direction is always "stop".
+//
+// Three subsystems get no off switch, on purpose rather than for want of
+// a config key. `moving` is the tail of a download - stopping it midway
+// leaves files in two places; `maintenance` is a few seconds of database
+// upkeep that a restart would only run again; `list sync` is per-source
+// and belongs on the source's own row. Those say so with `chip.nostop`
+// and offer the place the work can be seen instead.
+const BUSY_ACTS={
+  indexing:[
+    ['idx.pause','Pause indexing',"busyCfg('index_paused',1)"],
+    ['chip.act.idxoff','Turn indexing off',"busyCfg('index_enabled',0)"],
+    null,
+    ['chip.act.settings','Open its settings',"goSetting('indexing')"],
+  ],
+  enriching:[
+    ['chip.act.metapause','Pause metadata lookups',"busyCfg('enrich_paused',1)"],
+    null,
+    ['chip.act.settings','Open its settings',"goSetting('indexing')"],
+  ],
+  predb:[
+    ['chip.act.predboff','Turn the release feed off',"busyCfg('predb_enabled',0)"],
+    null,
+    ['chip.act.settings','Open its settings',"goSetting('indexing')"],
+  ],
+  watchlist:[
+    ['chip.act.watch','Open the watchlist',"busyGoCard('watchCard')"],
+  ],
+  measuring:[
+    ['chip.act.tuneoff','Stop measuring connections',"busyCfg('auto_connections',0)"],
+    null,
+    ['chip.act.settings','Open its settings',"goSetting('speed')"],
+  ],
+  moving:[
+    ['chip.act.queue','Show the queue',"busyGoCard('queueCard')"],
+  ],
+  maintenance:[
+    ['chip.act.settings','Open its settings',"goSetting('database')"],
+  ],
+  'list sync':[
+    ['chip.act.lists','Open list sources',"busyGoCard('watchCard')"],
+  ],
+};
+// Which chips have nothing to switch off - see the note above. Kept
+// beside BUSY_ACTS rather than folded into it so the menu can SAY it,
+// which is the difference between a short menu and a menu that looks
+// unfinished.
+const BUSY_NOSTOP=new Set(['moving','maintenance','list sync']);
+
+// A setting written from the header. setCfg already toasts and reloads
+// the settings page's controls, so the chip's own feedback is the chip
+// leaving the strip on the next poll - which is the honest signal, since
+// a lane mid-batch keeps its token until the batch ends.
+function busyCfg(name,val){ setCfg(name,val); }
+// Jump to a card on the dashboard itself. Deliberately NOT goSetting:
+// the watchlist and the queue are not settings, and sending someone to
+// the settings view to look at their own watchlist is the round trip
+// this whole change exists to remove.
+function busyGoCard(id){
+  setView('dash');
+  const c=document.getElementById(id); if(!c) return;
+  c.scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth'});
+  c.classList.remove('clickflash'); void c.offsetWidth; c.classList.add('clickflash');
+}
+// Shared by both chip menus and the queue pill's: same #ctxmenu element,
+// same closeMenu lifetime, same arrow-key walk. `rows` is a list of
+// [key, English, js] with nulls for separators.
+function openPillMenu(e,label,rows){
+  e.preventDefault(); e.stopPropagation(); closeMenu();
+  const m=document.createElement('div'); m.id='ctxmenu';
+  m.setAttribute('role','menu');
+  m.setAttribute('aria-label',label);
+  // null row = separator; a row whose KEY is null is a heading, which
+  // renders as a disabled item so menuKey's arrow walk steps over it.
+  // null row = separator. A row with no javascript is TEXT - a heading,
+  // or the sentence that says this one cannot be switched off - and
+  // renders disabled, which both greys it and takes it out of menuKey's
+  // arrow walk (that walk is `:not([disabled])` for exactly this).
+  m.innerHTML=rows.map(r=>{
+    if(!r) return '<hr>';
+    if(!r[2]) return `<button type="button" disabled>${esc(r[0]?t(r[0],r[1]):r[1])}</button>`;
+    return `<button type="button" role="menuitem" onclick="${escA(r[2])}">${esc(t(r[0],r[1]))}</button>`;
+  }).join('');
+  document.body.appendChild(m);
+  m.addEventListener('keydown', menuKey);
+  const btn=e.target.closest && e.target.closest('button');
+  placeMenu(m, e, btn);
+  // Keyboard-opened menus take focus; a mouse click leaves the pointer
+  // in charge. Same rule as histMenu.
+  if(btn && e.detail===0){ menuOpener=btn; const f=m.querySelector('button:not([disabled])'); if(f) f.focus(); }
+  return false;
+}
+// The queue pill's menu. Two paused-from-here states because they are
+// genuinely different: plain Pause lets the articles already in flight
+// land, "now" drops them and frees the line, and they re-download on
+// resume. The wording is the Pause button's own tooltip, shortened.
+//
+// Only ever offers the direction the queue is not already in - `paused`
+// is the daemon's own value, overwritten by every poll, so this cannot
+// disagree with the pill it hangs off. An unreachable daemon gets no
+// menu at all: every item would be a request that cannot be made.
+function queueMenu(e){
+  const pill=document.getElementById('statusPill');
+  if(pill && pill.classList.contains('down')) return false;
+  const rows = paused
+    ? [['hdr.resume','Resume',"togglePause()"]]
+    : [['hdr.pause','Pause',"togglePause()"],
+       ['chip.q.pausenow','Pause now',"pauseNow()"]];
+  return openPillMenu(e, t('chip.q.label','Queue controls'), rows);
+}
+function busyMenu(e,tok){
+  const rows=(BUSY_ACTS[tok]||[]).slice();
+  if(BUSY_NOSTOP.has(tok)) rows.unshift(['chip.nostop','Finishes on its own - nothing to switch off',''],null);
+  if(!rows.length) return false;                 // an unknown token from a newer daemon
+  return openPillMenu(e, t('chip.menu.label','What to do about {what}',{what:busyLabel(tok)}), rows);
+}
+// The "+N" chip. Folding is a layout accident - the window was narrow,
+// not the work unimportant - so the menu behind it must reach the same
+// actions rather than being a list of names. Every folded subsystem's
+// menu is inlined under a disabled heading row bearing its name.
+//
+// NOT a submenu, and that is a fix rather than a simplification: a nested
+// open would anchor the second menu on the item that was just clicked,
+// and closeMenu has already detached it, so every rect reads zero and
+// the menu lands in the top-left corner of the window.
+function busyMoreMenu(e){
+  const rows=[];
+  for(const tok of busyFolded){
+    if(rows.length) rows.push(null);
+    rows.push([null,busyLabel(tok),null]);                 // heading, rendered disabled
+    // Same order as the chip's own menu: the sentence explaining why
+    // there is no off switch comes BEFORE what there is instead, or it
+    // reads as a footnote on the action above it.
+    if(BUSY_NOSTOP.has(tok)) rows.push(['chip.nostop','Finishes on its own - nothing to switch off','']);
+    for(const r of (BUSY_ACTS[tok]||[])) if(r) rows.push(r);
+  }
+  if(!rows.length) return false;
+  return openPillMenu(e, t('chip.more.label','Other background work'), rows);
 }
 // Has the header spilled onto a second row? Compared against the logo,
 // which is always on the first one.
+//
+// The sentinel is the LAST control in the header, not Pause. Pause was
+// wrong by one element: Online/disconnect comes after it, so a strip
+// wide enough to push only THAT onto a second row reported a header
+// that fits, the fold stopped folding, and the control this whole
+// mechanism exists to protect was the one left hanging - measured at
+// 1440px with four chips up, netBtn on row two while headerWrapped()
+// said false. Read off the DOM rather than by id so a control appended
+// after this one inherits the job instead of silently taking the
+// sentinel's place behind it.
 function headerWrapped(){
-  const h=document.querySelector('header'), l=document.getElementById('pauseBtn');
+  const h=document.querySelector('header');
+  const l=h && h.lastElementChild;
   if(!h||!l) return false;
   return Math.round(l.getBoundingClientRect().y) > Math.round(h.firstElementChild.getBoundingClientRect().y);
 }
@@ -6532,9 +6833,6 @@ async function tick(){
     // lifecycle events now (seq-cursored, no replay on a fresh page) -
     // watchHistory's snapshot diffing is gone.
     handleLifeEvents(r);
-    // After the events so a just-landed completion is visible to the
-    // queue-drained "all done" check.
-    sndQueueEvents(q);
     if(wasOffline){ wasOffline=false; snd('conn', true); say('conn',t('say.connBack','Connection restored.')); }
     drawVerifyHealth(h.slots);
     const c=h.counts||{};
@@ -6566,10 +6864,15 @@ async function tick(){
 // than a guessed-at longer list. Browser-local like the other list prefs.
 // Filtering runs over the WHOLE history payload and slices to 20 after,
 // so "Failed" can surface a failure older than the newest 20 rows.
+// A history row still travelling to its completed folder reports the
+// SAB stage word `Moving` (issue #59) - done downloading, not failed.
+// Every "is this row red" test goes through here, or the first mover
+// window after a download turns the whole row's furniture red.
+function histFailed(s){ return s.status!=='Completed'&&s.status!=='Moving'; }
 const HIST_BUCKETS=[
   ['all',    ()=>true],
-  ['done',   s=>s.status==='Completed'],
-  ['failed', s=>s.status!=='Completed'],
+  ['done',   s=>!histFailed(s)],
+  ['failed', s=>histFailed(s)],
   ['locked', s=>!!s.password_required],
 ];
 let lastHistSlots=[];
@@ -6711,6 +7014,8 @@ function altReason(o){
     ? t('queue.alt.why.recovery','the repair data for this post cannot be fetched from your provider')
     : o.reason==='gone'
     ? t('queue.alt.why.gone','no server you have set up still carries this post')
+    : o.reason==='short'
+    ? t('queue.alt.why.short','this post is damaged beyond what its repair data can rebuild')
     : (o.detail||'');
 }
 // §282 item 20: the pick list this row has asked for, keyed by nzo_id.
@@ -7092,7 +7397,7 @@ function renderDivNudge(){
   const el=document.getElementById('divNudge'); if(!el) return;
   const f=histFilter();
   if(f!=='all'&&f!=='failed') return;
-  const failed=(lastHistSlots||[]).filter(s=>s.status!=='Completed'&&s.fail_kind).slice(0,10);
+  const failed=(lastHistSlots||[]).filter(s=>histFailed(s)&&s.fail_kind).slice(0,10);
   const upto=+localStorage.divNudgeUpto||0;
   const miss=failed.filter(s=>s.fail_kind==='missing'&&(s.completed||0)>upto);
   const show=miss.length>=3;
@@ -7103,7 +7408,7 @@ function renderDivNudge(){
     } <a href="#" onclick="return goSetting('diversity')">${t('hist.divnudge.check','Check server diversity')}</a> · <a href="#" onclick="return dismissDivNudge()">${t('hist.divnudge.dismiss','dismiss')}</a>`);
 }
 function dismissDivNudge(){
-  const miss=(lastHistSlots||[]).filter(s=>s.status!=='Completed'&&s.fail_kind==='missing');
+  const miss=(lastHistSlots||[]).filter(s=>histFailed(s)&&s.fail_kind==='missing');
   localStorage.divNudgeUpto=String(Math.max(+localStorage.divNudgeUpto||0,
     Math.floor(Date.now()/1000), ...miss.map(s=>s.completed||0)));
   document.getElementById('divNudge').style.display='none';
@@ -7158,7 +7463,7 @@ function renderHistory(slots){
   const actSamples={};
   if(!selGuard)
   setHtml(document.querySelector('#hist tbody'), rows.map(s=>{
-      const failed=s.status!=='Completed';
+      const failed=histFailed(s);
       // The daemon says what would actually help this row (fail_action).
       // "search" means the post itself is the problem, so another
       // release is the only move - lead with it.
@@ -7461,7 +7766,7 @@ function histTailSpan(s){
   return `<span class="nowrap${tail>=120?' warn':''}" title="${escA(t('hist.tail.title','Time spent after the download itself: verify, repair, unpack, naming, moving and index work. A large figure here is the thing to look at when a download seemed stuck at 100%.'))}">${esc(t('hist.tail','then {t} finishing',{t:fmtEta(tail)}))}</span>`;
 }
 function histHoverHtml(s){
-  const failed=s.status!=='Completed';
+  const failed=histFailed(s);
   const rows=[];
   // The verdict first, with the caveat that makes an amber row amber -
   // a green "Completed" over a folder that is still packed, or still
@@ -8184,7 +8489,7 @@ async function toggleHistRow(tr){
   const s=await histFullRow(tr.dataset.id);
   if(!s) return;
   if(!tr.isConnected) return;         // the list re-rendered mid-fetch
-  const failed=s.status!=='Completed';
+  const failed=histFailed(s);
   const rows=[[t('col.status','Status'),
     `<span class="${failed?'bad':'ok'}">${esc(tStatus(s.status))}</span>`
     + (s.unpack_blocked_by&&!failed
@@ -8957,10 +9262,16 @@ async function setIndexEnabled(el){
   const on=el.checked;
   el.disabled=true;
   try{
-    await api('config',`&name=index_enabled&value=${on?1:0}`);
+    mustOk(await api('config',`&name=index_enabled&value=${on?1:0}`));
   }catch(e){
+    // This catch was dead until mustOk: api() resolves its failures, so
+    // a refused save fell straight through to the toast and the reload
+    // below, and the switch stayed where the click left it while the
+    // daemon's answer said the opposite. Put the switch back and say
+    // WHY, in the daemon's words - a bare "did not accept it" is the
+    // one thing the person cannot act on.
     el.disabled=false; el.checked=!on;
-    toast(t('toast.idxfail','Could not change that. The daemon did not accept it.'));
+    toast(e.refused?e.message:t('toast.idxfail','Could not change that. The daemon did not accept it.'), true);
     return;
   }
   toast(on?t('toast.idxon','Indexer on. Choose what to index below.')
@@ -8988,14 +9299,14 @@ async function idxLeftoverLine(){
 }
 async function setIdxPaused(btn,on){
   await busy(btn, on?t('busy.pausing','Pausing…'):t('busy.resuming','Resuming…'), async()=>{
-    await api('config',`&name=index_paused&value=${on?1:0}`);
+    mustOk(await api('config',`&name=index_paused&value=${on?1:0}`));
     toast(on?t('toast.idxpaused','Indexing paused. It stays off until you resume it.')
             :t('toast.idxresumed','Indexing resumed.'));
     setTimeout(pollIdxStats, 400);
   });
 }
 async function scanNow(btn,depth){ await busy(btn,t('busy.starting','Starting…'), async()=>{
-  await api('index_scan_now', depth?`&value=${depth}`:'');
+  mustOk(await api('index_scan_now', depth?`&value=${depth}`:''));
   toast(depth?t('toast.deepscan','Deep scan of the last {n} headers started.',{n:(+depth).toLocaleString(LOCALE)}):t('toast.scan','Scan started.'));
   setTimeout(pollIdxStats, 700);
 }); }
@@ -9003,7 +9314,11 @@ async function scanNow(btn,depth){ await busy(btn,t('busy.starting','Starting…
 // subscribed two groups the user never named. Whatever gets indexed is
 // now chosen in ⚙ settings → Indexing and nowhere else, so there is no
 // path where nzbfast picks a topic on someone's behalf.
-async function grab(id,btn){ await busy(btn,t('busy.getting','Getting…'), async()=>{ await api('index_get',`&id=${id}`); tick(); toast(t('toast.queued','Added to the queue.')); }); }
+// mustOk, not a bare await: index_get answers busy, not-found and a
+// failed enqueue as {status:false}, and this used to say "Added to the
+// queue" over every one of them. web/wall.html's grab is the same
+// contract written out longhand.
+async function grab(id,btn){ await busy(btn,t('busy.getting','Getting…'), async()=>{ mustOk(await api('index_get',`&id=${id}`)); tick(); toast(t('toast.queued','Added to the queue.')); }); }
 
 // "What is happening right now" sub-line under the active row's progress
 // bar (Gary, 2 Aug: a 30-40 s flatline had no explanation anywhere).
@@ -9413,7 +9728,37 @@ function renderQueue(){
     // the history row call, stopPropagation so it does not just fold the
     // row open instead.
     const defer=(s.password_needed?` <button class="ghost mini warn" title="${escA(t('queue.pwneeded.title2','This archive is password-protected. Enter the password here - the download keeps running, and with the password it unpacks in one pass.'))}" onclick="event.stopPropagation();unlockJob('${escA(s.nzo_id)}')">🔑 ${t('queue.pwneeded','needs a password')}</button>`:'')+
-      (s.deferred?` <span class="dim" title="${escA(s.defer_reason||'')}">· ${t('queue.deferred','deferred (slow)')}</span>`:'')+
+      // The watchdog tried this job, got nowhere, and moved it to the
+      // back of the queue - and until 26 Aug 2026 the row said so in a
+      // dim `title=` tooltip that nothing invites you to hover and that
+      // a touch device cannot show at all. Measured live 25 Aug: the
+      // engine benched four jobs in twenty minutes, each with a precise
+      // reason in the daemon log, and every one of them read on the
+      // dashboard as an untouched "Queued 0%" ("i dont feel like its
+      // trying"). It IS a control now, the whyslow row-clause treatment
+      // exactly: a `button.whychip` that opens this row's drawer and
+      // lands on the daemon's own sentence.
+      //
+      // The label carries the AGE and never a claim about speed. Two of
+      // the three watchdog arms are not about slowness at all - one
+      // fires when a server grants no connection, one when every answer
+      // comes back missing - so the old "deferred (slow)" was a second
+      // vocabulary drifting away from the daemon's words. The age is
+      // what answers the actual question: `deferred` is scheduling
+      // state that a later run does not clear, so the flag alone dates
+      // itself and says nothing about it.
+      //
+      // Not on the ACTIVE row: whyslow owns that row's diagnostic, and
+      // the flag is legitimately stale there - measured on the live
+      // daemon 26 Aug 2026, a job sat Downloading with `deferred` still
+      // true from a bench hours earlier, wearing the badge while it ran.
+      (s.deferred&&!dl?` <span class="dim">· </span><button type="button" class="whychip" title="${
+        escA(t('queue.benched.title','This job was tried and moved to the back of the queue. Open the row for the reason.'))
+      }" onclick="event.stopPropagation();openDefer('${escA(s.nzo_id)}')"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-help"/></svg>${
+        s.defer_at>0
+          ? t('queue.benched','tried {t} ago',{t:fmtEta(Math.max(1,Math.round(Date.now()/1000-s.defer_at)))})
+          : t('queue.benched.plain','tried, set aside')
+      }</button>`:'')+
       // §129 3e: this is the row the storage stall happened to. The
       // header pill says the queue is paused; only this line says which
       // download it stopped, and the tooltip carries the numbers behind
@@ -10020,9 +10365,18 @@ function jfFetch(id, live, tail){
 // "deferred" is a CHOICE rather than damage (a skipped sample, a volume
 // identified as recovery data while it arrived), so it must not read as
 // a fault; "damaged" is the one that does.
+// "at destination" is §296's, and it is a LATER stage than "done"
+// rather than a rival to it: the file is finished AND already copied to
+// the completed folder, so it is usable now while the rest of the pack
+// is still arriving - which is the only question a user watching a slow
+// season pack is actually asking. Not "moved": the download folder
+// still holds the original until the job settles (PAR2 repair reads
+// every file of the set), and a word that sent someone looking in the
+// wrong folder would be worse than no word.
 const JF_STATE={queued:['drawer.fs.queued','waiting'], active:['drawer.fs.active','downloading'],
   complete:['drawer.fs.complete','done'], deferred:['drawer.fs.deferred','skipped'],
-  damaged:['drawer.fs.damaged','damaged'], recovery:['drawer.fs.recovery','repair data']};
+  damaged:['drawer.fs.damaged','damaged'], recovery:['drawer.fs.recovery','repair data'],
+  published:['drawer.fs.published','at destination']};
 function jfState(w){ const e=JF_STATE[w]; return e?t(e[0],e[1]):(w||''); }
 function jfRow(id,f,live,bare){
   const b=+f.bytes||0, left=Math.max(0,Math.min(b,+f.bytes_left||0)), got=b-left;
@@ -10266,8 +10620,20 @@ function drawerHtml(s){
     // and that is exactly when the warning matters most: this is the
     // moment the user decides whether to resume it at all.
     mediaWarnBlock(s.media)+
-    (s.deferred?`<div class="warn" style="font-size:12px;margin-top:7px">${t('drawer.deferred','Deferred as slow:')} ${esc(s.defer_reason||'')}<br>
-      <span class="dim">${t('drawer.deferred.hint','Runs when nothing faster is queued; change its priority or drag it up to override.')}</span></div>`:'')+
+    // The id is the scroll target for the row's chip (openDefer), the
+    // same contract `#whyslowBlk` has with openWhySlow.
+    //
+    // `dim` and not `warn`: a benched job is a scheduling decision the
+    // engine made and will unmake on its own, not an error state. The
+    // sentence is the DAEMON's, verbatim off `defer_reason`, so this
+    // panel and the `[defer]` line in the log say the same thing in the
+    // same words - the count and the clock are the only text added
+    // here, and both are facts rather than a second verdict.
+    (s.deferred?`<div id="deferBlk" class="dim" style="font-size:12px;margin-top:7px;padding-top:7px;border-top:1px dashed var(--line)">
+      <b>${t('drawer.benched','Tried, and moved to the back of the queue:')}</b> ${esc(s.defer_reason||'')}<br>
+      ${s.defer_at>0?`${t('drawer.benched.at','Last set aside {t} ago.',{t:fmtEta(Math.max(1,Math.round(Date.now()/1000-s.defer_at)))})} `:''}${
+        s.defer_count>1?t('drawer.benched.tries','Tried and set aside {n} times.',{n:s.defer_count}):''}<br>
+      ${t('drawer.deferred.hint','Runs when nothing faster is queued; change its priority or drag it up to override.')}</div>`:'')+
     // §129 3e: the evidence behind the pause, where a user who wants to
     // check the claim will look for it. Nothing here is a button - the
     // queue comes back on its own, and saying so is what stops someone
@@ -10732,7 +11098,7 @@ async function loadListSrc(){
   }catch(e){}
 }
 async function listSyncNow(btn){ await busy(btn,t('busy.checking','Checking…'), async()=>{
-  await api('list_sync_now');
+  mustOk(await api('list_sync_now'));
   toast(t('toast.lsrcSync','Reading your lists now.'));
   setTimeout(loadListSrc, 3000);
 }); }
@@ -10953,7 +11319,10 @@ async function saveWatchlist(btn){ await busy(btn,t('busy.applying','Applying…
     const y=+g('year'); if(y&&kind!=='tv') w.year=y;
     return w;
   }).filter(w=>w.title);
-  await setCfg('watchlist', rows.length?JSON.stringify(rows):'');
+  // setCfg answers false on a refused save and has already toasted the
+  // daemon's reason; claiming "applied" over the top of it would leave
+  // the person believing a list the daemon never took (Codex F-18).
+  if(!await setCfg('watchlist', rows.length?JSON.stringify(rows):'')) return;
   toast(t('toast.wlApplied','Watchlist applied. Checking now.'));
   setTimeout(refreshWatchStatus, 1500);
 }); }
@@ -11003,12 +11372,23 @@ async function saveInterests(box){
     .filter(b=>b.checked).map(b=>b.dataset.want);
   box.disabled=true;
   try{
-    await setCfg('index_interests', keys.join(','));
+    // A refused save leaves the tick where the click put it, describing
+    // an opt-in the daemon never recorded, and setCfg has already said
+    // why - so put the box back and stop rather than toasting "Saved"
+    // over it (Codex F-18).
+    if(!await setCfg('index_interests', keys.join(','))){ box.checked=!box.checked; return; }
     // The daemon rewrites the scan list, so re-read both rather than
     // guessing what it did.
     await loadInterests();
     const c=(await api('get_config')).config.nzbfast;
-    put('s_index_groups',(c.index_groups||[]).join(', '));
+    // NOT put(): every put in this file is a const local to some other
+    // function, so this line has thrown ReferenceError on the SUCCESS
+    // path for as long as it has existed - taking the poll and the
+    // "Saved" toast below with it, which is how a save that worked came
+    // to look like one that did nothing. Separate from F-18 (that is
+    // about the refusal path) and found while testing it.
+    const gi=document.getElementById('s_index_groups');
+    if(gi) gi.value=(c.index_groups||[]).join(', ');
     pollIdxStats();
     toast(keys.length?t('toast.wantSaved','Saved. Indexing what you picked.')
                      :t('toast.wantNone','Saved. Nothing is being indexed.'));
@@ -11028,7 +11408,13 @@ async function watchFrom(kind,title,year,btn){ await busy(btn,'…', async()=>{
     target_quality:'1080p', upgrade:true, delete_old:false, category:'', enabled:true};
   if(kind==='movie'&&+year) w.year=+year;
   list.push(w);
-  await setCfg('watchlist', JSON.stringify(list));
+  // setCfg answers false on a refused save and has already toasted the
+  // daemon's reason. A star and "Watching X" over the top of that would
+  // promise a watch the daemon never recorded - and the refusal path's
+  // loadSettings() repaints the SETTINGS page, not these rows, so the
+  // title would sit there under a green promise nothing reloads away
+  // (Codex F-18, the same guard saveWatchlist takes over this setting).
+  if(!await setCfg('watchlist', JSON.stringify(list))) return;
   wlOwn=list;
   if(!document.querySelector('#wlrows :focus')) renderWatchlist(list);
   refreshWatchStatus();
@@ -11037,7 +11423,7 @@ async function watchFrom(kind,title,year,btn){ await busy(btn,'…', async()=>{
              :t('toast.wlAddedCat','Watching {title}. New posts in this category grab automatically.',{title})));
 }); }
 async function watchCheckNow(btn){ await busy(btn,t('busy.checking','Checking…'), async()=>{
-  await api('watchlist_check_now');
+  mustOk(await api('watchlist_check_now'));
   toast(t('toast.wlCheck','Watchlist check started.'));
   setTimeout(refreshWatchStatus, 2500);
 }); }
@@ -11047,11 +11433,19 @@ loadWatchlist(); refreshWatchStatus();
 setInterval(()=>{ if(!document.hidden) refreshWatchStatus(); }, 15_000);
 
 // Per-download controls (SAB-compatible queue/history ops).
+// Hands the daemon's answer BACK. It used to return nothing, and
+// `stopJob` below then toasted its own green "Download stopped." over
+// the red refusal this function had just drawn - toast() replaces the
+// message, so a delete the daemon refused (job finishing, delete
+// locked, a stale key) read as a stop that happened. Every caller that
+// wants to say something more must branch on `j.status` (the
+// api-contract rule this page follows everywhere else).
 async function qOp(name,id){
   const j=await api('queue',`&name=${name}&value=${id}`);
   if(!j.status) toast(t('toast.nochange','Nothing to change. The item may have just finished.'), true);
   else if(name==='delete') toast(t('toast.qRemoved','Removed from the queue.'));
   tick();
+  return j;
 }
 async function stopJob(id){
   // Honest about the consequences: a stopped job is dropped, not filed
@@ -11059,8 +11453,10 @@ async function stopJob(id){
   // only resume route is the user's own copy of the file. The old copy
   // promised a History retry that never existed after a stop.
   if(!confirm(t('confirm.stop','Stop this download?\n\nIt leaves the queue and history entirely. The partial data stays on disk, and adding the same NZB again picks up from it - but that needs your own copy of the .nzb file.'))) return;
-  await qOp('delete', id);
-  toast(t('toast.stopped','Download stopped.'));
+  // Only over a delete the daemon actually took: qOp has already said
+  // the refusal in the daemon's own words, and this line replaced it.
+  const j = await qOp('delete', id);
+  if(j && j.status) toast(t('toast.stopped','Download stopped.'));
 }
 // History's "Clear completed", for the queue - and a blunter thing than
 // that one, because what it discards has not finished. So it says the
@@ -11088,7 +11484,12 @@ async function clearQueue(btn){
   if(!confirm((busyRow?t('confirm.qclear.active','This stops the download in progress, and anything still repairing or unpacking.')+'\n\n':'')
       +t('confirm.qclear','Remove everything from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk, and adding the same NZB again picks up from there - but that needs your own copy of the .nzb file, because the queue\'s copy goes with the row.\n\nNothing is filed to history, and this cannot be undone.'))) return;
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
-    const j=await api('queue','&name=delete&value=all');
+    // mustOk, not a bare await: a refused clear used to fall through to
+    // the toast below and report "Removed 0 from the queue." in the
+    // daemon's own green, which is the F-18 failure mode exactly - a
+    // green screen describing a write that never happened. Inside a
+    // busy(), so the throw lands there and says the daemon's reason.
+    const j=mustOk(await api('queue','&name=delete&value=all'));
     // Counted from the daemon's own sweep, and worded without a plural
     // noun so one string covers 0, 1 and 20 in every locale.
     toast(t('toast.qCleared','Removed {n} from the queue.',{n:num(j.removed||0,0)}));
@@ -11104,8 +11505,12 @@ async function forceJob(id){
   // was still barred from - and the hold's own tooltip told people to
   // do exactly that. Resume is what frees it; the button does both.
   // The API keeps SAB's semantics, where priority is only priority.
-  if(j.status) await api('queue',`&name=resume&value=${id}`);
-  if(j.status) toast(t('toast.forced','Moved to the front. Downloads next.'));
+  // Both halves have to land before the toast: a resume the daemon
+  // refused leaves the job at the front of a queue it is still barred
+  // from, which is exactly the state "Downloads next" denies.
+  if(!reportRefusal(j)){ tick(); return; }
+  if(!reportRefusal(await api('queue',`&name=resume&value=${id}`))){ tick(); return; }
+  toast(t('toast.forced','Moved to the front. Downloads next.'));
   tick();
 }
 async function retryJob(id){
@@ -11121,6 +11526,15 @@ function initMovePace(v){
   const sel=document.getElementById('s_move_pace_mode');
   const num=document.getElementById('s_move_pace_mbs');
   if(!sel||!num) return;
+  // Same focus guard as loadSettings' put() and its sibling checkboxes,
+  // and for the same reason: setCfg calls loadSettings() after every
+  // successful write, so a save from ANOTHER control repaints this pair
+  // - and a half-made choice here (the mode picked, the MB/s not typed
+  // yet) snapped back to whatever the daemon last stored, under the
+  // cursor. Both controls compose ONE value, so either one focused
+  // means the user is mid-choice and neither may be rewritten.
+  const a=document.activeElement;
+  if(a===sel||a===num) return;
   if(v==='yield'||v==='full'){ sel.value=v; num.style.display='none'; }
   else { sel.value='fixed'; num.value=parseInt(v,10)||50; num.style.display=''; }
 }
@@ -11297,12 +11711,14 @@ function histUpgradedRow(h){
   const btn=`<button class="ghost mini" title="${escA(t('hist.upg.dismiss.title','Stop showing this note. Nothing in your history changes either way'))}" onclick="dismissHistUpgraded()">✕ ${esc(t('hist.upg.dismiss','dismiss'))}</button>`;
   return `<div style="margin:2px 0">${esc(main)}${esc(kept)} ${btn}</div>`;
 }
+// A refused dismissal is worth a word: tick() draws the notice straight
+// back, and a ✕ that visibly does nothing reads as a broken button.
 async function dismissHistUpgraded(){
-  await api('hist_upgraded_dismiss','');
+  reportRefusal(await api('hist_upgraded_dismiss',''));
   tick();
 }
 async function dismissDeleteKept(path){
-  await api('delete_kept_dismiss','&value='+encodeURIComponent(path));
+  reportRefusal(await api('delete_kept_dismiss','&value='+encodeURIComponent(path)));
   tick();
 }
 // The notice's own re-add. The daemon holds the NZB and the release
@@ -11345,6 +11761,21 @@ function openWhySlow(id){
   if(!openQueueRow(id)) return;
   requestAnimationFrame(()=>{
     const b=document.getElementById('whyslowBlk');
+    if(b) b.scrollIntoView({block:'center',behavior:REDUCED?'auto':'smooth'});
+  });
+}
+// The same contract for the benched-job chip on a QUEUED row: open the
+// row and land on the daemon's own sentence, rather than at the top of
+// a drawer whose first screen is the file list. Deliberately a twin of
+// the function above rather than a shared helper taking a block id -
+// the two silence rules are different (whyslow stands down on layers
+// `line` and `unknown`, this one stands down on the active row) and
+// folding them together would put both rules in one place where a
+// change meant for one silently reaches the other.
+function openDefer(id){
+  if(!openQueueRow(id)) return;
+  requestAnimationFrame(()=>{
+    const b=document.getElementById('deferBlk');
     if(b) b.scrollIntoView({block:'center',behavior:REDUCED?'auto':'smooth'});
   });
 }
@@ -11398,8 +11829,13 @@ async function jobReport(id){
   }
 }
 
+// No busy() around these two, so a throw would land in the onclick's
+// dropped promise: test the answer and report it here instead. tick()
+// runs either way - it is what puts a row the daemon kept back on the
+// list, rather than leaving it deleted on screen only.
 async function delHist(id){
-  await api('history',`&name=delete&value=${id}`);
+  const j=await api('history',`&name=delete&value=${id}`);
+  if(!reportRefusal(j)){ tick(); return; }
   toast(t('toast.histRemoved','History entry removed.'));
   tick();
 }
@@ -11416,7 +11852,10 @@ async function delHist(id){
 async function clearHistDone(btn){
   if(!confirm(t('confirm.histclear','Clear the finished downloads out of this list?\nAnything that failed or is waiting for a password stays, and no files are deleted.'))) return;
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
-    const j=await api('history','&name=delete&value=completed');
+    // mustOk for the reason clearQueue above carries: a refusal used to
+    // reach the count toast and say "Cleared 0 from the list." over a
+    // list nothing was cleared from.
+    const j=mustOk(await api('history','&name=delete&value=completed'));
     // Counted, not just acknowledged: "Cleared." over a list that still
     // has rows in it (the failures, which is the whole point) reads as a
     // button that did not work. Worded without a plural noun so one
@@ -11427,7 +11866,8 @@ async function clearHistDone(btn){
 }
 async function delHistFiles(id){
   if(!confirm(t('confirm.delfiles','Remove this entry AND delete its downloaded files from disk?\nThis cannot be undone.'))) return;
-  await api('history',`&name=delete&value=${id}&del_files=1`);
+  const j=await api('history',`&name=delete&value=${id}&del_files=1`);
+  if(!reportRefusal(j)){ tick(); return; }
   toast(t('toast.delfiles','Removed: files deleted.'));
   tick();
 }
@@ -11810,7 +12250,7 @@ async function fsNewFolder(){
   if(j.status){ toast(t('toast.created','Created {p}',{p:name})); fsGo(fsCtx.path); }
   else toast(tErr(j.error)||t('toast.mkdirfail','Could not create that folder.'),true);
 }
-function fsApply(path){
+async function fsApply(path){
   const el=fsCtx.el||document.getElementById('s_'+fsCtx.key);
   // The post-processing setting holds an ordered CHAIN, comma-separated
   // (TODO 192), so browsing to a second script must ADD a link rather
@@ -11818,11 +12258,26 @@ function fsApply(path){
   // what "choose this folder" means.
   const chain = fsCtx.key==='script' && el && el.value.trim();
   const val = chain ? el.value.trim().replace(/,\s*$/,'')+','+path : path;
+  const prev = el ? el.value : '';
+  const key = fsCtx.key;
   if(el) el.value=val;
+  // The sheet closes BEFORE the save is awaited, deliberately: #fsov sits
+  // at z-index 70 over a 55%-black blurred backdrop and #toast at 60, so a
+  // refusal reported while the picker is still up would be unreadable
+  // behind it - the one thing the person needs to read. fsCtx is captured
+  // above because fsClose() leaves it for the next open.
+  fsClose();
   // A row in a table has no setting of its own - its Apply writes the
   // whole list - so only the keyed form saves here.
-  if(fsCtx.key) setCfg(fsCtx.key,val);
-  fsClose();
+  if(key){
+    // setCfg answers false on a refused save and has already toasted the
+    // daemon's reason. "Set to X" over the top of that would name a path
+    // the daemon never took, and the field would keep showing it: a
+    // control that failed must snap back, not lie (Codex F-18). The
+    // restore is explicit rather than left to the refusal path's own
+    // loadSettings(), which skips whichever field has focus.
+    if(!await setCfg(key,val)){ if(el) el.value=prev; return; }
+  }
   toast(t('toast.setto','Set to {p}',{p:val}));
 }
 function fsChoose(){ if(fsCtx.mode!=='file') fsApply(fsCtx.path); }  // pick current folder
@@ -12048,7 +12503,7 @@ async function gbDetailPoll(name,box,tries){
 }
 async function gbResample(name,btn){
   await busy(btn,t('busy.checking','Checking…'),async()=>{
-    await api('group_sample',`&group=${encodeURIComponent(name)}&refresh=1`);
+    mustOk(await api('group_sample',`&group=${encodeURIComponent(name)}&refresh=1`));
     const row=document.getElementById('gbr-'+gbId(name));
     const box=row&&row.querySelector('.gbdet');
     if(box) gbDetailPoll(name,box,0);
@@ -12152,7 +12607,7 @@ async function gbAddMatching(btn){
   });
 }
 async function gbRefresh(btn){ await busy(btn,t('busy.checking','Checking…'), async()=>{
-  await api('groups_refresh');
+  mustOk(await api('groups_refresh'));
   gbLoad(0);
 }); }
 
@@ -12674,7 +13129,22 @@ function stopLadderLive(){
 // instant, which would look broken for the 5-10 s a rung takes.
 async function cancelLadder(btn){
   if(btn){ btn.disabled=true; btn.textContent=t('ladder.cancelling','Stopping…'); }
-  try{ await api('connladder_cancel'); }catch(e){}
+  // reportRefusal rather than a bare await: this handler has no busy()
+  // to catch a throw, and the button is ALREADY disabled reading
+  // "Stopping…" by the time the call goes out - so a swallowed refusal
+  // (a dead daemon, a key the page has lost) leaves a ladder running
+  // under a control that says it stopped.
+  // ...and its BOOLEAN is what decides whether the panel may say so.
+  // Reporting the refusal and then painting "stopping…" anyway leaves
+  // exactly the state the paragraph above refuses: a ladder still
+  // burning provider traffic under a control that says it stopped. On a
+  // refusal put the button back, so the user can try again.
+  let ok=false;
+  try{ ok=reportRefusal(await api('connladder_cancel')); }catch(e){ ok=false; }
+  if(!ok){
+    if(btn){ btn.disabled=false; btn.textContent=t('ladder.cancel','Cancel'); }
+    return;
+  }
   const pt=document.getElementById('lphaseTxt');
   if(pt) pt.textContent=t('ladder.ph.cancelling','stopping after this connection count…');
 }
@@ -13240,6 +13710,24 @@ let notifyOn=localStorage.nzbfastNotify==='on';
 // every queue poll; and the running jobs already asked mid-download, so
 // a Cancel is never re-prompted.
 let pwPromptMode='done', pwLiveAsked=new Set();
+// §129 1b(b): ids this page has ALREADY chimed for itself. The two
+// doors that add from this page (the .nzb drop/picker and the NZBLNK
+// box) sound "added" off their own API answer, because that answer is
+// in hand a whole poll before the daemon's `job.added` reaches the
+// ring, and waiting for it would make a drag-and-drop feel dead. This
+// is what stops the event then chiming the same add a second time - the
+// same job seeding the previous-poll id set did while the cue was a
+// queue diff. Named by description rather than by its old identifier on
+// purpose: `the_queue_snapshot_diff_does_not_narrate_switches` in
+// serve/assets.rs greps this page for those names, and a comment must
+// not be what makes that pin fail.
+//
+// Consumed on first sight rather than kept, so a genuine RE-add of the
+// same id (a retry of a job this page added) is announced normally. An
+// entry whose event never arrives - an add the daemon answered and then
+// refused - is a few bytes held for the life of the page, the same
+// bound `pwLiveAsked` above lives with.
+const addedSaid=new Set();
 // TODO 101: off | low_disk | always, off the queue poll. Only
 // low_disk asks per download, so only low_disk draws the button.
 let eatVolMode='off';
@@ -13280,6 +13768,21 @@ function handleLifeEvents(r){
   // whole batch, which is why it cannot just be another arm in the loop
   // below however the loop reports.
   const kept=[];
+  // §129 1b(b): the ARRIVAL cue, and it is collected for the same
+  // reason `kept` is - one poll can carry several arrivals and the
+  // spoken line collapses to a count rather than reading four release
+  // names in a row. Three kinds feed it, which is exactly why the
+  // snapshot diff this replaced could not be moved onto one of them:
+  // `job.added` is an add or a hunt's replacement, `job.requeued` is a
+  // record coming back out of history (a retry of either door, or a
+  // library play), and the promote arm below plays it by hand because
+  // the spare it promotes was already in the queue and emits neither.
+  //
+  // NOT toasted, deliberately. A row appearing in the queue is a thing
+  // the user can see, and the two arrivals that genuinely need
+  // explaining - an automatic retry, a switch - have their own arms
+  // with their own sentences. This is the chime and the spoken line.
+  const arrived=[];
   // §282 item 18's dashboard half. A switch announces itself with its
   // own kind, and the row it replaces is failed by a SECOND event in
   // the same batch: both doors that promote a copy already held emit
@@ -13345,15 +13848,33 @@ function handleLifeEvents(r){
       // row, and until this existed the only narration was two daemon
       // log lines. `fate` picks the honest sentence - the toast must
       // not promise a Trash the delete did not use (Linux default, or a
-      // Trash that stopped answering), nor a delete the Trash refused
-      // to make ('kept', which leaves the superseded copy on disk and
-      // files its own kept-files notice). `oldq` falls back to the
-      // superseded stem for slots grabbed before qualities were
-      // stamped. §129 1b(b): was a `watch_upgraded` array on the queue
-      // payload diffed against a seen-set - and a LATE one, since the
-      // upgrade's deletes move no queue revision to carry it.
+      // Trash that stopped answering), nor a delete that did not
+      // happen.
+      //
+      // NO POINTER TO A SURFACE on the 'kept' arm, and that is
+      // deliberate rather than an omission (TODO 290 F-05c). It read
+      // "see History" and sent the user to a row that is already gone:
+      // `settle_pending_upgrades` runs its `d.history...retain(...)`
+      // UNCONDITIONALLY on that branch, this arm included, so the
+      // record has left history by the time the toast is read. And
+      // 'kept' now arrives two ways, which no single pointer fits -
+      // the removal was REFUSED (a Trash that would not answer, a
+      // permission), so the superseded copy really is on disk and the
+      // kept-files strip on the queue payload names it; or the
+      // directory has another CLAIMANT (TODO 290 F-05a), so an A6
+      // re-download published over the canonical path, the bytes there
+      // are a different job's payload, and settlement deliberately
+      // files no strip for it. What is true of both is only that
+      // nothing was deleted and the folder is still there, so that is
+      // all the sentence claims.
+      //
+      // `oldq` falls back to the superseded stem for slots grabbed
+      // before qualities were stamped. §129 1b(b): was a
+      // `watch_upgraded` array on the queue payload diffed against a
+      // seen-set - and a LATE one, since the upgrade's deletes move no
+      // queue revision to carry it.
       const up={name:e.name,q:e.oldq||e.old};
-      notice(e.fate==='kept' ? t('toast.upgraded.kept','Upgraded to {name} - the {q} copy is still on disk, see History.',up)
+      notice(e.fate==='kept' ? t('toast.upgraded.kept','Upgraded to {name} - the {q} copy was not deleted, its folder is still on disk.',up)
         : e.fate==='trash' ? t('toast.upgraded.trash','Upgraded to {name} - the {q} copy went to the Trash.',up)
         : t('toast.upgraded.gone','Upgraded to {name} - the {q} copy was deleted.',up), P_ENGINE);
     } else if(e.kind==='job.retried'){
@@ -13410,12 +13931,13 @@ function handleLifeEvents(r){
           ? t('toast.hunted','{old} could not finish, so a different release was found and started instead: {name}',a)
           : t('toast.switched','{old} could not finish, so a copy already being held is downloading instead: {name}',a);
         notice(line, P_ENGINE, false, ()=>openHistDrawer(e.replaces));
-        // Sound on the PROMOTE door only. A hunted replacement is a row
-        // that was not in the queue last poll, so `sndQueueEvents`
-        // already plays "added" for it this same tick and a second one
-        // here would double it; a promoted spare WAS in the queue, so
-        // nothing else makes a sound for it and this is the only cue a
-        // sound-on user gets. Reusing `added` rather than growing the
+        // Sound on the PROMOTE door only, and §129 1b(b) did not change
+        // the reasoning, only what carries it. A hunted replacement is
+        // an ENQUEUE, so its own `job.added` is in this very batch and
+        // the arrival collection above already chimes for it - a second
+        // one here would double it. A promoted spare was enqueued when
+        // it was HELD, days ago perhaps, and emits nothing now, so this
+        // is the only cue a sound-on user gets for it. Reusing `added` rather than growing the
         // registry: something did start downloading, and a new key
         // would be a new toggle row and 27 more catalogue entries for a
         // note nobody asked for.
@@ -13424,6 +13946,50 @@ function handleLifeEvents(r){
           ? t('notify.hunted','Started a different release')
           : t('notify.switched','Switched to a copy already held'), line);
       }
+    } else if(e.kind==='job.added'||e.kind==='job.requeued'){
+      // The queue gained a row. `job.added` is an enqueue - a user add,
+      // a watch-folder pickup, an *arr grab, or the hunt's replacement;
+      // `job.requeued` is `commit_to_queue`, the one place a record
+      // leaves history and re-enters the queue, whose `why` says which
+      // door (`retry` or `play`).
+      if(addedSaid.has(e.nzo_id)) addedSaid.delete(e.nzo_id);
+      else arrived.push(e.name||'');
+    } else if(e.kind==='queue.idle'){
+      // "All done" - and the guard is what keeps it from firing when
+      // the user simply deleted the last row. `lastCompleteAt` is set
+      // by the `job.completed` arm above, and the daemon emits the
+      // completion BEFORE the drain edge, so a completion in this same
+      // batch has already been seen by the time this arm runs.
+      //
+      // ONE DIFFERENCE from the queue-diff this replaces, and it is an
+      // improvement rather than a slip: that version required the queue
+      // to be literally empty (`noofslots===0`), so a held duplicate
+      // spare left sitting in the queue suppressed it. `queue.idle` is
+      // the daemon's own answer to "is there anything left that can
+      // RUN", and a spare held against a release that just completed
+      // cannot.
+      if(performance.now()-lastCompleteAt<5000){
+        snd('alldone'); say('alldone',t('say.alldone','All downloads finished.'));
+      }
+    } else if(e.kind==='queue.paused'||e.kind==='queue.resumed'){
+      // The pause flag has NINE writers in the daemon and the page used
+      // to find this cue by diffing `q.paused` against the last poll.
+      // `announce_pause` computes the edge once, daemon-side, and the
+      // queue poll calls it as a belt - so a tenth writer costs a poll
+      // of lateness rather than the cue.
+      const paused=e.kind==='queue.paused';
+      snd('pause', !paused);
+      say('pause', paused?t('say.paused','Downloads paused.'):t('say.resumed','Downloads resumed.'));
+    } else if(e.kind==='update.available'){
+      // Once per DISCOVERY now, not once per page. The old cue
+      // remembered the last version it had announced in a page-local
+      // variable, so every reload re-announced an update the user had
+      // already been told about; the ring's cursor belongs to the
+      // daemon. The banner itself is untouched and still rides the
+      // queue payload - it is a state, true whenever the user looks,
+      // and a page opening after the check has to be able to draw it.
+      snd('update');
+      say('update', t('say.update','nzbfast version {v} is available.',{v:e.version}));
     } else if(e.kind==='watch.picked'){
       // The daemon consumed the user's file (a browser then lists its
       // download as "Removed"), so the moment needs its own sentence
@@ -13500,6 +14066,11 @@ function handleLifeEvents(r){
   // The kept-files nudge, one message however many landed. The STRIP
   // itself is rendered from the queue payload every tick and stays
   // until dismissed - this only points at it.
+  if(arrived.length){
+    snd('added');
+    say('added', arrived.length===1?t('say.added','Download added: {name}.',{name:sayShort(arrived[0])})
+      :t('say.addedMany','{n} downloads added.',{n:arrived.length}));
+  }
   if(kept.length===1) notice(t('toast.deleteKept','{name} was removed from the list, but its files are still on disk - see History.',{name:kept[0]}), P_ACT, true);
   else if(kept.length) notice(t('toast.deleteKept.n','{n} deleted downloads still have their files on disk - see History.',{n:kept.length}), P_ACT, true);
   // Sort is STABLE (ES2019), so within a tier the daemon's own order -
@@ -13707,11 +14278,42 @@ function sndSpdUI(){
   document.getElementById('ui_tickwrap').style.display=sndPrefs.speedMode==='ticks'?'':'none';
   document.getElementById('ui_tonewrap').style.display=sndPrefs.speedMode==='tone'?'':'none';
 }
-// Poll-driven event detection: primes on the first sample so a page load
-// never replays existing state as news.
-let qSeen=null, prevPaused2=null, wasOffline=false, lastCompleteAt=0, updToldFor='';
-// Separate from updToldFor: the spoken/sound cue is gated on the sound
-// setting, the visual ring must fire regardless.
+// SND QUEUE EVENTS IS GONE (§129 1b(b), 25 Aug 2026), and this is the
+// last of that item: five cues recovered by diffing the QUEUE PAYLOAD
+// against the previous poll. Arrival, "all done", pause/resume and
+// update-available are arms in `handleLifeEvents` now, off
+// `job.added` / `job.requeued`, `queue.idle`, `queue.paused` /
+// `queue.resumed` and `update.available`; the duplicate-promotion cue
+// went first (§282 item 18) and its own note is below.
+//
+// THREE OF THE FIVE HAD NO DAEMON EVENT AT ALL and this was blocked on
+// building them, which is why it outlived the other five seen-sets by
+// two days. `commit_to_queue` in particular emitted nothing, so moving
+// arrival onto `job.added` alone would have SILENCED the chime a manual
+// retry gets - a retry never goes near `enqueue`. Do not move a cue
+// here onto an event that covers only some of its doors: losing a chime
+// is exactly the failure this item was about.
+//
+// WHAT IT BOUGHT, beyond one mechanism instead of two: the arrival and
+// "all done" cues used to sit out ENTIRELY while the queue was windowed
+// (`partial` -> `added=[]`), because a row falling off the end of a
+// page is not a row that left the queue. A sequence ring has no such
+// blind spot, and a page showing 50 of 300 rows now hears every one.
+// The update chime also stopped re-announcing itself on every reload:
+// its "already told them" memory was per-PAGE, and the ring's cursor is
+// the daemon's.
+//
+// What is left here is poll-driven because it is genuinely about the
+// POLL: `wasOffline` is whether the last fetch reached the daemon,
+// which no daemon event could ever carry.
+let wasOffline=false, lastCompleteAt=0;
+// The visual attention ring on the update chip, which is a different
+// question from the CHIME and is why the two were never one variable:
+// the sound is gated on the sound setting, the ring must fire
+// regardless. It stays a page-local memory off the queue payload
+// because it is drawn from a STATE - an update IS available - where the
+// chime is the MOMENT one was discovered, and that moment is
+// `update.available` on the event ring since §129 1b(b).
 let updAttnFor='';
 // The version the chip is currently advertising, so the container recipe
 // can title itself with it without re-reading the queue.
@@ -13754,39 +14356,6 @@ let updVersion='';
 // the event's own sentence on the two doors it could see. Do not
 // reintroduce a snapshot diff beside the event: the toast element holds
 // one message, and the later writer wins.
-function sndQueueEvents(q){
-  // The arrival cue compares this poll's ids with the last poll's,
-  // and a PAGED queue makes that comparison meaningless - "show more"
-  // would announce 250 new downloads, and a row falling off the end of
-  // the window is not a row that left the queue. So while the page is
-  // short of the queue, the arrival and drained cues sit out, and
-  // `qSeen` re-primes rather than banking a set it cannot trust. The
-  // pause and update cues are header facts and keep working.
-  const partial=qTruncated(q);
-  const ids=new Set(q.slots.map(s=>s.nzo_id));
-  if(qSeen!==null){
-    const added=partial?[]:q.slots.filter(s=>!qSeen.has(s.nzo_id));
-    if(added.length){
-      snd('added');
-      say('added', added.length===1?t('say.added','Download added: {name}.',{name:sayShort(added[0].filename||added[0].name)})
-        :t('say.addedMany','{n} downloads added.',{n:added.length}));
-    }
-    // Queue just drained, and something actually completed moments ago -
-    // that's "all done", not the user deleting the last item.
-    if(qSeen.size>0 && qCount(q)===0 && performance.now()-lastCompleteAt<5000){
-      snd('alldone'); say('alldone',t('say.alldone','All downloads finished.'));
-    }
-    if(prevPaused2!==null && q.paused!==prevPaused2){
-      snd('pause', !q.paused);
-      say('pause', q.paused?t('say.paused','Downloads paused.'):t('say.resumed','Downloads resumed.'));
-    }
-    if(q.update_version && updToldFor!==q.update_version){
-      updToldFor=q.update_version; snd('update');
-      say('update', t('say.update','nzbfast version {v} is available.',{v:q.update_version}));
-    }
-  }
-  qSeen=partial?null:ids; prevPaused2=q.paused;
-}
 addEventListener('pointerdown', e=>{
   const el=e.target.closest('button,select,a,[onclick],input[type=checkbox]');
   if(!el||el.disabled) return;
@@ -14042,7 +14611,7 @@ function adDest(){
 function adAsk(nzbs){
   const cat=document.getElementById('adcat'), prio=document.getElementById('adprio');
   document.getElementById('adfiles').innerHTML=
-    nzbs.map(f=>`<div title="${escA(f.name)}">${esc(f.name)}</div>`).join('');
+    nzbs.map((f,i)=>`<div title="${escA(f.name)}">${esc(f.name)}<div class="dim" id="adchk${i}" style="font-size:11.5px;margin:1px 0 5px"></div></div>`).join('');
   // The last pick is offered again: someone filing a run of episodes
   // should not re-choose "tv" twenty times. Safe to remember because the
   // dialog SHOWS it and waits - nothing is filed without a confirmation.
@@ -14072,7 +14641,81 @@ function adAsk(nzbs){
     }).catch(()=>{ selCats=null; });
   }
   adLoadCfg().then(()=>{ if(adResolve) adDest(); });
-  return new Promise(res=>{ adResolve=res; });
+  const p=new Promise(res=>{ adResolve=res; });
+  // §303: the availability check fills in behind, like the category
+  // list and the destination - the dialog never waits on it and the
+  // answer never gates the Add button.
+  adPreview(nzbs);
+  return p;
+}
+// §303: ask the daemon what the post looks like out there BEFORE the
+// grab - the same verdict the queue row's pre-flight badge carries,
+// with nothing enqueued (mode=nzb_preview is a dry run). ALTHUNT's
+// cache rule holds here too: a render reads this cache, and only the
+// user's own drop ever starts a probe - a probe spends provider round
+// trips, so nothing here may fire off a re-render. Keyed by the file's
+// own identity; the daemon holds its own cache keyed by post identity,
+// so a re-ask that does slip through costs one HTTP round trip and no
+// provider traffic.
+const ADPREV=new Map();
+async function adPreview(nzbs){
+  for(let i=0;i<nzbs.length&&i<5;i++){
+    // Dialog closed: the answer has nowhere to go, so stop spending.
+    if(!adResolve) return;
+    const f=nzbs[i], ck=f.name+' '+f.size+' '+f.lastModified;
+    const hit=ADPREV.get(ck);
+    if(hit){ adChkShow(i, hit); continue; }
+    adChkShow(i, {wait:true});
+    let v={reason:'unknown'};
+    try{
+      const fd=new FormData(); fd.append('nzbfile', f, f.name);
+      const r=await fetch('/api?mode=nzb_preview',
+        {method:'POST', body:fd, headers: key?{'X-Api-Key': key}:{}});
+      const j=await r.json().catch(()=>({}));
+      if(j.status&&j.checked&&j.health) v={health:j.health};
+      else if(j.status&&!j.checked) v={reason:j.reason||'unknown'};
+    }catch(_){}
+    // Only a real verdict is worth remembering: a daemon that was busy
+    // or offline may well answer by the next open.
+    if(v.health){ if(ADPREV.size>64) ADPREV.clear(); ADPREV.set(ck, v); }
+    adChkShow(i, v);
+  }
+}
+function adChkShow(i, v){
+  const el=document.getElementById('adchk'+i);
+  if(!el) return;
+  const r=adChkText(v);
+  el.className=r.c;
+  el.textContent=r.s;
+}
+// The verdict as one compact sentence. Counts, never percentages - the
+// same honesty rule every health surface follows - and the two bad
+// answers both say adding still works, because this check is advisory
+// exactly like the queue badge it mirrors.
+//
+// The hard "no" sentence additionally requires the RED bucket - the
+// daemon's own age gate, GONE_MIN_AGE_DAYS on the wire as the bucket
+// colour. `completable` is deliberately age-blind (an honest projection
+// of the sample at any age; release-eve sweep S4, settled arm-level in
+// altcand::terminal_reason), so every surface whose COPY asserts loss
+// waits out propagation itself: a "no" on an amber bucket is a post
+// that may simply still be settling in, and it gets the soft sentence.
+function adChkText(v){
+  if(v.wait) return {c:'dim', s:t('add.check.wait','Checking availability…')};
+  const h=v.health;
+  if(!h){
+    return v.reason==='downloading'
+      ? {c:'dim', s:t('add.check.busy','Availability not checked - your connections are busy with a download.')}
+      : {c:'dim', s:t('add.check.unavail','Availability could not be checked right now.')};
+  }
+  const n={sampled:h.sampled, absent:h.absent};
+  return h.completable==='yes'
+    ? {c:'ok', s:t('add.check.yes','Looks complete: all {sampled} sampled articles answered.',n)}
+    : h.completable==='with-recovery'
+    ? {c:'ok', s:t('add.check.rec','Repairable: {absent} of {sampled} sampled articles are missing, within what its repair data covers.',n)}
+    : (h.completable==='no'&&h.bucket==='red')
+    ? {c:'bad', s:t('add.check.no','Unlikely to finish: {absent} of {sampled} sampled articles are gone - more than its repair data can rebuild. You can still add it.',n)}
+    : {c:'warn', s:t('add.check.doubt','Not sure yet: {absent} of {sampled} sampled articles are missing. A post still settling in looks like this - nzbfast keeps checking after you add it.',n)};
 }
 // The category list landed after the dialog opened: re-render the select
 // without disturbing a choice the user has already made in it.
@@ -14153,10 +14796,12 @@ async function uploadNzbsWith(nzbs, stream, opt){
         // was said either way, and the row then sat there doing nothing
         // with no explanation the user had asked for.
         held+=(j.held||[]).length;
-        // Instant feedback for this page's own drops; seed qSeen so the
-        // queue-diff watcher doesn't play it a second time next poll.
+        // Instant feedback for this page's own drops - the API answer
+        // is here now and the poll that carries the daemon's own
+        // `job.added` is up to a second away. Claim the ids so that
+        // event does not chime a second time.
         snd('added'); say('added', t('say.added','Download added: {name}.',{name:sayShort(f.name)}));
-        (j.nzo_ids||[]).forEach(id=>qSeen&&qSeen.add(id));
+        (j.nzo_ids||[]).forEach(id=>addedSaid.add(id));
         if(wantStream&&j.m3u){ toast(t('toast.handoff','Handing playback to your player…')); m3uHandoff(j.nzo_ids[0]); }
       }
       else toast(`${f.name}: ${tErr(j.error)||t('err.rejected','rejected')}`, true);
@@ -14414,7 +15059,7 @@ async function addNzblnk(link){
       toast(notes.length?`${why} ${notes.join(' · ')}`:why, true);
       return;
     }
-    (j.nzo_ids||[]).forEach(id=>qSeen&&qSeen.add(id));
+    (j.nzo_ids||[]).forEach(id=>addedSaid.add(id));
     snd('added'); say('added', t('say.added','Download added: {name}.',{name:sayShort(j.name||'')}));
     toast(j.partial ? t('toast.lnkPartial','Added, but parts are missing so it may not finish.')
       : t('toast.lnkAdded','Found it. Added to the queue.'));
@@ -15420,6 +16065,9 @@ async function loadSettings(){
   if(ret&&document.activeElement!==ret) ret.checked=c.index_retention!==false;
   const pdl=document.getElementById('s_index_pause_dl');
   if(pdl&&document.activeElement!==pdl) pdl.checked=c.index_pause_on_download!==false;
+  // Opt-IN pause, so === true: an absent value must read as "running".
+  const enp=document.getElementById('s_enrich_paused');
+  if(enp&&document.activeElement!==enp) enp.checked=c.enrich_paused===true;
   // M35 phase 2: opt-IN, so === true (an absent value must read as off).
   const wex=document.getElementById('s_watchlist_external');
   if(wex&&document.activeElement!==wex) wex.checked=c.watchlist_external===true;
@@ -15889,16 +16537,54 @@ async function saveFeeds(btn){ await busy(btn,t('busy.applying','Applying…'), 
 // get_config never echoes an apikey (has_key only); a blank key field on
 // save keeps the stored one, so a round-trip cannot erase it.
 function idxRowHtml(x){
-  return `<div class="idxrow" data-haskey="${x.has_key?1:''}">
+  // TODO 297: `kind` decides which protocol this entry speaks. Absent on
+  // every entry saved before it landed, and absent means Newznab - the
+  // daemon defaults it the same way, so the page and the setting agree
+  // without either having to guess.
+  const kind = x.kind==='nzbindex' ? 'nzbindex' : 'newznab';
+  const o = x.nzbindex||{};
+  // complete_only defaults ON, matching the daemon's own default: an
+  // undefined here is a NEW row, not a user who turned it off.
+  const compOn = o.complete_only!==false;
+  const num=(v)=>(+v>0?+v:'');
+  return `<div class="idxrow" data-haskey="${x.has_key?1:''}" data-kind="${kind}">
+    <select class="txt" data-k="kind" onchange="idxKindChanged(this)" title="${escA(t('nnab.kind.title','which kind of search source this is. Newznab is what an indexer account speaks (NZBGeek, DrunkenSlug, Prowlarr, NZBHydra). nzbindex searches nzbindex.com directly over its own API'))}">
+      <option value="newznab"${kind==='newznab'?' selected':''} data-i18n-skip>Newznab</option>
+      <option value="nzbindex"${kind==='nzbindex'?' selected':''} data-i18n-skip>nzbindex</option>
+    </select>
     <input class="txt" data-k="name" value="${escA(x.name||'')}" placeholder="${escA(t('nnab.name.ph','name'))}" title="${escA(t('nnab.name.title','a label for this account; renaming makes it a new entry, so re-enter the key'))}">
-    <input class="txt" data-k="url" value="${escA(x.url||'')}" placeholder="https://api.indexer.example" title="${escA(t('nnab.url.title','the indexer API URL. The site address works; a Prowlarr entry looks like http://host:9696/1/api'))}">
-    <input class="txt" data-k="apikey" type="password" value="" autocomplete="new-password" placeholder="${escA(x.has_key?t('nnab.key.saved','key saved - blank keeps it'):t('nnab.key.ph','API key'))}">
+    <input class="txt" data-k="url" value="${escA(x.url||'')}" placeholder="${escA(kind==='nzbindex'?'https://nzbindex.com':'https://api.indexer.example')}" title="${escA(t('nnab.url.title','the indexer API URL. The site address works; a Prowlarr entry looks like http://host:9696/1/api'))}">
+    <input class="txt" data-k="apikey" type="password" value="" autocomplete="new-password" placeholder="${escA(x.has_key?t('nnab.key.saved','key saved - blank keeps it'):(kind==='nzbindex'?t('nnab.key.opt','API key (optional)'):t('nnab.key.ph','API key')))}">
     <input class="txt" data-k="hits" type="number" min="0" value="${+x.hits_per_day||0}" title="${escA(t('nnab.hits.title','searches per day this entry may spend (API hits); 0 = unlimited'))}">
     <input class="txt" data-k="grabs" type="number" min="0" value="${+x.grabs_per_day||0}" title="${escA(t('nnab.grabs.title','downloads per day this entry may spend (grabs); 0 = unlimited'))}">
     <label class="mtog" data-i18n-skip title="${escA(t('nnab.enabled.title','searched only while enabled'))}"><input type="checkbox" data-k="enabled"${x.enabled===false?'':' checked'}> <span>${t('nnab.enabled','on')}</span></label>
     <button class="ghost" onclick="testIdx(this)" data-i18n-skip title="${escA(t('nnab.test.title','Ask this indexer what it supports - proves the URL and key work'))}">${t('nnab.test','Test')}</button>
     <button class="ghost" onclick="this.closest('.idxrow').remove()" title="${escA(t('nnab.remove.title','Remove this indexer'))}" aria-label="${escA(t('nnab.remove.title','Remove this indexer'))}">×</button>
+    <div class="nzbopts">
+      <span class="rawnote">${t('nnab.nzbi.raw','nzbindex lists what was actually posted, so many results are scrambled names rather than titles. Downloads still work - names get sorted out on the way in.')}</span>
+      <label class="mtog" data-i18n-skip title="${escA(t('nnab.nzbi.complete.title','leave this on unless you are hunting something rare. Off, the results include posts that are missing parts and can never finish'))}"><input type="checkbox" data-k="complete"${compOn?' checked':''}> <span>${t('nnab.nzbi.complete','complete only')}</span></label>
+      <input class="txt" data-k="minsize" type="number" min="0" value="${num(o.min_size_mb)}" placeholder="${escA(t('nnab.nzbi.minsize','min MB'))}" title="${escA(t('nnab.nzbi.minsize.title','smallest result to show, in MB. Blank for no limit'))}">
+      <input class="txt" data-k="maxsize" type="number" min="0" value="${num(o.max_size_mb)}" placeholder="${escA(t('nnab.nzbi.maxsize','max MB'))}" title="${escA(t('nnab.nzbi.maxsize.title','largest result to show, in MB. Blank for no limit'))}">
+      <input class="txt" data-k="minage" type="number" min="0" value="${num(o.min_age_days)}" placeholder="${escA(t('nnab.nzbi.minage','min days'))}" title="${escA(t('nnab.nzbi.minage.title','skip anything posted more recently than this many days ago. Blank for no limit'))}">
+      <input class="txt" data-k="maxage" type="number" min="0" value="${num(o.max_age_days)}" placeholder="${escA(t('nnab.nzbi.maxage','max days'))}" title="${escA(t('nnab.nzbi.maxage.title','skip anything older than this many days - your provider keeps posts only so long. Blank for no limit'))}">
+      <input class="txt grp" data-k="groups" value="${escA((o.groups||[]).join(', '))}" placeholder="${escA(t('nnab.nzbi.groups','newsgroups, comma separated (all of them if blank)'))}" title="${escA(t('nnab.nzbi.groups.title','search only these newsgroups. Leave blank to search all of them'))}">
+    </div>
     <div class="dim" data-k="result"></div></div>`;
+}
+// The kind decides which fields make sense, so the row re-reads itself
+// on every change. Only the ATTRIBUTE moves: the knobs stay in the DOM
+// with whatever the user typed, so flipping to Newznab and back does not
+// silently discard a filter they had set.
+function idxKindChanged(sel){
+  const row=sel.closest('.idxrow'), kind=sel.value==='nzbindex'?'nzbindex':'newznab';
+  row.dataset.kind=kind;
+  const url=row.querySelector('[data-k=url]');
+  // Only ever fills a BLANK box. Overwriting a URL the user typed would
+  // lose it, and the kind is the likelier thing to have been a misclick.
+  if(kind==='nzbindex'&&!url.value.trim()) url.value='https://nzbindex.com';
+  url.placeholder=kind==='nzbindex'?'https://nzbindex.com':'https://api.indexer.example';
+  const name=row.querySelector('[data-k=name]');
+  if(kind==='nzbindex'&&!name.value.trim()) name.value='nzbindex';
 }
 function renderIdx(list){ setHtml('idxrows', list.map(idxRowHtml).join('')||`<div class="dim">${t('nnab.none','no indexers: add your indexer account below to search it from the wall')}</div>`); }
 function addIdxRow(){
@@ -15908,9 +16594,23 @@ function addIdxRow(){
 }
 function idxRowData(r){
   const g=k=>r.querySelector(`[data-k=${k}]`).value.trim();
-  return { name:g('name'), url:g('url'), apikey:g('apikey'),
+  const kind=g('kind')==='nzbindex'?'nzbindex':'newznab';
+  return { name:g('name'), url:g('url'), apikey:g('apikey'), kind,
     enabled:r.querySelector('[data-k=enabled]').checked,
-    hits_per_day:Math.max(0,+g('hits')||0), grabs_per_day:Math.max(0,+g('grabs')||0) };
+    hits_per_day:Math.max(0,+g('hits')||0), grabs_per_day:Math.max(0,+g('grabs')||0),
+    // TODO 297: NESTED, in exactly the shape get_config hands back and
+    // the daemon's `NzbIndexOpts` parses - so the editor round-trips
+    // what it was given instead of translating between two spellings.
+    // Sent for a Newznab row too, where the daemon ignores it: the
+    // fields keep whatever the user typed while they flip the kind, and
+    // dropping them here would make that a silent loss on save.
+    nzbindex: {
+      complete_only:r.querySelector('[data-k=complete]').checked,
+      // MB and DAYS, which is what the far end takes. Blank is 0, which
+      // the daemon reads as "no bound" and never sends.
+      min_size_mb:Math.max(0,+g('minsize')||0), max_size_mb:Math.max(0,+g('maxsize')||0),
+      min_age_days:Math.max(0,+g('minage')||0), max_age_days:Math.max(0,+g('maxage')||0),
+      groups:g('groups').split(',').map(x=>x.trim()).filter(Boolean) } };
 }
 async function saveIdx(btn){ await busy(btn,t('busy.applying','Applying…'), async()=>{
   const rows=[...document.querySelectorAll('#idxrows .idxrow')].map(idxRowData)
@@ -15920,9 +16620,16 @@ async function saveIdx(btn){ await busy(btn,t('busy.applying','Applying…'), as
 async function testIdx(btn){
   const row=btn.closest('.idxrow'), out=row.querySelector('[data-k=result]');
   out.textContent='…';
-  const j=await apiPost('indexer_test',{indexer:idxRowData(row)});
+  const d=idxRowData(row);
+  const j=await apiPost('indexer_test',{indexer:d});
+  // TODO 297: an nzbindex entry has no categories to count - that API
+  // publishes none - so "0 categories" would read as a broken account
+  // rather than as a working one. The Test it DOES run is a real search,
+  // so what it proves is that results will parse.
   out.textContent=j.status
-    ? `✓ ${j.server||'?'} · ${tn('nnab.cats',j.categories||0,'{n} category','{n} categories')}`
+    ? (d.kind==='nzbindex'
+        ? `✓ ${t('nnab.nzbi.ok','nzbindex answered - search works')}`
+        : `✓ ${j.server||'?'} · ${tn('nnab.cats',j.categories||0,'{n} category','{n} categories')}`)
     : `✗ ${tErr(j.error)||j.error||''}`;
   out.style.color=j.status?'var(--ok)':'var(--bad)';
 }
@@ -16636,7 +17343,7 @@ async function toggleServer(i,on,box){
   try{
     const j=await api('server_enable',`&value=${i}&value2=${on}`);
     if(!j.status){ box.checked=!on; toast(tErr(j.error)||t('err.failed','failed'), true); return; }
-    toast(on?t('toast.srvOn','Server enabled. Back in the pool from the next download.'):t('toast.srvOff','Server disabled: kept in the list, out of the pool.'));
+    toast(on?t('toast.srvOn','Server enabled. Back in the pool from the next download.'):t('toast.srvOff','Server disabled: kept in the list, out of the pool from the next download. A download already running keeps the connections it has.'));
     loadSettings();
   } finally { box.disabled=false; }
 }
@@ -16750,6 +17457,12 @@ function editServer(i){
   // M32 route controls. The proxy password never round-trips - the
   // daemon echoes only whether one is stored, same contract as the
   // server password above.
+  // §291: the daemon always echoes one of the three names, so there is
+  // no blank state to guard - but fall back anyway, or a response from a
+  // daemon older than the field would leave the box on whatever the last
+  // server showed and the next Save would write it.
+  put('sv_family', s.address_family||'auto');
+  put('sv_tlsname', s.tls_hostname||'');
   put('sv_bindip', s.bind_ip||''); put('sv_socks', s.socks5||'');
   put('sv_socksuser', s.socks5_user||''); put('sv_sockspass','');
   document.getElementById('sv_sockspasshint').textContent=
@@ -16884,6 +17597,8 @@ function srvFormData(){
     max_source_ips:intOrBlank(g('sv_maxips')),
     idle_release_secs:intOrBlank(g('sv_idlerel')),
     idle_keep:intOrBlank(g('sv_idlekeep')),
+    address_family:g('sv_family'),
+    tls_hostname:g('sv_tlsname'),
     bind_ip:g('sv_bindip'), socks5:g('sv_socks'),
     socks5_user:g('sv_socksuser'),
     // Not trimmed: a proxy password may legitimately start or end with
@@ -17498,7 +18213,16 @@ function saveSetupLine(){
   const v=document.getElementById('setupLine'), u=document.getElementById('setupLineUnit');
   const n=parseFloat(v&&v.value);
   if(!(n>0)){ toast(t('setup.s4.need','Enter your line speed, or choose "I don\'t know".'), true); if(v) v.focus(); return; }
-  setCfg('line_speed', n+u.value).then(()=>{ loadStatus&&loadStatus(); toast(t('setup.s4.saved','Line speed saved.')); });
+  // setCfg RESOLVES false on a refused save (it never rejects), so a
+  // bare .then() ran the success arm over the top of the daemon's own
+  // red toast and left "Line speed saved." as the last thing on screen.
+  // The checklist step would then read as done next render, describing a
+  // line speed the daemon never took (Codex F-18).
+  setCfg('line_speed', n+u.value).then(ok=>{
+    if(!ok) return;
+    loadStatus&&loadStatus();
+    toast(t('setup.s4.saved','Line speed saved.'));
+  });
 }
 // "I don't know" is a real answer and has to stick, or the checklist
 // nags forever about something optional. Browser-local, like the other

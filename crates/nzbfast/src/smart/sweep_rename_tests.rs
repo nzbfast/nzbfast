@@ -1914,3 +1914,98 @@ fn an_extensionless_sample_loses_the_other_naming_routes_too() {
         "and the release name was not put on a teaser"
     );
 }
+
+/// Regression (TODO 262's "Left open"): a numbered BYTE SPLIT of a
+/// container - `hash.001`, `hash.002`, ... where only part 1 carries the
+/// archive's head - lost every part after the first to keep-media-only.
+///
+/// The zip twin of this was fixed by asking the directory
+/// (`keep_media_only_spares_every_part_of_a_split_zip`); the 7z and RAR
+/// twins were not, because `sevenz_archive_part` and
+/// `looks_like_named_rar` are per-PATH questions and parts 2..=n are raw
+/// continuation bytes with nothing in the name or the head to answer
+/// them with. So the sweep kept the head and deleted the payload behind
+/// it, leaving a stub that still looks like an archive.
+#[test]
+fn keep_media_only_spares_every_part_of_an_obfuscated_container_split() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepcsplit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Part 1 opens with the container's head; the rest are the bytes that
+    // follow it, uniform-sized the way a byte splitter writes them.
+    let mut sevenz = b"7z\xbc\xaf\x27\x1c".to_vec();
+    sevenz.resize(4096, 0);
+    let mut rar = b"Rar!\x1a\x07\x01\x00".to_vec();
+    rar.resize(4096, 0);
+    let sets = [
+        ("301c0186f3bbdc58ac03a8739f989391c4", sevenz),
+        ("a845657a411e3164c9d1e3f2c93235de3c", rar),
+    ];
+    for (base, head) in &sets {
+        std::fs::write(dir.join(format!("{base}.001")), head).unwrap();
+        std::fs::write(dir.join(format!("{base}.002")), vec![b'x'; 4096]).unwrap();
+        std::fs::write(dir.join(format!("{base}.003")), vec![b'x'; 512]).unwrap();
+    }
+    // A video has to be present or the sweep declines to run at all
+    // (see `keep_media_only_leaves_a_video_less_job_alone`).
+    std::fs::write(dir.join("teaser.mkv"), vec![0u8; 4096]).unwrap();
+    std::fs::write(dir.join("poster.jpg"), b"x").unwrap();
+    // Membership is not "keep anything numbered": a lone numbered blob
+    // belongs to no set and is still clutter.
+    std::fs::write(dir.join("cc98d076ce474159bec6a0fe670059ee32.001"), b"x").unwrap();
+    let n = keep_media_only(&dir);
+    for (base, _) in &sets {
+        for idx in ["001", "002", "003"] {
+            assert!(
+                dir.join(format!("{base}.{idx}")).exists(),
+                "{base}.{idx} is a part of the only copy of the payload"
+            );
+        }
+    }
+    assert_eq!(n, 2, "the poster and the set-less blob go, nothing else");
+    assert!(dir.join("teaser.mkv").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Regression (TODO 299's "Left open", closed by §301): the PLAIN
+/// reading of the shape above - a numbered byte split with NO archive
+/// head on ANY part - and the more destructive of the two.
+///
+/// The container twin lost all-but-one part, because part 1 could still
+/// answer for itself. Here no member can: carrying a head is exactly what
+/// disqualifies a set from this reading, so every per-path question
+/// `is_packed_archive` asks answers "not an archive" and the sweep took
+/// the WHOLE set. `crate::split_part_set` records the three routes that
+/// reach this pass with a set still unjoined - none of them a failed
+/// join, which fails the job outright and never reaches the sweep at all.
+#[test]
+fn keep_media_only_spares_every_part_of_a_plain_split() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keeppsplit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Uniform parts, gapless from 1, and no archive head anywhere - the
+    // whole payload is raw bytes, which is what makes the set invisible
+    // one file at a time.
+    for (idx, len) in [("001", 4096), ("002", 4096), ("003", 512)] {
+        std::fs::write(dir.join(format!("Bonus.mkv.{idx}")), vec![b'x'; len]).unwrap();
+    }
+    // A video has to be present or the sweep declines to run at all
+    // (see `keep_media_only_leaves_a_video_less_job_alone`).
+    std::fs::write(dir.join("teaser.mkv"), vec![0u8; 4096]).unwrap();
+    std::fs::write(dir.join("poster.jpg"), b"x").unwrap();
+    // Membership is not "keep anything numbered": a lone numbered blob
+    // belongs to no set and is still clutter.
+    std::fs::write(dir.join("cc98d076ce474159bec6a0fe670059ee32.001"), b"x").unwrap();
+    let n = keep_media_only(&dir);
+    for idx in ["001", "002", "003"] {
+        assert!(
+            dir.join(format!("Bonus.mkv.{idx}")).exists(),
+            "Bonus.mkv.{idx} is a part of the only copy of the payload"
+        );
+    }
+    assert_eq!(n, 2, "the poster and the set-less blob go, nothing else");
+    assert!(dir.join("teaser.mkv").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

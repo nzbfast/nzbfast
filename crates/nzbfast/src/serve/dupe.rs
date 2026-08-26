@@ -28,6 +28,17 @@ impl Daemon {
     /// never one either. Same rules the hold itself applies, because it
     /// is the same code.
     pub(crate) fn dupe_collision(&self, stem: &str) -> Option<DupeCollision> {
+        self.dupe_collision_except(stem, None)
+    }
+
+    /// [`Self::dupe_collision`] with one record forgiven.
+    ///
+    /// `except` is a row this add is REPLACING, so colliding with it is
+    /// not a duplicate (§290, Codex F-09). It is applied inside both
+    /// scans rather than to the answer, because these scans report the
+    /// FIRST hit: filtering afterwards would let the forgiven row mask
+    /// an unrelated live copy sitting behind it in the queue.
+    fn dupe_collision_except(&self, stem: &str, except: Option<&str>) -> Option<DupeCollision> {
         if is_proper(stem) {
             return None;
         }
@@ -73,7 +84,7 @@ impl Daemon {
         };
         let queued = self.queue.lock_ok().iter().find_map(|j| {
             let g = j.lock_ok();
-            hit(&g).then(|| DupeCollision {
+            (Some(g.nzo_id.as_str()) != except && hit(&g)).then(|| DupeCollision {
                 where_: "queue",
                 name: g.name.clone(),
                 nzo_id: g.nzo_id.clone(),
@@ -84,11 +95,13 @@ impl Daemon {
         }
         let done = self.history.lock_ok().iter().find_map(|j| {
             let g = j.lock_ok();
-            (hit(&g) && g.state == JobState::Completed).then(|| DupeCollision {
-                where_: "history",
-                name: g.name.clone(),
-                nzo_id: g.nzo_id.clone(),
-            })
+            (Some(g.nzo_id.as_str()) != except && hit(&g) && g.state == JobState::Completed).then(
+                || DupeCollision {
+                    where_: "history",
+                    name: g.name.clone(),
+                    nzo_id: g.nzo_id.clone(),
+                },
+            )
         });
         if done.is_some() {
             return done;
@@ -96,7 +109,7 @@ impl Daemon {
         if exact {
             return None;
         }
-        self.dupe_alias_collision(stem, &smart_k?)
+        self.dupe_alias_collision(stem, &smart_k?, except)
     }
 
     /// The alias arm of the smart duplicate check: the SAME episode of
@@ -114,7 +127,12 @@ impl Daemon {
     /// title keys resolved, independently, to the same TVmaze show id.
     /// No index, no enrichment yet, or either title unresolved → not a
     /// duplicate, same as before this arm existed.
-    fn dupe_alias_collision(&self, stem: &str, smart_k: &str) -> Option<DupeCollision> {
+    fn dupe_alias_collision(
+        &self,
+        stem: &str,
+        smart_k: &str,
+        except: Option<&str>,
+    ) -> Option<DupeCollision> {
         // Only the SxxEyy identity. Movie years and daily dates carry
         // their own aliasing questions; this arm answers the one that
         // bit.
@@ -144,7 +162,7 @@ impl Daemon {
             .iter()
             .filter_map(|j| {
                 let g = j.lock_ok();
-                same_ep(&g).then(|| DupeCollision {
+                (Some(g.nzo_id.as_str()) != except && same_ep(&g)).then(|| DupeCollision {
                     where_: "queue",
                     name: g.name.clone(),
                     nzo_id: g.nzo_id.clone(),
@@ -153,11 +171,12 @@ impl Daemon {
             .collect();
         cands.extend(self.history.lock_ok().iter().filter_map(|j| {
             let g = j.lock_ok();
-            (same_ep(&g) && g.state == JobState::Completed).then(|| DupeCollision {
-                where_: "history",
-                name: g.name.clone(),
-                nzo_id: g.nzo_id.clone(),
-            })
+            (Some(g.nzo_id.as_str()) != except && same_ep(&g) && g.state == JobState::Completed)
+                .then(|| DupeCollision {
+                    where_: "history",
+                    name: g.name.clone(),
+                    nzo_id: g.nzo_id.clone(),
+                })
         }));
         if cands.is_empty() {
             return None;
@@ -178,6 +197,121 @@ impl Daemon {
             // namespaces means nothing at all (Codex sweep 7, H2).
             q.kind == nzbkit::release::Kind::Tv && self.tv_show_id(&q.key).as_ref() == Some(&my_id)
         })
+    }
+
+    /// The whole of `enqueue_as`'s duplicate question: nothing for an
+    /// add that may not be held ([`DupeExempt::Anybody`] - the wall's
+    /// asked-and-said-yes, or a spare, where the caller already decided
+    /// its fate), else name identity first and §292's message-id arm
+    /// behind it. Both arms yield the same `DupeCollision`, so the
+    /// ladder downstream - pause/discard/fail, `held_for`, park
+    /// promotion - treats the two identically.
+    ///
+    /// [`DupeExempt::Row`] forgives ONE record and asks both arms
+    /// anyway, which is what the hunt's replacement needs and what a
+    /// bool could not say: a copy that replaces a failed row is still
+    /// an ordinary duplicate of every OTHER live copy of that release.
+    pub(super) fn add_collision(
+        &self,
+        stem: &str,
+        nzb: &nzbkit::nzb::Nzb,
+        total_bytes: u64,
+        exempt: DupeExempt<'_>,
+    ) -> Option<DupeCollision> {
+        if matches!(exempt, DupeExempt::Anybody) {
+            return None;
+        }
+        let except = exempt.row();
+        self.dupe_collision_except(stem, except)
+            .or_else(|| self.dupe_post_collision(nzb, total_bytes, except))
+    }
+
+    /// §292: the SAME-POST arm of the duplicate question, consulted by
+    /// `enqueue_as` only when the name arm found nothing. Two grabs of
+    /// one post from two indexers routinely carry different names - an
+    /// obfuscated stem on each, or one indexer's re-title of the
+    /// other's row - and no name key can ever meet them; the
+    /// message-id set can. The identity is spare.rs's own §282
+    /// admission question pointed the other way (`post_ids` /
+    /// `post_covers`), directional and conservative for the reason
+    /// written at `SAME_POST_COVERAGE`.
+    ///
+    /// QUEUE rows only, on purpose: a history arm means parsing a
+    /// spooled NZB for every completed row on every add, and the waste
+    /// this exists to stop is two indexers grabbing one post around
+    /// the same time - two live queue rows. Rows that are themselves
+    /// held (`held_for` non-empty - a §282 spare, or an already-held
+    /// duplicate) are not collision targets: holding a user's explicit
+    /// add behind a row that is itself paused inverts who asked for
+    /// what, and a spare is CHOSEN disjoint from its primary anyway.
+    /// Tombstoned rows are mid-delete and out for the same reason the
+    /// stands re-check exists.
+    ///
+    /// The spool parses run OUTSIDE the queue lock, against a snapshot
+    /// of candidate rows - the #38 lesson, same as the alias arm above:
+    /// nothing slow runs under that lock. A declared-size prefilter
+    /// keeps the parse count to rows that could possibly be the same
+    /// post; the one shape it can miss (an add that is a SMALL slice
+    /// of a much larger queued post, more than 4x apart in declared
+    /// bytes) is judged not worth parsing every spool on every add.
+    ///
+    /// `except` forgives ONE row, for the reason written at
+    /// [`Self::dupe_collision_except`]: the record a hunted replacement
+    /// is replacing is not a duplicate of itself, and every other row
+    /// still is. Applied in the scan and not to the answer, so a
+    /// forgiven row cannot mask the one behind it.
+    pub(crate) fn dupe_post_collision(
+        &self,
+        nzb: &nzbkit::nzb::Nzb,
+        total_bytes: u64,
+        except: Option<&str>,
+    ) -> Option<DupeCollision> {
+        let mine = spare::post_ids(nzb);
+        let cands: Vec<(String, String, PathBuf, u64)> = self
+            .queue
+            .lock_ok()
+            .iter()
+            .filter_map(|j| {
+                let g = j.lock_ok();
+                if !g.held_for.is_empty() || g.tombstone || Some(g.nzo_id.as_str()) == except {
+                    return None;
+                }
+                Some((
+                    g.nzo_id.clone(),
+                    g.name.clone(),
+                    g.nzb_path.clone(),
+                    g.total_bytes,
+                ))
+            })
+            .collect();
+        for (nzo_id, name, path, bytes) in cands {
+            if total_bytes > 0 && bytes > 0 {
+                let (lo, hi) = if bytes < total_bytes {
+                    (bytes, total_bytes)
+                } else {
+                    (total_bytes, bytes)
+                };
+                if hi > lo.saturating_mul(4) {
+                    continue;
+                }
+            }
+            let Some(row) = spare::nzb_at(&path) else {
+                continue;
+            };
+            if spare::post_covers(&spare::post_ids(&row), &mine) {
+                info!(
+                    target: "queue",
+                    "same post as {name:?} ({nzo_id}) by message-id identity - \
+                     the duplicate ladder decides what this add becomes"
+                );
+                return Some(DupeCollision {
+                    where_: "queue",
+                    name,
+                    nzo_id,
+                });
+            }
+        }
+        None
     }
 
     /// Does the collision `dupe_collision` picked still exist?

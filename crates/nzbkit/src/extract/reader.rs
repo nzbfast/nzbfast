@@ -37,7 +37,13 @@ impl Extractor {
     /// True iff `[off, off+len)` of this slot's (volume-view) bytes are
     /// really on disk / in the header stash - a sparse hole would pread
     /// as zeros, so the M15 backfill path must ask first.
-    pub fn covered(&self, slot: usize, off: u64, len: usize) -> bool {
+    /// `len` is u64 BY TYPE, and that is the fix rather than a
+    /// convenience: it used to be `usize`, so every caller with a real
+    /// byte span narrowed at the call - and `usize` is 32 bits on the
+    /// shipped armv7 target, where a 4 GiB gap narrows to ZERO and this
+    /// answers "covered" for a hole. See [`crate::disk::chunk_len`] for
+    /// the class.
+    pub fn covered(&self, slot: usize, off: u64, len: u64) -> bool {
         let inner = self.inner_read();
         // TODO 211 (b): a split part's bytes are its head's, at the
         // logical offset (same translation in read_at and
@@ -45,10 +51,9 @@ impl Extractor {
         let (slot, off) = Self::split_target(&inner, slot, off);
         let s = &inner.slots[slot];
         match s.mode {
-            SlotMode::Plain | SlotMode::RarFallback => s
-                .writer
-                .as_ref()
-                .is_some_and(|w| w.covered(off, len as u64)),
+            SlotMode::Plain | SlotMode::RarFallback => {
+                s.writer.as_ref().is_some_and(|w| w.covered(off, len))
+            }
             // Chased slot: the frontier buffer is the byte record
             // (frontier + parked out-of-order spans) from the trim point
             // up; below it the slot's own archive file holds the bytes a
@@ -60,7 +65,7 @@ impl Extractor {
                 if len == 0 {
                     return true;
                 }
-                let end = off + len as u64;
+                let end = off + len;
                 let base = ch.buf.base();
                 if off < base {
                     let spilled = base.min(end);
@@ -76,7 +81,7 @@ impl Extractor {
                     }
                     return ch.buf.intervals(base, end - base) == [(base, end)];
                 }
-                ch.buf.intervals(off, len as u64) == [(off, end)]
+                ch.buf.intervals(off, len) == [(off, end)]
             }
             SlotMode::Rar => {
                 let Some(m) = s.mapper.as_ref() else {
@@ -93,12 +98,12 @@ impl Extractor {
                 for (hs, span) in s.header_spans.iter().chain(&s.holds) {
                     let he = hs + span.len() as u64;
                     let qs = off.max(*hs);
-                    let qe = (off + len as u64).min(he);
+                    let qe = (off + len).min(he);
                     if qs < qe {
                         covered.push((qs - off, qe - off));
                     }
                 }
-                for (ei, piece_off, span_off, plen) in m.map_span(off, len as u64) {
+                for (ei, piece_off, span_off, plen) in m.map_span(off, len) {
                     // Soft-skip like read_at: holds may already cover a
                     // range whose base/route is unresolved.
                     let Some(base) = Self::base_for(&inner, slot, ei) else {
@@ -113,7 +118,7 @@ impl Extractor {
                             Some(cs) => cs.covers(base + piece_off, plen),
                             None => w.covered(base + piece_off, plen),
                         },
-                        Some(Dest::Child(c, cs)) => c.covered(cs, base + piece_off, plen as usize),
+                        Some(Dest::Child(c, cs)) => c.covered(cs, base + piece_off, plen),
                         None => false,
                     };
                     if !ok {
@@ -121,7 +126,7 @@ impl Extractor {
                     }
                     covered.push((span_off, span_off + plen));
                 }
-                intervals_cover_all(covered, len as u64)
+                intervals_cover_all(covered, len)
             }
             // Unclassified slot: pre-sniff holds are exact file bytes.
             SlotMode::Unknown => {
@@ -129,12 +134,12 @@ impl Extractor {
                 for (hs, span) in &s.holds {
                     let he = hs + span.len() as u64;
                     let qs = off.max(*hs);
-                    let qe = (off + len as u64).min(he);
+                    let qe = (off + len).min(he);
                     if qs < qe {
                         covered.push((qs - off, qe - off));
                     }
                 }
-                intervals_cover_all(covered, len as u64)
+                intervals_cover_all(covered, len)
             }
             SlotMode::Discard | SlotMode::SplitPart => false,
         }
@@ -1152,6 +1157,30 @@ impl Extractor {
         }
     }
 
+    /// How far this slot's chase decode has READ, in volume offsets -
+    /// the `served` line `FrontierBuffer::write_span` judges a differing
+    /// rewrite against, and therefore the only thing
+    /// that decides whether a repair of a given byte will set
+    /// [`Self::chase_repair_conflicted`] or pass unnoticed. `None` for a
+    /// slot with no live chase.
+    ///
+    /// Read-only, and its one caller is the TODO 278 ordering hook in
+    /// `nzbfast`'s repair path: the row-26 conflict tripwire can only be
+    /// exercised by a test that gets the decode past the damage first,
+    /// and until this was observable that ordering was a race the CI
+    /// runner lost every night while this fleet's boxes won it every
+    /// time. Nothing on the production path reads it - a repair that
+    /// wants the verdict reads `chase_repair_conflicted` afterwards,
+    /// which is the answer rather than the inputs to it.
+    pub fn chase_served(&self, slot: usize) -> Option<u64> {
+        let inner = self.inner_read();
+        inner
+            .slots
+            .get(slot)
+            .and_then(|s| s.chase.as_ref())
+            .map(|ch| ch.buf.served())
+    }
+
     /// Has this slot given up on its in-RAM view and materialized its
     /// volume to disk since the repair gate admitted it?
     ///
@@ -1471,7 +1500,7 @@ mod tests {
                 i = e;
             }
         }
-        assert!(!ex.covered(1, 45_000, art), "hole really is a hole");
+        assert!(!ex.covered(1, 45_000, art as u64), "hole really is a hole");
         // Patch the holes with repaired bytes (here: the originals).
         ex.patch_volume_span(1, 45_000, &vols[1][45_000..54_000])
             .unwrap();
@@ -1582,7 +1611,7 @@ mod tests {
         assert!(h.join().is_err(), "helper thread must have panicked");
         assert!(ex.inner.is_poisoned(), "lock must be poisoned");
         // Every read accessor still answers from the snapshot.
-        assert!(ex.covered(0, 0, data.len()));
+        assert!(ex.covered(0, 0, data.len() as u64));
         let mut buf = vec![0u8; data.len()];
         ex.read_at(0, 0, &mut buf).unwrap();
         assert_eq!(buf, data);
@@ -1629,7 +1658,7 @@ mod tests {
             let mut back = vec![0u8; vol.len()];
             ex.read_at(si, 0, &mut back).unwrap();
             assert_eq!(&back, vol, "volume {si} view");
-            assert!(ex.covered(si, 0, vol.len()), "volume {si} coverage");
+            assert!(ex.covered(si, 0, vol.len() as u64), "volume {si} coverage");
         }
         // Targeted ranges: outer header bytes; the outer data-area start,
         // which carries the inner archive's own headers; straddling and

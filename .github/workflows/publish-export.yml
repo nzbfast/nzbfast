@@ -1,0 +1,148 @@
+# publish-export - run the public export and assert it COMPLETES.
+#
+# WHAT IT HOLDS. packaging/publish-public.sh is the only route out of this
+# repository into the public one. It reads the manifest, archives the
+# allowlisted tracked files, swaps in the public README, removes the private
+# working documents, rewrites the exported ci-private.yml to take the private
+# tree names out of it, and then refuses the publish on any leak, any reach back
+# into the private tree, and any strip rule that stopped matching.
+#
+# Until 26 Aug 2026 nothing in this repository ever ran it. `grep -rn
+# publish-public .github/workflows/` returned eight hits and every one was a
+# COMMENT - a mention rather than an invocation, which is the precise shape the
+# packaging-test roster gate exists to refuse one directory over. The one test
+# that does invoke the script stops on purpose at the destructive-target guard,
+# so the entire export path was exercised by nobody until a human tried to cut a
+# release.
+#
+# IT HAD ALREADY BROKEN PUBLISHING TWICE, both times in ci-private.yml by the
+# same mechanism. The script's own comment carries the first: "THIS BROKE
+# PUBLISHING FOR SIXTEEN HOURS AND NOTHING SAID SO" - the last snapshot came
+# from one commit and the changed-path classifier landed ten seconds later, so
+# every publish after that refused while the leak-check job stayed green
+# throughout, because it greps for names and credentials and not for reaches
+# into the private tree. The second was a comment added on 26 Aug 2026 citing a
+# handoff by its private-tree path, wrapped so the directory landed at the end
+# of a line. Every gate was green. It was found only because another lane
+# happened to need a completing export in order to verify something else.
+#
+# ---------------------------------------------------------------------
+# WHY macOS, AND WHY THAT IS THE HONEST RUNNER
+#
+# publish-public.sh is macOS-native by construction: thirteen `sed -i ''` calls
+# (BSD in-place - GNU sed reads the empty string as the SCRIPT and the
+# expression as a FILENAME, so every strip rule dies) plus zsh array forms bash
+# does not have. Making it portable just to suit a cheaper runner would trade a
+# release-critical script's real behaviour for a green line about a code path no
+# release ever takes: the release is cut on a Mac. The test refuses outright on
+# a GNU-sed host rather than adapting to one. Same call, and the same reasoning,
+# as rig-selftest.yml.
+#
+# ---------------------------------------------------------------------
+# WHY ITS OWN FILE
+#
+# size-gate.yml is where the cheap gates live BECAUSE it runs on every branch
+# push, and it earns that by being build-free - "checkout plus the script is the
+# whole job". A macOS runner falsifies that, and its `paths:` list is a UNION
+# covering `**/*.rs`, `**/*.py`, `**/*.sh` and `*.md`, so a job added there
+# would spin a macOS runner on very nearly every push. ci-private.yml is
+# main-only, so its verdict lands on the next lane rather than on the author,
+# and at this push cadence it is routinely superseded. So: a dedicated workflow
+# on every branch, with a native path filter. Same shape as macapp.yml and
+# rig-selftest.yml.
+#
+# ---------------------------------------------------------------------
+# THREE TRIGGERS, AND EACH COVERS SOMETHING THE OTHERS CANNOT
+#
+#   push (filtered) - the author of a change to the export's own inputs is
+#     reddened on their own push. Both real incidents are this trigger: both
+#     were ci-private.yml, which is on the filter.
+#
+#   schedule (daily) - the filter is a list of the export's INPUTS, and the
+#     export's leak scan and private-tree reference scan read EVERY exported
+#     file, so in principle any file under a manifest entry can refuse a
+#     publish. Widening the filter to reach that would mean `**/*.rs`, which
+#     restores the every-push macOS spin this design exists to avoid, for a
+#     class leak-check.yml already covers most of on every push to every branch.
+#     A daily run closes the rest within a day - which is exactly what the
+#     sixteen-hour outage needed and did not have. It runs on the default
+#     branch, so a red here means publishing is broken RIGHT NOW.
+#
+#   workflow_dispatch - the release-cutter's own answer to "can I publish?",
+#     which is the question that used to be answered by finding out the hard
+#     way.
+#
+# ---------------------------------------------------------------------
+# THE FILTER IS A LIST, AND THE LIST IS HELD TO THE SCRIPT
+#
+# Nothing about a list stops the sixth input being read by a script that no
+# longer triggers on it. The test's `--paths` arm derives the input set from
+# publish-public.sh ITSELF - $ROOT-anchored reads, bare relative reads taken
+# after its `cd`, and every workflow it names - and refuses an input no pattern
+# here matches. That arm is build-free and portable, and it runs in
+# size-gate.yml, whose filter is wide enough to see the change, so a new input
+# reddens on the AUTHOR's push instead of leaving this job quietly
+# un-triggered. Add a pattern here in the same commit as the input it covers.
+#
+# NEVER --push. The test passes a mktemp destination with no `origin` and never
+# passes --push, which is the only thing that makes the script push at all.
+
+name: publish-export
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'packaging/publish-public.sh'
+      - 'packaging/PUBLIC_MANIFEST'
+      - 'packaging/private-patterns.txt'
+      - 'packaging/README.public.md'
+      - 'packaging/public-hooks/**'
+      - 'packaging/tests/publish-export-completes.sh'
+      - '.github/workflows/ci-private.yml'
+      - '.github/workflows/leak-check.yml'
+      - '.github/workflows/publish-export.yml'
+  schedule:
+    # 07:20 UTC daily. Off the hour on purpose - GitHub queues scheduled runs
+    # hardest on the exact hour, and a publish check that is habitually late is
+    # one nobody reads.
+    - cron: '20 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish-export:
+    # Private repo only. The export's SOURCE - the manifest, the pattern file
+    # and the script itself - is removed from the public tree by the very
+    # export this runs, so there is nothing there for this job to do.
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    concurrency:
+      group: publish-export-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      # fetch-depth 1 is enough and was measured rather than assumed: the
+      # script reads HEAD only (`git rev-parse --short HEAD`, `git archive
+      # HEAD`), and the destination is a fresh `git init` unrelated to this
+      # checkout's depth. A shallow clone exports the same 1852 files in the
+      # same time as a full one.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a runner image bump
+      # rather than against the diff. `sed --version` FAILING is the pass here:
+      # that is what identifies BSD sed, which every strip rule needs.
+      - name: shell versions
+        run: |
+          zsh --version
+          sed --version >/dev/null 2>&1 && echo "GNU sed - the export will refuse" || echo "BSD sed - ok"
+
+      # `--selftest` first, the same reason every gate in size-gate.yml runs its
+      # own: what the trigger roster protects against is a matcher that has
+      # quietly stopped matching, and that reads as a clean tree forever.
+      - name: publish export completes
+        run: |
+          packaging/tests/publish-export-completes.sh --selftest
+          packaging/tests/publish-export-completes.sh

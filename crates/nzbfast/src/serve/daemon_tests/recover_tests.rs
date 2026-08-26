@@ -209,3 +209,103 @@ fn a_recovered_duplicate_is_held_behind_the_live_original() {
         assert_eq!(g.priority, DUPE_PRIORITY);
     });
 }
+
+/// The category the user CHOSE survives the loss of the record it was
+/// written in.
+///
+/// Before the sidecar, an adopted job was enqueued under an empty
+/// category and took whatever §218's inference made of the NZB - so a
+/// release the user filed under one category came back under another,
+/// in a different folder, and nothing said it had moved. The one place
+/// the choice can be kept is beside the spool copy, because that copy is
+/// the only thing a run whose saves never landed leaves behind.
+#[test]
+fn a_recovered_job_keeps_the_category_the_user_chose() {
+    with_daemon("a12-category", |d| {
+        crate::serve::storecut::arm_cut(0);
+        let lost = d
+            .enqueue(
+                one_file_nzb("one").as_bytes(),
+                "Some.Release.nzb",
+                "films",
+                -100,
+                None,
+                None,
+                "test",
+                false,
+            )
+            .expect("enqueue");
+        crate::serve::storecut::disarm();
+        assert!(!lost.durable, "the record never reached disk");
+
+        let d2 = restart(d);
+        assert_eq!(d2.recover_orphaned_spool(), 1);
+        let row = d2.queue.lock_ok()[0].clone();
+        let g = row.lock_ok();
+        assert_eq!(g.nzo_id, lost.nzo_id);
+        assert_eq!(g.category, "films", "the chosen category was not recovered");
+        assert!(
+            g.out_dir.components().any(|c| c.as_os_str() == "films"),
+            "and the payload must land where that category files it: {}",
+            g.out_dir.display()
+        );
+    });
+}
+
+/// An orphan with no sidecar beside it - a copy written before this
+/// existed, an add that chose no category, or a sidecar write the same
+/// failing disk refused - is adopted exactly as it was before, with the
+/// inference deciding. The sidecar adds a case; it does not replace the
+/// old one.
+#[test]
+fn an_orphan_with_no_sidecar_is_adopted_as_it_always_was() {
+    with_daemon("a12-no-sidecar", |d| {
+        let orphan = d.spool.join("SABnzbd_nzo_nzbfast55-Hand.Written.nzb");
+        std::fs::write(&orphan, one_file_nzb("z")).expect("write");
+        assert_eq!(d.recover_orphaned_spool(), 1);
+        assert_eq!(queued_ids(d), vec!["SABnzbd_nzo_nzbfast55".to_string()]);
+    });
+}
+
+/// The sidecar belongs to the spool copy: it goes when the copy goes,
+/// it is never mistaken for an orphan of its own, and one left behind
+/// by any other route is swept at the next start.
+#[test]
+fn a_category_sidecar_lives_and_dies_with_its_spool_copy() {
+    with_daemon("a12-sidecar-life", |d| {
+        let job = d
+            .enqueue(
+                one_file_nzb("one").as_bytes(),
+                "Some.Release.nzb",
+                "films",
+                -100,
+                None,
+                None,
+                "test",
+                false,
+            )
+            .expect("enqueue");
+        let nzb = d.queue.lock_ok()[0].lock_ok().nzb_path.clone();
+        let side = crate::serve::job::spool_cat_path(&nzb);
+        assert_eq!(std::fs::read_to_string(&side).unwrap_or_default(), "films");
+        // A sidecar is not an adoptable orphan, whatever else is here.
+        assert_eq!(d.recover_orphaned_spool(), 0);
+        assert_eq!(queued_ids(d), vec![job.nzo_id]);
+        assert!(side.exists(), "and the live job's own sidecar stays");
+
+        // One whose copy has gone has no reader left.
+        let dangling = d.spool.join("SABnzbd_nzo_nzbfast800-Gone.nzb.cat");
+        std::fs::write(&dangling, "tv").expect("write");
+        assert_eq!(d.recover_orphaned_spool(), 0);
+        assert!(!dangling.exists(), "a sidecar with no copy is swept");
+        assert!(side.exists());
+
+        // And a delete takes the copy's sidecar with it.
+        drop_spool(&nzb);
+        assert!(!nzb.exists());
+        assert!(
+            !side.exists(),
+            "the sidecar outlived the copy it belongs to"
+        );
+    });
+}

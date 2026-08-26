@@ -409,7 +409,7 @@ impl AsyncWrite for ChaosSock {
         // This write crosses the threshold: send the same bytes with one
         // bit flipped at the crossing point. Rebuilt from `buf` every
         // poll, so a Pending here cannot smear the damage.
-        let off = (me.after.saturating_sub(me.written) as usize).min(buf.len() - 1);
+        let off = crate::disk::chunk_len(me.after.saturating_sub(me.written), buf.len() - 1);
         me.scratch.clear();
         me.scratch.extend_from_slice(buf);
         me.scratch[off] ^= 0x40;

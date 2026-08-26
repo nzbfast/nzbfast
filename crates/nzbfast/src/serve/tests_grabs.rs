@@ -1304,6 +1304,90 @@ fn each_failure_gets_the_action_that_can_help() {
     assert_eq!(act("Permission denied (os error 13)", false), "path");
 }
 
+/// TODO 305: the SECOND question, and the one family where it parts
+/// company with the first.
+///
+/// `fail_action` is "what should this person press";
+/// `another_copy_can_help` is "can a different post of the same release
+/// finish what this one could not". Round B measured seven of twelve
+/// failures where another release is the only remedy the product has
+/// and the parked row said retry, and they are one shape.
+///
+/// The SUPERSET property is asserted rather than described, because it
+/// is what TODO 284's clause 1 was reaching for when it borrowed
+/// `fail_action` in the first place: a one-click replacement must not be
+/// offered on a NARROWER set than the hand search beside it. Widening is
+/// the whole change; narrowing anywhere would be a regression that this
+/// pins by construction over every message the sibling test above uses.
+#[test]
+fn another_copy_helps_exactly_where_a_second_post_could_finish_the_job() {
+    let can = |msg: &str, pw: bool| another_copy_can_help(fail_kind(msg), fail_hint(msg), msg, pw);
+    let act = |msg: &str, pw: bool| fail_action(fail_kind(msg), fail_hint(msg), msg, pw);
+
+    // The founding shape, and the whole reason this predicate exists:
+    // the payload is all but whole and the parity is what would not
+    // serve. `fail_action` says retry - correctly, because a
+    // journal-resume retry still costs almost nothing and the SAB
+    // `retry` boolean rides on it - and another copy is still the
+    // remedy.
+    let casualty = "download incomplete: the recovery data is what failed, not the payload - \
+                    26 of the post's 26 PAR2 recovery segment(s) are missing or damaged, so \
+                    the 1 file(s) that came up short have no parity left to rebuild them \
+                    from, 0 decode/write errors";
+    assert_eq!(act(casualty, false), "retry", "{casualty}");
+    assert!(can(casualty, false), "{casualty}");
+
+    // A plain missing-articles failure is what propagation fixes every
+    // day. Positive evidence or nothing - this is the over-wide fix
+    // TODO 305 rules out, pinned so it cannot arrive by accident.
+    let plain = "download incomplete: 1 file(s) with missing segments, 0 decode/write errors";
+    assert!(!can(plain, false), "{plain}");
+
+    // Shape 6, which TODO 305 asks to be SETTLED here rather than left
+    // open. Out, and not on a judgement about how many providers the
+    // user has: "the articles did not decode" classifies `Local`, and
+    // `hunt::hunt_gates` refuses any kind that is not
+    // `post_unavailable()` with `NoHunt::LocalFault` - so admitting it
+    // would draw a button the very next door refuses.
+    let corrupt = "the articles did not decode: 10 article(s) failed their yEnc CRC";
+    assert_eq!(fail_hint(corrupt), "corrupt", "{corrupt}");
+    assert!(
+        !crate::failkind::fail_kind(corrupt).post_unavailable(),
+        "{corrupt}"
+    );
+    assert!(!can(corrupt, false), "{corrupt}");
+
+    // A locked archive and a full disk are answered by neither road.
+    assert!(!can("unpack failed", true));
+    assert!(!can("No space left on device (os error 28)", false));
+
+    // THE SUPERSET. Every message the action test above declares a
+    // `search` must still be replaceable, or the offer has become
+    // narrower than the hand search beside it.
+    for msg in [
+        "content no longer retrievable",
+        "pre-flight: articles missing beyond repair (12 segments)",
+        "verification failed and PAR2 repair could not complete",
+        "post size header disagrees with its parts: every payload article arrived",
+    ] {
+        assert_eq!(act(msg, false), "search", "{msg}");
+        assert!(can(msg, false), "{msg}");
+    }
+    // ...and the settings-owned failures stay out of both: a second copy
+    // is excluded by the same setting and fails identically.
+    let retention = crate::incomplete_reason(
+        2,
+        0,
+        &crate::LossCauses {
+            missing_430: 1,
+            retention_excluded: 900,
+            ..no_causes()
+        },
+    );
+    assert!(!can(&retention, false), "{retention}");
+    assert!(!can("no usable servers: none are set up yet", false));
+}
+
 /// Six watch-folder states, four of which are SUCCESSES. The strip
 /// showed one sentence for all six and offered a Delete that destroys
 /// the only copy in exactly the states where it is not safe.
@@ -1942,6 +2026,8 @@ fn every_search_carries_the_address_its_indexer_answered_from() {
         }
     });
     let cfg = crate::newznab::IndexerConfig {
+        kind: Default::default(),
+        nzbindex: Default::default(),
         name: "loopback".into(),
         url: format!("http://{at}"),
         apikey: "K1".into(),

@@ -321,6 +321,16 @@ overføringen stopper i løpet av sekunder og fortsetter senere fra journalen, u
 (Jobber med Tving-prioritet fortsetter å laste ned, SABnzbd-stil.)</li>
 <li>Et <b>oppdateringsbanner</b> dukker opp her når en ny versjon er tilgjengelig
 (se <a href="#updates">Oppdateringer</a>).</li>
+<li>Hver <b>brikke for bakgrunnsarbeid</b> viser hva nzbfast gjør akkurat nå -
+indeksering, henting av metadata, utgivelsesstrøm, måling av tilkoblinger,
+watchlisten, listesynkronisering, flytting av ferdige filer, vedlikehold av
+databasen. Klikk på en for å se hva du kan gjøre: sett på pause eller slå av
+det som har en bryter, eller hopp rett til watchlisten, listekildene eller
+køen. Flytting, vedlikehold og listesynkronisering blir ferdig av seg selv og
+sier det, i stedet for å tilby en bryter.</li>
+<li><b>Statusindikatoren for køen</b> åpnes på samme måte, med <b>Pause</b>
+(lar artikler som allerede er i gang bli ferdige), <b>Pause nå</b> (dropper
+dem og frigjør linjen med det samme) og <b>Fortsett</b>.</li>
 </ul>
 <h3>Gjennomstrømning</h3>
 <p>Live MB/s med et rullende diagram; de stiplede vannmerkene markerer denne øktens
@@ -354,7 +364,7 @@ API-et …). En <b>Last ned .nzb-filen</b>-knapp lagrer jobbens <code>.nzb</code
 nzbfast beholder sin egen kopi, så dette fungerer for hver jobb, selv når originalfilen
 for lengst er borte.</li>
 <li><b>"Hvorfor er dette tregt?"</b> Mens en jobb laster ned, bærer linjen under framdriftslinjen en konklusjon om <em>den</em> jobben, ikke om maskinen: <i>tilbyderne dine er grensen</i>, <i>denne maskinen er ved CPU-grensen sin</i>, <i>lagringen henger ikke med</i>, og så videre. Klikk på den, så åpner raden seg på beviset: hva linja di klarer, hva tilbyderne leverte, hva som kommer inn nå, og en tabell per tjener der en strupt tilbyder synes med én gang. En jobb i full fart sier ingenting her, og heller ikke en jobb der konklusjonen fortsatt tar form.</li>
-<li>Merker viser spesialtilstander: <i>utsatt (treg)</i>, <i>prefetcher</i>,
+<li>Merker viser spesialtilstander: <i>forsøkt, satt til side</i>, <i>prefetcher</i>,
 <i>pauset</i> (se <a href="#performance">Ytelsesverktøy</a>).</li>
 <li>Et nedtellingsdiagram sporer totalt antall GB som gjenstår i hele køen.</li>
 </ul>
@@ -761,14 +771,6 @@ etter hver oppdatering blir dårlige. Og en stor andel av installasjonene er Doc
 servere uten skjerm og NAS-bokser der det ikke finnes noen nøkkelring i det hele tatt,
 noe som ville etterlatt to ulike lagringsveier å holde riktige. Ett velforstått format
 som oppfører seg likt overalt er inntil videre den bedre handelen.</p>
-<p>To andre valg per server har ennå ingen kontroll i dashbordet: skriv dem inn for
-hånd i den serverens oppføring i <code>config.local.json</code>
-(se <a href="#files">§17</a>) og start på nytt.</p>
-<div class="tblwrap"><table>
-<tr><th>Nøkkel</th><th>Merknader</th></tr>
-<tr><td><code>bind_ip</code></td><td>Binder de utgående forbindelsene til denne serveren til en bestemt lokal adresse, for maskiner med flere utganger og delte VPN-tunneler. Adressefamilien velger samtidig målfamilien: en v4-binding kobler til serverens v4-adresse.</td></tr>
-<tr><td><code>socks5</code></td><td>Sender NNTP-trafikken til denne serveren gjennom en SOCKS5-proxy: <code>host:port</code>, eller <code>user:pass@host:port</code>. Vertsnavnet slås opp <em>av proxyen</em>, så det blir ingen lokal DNS-lekkasje.</td></tr>
-</table></div>
 <ul>
 <li><b>Haken</b> ved siden av hver server er av/på-bryteren: med hake er serveren med i
 nedlastingspoolen, uten hake er den deaktivert. En deaktivert server beholder
@@ -977,6 +979,7 @@ kontoene i stedet.</div>
 <tr><td>Inntaksfiltre</td><td>JSON-regler som filtrerer hva som kommer inn i indeksen: typer (obfuskert søppel forkastes som standard), år/oppløsning/språk, størrelsesgrenser.</td></tr>
 <tr><td>Skann nå / dyp ny skanning</td><td>Kjør en runde umiddelbart; med en dybde, skann på nytt så mange nylige headere.</td></tr>
 <tr><td>OMDb-nøkkel / metadataoppdatering / sletting</td><td>Kontroller for berikelse av veggen (<a href="#wall">§6</a>). Sletting gjenoppbygger databasen fra bunnen - løsningen hvis den noen gang blir korrupt.</td></tr>
+<tr><td>Sett metadata på pause</td><td>Slutter å hente titler, plakater og rollelister fra metadatasidene (<a href="#wall">§6</a>), mens selve skanningen fortsetter uendret. Ingenting av det som allerede er hentet, går tapt; rader funnet mens pausen står på beholder bare navnet de ble lagt ut under, til du slår dette på igjen. Den eneste innstillingen på dette kortet som ikke berører noen usenet-leverandør.</td></tr>
 <tr><td>Pre-feed</td><td><b>Av til du slår den på.</b> Mange opplastinger publiseres uten navnet sitt, og da har en skanning ingenting å lese. Offentlige relékanaler kunngjør det ekte navnet, den eneste åpne veien til å pare slike innlegg. Å slå på holder en forbindelse til et IRC-nett åpen og lytter: ingenting sendes noen gang, og ingen konto opprettes. Krever at indekseringen er på, for en feed uten et sted å legge det den hører er bare en socket som står åpen til ingen nytte.</td></tr>
 <tr><td>Reléserver, Relékanaler</td><td>IRC-nettet som bærer kunngjøringene (vert eller vert:port) og kanalene å lytte i, kommaseparert. En endring trer i kraft ved neste tilkobling: slå feeden av og på for å bruke den med en gang.</td></tr>
 <tr><td>Navngi ved korrelasjon</td><td>De offentlige direkterelèene bærer ingen filnavn, så de fleste tilslørte innlegg kan ikke pares direkte. Det en kunngjøring derimot fastslår, er når en utgivelse dukket opp og hvor stor den er. Dette sammenligner kunngjort tid og størrelse med navnløse innlegg og foreslår, når de passer, det ekte navnet under Bla. Et forslag er merket som et forslag, krever klikket ditt og gir aldri nytt navn til filer på disken.</td></tr>
@@ -1076,15 +1079,16 @@ dom, fortsetter tillegget urørt, og loggen sier hvorfor.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (et automatisk nytt forsøk har lagt en mislykket nedlasting i kø igjen),
-<code>job.switched</code> (en jobb som ikke kunne fullføres ble erstattet av en
+<code>job.requeued</code> (en nedlasting forlot historikken og kom i kø igjen - et nytt forsøk, eller en avspilt bibliotekoppføring), <code>job.switched</code> (en jobb som ikke kunne fullføres ble erstattet av en
 alternativ kopi som var holdt av til den), <code>job.replaced</code> (samme utfall, bortsett fra at ingen kopi var
 holdt av, så en erstatning ble søkt opp og lastet ned) og
 <code>job.delete_kept</code> (en sletting fjernet oppføringen, men fikk ikke
 fjernet filene dens), pluss <code>watch.picked</code> (en .nzb ble hentet ut av
 overvåkingsmappen), <code>nzb.refeed</code> (en ferdig nedlastings egen NZB-fil ble lagt i køen på pause), <code>watchlist.upgraded</code> (en oppgradering fra
 overvåkingslisten kom inn, og den erstattede kopien ble fjernet),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> og <code>quota.reached</code>. Hver bærer
+<code>queue.idle</code>, <code>queue.paused</code> og <code>queue.resumed</code> (køen stoppet eller startet igjen, uansett hvem eller hva som gjorde det), <code>queue.finished_action</code>
+(handlingen ved køens slutt ble slått på, kjørte eller ble avbrutt), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> og <code>update.available</code> (en nyere nzbfast-versjon ble funnet). Hver bærer
 <code>schema_version</code> (for øyeblikket 1; nye nøkler kan dukke opp uten et hopp -
 ignorer det du ikke kjenner), en monoton <code>seq</code> og et
 <code>at</code>-tidsstempel i millisekunder.</p>
@@ -1425,7 +1429,7 @@ SABnzbd-kompatibelt, så eksisterende SAB-integrasjoner fungerer uendret. To nø
 <tr><td>Automatisering</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostikk</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-autentisering: hvilken som helst bruker, API-nøkkel som passord)</td></tr>
-<tr><td>Forhåndsvisning / avspilling</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; å starte en parkert biblioteksjobb krever <code>?t=</code>-token eller nøkkel), <code>/m3u/&lt;id&gt;</code> (krever nøkkel; lager tokenet), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Forhåndsvisning / avspilling</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; å starte en parkert biblioteksjobb krever <code>?t=</code>-token eller nøkkel), <code>/m3u/&lt;id&gt;</code> (krever nøkkel eller jobbens eget token; lager tokenet), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Filer og plasseringer</h2>

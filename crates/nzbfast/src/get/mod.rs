@@ -14,6 +14,7 @@ use fleet::{Fleet, build_fleet};
 mod plan;
 use plan::{FetchPlan, Intake, build_fetch_plan, build_intake, clamp_concurrency};
 mod census;
+mod donor;
 mod dropped;
 mod tail;
 use tail::finish_run;
@@ -199,6 +200,12 @@ pub(crate) async fn get_with_progress(
     // is itself the consent and `off` cannot be talked into it - and
     // never enough on its own: the set must still have verified.
     eat_consent: bool,
+    // §293: directories whose files the disk repair's adoption scan may
+    // read as block sources - a failed predecessor's output, resolved
+    // by the daemon when this job is a switch (`alt_from`). Read-only
+    // everywhere downstream; empty on the CLI, the sidecar and every
+    // ordinary job.
+    donor_dirs: Vec<PathBuf>,
     progress: Option<Arc<AtomicU64>>,
     hub: Option<Arc<StreamHub>>,
     // The nzo_id that owns this run's hub extractor (daemon jobs); empty for
@@ -232,7 +239,7 @@ pub(crate) async fn get_with_progress(
         job_posted,
         password,
         journal,
-        restored,
+        mut restored,
         completed,
         resuming,
         has_main,
@@ -240,6 +247,13 @@ pub(crate) async fn get_with_progress(
         resume_vols,
         resume_map,
     } = build_intake(config, nzb_path, out_dir, password, no_extract, &hub)?;
+    // §293 plan-side adoption (TODO 305 item 2): before the plan
+    // finalizes, take whole member files off a failed predecessor's disk
+    // so their articles are never queued. Costs one small PAR2-index
+    // fetch and touches nothing at all when `donor_dirs` is empty, which
+    // is the CLI, the sidecar and every job that is not a switch. See
+    // get/donor.rs for why it needs the successor's own set to be safe.
+    let donated = donor::adopt_from_donors(&cfg_all.servers, &nzb, out_dir, &donor_dirs).await;
     // The slot + article fetch plan: see build_fetch_plan. The
     // destructure keeps every downstream read on the inline names.
     let FetchPlan {
@@ -261,12 +275,48 @@ pub(crate) async fn get_with_progress(
         bootstrap_vol,
         &resume_vols,
         skip_samples,
+        &donated.by_file,
     );
     // The resume id set is read exactly once - by the plan walk above -
     // and nothing downstream asks about it again (`resuming` already
     // carries the only bit anyone needs). Free it here rather than let a
     // 128k-article set sit resident through the whole fetch and tail.
     drop(completed);
+
+    // A donated file is bytes on disk this run will not fetch, which is
+    // the crash-resume ADOPT shape exactly - so it takes that path,
+    // seeds and all. `SlotSeed` is the same record `journal::restore`
+    // builds, and `replay_or_adopt_restored` (below, inside build_rig)
+    // does the three things it exists to do: adopt the file as the
+    // slot's plain writer, register its bytes as pre-activation spans so
+    // the M15b backfill re-reads and HASHES them against the PAR2 block
+    // map, and let the real on-disk name beat the subject hint for PAR2
+    // matching. The donation's own whole-file MD5 is therefore not the
+    // only thing standing behind these bytes: the backfill checks every
+    // block of them, and the settle read-back backs that up.
+    for (fi, name, size) in &donated.placed {
+        let Some(slot) = slot_file.iter().position(|&f| f == *fi) else {
+            continue;
+        };
+        restored.seeds.push(nzbkit::journal::SlotSeed {
+            slot,
+            name: name.clone(),
+            size: *size,
+            spans: vec![(0, *size)],
+            sources: Vec::new(),
+            article_ids: Vec::new(),
+        });
+    }
+    // ...and the two flags that path answers to. `resume_map` is forced
+    // OFF rather than left: mapping means replaying journal placements
+    // through the one-pass extractor, and a donated file has no
+    // placements to replay - what it has is a finished file on disk,
+    // which is precisely what the adopt path is for. Together these put
+    // the run on the resumed shape end to end: in-stream extraction off,
+    // the volumes on disk re-extracted at the tail. Paid only by a job
+    // that actually donated - which has just skipped a download.
+    let resuming = resuming || donated.any();
+    let resume_map = resume_map && !donated.any();
 
     // The verification rig - verifier, sniff control, the configured
     // extractor: see build_rig. The destructure keeps every downstream
@@ -421,7 +471,7 @@ pub(crate) async fn get_with_progress(
             nzb: nzb.clone(),
             slot_file: slot_file.clone(),
             verifier: verifier.clone(),
-            declared_blocks: workers::spec_ladder(&nzb).iter().map(|&(_, c, _)| c).sum(),
+            volumes: workers::declared_volumes(&nzb),
         },
     );
 
@@ -583,6 +633,7 @@ pub(crate) async fn get_with_progress(
         eat_consent,
         &note_activity,
         cancel,
+        &donor_dirs,
         &hub,
         stream_owner,
         &budget,

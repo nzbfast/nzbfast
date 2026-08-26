@@ -202,7 +202,15 @@ pub(super) const API_BODY_DEFAULT: u64 = 1 << 20;
 pub(super) fn api_body_cap(mode: &str) -> u64 {
     match mode {
         // A whole NZB, or a multipart batch of them.
-        "addfile" => API_BODY_MAX,
+        //
+        // `nzb_preview` takes the SAME payload - `api::queue::preview`
+        // accepts the identical bare-or-multipart NZB that `addfile`
+        // does, and its whole job is to parse it and report what is in
+        // it - so it needs the same ceiling. It was on
+        // `API_BODY_DEFAULT`, which truncated any NZB over 1 MiB and
+        // then reported the truncation as "not an NZB", while dropping
+        // the very same bytes on `addfile` worked.
+        "addfile" | "nzb_preview" => API_BODY_MAX,
         // A settings backup archive.
         "backup_import" => 8 << 20,
         // Poster/fanart upload.

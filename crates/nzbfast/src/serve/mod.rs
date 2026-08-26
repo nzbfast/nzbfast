@@ -52,6 +52,11 @@ use wire::*;
 // helpers, so no glob is needed.
 mod altcand;
 
+// serve/altspend.rs: §290 (Codex F-09/F-11) - the one reserve-then-admit
+// primitive the hunt, the clicked switch and the automatic promotion all
+// pass through. Inherent methods on `Daemon`, so no glob is needed.
+mod altspend;
+
 // serve/dupe.rs: inherent methods on `Daemon`, so no glob is needed.
 mod dupe;
 
@@ -65,6 +70,10 @@ mod histmigrate;
 mod histstore;
 /// §282 section C: hunt for a replacement when a job cannot complete.
 mod hunt;
+// serve/insurance.rs: retention insurance - bank a deferred row's
+// payload while its articles are still alive, extract at promotion.
+// Inherent picker on `Daemon` plus the watchdog's yield helper.
+mod insurance;
 mod moveseq;
 /// Server-outage reporting, lifted out of daemon.rs (TODO 106).
 mod outage;
@@ -94,6 +103,7 @@ mod tasks;
 
 mod probeids;
 
+pub(crate) mod earlyfile;
 mod mover;
 mod naming;
 mod postproc;
@@ -505,9 +515,9 @@ impl RunStop {
 }
 
 /// Sleep up to `dur`, waking early on ANY stop request. For the few
-/// parks that are not run-scoped (`Daemon::park_if_off`): the caller's
-/// own [`RunStop`] check decides whether the wake means "exit", this
-/// only makes sure a stop is not slept through.
+/// parks that are not run-scoped (`Daemon::park_metadata_lanes`): the
+/// caller's own [`RunStop`] check decides whether the wake means "exit",
+/// this only makes sure a stop is not slept through.
 #[cfg(feature = "indexer")]
 pub(crate) fn sleep_until_stop_bump(dur: std::time::Duration) {
     let epoch = STOP_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
@@ -549,12 +559,19 @@ impl Drop for AuxCensus {
     }
 }
 
-/// Spawn a named auxiliary thread and count it while it runs.
+/// Spawn a named auxiliary thread and count it while it runs. `false`
+/// means the OS refused the thread and nothing is running.
 ///
 /// Every lane that outlives a single unit of work goes through here, so
 /// [`live_aux_threads`] is a complete census of what a stop has to
 /// reclaim - which is what makes the leak provable rather than asserted.
-pub(crate) fn spawn_aux(name: &'static str, body: impl FnOnce() + Send + 'static) {
+///
+/// Most callers ignore the verdict: a lane that fails to start is a
+/// feature that quietly does not happen, on a host with no threads
+/// left. The pause timer reads it because it arms a live-worker flag
+/// BEFORE the spawn, and a flag left set with nothing running would
+/// disable auto-resume for the life of the process.
+pub(crate) fn spawn_aux(name: &'static str, body: impl FnOnce() + Send + 'static) -> bool {
     *AUX_THREADS
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -569,7 +586,9 @@ pub(crate) fn spawn_aux(name: &'static str, body: impl FnOnce() + Send + 'static
     if let Err(e) = spawned {
         drop(AuxCensus(name));
         warn!(target: "serve", "{name} thread failed to start: {e}");
+        return false;
     }
+    true
 }
 
 /// Live auxiliary lanes (see [`spawn_aux`]) as `name x count`, empty
@@ -802,6 +821,8 @@ use fsutil::*;
 mod winfront;
 
 mod history;
+#[cfg(test)]
+mod history_space_tests;
 use history::*;
 
 mod sched;

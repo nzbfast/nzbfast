@@ -610,6 +610,48 @@ fn the_recovery_clause_stands_down_where_it_would_be_a_lie() {
         },
     );
     assert!(gone.starts_with("post is gone"), "{gone}");
+
+    // Damaged articles are payload loss too, by this module's own
+    // definition: a decode or write error leaves `missing_segments` at
+    // zero while the failed article's bytes are a real gap. A payload
+    // with a fifth of its segments damaged is not a payload anyone may
+    // call the survivor, however dead the recovery set is.
+    let damaged = super::incomplete_reason(
+        83,
+        3426,
+        &LossCauses {
+            recovery_unobtainable: true,
+            missing_segments: 0,
+            total_segments: 17130,
+            recovery_segments: 1,
+            par2_slots: 127,
+            ..no_causes()
+        },
+    );
+    assert!(
+        !damaged.contains("not the payload"),
+        "3426 damaged articles ARE payload loss: {damaged}"
+    );
+
+    // And the tolerance holds in the other direction, for the reason it
+    // holds for absent articles: one corrupt article out of 17130 does
+    // not stand the clause down.
+    let nicked = super::incomplete_reason(
+        83,
+        1,
+        &LossCauses {
+            recovery_unobtainable: true,
+            missing_segments: 0,
+            total_segments: 17130,
+            recovery_segments: 1,
+            par2_slots: 127,
+            ..no_causes()
+        },
+    );
+    assert!(
+        nicked.contains("the recovery data is what failed, not the payload"),
+        "one damaged article is inside the same twentieth: {nicked}"
+    );
 }
 
 /// TODO 282 item 4's seam, driven from this side.
@@ -645,6 +687,117 @@ fn a_repair_side_verdict_reaches_the_message_without_a_census() {
     assert!(
         !msg.contains("0 of the post's"),
         "and must never quote an empty census: {msg}"
+    );
+}
+
+/// The seam survives the rung standing down, the way the census does.
+///
+/// `recovery_is_the_casualty` needs the payload proven whole, so a
+/// payload short by more than a twentieth stands the rung down - and
+/// that is right, because "not the payload" would then be a lie. What
+/// it must NOT cost is the repair ladder's verdict itself: the volume
+/// fetch still failed, and that is the one thing this run can say about
+/// why the parity did not close the gap. The census half already
+/// survives (the `rec_lost` clause, pinned by
+/// `the_recovery_clause_stands_down_where_it_would_be_a_lie`), but a
+/// conventionally named set has every one of those counters at zero by
+/// construction - `get::plan` gives a named `Par2Volume` no slot - so
+/// without a clause of its own the flag was consumed nowhere and the
+/// user read the plain missing-segments line with no word about the
+/// fetch that failed.
+#[test]
+fn the_repair_side_verdict_survives_the_rung_standing_down() {
+    // Short by more than 1/20 of the payload, so the comparative claim
+    // goes; still inside what a large parity set could have covered, so
+    // the ladder really did reach the volume fetch.
+    let msg = super::incomplete_reason(
+        9,
+        0,
+        &LossCauses {
+            recovery_unobtainable: true,
+            missing_430: 1400,
+            missing_segments: 1400,
+            total_segments: 17130,
+            bytes_arrived: 13_000_000_000,
+            // The main index, and nothing else with a slot.
+            recovery_segments: 1,
+            par2_slots: 127,
+            ..no_causes()
+        },
+    );
+    assert!(
+        !msg.contains("not the payload"),
+        "a payload short by 8% is not the survivor: {msg}"
+    );
+    assert!(
+        msg.contains("could not be fetched from any server that has the post"),
+        "the repair ladder's verdict is the only account of why the parity \
+         did not close the gap, and it must not be dropped: {msg}"
+    );
+    // A clause, never an opening: the class is decided on the opening
+    // token, and this changes what the user reads rather than what the
+    // daemon does.
+    assert!(
+        msg.starts_with("download incomplete: 9 file(s) with missing segments"),
+        "{msg}"
+    );
+    assert_eq!(
+        crate::failkind::fail_kind(&msg),
+        crate::failkind::FailKind::MissingArticles,
+        "{msg}"
+    );
+
+    // Both halves with something to say: the download-time census and
+    // the repair-time verdict join rather than each spending the same
+    // tail sentence.
+    let both = super::incomplete_reason(
+        9,
+        0,
+        &LossCauses {
+            recovery_unobtainable: true,
+            missing_430_recovery: 900,
+            recovery_segments: 1000,
+            missing_430: 1400,
+            missing_segments: 1400,
+            total_segments: 17130,
+            par2_slots: 127,
+            ..no_causes()
+        },
+    );
+    assert!(
+        both.contains("900 recovery (PAR2) segment(s) were lost as well"),
+        "{both}"
+    );
+    assert!(
+        both.contains("; and the PAR2 recovery volumes this repair needed"),
+        "the seam joins the census clause instead of repeating its tail: {both}"
+    );
+    assert_eq!(
+        both.matches("less parity available to repair with").count(),
+        1,
+        "said once: {both}"
+    );
+
+    // And it stands down where the rung FIRED, which already spent the
+    // verdict on the headline.
+    let fired = super::incomplete_reason(
+        1,
+        0,
+        &LossCauses {
+            recovery_unobtainable: true,
+            recovery_segments: 1,
+            missing_segments: 1,
+            total_segments: 40,
+            par2_slots: 1,
+            ..no_causes()
+        },
+    );
+    assert_eq!(
+        fired
+            .matches("could not be fetched from any server that has the post")
+            .count(),
+        1,
+        "the headline already says it: {fired}"
     );
 }
 
@@ -831,7 +984,9 @@ fn a_local_write_fault_does_not_claim_missing_segments() {
         0,
         5,
         &LossCauses {
-            decode_sample: Some("write a.mkv: No space left on device".into()),
+            decode_sample: Some(crate::diag::DecodeSample::write(
+                "write a.mkv: No space left on device".into(),
+            )),
             ..no_causes()
         },
     );
@@ -1654,4 +1809,109 @@ fn a_successful_unlock_clears_the_bomb_reason_too() {
         "download incomplete: 1 file(s) with missing segments"
     ));
     assert!(!super::unlock_answers(""));
+}
+
+/// TODO 305: the two clauses this module writes about a dead RECOVERY
+/// set are the evidence `failkind::another_copy_can_help` reads, so the
+/// round trip against the producer is a test and not a hope.
+///
+/// Same reasoning as `the_age_clause_reads_back` one function family
+/// over: the predicate lives at the crate root, takes a `&str` and can
+/// see nothing of the struct these sentences were built from, so a
+/// reworded clause here would silently empty it - and an emptied
+/// predicate reads as "no failure is replaceable", which is exactly the
+/// state TODO 305 was filed to end. This is what makes a wording change
+/// go red where it is made.
+#[test]
+fn the_recovery_evidence_reads_back() {
+    let can = |m: &str| {
+        crate::failkind::another_copy_can_help(
+            crate::failkind::fail_kind(m),
+            crate::failkind::fail_hint(m),
+            m,
+            false,
+        )
+    };
+    let backbones = ["a".to_string()];
+
+    // TODO 282's founding shape: 97.5% of the payload on disk, the
+    // parity gone. The headline clause.
+    let casualty = super::incomplete_reason(
+        1,
+        0,
+        &LossCauses {
+            missing_430: 1,
+            missing_430_recovery: 26,
+            recovery_segments: 26,
+            missing_segments: 1,
+            total_segments: 40,
+            bytes_arrived: 2_600_000,
+            par2_slots: 5,
+            backbones: &backbones,
+            post_age_days: 30,
+            ..no_causes()
+        },
+    );
+    assert_eq!(
+        crate::failkind::fail_kind(&casualty),
+        crate::failkind::FailKind::MissingArticles,
+        "the opening must not have moved - the age gate reads it: {casualty}"
+    );
+    assert!(
+        can(&casualty),
+        "TODO 284 built its parked surface for exactly this shape: {casualty}"
+    );
+
+    // The same repair-ladder verdict riding as an appended clause,
+    // because the payload lost more than its admitted twentieth and the
+    // headline stood down. Still the recovery set that ended the job.
+    let unobtainable = super::incomplete_reason(
+        3,
+        0,
+        &LossCauses {
+            missing_430: 12,
+            missing_segments: 12,
+            total_segments: 40,
+            recovery_segments: 0,
+            recovery_unobtainable: true,
+            bytes_arrived: 1_800_000,
+            par2_slots: 5,
+            backbones: &backbones,
+            post_age_days: 30,
+            ..no_causes()
+        },
+    );
+    assert!(
+        !unobtainable.contains("the recovery data is what failed"),
+        "a payload this short may not be vouched for: {unobtainable}"
+    );
+    assert!(
+        can(&unobtainable),
+        "the volumes could not be fetched from any server that has the \
+         post - another copy is the whole remedy: {unobtainable}"
+    );
+
+    // And the control, which is the reason this predicate asks for
+    // POSITIVE evidence rather than admitting the kind: a plain
+    // missing-articles failure is what propagation fixes every day, and
+    // offering a second copy of the release for it would be the
+    // over-wide fix TODO 305 rules out.
+    let plain = super::incomplete_reason(
+        1,
+        0,
+        &LossCauses {
+            missing_430: 1,
+            missing_segments: 1,
+            total_segments: 40,
+            recovery_segments: 8,
+            bytes_arrived: 2_600_000,
+            par2_slots: 5,
+            backbones: &backbones,
+            ..no_causes()
+        },
+    );
+    assert!(
+        !can(&plain),
+        "nothing here says the recovery half died: {plain}"
+    );
 }

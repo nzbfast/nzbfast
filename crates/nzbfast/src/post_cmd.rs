@@ -470,7 +470,11 @@ async fn verify(
                 }
             }
             FetchOutcome::Missing { id, .. } => problems.push(format!("{id}: missing (430)")),
-            FetchOutcome::Failed { id, error } => problems.push(format!("{id}: {error}")),
+            // `code` deliberately unread here: this list is a human
+            // diagnostic, and the sentence carries the OS's own words
+            // for what happened, which is the more useful half of the
+            // pair for someone reading a CLI run.
+            FetchOutcome::Failed { id, error, .. } => problems.push(format!("{id}: {error}")),
         }
     }
     let _ = fetcher.await;
@@ -541,6 +545,8 @@ mod tests {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         }
     }
 

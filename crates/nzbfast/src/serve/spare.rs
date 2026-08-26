@@ -96,6 +96,17 @@ impl PostIds {
     fn len(&self) -> usize {
         self.ids.len()
     }
+
+    /// The whole id set folded to one order-independent u64, for keying
+    /// the §303 preview cache by "same post". XOR over the per-id
+    /// hashes, so segment ORDER (which two indexers' NZBs of one post
+    /// routinely disagree on) cannot split the key. Same in-process-only
+    /// promise as the hashes it folds: never persisted, never compared
+    /// across builds. A collision costs one stale preview verdict,
+    /// which is advisory everywhere.
+    pub(in crate::serve) fn identity(&self) -> u64 {
+        self.ids.iter().fold(0, |a, h| a ^ h)
+    }
 }
 
 fn hash_id(id: &str) -> u64 {
@@ -171,6 +182,33 @@ pub(in crate::serve) fn admits(primary: &PostIds, cand: &PostIds, unknown: bool)
     }
 }
 
+/// How much of an ADD a queue row must already carry before the add is
+/// held as the same post (§292) - deliberately far above
+/// [`SAME_POST_OVERLAP`], because the two sites create opposite risks.
+/// Spare admission REFUSES a hold on a match, so a generous threshold
+/// only skips a candidate; the add path CREATES a hold on a match, and
+/// a wrong one denies the user data they asked for. On the measured
+/// bimodal distribution (module note: ~0 or ~1, nothing near the line)
+/// any threshold in the open interval separates the modes, so each site
+/// picks the end that makes its failure direction cheap.
+const SAME_POST_COVERAGE: f64 = 0.90;
+
+/// Does `row` already carry (nearly) every article `add` declares -
+/// §292's question, DIRECTIONAL where [`admits`] is not. The fraction
+/// is of the ADD's ids, not of the smaller set: a queue row that is a
+/// small subset of the add must never hold it (the row finishing would
+/// deliver less than the add would), while an add that is a subset of
+/// a row is safely held (the row covers it). `false` for a pair that
+/// cannot be compared - an add is never held on not knowing, for the
+/// same reason admission never holds a spare on it.
+pub(in crate::serve) fn post_covers(row: &PostIds, add: &PostIds) -> bool {
+    if add.len() == 0 || row.len() == 0 {
+        return false;
+    }
+    let shared = add.ids.iter().filter(|h| row.ids.contains(h)).count();
+    shared as f64 / add.len() as f64 >= SAME_POST_COVERAGE
+}
+
 /// Where a post was PUT: its newsgroups and its posters, lowercased.
 #[derive(Default)]
 pub(in crate::serve) struct PostOrigin {
@@ -232,9 +270,16 @@ pub(in crate::serve) struct SpareCandidate {
 /// Pick the best held alternative of a job that just failed.
 ///
 /// Returns an index into `cands` and the rank it won on. `cands` is
-/// `(release name, spooled NZB path)` in the order park collected them,
-/// and ties keep the earliest - which is the behaviour that was there
-/// before §282 and is as good a tiebreak as any.
+/// `(release name, spooled NZB path, §295 health band)` in the order
+/// park collected them, and ties keep the earliest - which is the
+/// behaviour that was there before §282 and is as good a tiebreak as
+/// any. The band (see `crate::health::promote_band`) outranks
+/// EVERYTHING else: a spare the prober has watched go red is promoted
+/// after every healthier or unprobed one, because quality rank is a
+/// statement about which copy the user would rather have and the band
+/// is a statement about which copies exist - and a 2160p that is not
+/// there loses to a 720p that is. Within a band the order is exactly
+/// what it was before §295.
 ///
 /// Two things are new here and both are §282 section B applied to the
 /// EXISTING promote path rather than to the spares this module holds:
@@ -252,13 +297,13 @@ pub(in crate::serve) struct SpareCandidate {
 /// missing spool file must not cost the user a promotion.
 pub(in crate::serve) fn best_alternative(
     failed_nzb: &std::path::Path,
-    cands: &[(String, std::path::PathBuf)],
+    cands: &[(String, std::path::PathBuf, u32)],
 ) -> Option<(usize, u32)> {
     let failed = nzb_at(failed_nzb);
     let failed_ids = failed.as_ref().map(post_ids);
     let failed_origin = failed.as_ref().map(post_origin);
-    let mut best: Option<(usize, u32, bool)> = None;
-    for (i, (name, path)) in cands.iter().enumerate() {
+    let mut best: Option<(usize, u32, u32, bool)> = None;
+    for (i, (name, path, band)) in cands.iter().enumerate() {
         let rank = crate::watchlist::quality_rank(&crate::wall::parse_release(name));
         // Only read the candidate when there is something to compare it
         // with; with no failed-job fingerprint this stays a pure rank
@@ -278,11 +323,13 @@ pub(in crate::serve) fn best_alternative(
             (Some(f), Some(c)) => looks_independent(f, &post_origin(c)),
             _ => false,
         };
-        if best.is_none_or(|(_, r, ind)| rank > r || (rank == r && indep && !ind)) {
-            best = Some((i, rank, indep));
+        if best.is_none_or(|(_, b, r, ind)| {
+            *band < b || (*band == b && (rank > r || (rank == r && indep && !ind)))
+        }) {
+            best = Some((i, *band, rank, indep));
         }
     }
-    best.map(|(i, r, _)| (i, r))
+    best.map(|(i, _, r, _)| (i, r))
 }
 
 /// The search-fed half. A spare comes out of a search this daemon ran,
@@ -432,7 +479,7 @@ impl Daemon {
                 None,
                 None,
                 SPARE_ORIGIN,
-                false,
+                DupeExempt::Nobody,
                 Some(primary_id),
             ) {
                 Ok(e) => {
@@ -479,24 +526,68 @@ impl Daemon {
     /// §282 existed. Only rows still HELD: one that was promoted is a
     /// download in its own right.
     pub(in crate::serve) fn drop_spares_for(&self, owner: &str) {
-        let dropped: Vec<(String, PathBuf, String)> = {
+        let dropped = {
             let mut q = self.queue.lock_ok();
-            let mut out = Vec::new();
-            q.retain(|j| {
-                let g = j.lock_ok();
-                let mine =
-                    g.held_for == owner && is_spare_origin(&g.origin) && is_held_alternative(&g);
-                if mine {
-                    out.push((g.nzo_id.clone(), g.nzb_path.clone(), g.name.clone()));
-                }
-                !mine
-            });
-            out
+            take_spare_rows(&mut q, owner)
+        };
+        self.finish_spare_drop(&dropped);
+    }
+
+    /// [`Self::drop_spares_for`] for a caller whose reason to drop is
+    /// "the owner is in NEITHER store": re-tests that under ONE hold of
+    /// all three, so the decision and the queue mutation cannot be split
+    /// by a mover.
+    ///
+    /// The sweep's three reads are each taken and released on their own,
+    /// and a mover that both writes its DESTINATION store and drops its
+    /// `hist_inflight` registration inside the gap between two of them is
+    /// absent from every sample - a retry whose guard drops between the
+    /// history read and the inflight read, a park whose history push AND
+    /// guard drop both land there. `drop_spares_for` then deletes the
+    /// rows and unlinks their spooled NZBs for an owner that is alive,
+    /// and nothing re-verifies before the unlink, so the answer cannot be
+    /// taken back: §284's offer and `promote_held_alternative` find
+    /// nothing held and the alternatives have to be searched for again.
+    ///
+    /// Lock order is the sweep's own - queue, then history, then
+    /// `hist_inflight` - and holding the three at once inverts nothing:
+    /// every mover registers inflight while already holding history
+    /// (`daemon_retry` at its `hist_inflight_begin`) or holds neither
+    /// store lock across the registration, and nothing in `serve/` takes
+    /// history and then the queue. Nothing is held across the spool work
+    /// below, which is the property [`Self::drop_spares_for`] has and
+    /// this must not lose: all three guards are released with the block.
+    pub(in crate::serve) fn drop_spares_if_still_stranded(&self, owner: &str) {
+        let dropped = {
+            let mut q = self.queue.lock_ok();
+            let h = self.history.lock_ok();
+            let inflight = self.hist_inflight.lock_ok();
+            if q.iter().any(|j| j.lock_ok().nzo_id == owner)
+                || h.iter().any(|j| j.lock_ok().nzo_id == owner)
+                || inflight.contains(owner)
+            {
+                // It came back between the sweep's reads and this one.
+                // Not stranded, so there is nothing here to answer.
+                return;
+            }
+            take_spare_rows(&mut q, owner)
         };
         if dropped.is_empty() {
             return;
         }
-        for (id, path, name) in &dropped {
+        info!(
+            target: "queue",
+            "{owner} is in neither the queue nor history - dropping the spare(s) held for it"
+        );
+        self.finish_spare_drop(&dropped);
+    }
+
+    /// The spool half of a spare drop, run with NO lock held.
+    fn finish_spare_drop(&self, dropped: &[(String, PathBuf, String)]) {
+        if dropped.is_empty() {
+            return;
+        }
+        for (id, path, name) in dropped {
             // The spool copy goes with the row. `recover_orphaned_spool`
             // adopts any spooled NZB no record names, so leaving it
             // behind would put the dropped spare back in the queue at the
@@ -570,6 +661,18 @@ impl Daemon {
     /// could empty history before the history read and be missed by all
     /// three.
     ///
+    /// **THE ORDER IS NOT ENOUGH ON ITS OWN, AND THAT IS WHY THE VERDICT
+    /// IS TAKEN TWICE.** It covers a mover still REGISTERED at the last
+    /// read. It does not cover one that writes its destination store AND
+    /// drops its registration inside the gaps between these three
+    /// separate holds: a retry whose guard drops between the history read
+    /// and the inflight read is in none of the three samples, and so is a
+    /// park whose history push and guard drop both land there. So these
+    /// reads NOMINATE, and
+    /// [`Self::drop_spares_if_still_stranded`] re-tests the same
+    /// question under one combined hold of all three before it touches a
+    /// row - the drop unlinks spooled NZBs and cannot be taken back.
+    ///
     /// The one window it does NOT close is `sabcompat::editqueue_delete`,
     /// which retains a non-active row out of the queue and pushes it to
     /// history a few statements later with no inflight registration. A
@@ -635,13 +738,39 @@ impl Daemon {
             owners.retain(|o| !inflight.contains(o));
         }
         for owner in &owners {
-            info!(
-                target: "queue",
-                "{owner} is in neither the queue nor history - dropping the spare(s) held for it"
-            );
-            self.drop_spares_for(owner);
+            // The three reads above are a NOMINATION filter and nothing
+            // more - they are taken and released one at a time, so a
+            // mover can complete inside the gaps between them and be
+            // missed by all three. The verdict is taken again under one
+            // combined hold, next to the mutation it authorises.
+            self.drop_spares_if_still_stranded(owner);
         }
     }
+}
+
+/// The queue half of a spare drop, over a queue the caller is ALREADY
+/// holding: retain the owner's held spares out of it and report what
+/// left, so the caller can unlink their spool copies with no lock held.
+///
+/// One rule, one implementation. Both callers must agree exactly about
+/// which rows a drop takes - only rows this daemon added (a duplicate
+/// the USER added is theirs and keeps its pre-§282 behaviour) and only
+/// rows still HELD (one that was promoted is a download in its own
+/// right).
+fn take_spare_rows(
+    q: &mut VecDeque<Arc<Mutex<Job>>>,
+    owner: &str,
+) -> Vec<(String, PathBuf, String)> {
+    let mut out = Vec::new();
+    q.retain(|j| {
+        let g = j.lock_ok();
+        let mine = g.held_for == owner && is_spare_origin(&g.origin) && is_held_alternative(&g);
+        if mine {
+            out.push((g.nzo_id.clone(), g.nzb_path.clone(), g.name.clone()));
+        }
+        !mine
+    });
+    out
 }
 
 /// [`Daemon::repoint_spares`] over a queue the caller is ALREADY

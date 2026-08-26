@@ -46,6 +46,14 @@ pub(super) fn build_fetch_plan(
     // queued - the point of the setting is that its bytes never cross
     // the wire, so the decision has to be made here and nowhere later.
     skip_samples: bool,
+    // §293 plan-side adoption (TODO 305 item 2), by NZB FILE index: this
+    // file's bytes are already in `out_dir`, taken whole and byte-exact
+    // off a failed predecessor by `get::donor`, so NONE of its articles
+    // may be queued. Empty (or all false) on every job that is not a
+    // switch. Booked exactly as the resume branch below books a
+    // journal-completed article, because the situation is the same one:
+    // the bytes are on disk and the settle pass verifies them.
+    donated: &[bool],
 ) -> FetchPlan {
     // Which DATA files this run will decline to fetch. Computed over the
     // whole file list up front because the answer is comparative: a
@@ -59,7 +67,10 @@ pub(super) fn build_fetch_plan(
             .iter()
             .map(|f| {
                 if f.kind() == FileKind::Data {
-                    (f.filename_hint().unwrap_or_default().to_string(), f.bytes())
+                    (
+                        f.filename_hint_lenient().unwrap_or_default().to_string(),
+                        f.bytes(),
+                    )
                 } else {
                     (String::new(), 0)
                 }
@@ -84,6 +95,13 @@ pub(super) fn build_fetch_plan(
     let mut skipped_sample_arts = 0usize;
     let mut skipped_sample_bytes = 0u64;
     let mut skipped_sample_names: Vec<String> = Vec::new();
+    // What plan-side adoption struck out, for the banner. Kept apart
+    // from the resume counters so the log can say which of the two it
+    // was: a resumed job continues its own work, a donated one starts
+    // on somebody else's bytes.
+    let mut donated_arts = 0usize;
+    let mut donated_bytes = 0u64;
+    let mut donated_names: Vec<String> = Vec::new();
     let mut slots: Vec<Arc<FileSlot>> = Vec::new();
     let mut id_to_slot: crate::unpack::IdSlots = HashMap::new();
     // UX §15 honest percentage. `fetch_plan` is the declared NZB byte
@@ -126,6 +144,10 @@ pub(super) fn build_fetch_plan(
         // A bootstrap volume is recovery data by election, so it can
         // never be a skipped sample however it is named.
         let sample_skipped = sample_skip[fi] && !is_par2_main;
+        // Never a par2 slot: the main index is refetched on every run
+        // (activation needs its packets in memory) and a recovery volume
+        // is not a recovery-set MEMBER, so nothing can have donated it.
+        let file_donated = !is_par2_main && donated.get(fi).copied().unwrap_or(false);
         let idx = slots.len();
         let resume_sniffed = !is_par2_main && resume_vols.contains_key(&idx);
         if resume_sniffed {
@@ -133,8 +155,13 @@ pub(super) fn build_fetch_plan(
         }
         slot_file.push(fi);
         slots.push(Arc::new(FileSlot {
+            // Lenient on purpose (issue #55): a poster who quotes
+            // nothing still usually writes the real filename in the
+            // subject, and `file{idx:03}` is what discarding it costs -
+            // every downstream namer (PAR2 FileDesc aside) then has
+            // nothing to work from.
             hint: f
-                .filename_hint()
+                .filename_hint_lenient()
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("file{idx:03}")),
             is_par2_main,
@@ -155,6 +182,9 @@ pub(super) fn build_fetch_plan(
         }));
         if sample_skipped {
             skipped_sample_names.push(slots[idx].hint.clone());
+        }
+        if file_donated {
+            donated_names.push(slots[idx].hint.clone());
         }
         let mut arts: Vec<(u64, std::sync::Arc<str>)> = Vec::new();
         let mut enc_cum = 0u64;
@@ -223,6 +253,19 @@ pub(super) fn build_fetch_plan(
                 skipped_sample_bytes = skipped_sample_bytes.saturating_add(seg.bytes);
                 continue;
             }
+            // §293: the whole file came off a donor. Same booking as
+            // the resume branch under it and for the same reason - the
+            // bytes are on disk and the settle pass verifies them - but
+            // ahead of it, because this is a decision about the FILE:
+            // there is no article of a donated file worth fetching, and
+            // a switch job's journal knows nothing about any of them.
+            if file_donated {
+                slots[idx].remaining.fetch_sub(1, Ordering::Relaxed);
+                resume_have_bytes = resume_have_bytes.saturating_add(seg.bytes);
+                donated_arts += 1;
+                donated_bytes = donated_bytes.saturating_add(seg.bytes);
+                continue;
+            }
             // On resume, journal-completed data articles are skipped -
             // their bytes are on disk and the settle pass verifies them.
             // Par2-main articles always refetch (tiny; activation needs
@@ -273,6 +316,16 @@ pub(super) fn build_fetch_plan(
         .as_ref()
         .map(|c| c.done.clone())
         .unwrap_or_default();
+    if donated_arts > 0 {
+        info!(
+            target: "repair",
+            "plan-side adoption: {} file(s) already on disk from the predecessor - {} article(s), {:.1} MB will not be fetched: {}",
+            donated_names.len(),
+            donated_arts,
+            donated_bytes as f64 / 1e6,
+            donated_names.join(", ")
+        );
+    }
     if skipped_sample_arts > 0 {
         info!(
             target: "get",
@@ -884,6 +937,7 @@ mod tests {
             bootstrap_vol,
             resume_vols,
             skip_samples,
+            &[],
         )
     }
 
@@ -913,6 +967,7 @@ mod tests {
             None,
             &HashMap::new(),
             false,
+            &[],
         );
         assert_eq!(
             hub.post_unix.load(Ordering::Relaxed),
@@ -949,12 +1004,109 @@ mod tests {
             None,
             &HashMap::new(),
             false,
+            &[],
         );
         assert_eq!(hub.post_unix.load(Ordering::Relaxed), 0);
     }
 
     fn ids_of(p: &FetchPlan) -> Vec<&str> {
         p.ids.iter().map(|r| &*r.id).collect()
+    }
+
+    fn plan_donated(n: &Arc<Nzb>, donated: &[bool]) -> FetchPlan {
+        build_fetch_plan(
+            n,
+            &None,
+            &HashSet::new(),
+            false,
+            None,
+            &HashMap::new(),
+            false,
+            donated,
+        )
+    }
+
+    /// §293 plan-side adoption (TODO 305 item 2): a donated file's
+    /// articles are struck out of the plan ENTIRELY - none is queued,
+    /// its head is not promoted to the head burst either - and the par2
+    /// main's are untouched beside them. The slot survives with nothing
+    /// remaining and nothing missing, which is the same shape a fully
+    /// resumed file has, so the settle read-back is what proves the
+    /// bytes.
+    #[test]
+    fn a_donated_file_queues_none_of_its_articles() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"m.part1.rar" yEnc (1/2)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="100" number="1">a@t</segment>
+   <segment bytes="200" number="2">b@t</segment>
+  </segments>
+ </file>
+ <file subject='"m.par2" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="50" number="1">p1@t</segment></segments>
+ </file>
+ <file subject='"m.part2.rar" yEnc (1/2)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="400" number="1">d@t</segment>
+   <segment bytes="500" number="2">e@t</segment>
+  </segments>
+ </file>
+</nzb>"#);
+        let none = plan_donated(&n, &[]);
+        assert_eq!(
+            ids_of(&none),
+            ["<p1@t>", "<a@t>", "<d@t>", "<b@t>", "<e@t>"],
+            "control: nothing donated, the whole post is planned"
+        );
+
+        let p = plan_donated(&n, &[true, false, false]);
+        assert_eq!(
+            ids_of(&p),
+            ["<p1@t>", "<d@t>", "<e@t>"],
+            "the donated file contributes no article at any priority"
+        );
+        assert_eq!(p.slots[0].remaining.load(Ordering::Relaxed), 0);
+        assert_eq!(p.slots[0].missing.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            p.slots[0].deferred.load(Ordering::Relaxed),
+            0,
+            "a donated file is HELD, not deferred - it must not report as \
+             recovery data nobody downloaded"
+        );
+        assert_eq!(
+            p.resume_have_bytes, 300,
+            "its declared bytes seed the bar, so the row does not start at 0%"
+        );
+    }
+
+    /// The par2 MAIN is never donatable however the flags arrive: its
+    /// packets have to be in memory for the set to activate, and a
+    /// recovery volume is not a member of the set it protects. A caller
+    /// that flags one anyway (a name collision, a future bug) must not
+    /// be able to strike the index out of the plan.
+    #[test]
+    fn a_donation_can_never_strike_out_the_par2_index() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"m.par2" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="50" number="1">p1@t</segment></segments>
+ </file>
+ <file subject='"m.part1.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">a@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan_donated(&n, &[true, true]);
+        assert_eq!(
+            ids_of(&p),
+            ["<p1@t>"],
+            "the index is still fetched; only the payload file is struck out"
+        );
     }
 
     /// Queue order: the par2 main's articles first (the recovery set
@@ -1428,6 +1580,24 @@ mod tests {
         assert_eq!(p.slots[0].hint, "file000");
     }
 
+    /// ...but an UNQUOTED subject that plainly ends in a filename names
+    /// the slot (issue #55: `10-Track Name-8c63a701.flac (1/0)`, no
+    /// quotes at all - the whole album landed as fileNNN with the real
+    /// names discarded, and only the one track a PAR2 set covered ever
+    /// got its name back).
+    #[test]
+    fn hint_reads_an_unquoted_subject_filename() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject="10-Track Name-8c63a701.flac (1/0)" date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="10" number="1">x@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan(&n, &HashSet::new(), None, &HashMap::new());
+        assert_eq!(p.slots[0].hint, "10-Track Name-8c63a701.flac");
+    }
+
     /// Build a ServerConfig through serde so the test survives new
     /// `#[serde(default)]` fields being added to the struct.
     fn srv(host: &str, level: u32) -> ServerConfig {
@@ -1590,3 +1760,7 @@ mod tests {
         assert!(!crate::get::fleet::has_steer_peer(&pair));
     }
 }
+
+#[cfg(test)]
+#[path = "plan_route_rig.rs"]
+mod plan_route_rig;

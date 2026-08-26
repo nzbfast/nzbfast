@@ -646,6 +646,28 @@ async fn wall_groups_dedupes_and_serves() {
         assert_eq!(code, 200);
         assert!(m3u.starts_with("#EXTM3U"), "{m3u}");
         assert!(m3u.contains("/stream/SABnzbd_nzo_test?t="), "{m3u}");
+        // TODO 23 low1, CLI half: that per-job token opens /m3u itself,
+        // so `nzbfast stream` need not put the API key in a player's
+        // argv. A wrong one is still refused.
+        let tok: String = m3u["#EXTM3U".len()..]
+            .split("?t=")
+            .nth(1)
+            .unwrap_or_default()
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        assert!(!tok.is_empty(), "no token in {m3u}");
+        let (code, tokened) = http_get(port, &format!("/m3u/SABnzbd_nzo_test?t={tok}"));
+        assert_eq!(code, 200, "tokened /m3u rejected: {tokened}");
+        assert!(
+            !tokened.contains("sekrit"),
+            "key in the playlist: {tokened}"
+        );
+        assert_eq!(
+            http_get(port, "/m3u/SABnzbd_nzo_test?t=deadbeef").0,
+            401,
+            "a wrong token opened /m3u"
+        );
         // Unknown art 404s (and traversal is refused).
         assert_eq!(http_get(port, "/art/nope.jpg").0, 404);
         assert_eq!(http_get(port, "/art/../index.db").0, 404);

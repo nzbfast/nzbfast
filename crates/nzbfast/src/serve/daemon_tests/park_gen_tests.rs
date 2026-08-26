@@ -252,3 +252,245 @@ fn a_lane_tail_declines_a_retry_that_lands_while_it_is_writing_history() {
         assert!(job.lock_ok().move_seq > 0, "the retry stamped its own move");
     });
 }
+
+// -- §158.7's other half: the park's own filing ------------------------------
+
+/// A job parked as Failed with the auto-retry cooldown armed, which is
+/// what makes this a test of the LAST write and not only of the first:
+/// `arm_auto_retry` stamps `auto_retry_at` AFTER the row has left the
+/// queue, so the prewrite's copy does not carry it and only park's final
+/// filing does.
+fn failed_with_a_retry_armed(d: &Arc<Daemon>, id: &str, name: &str) -> Arc<Mutex<Job>> {
+    d.auto_retry_secs.store(60, Ordering::Relaxed);
+    let job = jv(
+        id,
+        name,
+        serde_json::json!({
+            "state": "Failed",
+            "fail_message": "download incomplete: 3 articles missing",
+        }),
+    );
+    d.queue.lock_ok().push_back(job.clone());
+    assert!(d.save_queue(), "the queue snapshot the park starts from");
+    assert!(
+        d.will_auto_retry(&job),
+        "the fixture's own premise: this park arms a retry after the retain"
+    );
+    job
+}
+
+/// P2-1's sibling on the PARK path. `history.jsonl` is opened
+/// `create(true).append(true)`, so it needs write permission ON THE FILE,
+/// while `queue.json` and the atomic rewrite go through
+/// `persist::write_atomic` - private temp file, rename - and need only
+/// the DIRECTORY. One `sudo nzbfast`, a store left 0444, or an ownership
+/// that no longer matches separates them, and the queue store then keeps
+/// working while every history append is refused.
+///
+/// `park_prewrite` and park's two filings all rode the bare append with
+/// their answers dropped, so on that store EVERY finished download was
+/// lost from both stores at the next start: gone from the queue, absent
+/// from history, its payload on disk named by no record anywhere. That
+/// is worse than the delete case P2-1 fixed - it is every finished job
+/// rather than every deleted one - and nothing said a word.
+///
+/// The asymmetry is also the way out, so the park has to SUCCEED here,
+/// and the restart is what proves it. The retry stamp is what proves the
+/// FINAL filing landed rather than only the prewrite: it is written
+/// after the row leaves the queue, so a store holding the prewrite's
+/// copy alone restores a failed job with no retry pending.
+#[test]
+fn a_park_survives_a_store_that_refuses_the_append() {
+    use crate::serve::storecut::{Store, arm_store_cut, disarm};
+
+    with_daemon("park-store-refuses-append", |d| {
+        let job = failed_with_a_retry_armed(d, "nzo-parkfile-1", "Rescued.Park");
+
+        arm_store_cut(&[Store::HistoryAppend]);
+        d.park_gen(job, None);
+        disarm();
+
+        let d2 = restart(d);
+        let stored = d2
+            .history
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == "nzo-parkfile-1")
+            .cloned()
+            .expect(
+                "the parked record was lost from BOTH stores - the append was \
+                 refused and nothing stood the rewrite in for it",
+            );
+        assert!(
+            stored.lock_ok().auto_retry_at.is_some(),
+            "only the prewrite's copy reached the store, so the retry this park \
+             armed is not coming back"
+        );
+        assert!(
+            d2.queue.lock_ok().is_empty(),
+            "and it must not come back as a queued job as well"
+        );
+    });
+}
+
+/// The same store, and a stop the instant the row leaves the live queue -
+/// which is the window §158.7 put the prewrite in front of.
+///
+/// Every write park still owed is refused from the gap onward, the
+/// rewrite included, so the ONLY thing that can name this record at the
+/// next start is the prewrite. On a store that refuses the append that
+/// meant nothing did: the racing save publishes a queue.json without the
+/// row and no history line was ever written, so the record was gone from
+/// both stores with its payload on disk named by nothing.
+#[test]
+fn a_park_prewrites_through_a_store_that_refuses_the_append() {
+    use crate::serve::storecut::{Store, arm_cut, arm_store_cut, disarm};
+
+    with_daemon("park-prewrite-refuses-append", |d| {
+        let job = failed_with_a_retry_armed(d, "nzo-parkfile-3", "Prewritten.Park");
+
+        arm_store_cut(&[Store::HistoryAppend]);
+        crate::serve::storecut::on_park_gap(|d| {
+            assert!(d.save_queue(), "the racing save must land");
+            // ...and the process dies there: nothing park writes after
+            // this point reaches disk, the rescue included. `arm_cut`
+            // alone would not do it - the rewrite is deliberately
+            // outside that budget, so the mask has to name it.
+            arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+            arm_cut(0);
+        });
+        d.park_gen(job, None);
+        disarm();
+
+        let queued = std::fs::read_to_string(d.spool.join("queue.json")).unwrap_or_default();
+        assert!(
+            !queued.contains("nzo-parkfile-3"),
+            "the racing save was supposed to publish a queue without the row - \
+             this harness is not exercising the window"
+        );
+        assert!(
+            restart(d)
+                .history
+                .lock_ok()
+                .iter()
+                .any(|j| j.lock_ok().nzo_id == "nzo-parkfile-3"),
+            "the record left the queue with nothing durable naming it"
+        );
+    });
+}
+
+/// The M5 arm: a delete verb cancelling an ACTIVE job, whose record park
+/// files itself.
+///
+/// A dropped answer costs more here than one row. `delete_prewrite`
+/// overrode the terminal keys in its placeholder, and then this park's
+/// own prewrite wrote the LIVE job over the top of it - still
+/// nonterminal, still tombstoned - so the store's last word on the id is
+/// a row that replays as `Queued` (job_wire.rs). Losing the final filing
+/// therefore does not merely forget the delete: it brings the cancelled
+/// job back looking like something to download.
+#[test]
+fn a_deleted_active_jobs_final_record_reaches_a_store_that_refuses_the_append() {
+    use crate::serve::storecut::{Store, arm_store_cut, disarm};
+
+    with_daemon("park-store-refuses-m5", |d| {
+        let job = jv(
+            "nzo-parkfile-4",
+            "Cancelled.Park",
+            serde_json::json!({ "state": "Downloading" }),
+        );
+        {
+            let mut g = job.lock_ok();
+            g.tombstone = true;
+            g.delete_status = "MANUAL".into();
+        }
+        d.queue.lock_ok().push_back(job.clone());
+        assert!(d.save_queue());
+
+        arm_store_cut(&[Store::HistoryAppend]);
+        d.park_gen(job, None);
+        disarm();
+
+        let d2 = restart(d);
+        let stored = d2
+            .history
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == "nzo-parkfile-4")
+            .cloned()
+            .expect("the cancelled job's record was lost from BOTH stores");
+        let g = stored.lock_ok();
+        assert_eq!(
+            g.state,
+            JobState::Failed,
+            "the store's last word is the row written while it was still \
+             downloading, so the cancelled job replays as queued"
+        );
+        assert_eq!(g.fail_message, "deleted from the queue");
+        assert!(
+            d2.queue.lock_ok().is_empty(),
+            "and the job the user deleted must not be back in the queue"
+        );
+    });
+}
+
+/// The other end: a data folder this daemon cannot write AT ALL, so the
+/// rewrite that rescues the append above is refused too.
+///
+/// Nothing is left to try, and the park still may not stop. A delete verb
+/// can refuse because a user is waiting on the answer; this download has
+/// already happened and its bytes are on disk, so refusing would leave
+/// the daemon holding a finished job it can neither file nor forget. The
+/// answer is to carry on and SAY what the next start loses - on the event
+/// ring, which is where the dashboard reads it, rather than in a log
+/// nobody is reading at 3am.
+///
+/// One entry, not three. The prewrite's own rescue attempt closes
+/// `hist_rescue_open`'s one-a-minute gate, so both filings behind it find
+/// it shut and report without an event; that is why the prewrite is the
+/// half that carries the sentence.
+#[test]
+fn a_park_that_cannot_reach_either_store_says_what_the_restart_loses() {
+    use crate::serve::storecut::{Store, arm_store_cut, disarm};
+
+    with_daemon("park-store-refuses-both", |d| {
+        let job = failed_with_a_retry_armed(d, "nzo-parkfile-2", "Lost.Park");
+
+        arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+        d.park_gen(job, None);
+        disarm();
+
+        assert!(
+            d.history
+                .lock_ok()
+                .iter()
+                .any(|j| j.lock_ok().nzo_id == "nzo-parkfile-2"),
+            "a park with nowhere to write must still finish - the record is \
+             correct in memory and only its survival across a restart is lost"
+        );
+        let told: Vec<String> = d
+            .recent_events(50)
+            .into_iter()
+            .filter(|e| e.kind == "disk")
+            .map(|e| e.detail)
+            .collect();
+        assert_eq!(
+            told.len(),
+            1,
+            "exactly one entry for the park, got {told:?}"
+        );
+        assert!(
+            told[0].contains("Lost.Park") && told[0].contains("history"),
+            "the entry has to name the job and the store, got {told:?}"
+        );
+        assert!(
+            restart(d)
+                .history
+                .lock_ok()
+                .iter()
+                .all(|j| j.lock_ok().nzo_id != "nzo-parkfile-2"),
+            "the fixture's own premise: with both stores refused there is \
+             nothing on disk for the restart to find"
+        );
+    });
+}

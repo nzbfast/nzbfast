@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::config::ServerConfig;
+use crate::config::{AddressFamily, ServerConfig};
 use tracing::{info, warn};
 
 pub mod resolve;
@@ -1140,32 +1140,31 @@ pub(crate) use multiline::*;
 mod tlswire;
 use tlswire::userspace_tls;
 
-/// Resolve `host` (prefer IPv4 - providers count simultaneous source
-/// IPs, and macOS can otherwise spread connections across IPv4 +
-/// rotating IPv6 privacy addresses), apply the server's
-/// bind_ip/rcvbuf, and connect to the first candidate that answers
-/// ([`dial_in_order`]). A bind_ip's family overrides the IPv4
-/// preference: binding a v6 source to a v4 target can't work.
+/// Resolve `host`, order the candidates by this server's
+/// `address_family` and `bind_ip` ([`resolve::order_candidates`] carries
+/// the whole reasoning and is where it must stay), apply bind_ip/rcvbuf,
+/// and connect to the first that answers ([`dial_in_order`]).
 async fn direct_connect(
     host: &str,
     port: u16,
     server: &ServerConfig,
 ) -> std::io::Result<tokio::net::TcpStream> {
-    direct_connect_opts(host, port, server.bind_ip.as_deref(), server.rcvbuf).await
+    let fam = server.address_family;
+    direct_connect_opts(host, port, server.bind_ip.as_deref(), server.rcvbuf, fam).await
 }
 
-/// As [`direct_connect`], taking the two settings it actually reads.
-/// Lets the TLS diagnostic dial a bare host with no `ServerConfig`.
+/// As [`direct_connect`] but with no `ServerConfig`, for the TLS probe.
 async fn direct_connect_opts(
     host: &str,
     port: u16,
     bind_ip: Option<&str>,
     rcvbuf: Option<u32>,
+    family: AddressFamily,
 ) -> std::io::Result<tokio::net::TcpStream> {
-    let bind: Option<std::net::IpAddr> =
+    let bind =
         match bind_ip {
             None => None,
-            Some(s) => Some(s.trim().parse().map_err(|_| {
+            Some(s) => Some(s.trim().parse::<std::net::IpAddr>().map_err(|_| {
                 std::io::Error::other(format!("bind_ip {s:?} is not an IP address"))
             })?),
         };
@@ -1173,7 +1172,7 @@ async fn direct_connect_opts(
     // production resolves with `lookup_host` exactly as before, the rig
     // installs a registry (`mock::dns`) so DNS faults are reproducible.
     let answer = resolve::resolve(host, port).await?;
-    let addrs = resolve::order_candidates(host, answer, bind)?;
+    let addrs = resolve::order_candidates(host, answer, bind, family)?;
     let one = |addr: std::net::SocketAddr| async move {
         let socket = if addr.is_ipv4() {
             tokio::net::TcpSocket::new_v4()?
@@ -1273,6 +1272,14 @@ where
 fn set_keepalive(socket: &tokio::net::TcpSocket) {
     use std::os::fd::AsRawFd;
     let fd = socket.as_raw_fd();
+    // SAFETY: each setsockopt below passes a pointer to a live `c_int`
+    // local together with that type's own size, which is exactly what
+    // every one of these SOL_SOCKET/IPPROTO_TCP options expects, and the
+    // kernel only reads it. `fd` is borrowed from a `&TcpSocket` that
+    // outlives this call, so it cannot have been closed underneath us.
+    // The return codes are deliberately ignored: this is a best-effort
+    // tuning pass, and a kernel that rejects an option has changed
+    // nothing.
     unsafe {
         let on: libc::c_int = 1;
         libc::setsockopt(
@@ -1970,7 +1977,8 @@ pub async fn probe_tls(host: &str, port: u16) -> Result<(String, String), NntpEr
     // no per-candidate slice and the TLS peer may simply never answer, so
     // an unbounded probe parked its caller for as long as the OS let the
     // SYN wait.
-    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, direct_connect_opts(host, port, None, None))
+    let dial = direct_connect_opts(host, port, None, None, AddressFamily::default());
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, dial)
         .await
         .map_err(|_| NntpError::Timeout)??;
     tcp.set_nodelay(true)?;
@@ -2018,7 +2026,7 @@ impl Connection {
         let tcp = tcp_connect().await?;
 
         let wire = if server.tls {
-            let name = rustls::pki_types::ServerName::try_from(server.host.clone())
+            let name = rustls::pki_types::ServerName::try_from(server.tls_name().to_string())
                 .map_err(|_| NntpError::TlsName)?;
             // The handshake ladder: kernel TLS (when it is built in,
             // asked for, and the kernel takes it), then userspace
@@ -3306,73 +3314,10 @@ mod tls_provider_tests {
     }
 }
 
+// The multiline read cap - a child module (the `unit_tests` pattern
+// below) so nntp.rs stays inside its size-gate entry.
 #[cfg(test)]
-mod capped_read_tests {
-    use super::{NntpError, read_multiline_paced_max};
-
-    /// The cap must not depend on how the response was chunked.
-    ///
-    /// `preflight::tests::a_capped_body_stops_reading_at_the_caller_s_allowance`
-    /// drives this through a socket, where the split is the loopback's
-    /// choice: it caught the missing check on Windows, which delivered
-    /// the body in one piece, and passed on Linux and macOS, which did
-    /// not. A `Cursor` hands the whole slice back from a single
-    /// `fill_buf`, so this reaches the terminator-inside-the-chunk arm
-    /// on EVERY platform and fails deterministically without the check.
-    #[tokio::test]
-    async fn the_cap_binds_when_the_terminator_arrives_in_the_same_chunk() {
-        let mut wire = Vec::new();
-        wire.extend_from_slice(&vec![b'x'; 200_000]);
-        wire.extend_from_slice(b"\r\n.\r\n");
-
-        let mut out = Vec::new();
-        let err = read_multiline_paced_max(
-            &mut std::io::Cursor::new(&wire[..]),
-            &mut out,
-            std::time::Duration::from_secs(5),
-            8_192,
-            None,
-        )
-        .await
-        .expect_err("a 200 KB body under an 8 KiB cap must be refused");
-        assert!(
-            matches!(err, NntpError::TooLarge(8_192)),
-            "expected TooLarge(8192), got {err:?}"
-        );
-
-        // The boundary, exactly. What the caller receives is the payload
-        // PLUS the terminating CRLF of its last line - 200_002 bytes -
-        // because the copy runs to the dot. One byte under that is a
-        // refusal; the figure itself is returned whole.
-        const BODY: usize = 200_002;
-        let mut out = Vec::new();
-        let err = read_multiline_paced_max(
-            &mut std::io::Cursor::new(&wire[..]),
-            &mut out,
-            std::time::Duration::from_secs(5),
-            BODY - 1,
-            None,
-        )
-        .await
-        .expect_err("one byte under the body must be refused");
-        assert!(
-            matches!(err, NntpError::TooLarge(n) if n == BODY - 1),
-            "{err:?}"
-        );
-
-        let mut out = Vec::new();
-        read_multiline_paced_max(
-            &mut std::io::Cursor::new(&wire[..]),
-            &mut out,
-            std::time::Duration::from_secs(5),
-            BODY,
-            None,
-        )
-        .await
-        .expect("a body exactly at the allowance must be returned");
-        assert_eq!(out.len(), BODY);
-    }
-}
+mod capped_read_tests;
 
 // OVER/XOVER capability, fallback and body-path tests - a child module
 // (the `unit_tests` pattern below) so nntp.rs stays inside its

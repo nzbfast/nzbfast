@@ -116,7 +116,7 @@ fn restore_crypto(
             }
             let mut next_ck = ckpts.partition_point(|&(ko, _)| ko <= at);
             while at < target {
-                let n = walk.len().min((target - at) as usize);
+                let n = crate::disk::chunk_len(target - at, walk.len());
                 if at + (n as u64) > src_len
                     || crate::disk::read_exact_at(&src, &mut walk[..n], at).is_err()
                 {
@@ -606,7 +606,7 @@ pub fn restore_for(
                 };
                 let (mut done, mut ok) = (0u64, true);
                 while done < f.len {
-                    let n = ((f.len - done) as usize).min(buf.len());
+                    let n = crate::disk::chunk_len(f.len - done, buf.len());
                     if crate::disk::read_exact_at(src, &mut buf[..n], f.file_off + done).is_err() {
                         ok = false;
                         break;

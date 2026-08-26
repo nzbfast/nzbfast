@@ -77,6 +77,12 @@ pub(super) struct PostprocTicket {
     pub(super) dl_secs: f64,
     pub(super) on_disk_bytes: u64,
     pub(super) index_job_guard: IndexJobGuard,
+    /// Retention insurance: this run banked a deferred row's payload
+    /// (`no_extract`), so the tail re-queues the row paused instead of
+    /// filing it - see the insurance arm in [`run_tail`]. Run state,
+    /// not a read of the record, for the reason `Running::insurance`
+    /// gives.
+    pub(super) insurance: bool,
     /// M29 oracle samples the runner drained off the hub for this job.
     /// Ingested here rather than there: the fold takes the index write
     /// mutex, and the runner must never wait on it.
@@ -188,6 +194,9 @@ impl PostprocLane {
             // §129 4a: the per-stage transition the schema promises -
             // the download is done, the tail (verify remainder, unlock,
             // rename, move, scripts) begins.
+            // event-arm-gate: a STATE, not a moment - the queue row's
+            // own `s.finishing` renders the word "Finishing" from the
+            // next poll. §129 1b finding (b) is the rule.
             self.d.life_emit(
                 "job.finishing",
                 json!({
@@ -499,6 +508,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
         dl_secs,
         on_disk_bytes,
         index_job_guard,
+        insurance,
         #[cfg(feature = "indexer")]
         oracle_samples,
     } = t;
@@ -681,6 +691,56 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
         return;
     }
     job2.lock_ok().suspended = false;
+    // Retention insurance: this run banked a deferred row's payload and
+    // owes it back to the QUEUE, never to history. Sits after the
+    // suspended arm (a pause-abort during an insurance fetch is the
+    // same re-queue, taken there) and before the disk-full park (an
+    // insurance fetch that filled the disk must not be re-queued
+    // unpaused under a hold it never asked to wait out). Same
+    // no-await-since-the-generation-check safety as the suspended arm.
+    //
+    // Ok means the volumes are materialized and journaled: `fetched`
+    // retires the row from the picker, and promotion is now just an
+    // unpause - the ordinary run resumes from the journal and extracts
+    // from disk. (A promotion that landed MID-fetch has already cleared
+    // `paused`, so the re-queued row is picked up by the very next
+    // ordinary pick and finishes the normal way.) Err keeps everything
+    // the journal holds and climbs the bounded attempt ladder; a post
+    // that is already dying is precisely the one the user must hear
+    // about at promotion, from the run they asked for.
+    if insurance && !job2.lock_ok().tombstone {
+        {
+            let mut j = job2.lock_ok();
+            j.state = JobState::Queued;
+            // The abort/demote machinery may have judged this stint;
+            // none of it may outlive the errand (a demote flag left set
+            // would send the row through park's requeue arms later).
+            j.demote = false;
+            j.clear_attempt_verdicts();
+            j.downloaded_bytes = on_disk_bytes;
+            match &res {
+                Ok(()) => {
+                    j.fetched = true;
+                    info!(
+                        target: "insurance",
+                        "{}: payload banked ({:.2} GB on disk) - extract runs at promotion",
+                        j.nzo_id,
+                        on_disk_bytes as f64 / 1e9
+                    );
+                }
+                Err(e) => {
+                    j.insurance_attempts += 1;
+                    info!(
+                        target: "insurance",
+                        "{}: background fetch stopped (attempt {}): {e} - progress kept in the journal",
+                        j.nzo_id, j.insurance_attempts
+                    );
+                }
+            }
+        }
+        d2.save_queue();
+        return;
+    }
     // Mid-download disk full: park under the min-free hold
     // instead of failing - see `park_on_full_disk`.
     if park_on_full_disk(&d2, &job2, res.as_ref().err(), on_disk_bytes).await {
@@ -964,6 +1024,7 @@ mod tests {
             dl_secs: 1.0,
             on_disk_bytes: 1_000,
             index_job_guard: d.begin_index_job(),
+            insurance: false,
             // No articles were fetched, so there is nothing for the
             // availability ledger to learn.
             #[cfg(feature = "indexer")]

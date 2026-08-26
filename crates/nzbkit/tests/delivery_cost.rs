@@ -66,23 +66,38 @@ static ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
 /// allocation of the whole buffer AND leave the old size uncounted.
 struct Counting;
 
+// SAFETY: `GlobalAlloc`'s contract is that the implementation behaves as
+// an allocator: every pointer it returns is either null or a fresh block
+// fitting the requested `Layout`, and `dealloc`/`realloc` are given back
+// exactly the (pointer, layout) pairs it handed out. This one delegates
+// all three to `System`, which upholds all of that, and adds only
+// relaxed atomic counter arithmetic - no allocation of its own, so it
+// cannot re-enter, and no pointer is derived or altered here.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(l.size() as u64, Ordering::Relaxed);
+        // SAFETY: `l` reaches `System` exactly as the caller passed it,
+        // and the caller already owes `GlobalAlloc::alloc` its validity.
         unsafe { System.alloc(l) }
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(l.size() as u64, Ordering::Relaxed);
+        // SAFETY: as in `alloc` - the layout is forwarded untouched.
         unsafe { System.alloc_zeroed(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        // SAFETY: every pointer this allocator ever returned is one
+        // `System` produced under the same layout, so the (p, l) pair
+        // handed back is `System`'s own.
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
         ALLOC_BYTES.fetch_add(new as u64, Ordering::Relaxed);
+        // SAFETY: same provenance argument as `dealloc`, and `new` is
+        // the caller's own size, forwarded unchanged.
         unsafe { System.realloc(p, l, new) }
     }
 }
@@ -238,6 +253,7 @@ async fn leg(arm: Arm, decode: bool) -> Leg {
                         break;
                     };
                     if let FetchOutcome::Done { id, raw } = o {
+                        let raw = bufs.adopt(raw);
                         let part = if decode {
                             match nzbkit::yenc_simd::decode_into_integrity(&raw, &mut scratch, true)
                             {
@@ -251,7 +267,6 @@ async fn leg(arm: Arm, decode: bool) -> Leg {
                             && ctl.note_decoded(&id, DecodeReport::Clean { part })
                                 == DecodeAck::Steered
                         {
-                            bufs.give(raw);
                             continue;
                         }
                         // The notional write lands between the two acks -
@@ -261,7 +276,6 @@ async fn leg(arm: Arm, decode: bool) -> Leg {
                         if arm != Arm::Plain {
                             ctl.note_settled(&id);
                         }
-                        bufs.give(raw);
                         done += 1;
                     }
                 }

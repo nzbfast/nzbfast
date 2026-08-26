@@ -140,8 +140,12 @@ pub(crate) async fn sysbench_cmd(config: &Path, group: &str) -> Result<()> {
     println!("== system benchmark ==");
     let compute = nzbkit::sysbench::compute(128);
     println!(
-        "compute: verify ceiling {:.1} Gbps ({} cores, SIMD decode {:.0} GB/s all-core)",
-        compute.ceiling_gbps, compute.cores, compute.decode_simd.all_core
+        "compute: full-verify ceiling {:.1} Gbps, fast-verify (CRC32-only) ceiling \
+         {:.1} Gbps ({} cores, SIMD decode {:.0} GB/s all-core)",
+        compute.ceiling_gbps,
+        compute.fast_ceiling_gbps,
+        compute.cores,
+        compute.decode_simd.all_core
     );
     let out = std::env::temp_dir();
     let disk = nzbkit::sysbench::disk_write(&out, 512).unwrap_or(0.0);
@@ -249,7 +253,11 @@ pub(crate) async fn sysbench_cmd(config: &Path, group: &str) -> Result<()> {
                 r
             }
         };
-    let mut v = nzbkit::sysbench::verdict(net, &compute, disk);
+    // This standalone probe has no daemon settings to read, so it
+    // reports against the shipped default (`fast_verify` on since 21
+    // Jul 2026, TODO §10) - what an out-of-the-box download actually
+    // does. Both ceilings are still on the report either way.
+    let mut v = nzbkit::sysbench::verdict(net, &compute, disk, true);
     v.network_host = probe_servers
         .iter()
         .map(|s| s.host.as_str())
@@ -421,12 +429,12 @@ pub(crate) async fn soak(
                 let outcome = { rx.lock().await.recv().await };
                 match outcome {
                     Some(FetchOutcome::Done { raw, .. }) => {
+                        let raw = pool.adopt(raw);
                         raw_bytes.fetch_add(raw.len() as u64, Ordering::Relaxed);
                         match nzbkit::yenc_simd::decode(&raw) {
                             Ok(_) => ok.fetch_add(1, Ordering::Relaxed),
                             Err(_) => bad.fetch_add(1, Ordering::Relaxed),
                         };
-                        pool.give(raw);
                     }
                     Some(_) => {
                         gone.fetch_add(1, Ordering::Relaxed);
@@ -1107,24 +1115,92 @@ pub(crate) fn stream_cmd(
     println!("  player link: {m3u}");
     println!("  raw stream:  {}", v["stream"].as_str().unwrap_or(""));
     if !no_open && !m3u.is_empty() {
-        #[cfg(target_os = "macos")]
-        let opened = std::process::Command::new("open").arg(&m3u).status();
-        // Windows: explorer, NOT `cmd /C start` - cmd re-parses its command
-        // line, so metacharacters (&, ^, %) in the string would execute. This
-        // string is the daemon's `m3u` field, read over plaintext HTTP from a
-        // possibly-remote `--host`, so an on-path attacker answering
-        // {"m3u":"http://h/x&calc.exe"} got arbitrary execution. Same rule the
-        // daemon's own os_open already follows for exactly this reason.
-        #[cfg(target_os = "windows")]
-        let opened = std::process::Command::new("explorer").arg(&m3u).status();
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let opened = std::process::Command::new("xdg-open").arg(&m3u).status();
-        match opened {
-            Ok(st) if st.success() => println!("  handed to the default player"),
-            _ => println!("  (couldn't launch a player - open the link above manually)"),
+        match player_argv(&m3u) {
+            Ok((prog, args)) => match std::process::Command::new(prog).args(args).status() {
+                Ok(st) if st.success() => println!("  handed to the default player"),
+                _ => println!("  (couldn't launch a player - open the link above manually)"),
+            },
+            Err(param) => println!(
+                "  (not launching a player: that daemon's player link carries `{param}=`, and a \
+                 child process's command line is readable by every other account on this \
+                 machine. Open the link above yourself, or update the daemon.)"
+            ),
         }
     }
     Ok(())
+}
+
+/// A query parameter that is a CREDENTIAL, if this URL carries one.
+///
+/// Only the query is judged, and only a parameter NAME: `apikey` in a
+/// path segment or a hostname is not a key, and refusing on it would
+/// cost a launch for nothing. Case-insensitive because the API accepts
+/// the parameter either way, and all three spellings the daemon's own
+/// auth reads are listed - a link is refused on what it could be
+/// carrying, not on what this version happens to build.
+///
+/// A FRAGMENT counts. A `#` tail never reaches the server, so it is not
+/// a credential in transit - but this function is about what lands in
+/// ARGV, and `#apikey=` is as readable there as `?apikey=` is.
+fn credential_param(url: &str) -> Option<&'static str> {
+    let q = url.find(['?', '#']).map(|i| &url[i + 1..])?;
+    q.split(['&', ';', '#']).find_map(|p| {
+        let name = p
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "apikey" => Some("apikey"),
+            "api_key" => Some("api_key"),
+            "nzbkey" => Some("nzbkey"),
+            _ => None,
+        }
+    })
+}
+
+/// The exact command line [`stream_cmd`] hands the player, and the one
+/// rule about it: no credential is in it.
+///
+/// Split out from the spawn - the shape `serve::bootstrap::dashboard_argv_in`
+/// uses for the browser launch - so a test can read what the child would
+/// be given and assert the thing that is invisible at the call site. A
+/// spawned process's command line is readable by every other account on
+/// the box (Linux `/proc/<pid>/cmdline` is world-readable, macOS `ps`
+/// shows other users' arguments, the Windows line comes out of WMI), and
+/// with the API key comes `mode=server_secret`, the Usenet password in
+/// cleartext. That is TODO 23 low1, which closed the browser launch and
+/// deliberately left this one; the daemon now builds its `m3u` link with
+/// the JOB's own `?t=` capability token, so the ordinary answer carries
+/// nothing worth reading off a `ps`.
+///
+/// A link that still names a key came from a daemon older than that
+/// change - `--host` is any machine - and is REFUSED rather than
+/// spawned. The point of the fix is that the credential does not travel
+/// as an argument, and the caller prints the link so the user can open
+/// it themselves. Refusing is also what keeps the fix honest as the flag
+/// grows: `--apikey` has no env or config fallback today, so the key is
+/// already on the user's own command line before any child exists, and
+/// the day somebody adds one this path must not quietly become the leak
+/// that was just closed.
+fn player_argv(m3u: &str) -> std::result::Result<(&'static str, Vec<String>), &'static str> {
+    if let Some(p) = credential_param(m3u) {
+        return Err(p);
+    }
+    #[cfg(target_os = "macos")]
+    let argv = ("open", vec![m3u.to_string()]);
+    // Windows: explorer, NOT `cmd /C start` - cmd re-parses its command
+    // line, so metacharacters (&, ^, %) in the string would execute. This
+    // string is the daemon's `m3u` field, read over plaintext HTTP from a
+    // possibly-remote `--host`, so an on-path attacker answering
+    // {"m3u":"http://h/x&calc.exe"} got arbitrary execution. Same rule the
+    // daemon's own os_open already follows for exactly this reason.
+    #[cfg(target_os = "windows")]
+    let argv = ("explorer", vec![m3u.to_string()]);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let argv = ("xdg-open", vec![m3u.to_string()]);
+    Ok(argv)
 }
 
 /// `nzbfast identify <file>`: the synthesised-naming ladder, end to end,
@@ -1239,6 +1315,79 @@ pub(crate) fn inspect(path: &Path) -> Result<()> {
         (total - eager) as f64 * 100.0 / total.max(1) as f64,
     );
     Ok(())
+}
+
+/// TODO 23 low1, CLI half: what `nzbfast stream` hands the player.
+#[cfg(test)]
+mod player_handoff {
+    use super::*;
+
+    /// The API key must never reach the player child's argv - the same
+    /// rule `the_browser_argv_never_carries_the_api_key` pins on the
+    /// dashboard launch, and the same reason: a child's command line is
+    /// readable by every other local account, and with the key comes
+    /// `mode=server_secret` (the Usenet password in cleartext).
+    ///
+    /// Asserted against the argv the spawn really uses, including the
+    /// program name, because the leak was one `format!` away from looking
+    /// correct.
+    #[test]
+    fn the_player_argv_never_carries_a_credential() {
+        const KEY: &str = "1f8b0e5c2d4a6b8c0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b";
+        // What a current daemon answers with: the job's own capability
+        // token, which /m3u accepts and which starts that job and nothing
+        // else. Fine to spawn.
+        const OK: &str = "http://nas.local:6789/m3u/SABnzbd_nzo_nzbfast1?t=0123456789abcdef";
+        let (prog, args) = player_argv(OK).expect("a tokened link is spawnable");
+        assert_ne!(
+            prog, "cmd",
+            "cmd re-parses its command line, so `&calc.exe` in a remote daemon's answer runs"
+        );
+        assert_eq!(args.iter().filter(|a| a.contains(KEY)).count(), 0);
+        assert_eq!(args.last().map(String::as_str), Some(OK));
+        // A daemon older than the fix still answers with the key in the
+        // link. Refused, naming the parameter - never spawned.
+        for (url, want) in [
+            (format!("http://h:6789/m3u/nzo_1?apikey={KEY}"), "apikey"),
+            (
+                format!("http://h:6789/m3u/nzo_1?t=abc&apikey={KEY}"),
+                "apikey",
+            ),
+            (format!("http://h:6789/m3u/nzo_1?API_KEY={KEY}"), "api_key"),
+            (format!("http://h:6789/m3u/nzo_1?nzbkey={KEY}"), "nzbkey"),
+        ] {
+            assert_eq!(player_argv(&url), Err(want), "spawned a keyed link: {url}");
+        }
+    }
+
+    /// Only a parameter NAME counts. A path or host that merely spells
+    /// the word is not a credential, and refusing on it would cost a
+    /// launch for nothing; a keyless daemon's link has no query at all.
+    #[test]
+    fn a_credential_is_a_query_parameter_and_not_a_substring() {
+        assert_eq!(credential_param("http://h:6789/m3u/nzo_1"), None);
+        assert_eq!(credential_param("http://h:6789/m3u/nzo_1?t=abcd"), None);
+        assert_eq!(
+            credential_param("http://apikey.example/m3u/nzo_1?t=a"),
+            None
+        );
+        assert_eq!(credential_param("http://h/m3u/apikey=1?t=a"), None);
+        // Value-side mentions are not names either.
+        assert_eq!(credential_param("http://h/m3u/n?t=apikey%3Dx"), None);
+        assert_eq!(credential_param("http://h/m3u/n?t=a#frag"), None);
+        // …but the real thing is caught wherever it sits in the query.
+        assert_eq!(credential_param("http://h/m3u/n?apikey=k"), Some("apikey"));
+        assert_eq!(
+            credential_param("http://h/m3u/n?t=a&ApiKey=k"),
+            Some("apikey")
+        );
+        // A fragment never reaches the server, but it is still argv.
+        assert_eq!(
+            credential_param("http://h/m3u/n?t=a#apikey=k"),
+            Some("apikey")
+        );
+        assert_eq!(credential_param("http://h/m3u/n#apikey=k"), Some("apikey"));
+    }
 }
 
 #[cfg(all(test, feature = "indexer"))]

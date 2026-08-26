@@ -18,11 +18,11 @@ fn seal_run_blocking_fails_orphans_exactly_once() {
     let (tx, mut rx) = mpsc::channel(8);
     // Live workers: not this path's job - the async seal owns it.
     sh.workers_live.store(1, Ordering::Release);
-    assert_eq!(seal_run_blocking(&sh, &tx, "shards stopped"), 0);
+    assert_eq!(seal_run_blocking(&sh, &tx, FailCode::FleetExhausted), 0);
     sh.workers_live.store(0, Ordering::Release);
     // A draining run keeps its queue intact for the resume.
     sh.draining.store(true, Ordering::Release);
-    assert_eq!(seal_run_blocking(&sh, &tx, "shards stopped"), 0);
+    assert_eq!(seal_run_blocking(&sh, &tx, FailCode::FleetExhausted), 0);
     sh.draining.store(false, Ordering::Release);
     // One orphan still queued, one stranded in flight: both must reach
     // a terminal Failed, and the pending count must reach zero.
@@ -32,12 +32,17 @@ fn seal_run_blocking_fails_orphans_exactly_once() {
         drop(q);
         sh.register_inflight(&w, 0);
     }
-    assert_eq!(seal_run_blocking(&sh, &tx, "all shard runtimes stopped"), 2);
+    assert_eq!(seal_run_blocking(&sh, &tx, FailCode::FleetExhausted), 2);
     let mut failed = Vec::new();
     while let Ok(o) = rx.try_recv() {
         match o {
-            FetchOutcome::Failed { id, error } => {
-                assert_eq!(error, "all shard runtimes stopped");
+            FetchOutcome::Failed { id, code, error } => {
+                // TODO 307 item 1: the code is what the seal path
+                // actually decided, and the sentence is derived from it
+                // - so both are asserted, and a reason reworded without
+                // the code moving (or the reverse) reddens here.
+                assert_eq!(code, FailCode::FleetExhausted);
+                assert_eq!(error, FailCode::FleetExhausted.reason());
                 failed.push(id);
             }
             other => panic!("unexpected outcome: {other:?}"),
@@ -47,7 +52,7 @@ fn seal_run_blocking_fails_orphans_exactly_once() {
     assert_eq!(failed, vec!["<a@x>".into(), "<b@x>".into()]);
     assert_eq!(sh.pending.load(Ordering::Acquire), 0);
     // Nothing left: the pending==0 early return, and no double report.
-    assert_eq!(seal_run_blocking(&sh, &tx, "again"), 0);
+    assert_eq!(seal_run_blocking(&sh, &tx, FailCode::FleetExhausted), 0);
 }
 
 /// Codex F-15 (22 Aug 2026): shard threads used to come up through bare
@@ -89,8 +94,13 @@ fn a_refused_shard_thread_is_survivable_and_every_article_still_seals() {
     let mut failed = Vec::new();
     while let Ok(o) = rx.try_recv() {
         match o {
-            FetchOutcome::Failed { id, error } => {
-                assert_eq!(error, "all shard runtimes stopped");
+            FetchOutcome::Failed { id, code, error } => {
+                // TODO 307 item 1: the code is what the seal path
+                // actually decided, and the sentence is derived from it
+                // - so both are asserted, and a reason reworded without
+                // the code moving (or the reverse) reddens here.
+                assert_eq!(code, FailCode::FleetExhausted);
+                assert_eq!(error, FailCode::FleetExhausted.reason());
                 failed.push(id);
             }
             other => panic!("unexpected outcome: {other:?}"),
@@ -147,7 +157,7 @@ fn a_contended_queue_lock_delays_the_seal_it_does_not_empty_it() {
     };
     held.wait();
     assert_eq!(
-        seal_run_blocking(&sh, &tx, "all shard runtimes stopped"),
+        seal_run_blocking(&sh, &tx, FailCode::FleetExhausted),
         2,
         "both queued articles must still reach a terminal outcome"
     );

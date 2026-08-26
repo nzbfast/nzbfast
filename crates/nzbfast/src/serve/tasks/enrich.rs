@@ -267,7 +267,7 @@ pub(in crate::serve) fn wall_enrich_lane(
         if stop.stopping() {
             return;
         }
-        if d.park_if_off(30) {
+        if d.park_metadata_lanes(30) {
             continue;
         }
         // Entries whose wait has expired retry on sight, so dropping
@@ -724,7 +724,7 @@ pub(in crate::serve) fn person_photo_fetcher(d: Arc<Daemon>, stop: crate::serve:
         // Before prune_person_art, which is a directory walk: an idle
         // walk of the art cache is exactly the disk work the switch
         // promises not to do.
-        if d.park_if_off(60) {
+        if d.park_metadata_lanes(60) {
             continue;
         }
         let batch = d
@@ -860,7 +860,7 @@ pub(in crate::serve) fn imdb_ratings_refresher(d: Arc<Daemon>, stop: crate::serv
         // fetched" - so an indexer that is switched off would pull the
         // whole ratings dataset every six hours, forever, for a wall
         // nobody can open.
-        if d.park_if_off(600) {
+        if d.park_metadata_lanes(600) {
             continue;
         }
         let now = std::time::SystemTime::now()

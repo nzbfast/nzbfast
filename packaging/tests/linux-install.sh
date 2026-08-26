@@ -2,6 +2,11 @@
 # Install the .deb and the .rpm for real, in systemd containers, and put
 # them through an upgrade.
 #
+# packaging-tests-roster: installs the .deb and .rpm for real and needs
+# docker. This is the one that READ as wired for as long as anyone looked,
+# because pr-check.yml names it in a COMMENT. See the roster of deliberate
+# exclusions in size-gate.yml's `packaging-gates` job.
+#
 # This is the test behind the claim in packaging/linux/README.md that an
 # upgrade keeps your settings. It is not a mock: dpkg and rpm do the
 # install, systemd runs the unit, the daemon serves its API, a setting is

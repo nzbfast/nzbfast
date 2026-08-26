@@ -332,6 +332,8 @@ async fn flap_breaker_clamps_a_flapping_server_to_one_keeper() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -400,6 +402,8 @@ async fn flap_keeper_target_follows_observed_cap() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig {
                 connections: 8,
@@ -1848,6 +1852,84 @@ async fn crc_steer_storm_steers_damage_from_the_consumer_seam() {
             .iter()
             .any(|n| n.contains("refetching from another server")),
         "no consumer steer was ever noted: {notes:?}"
+    );
+}
+
+/// TODO 114 A/B: what the consumer steer actually SAVES, priced.
+///
+/// `crc_steer_storm_steers_damage_from_the_consumer_seam` above asserts
+/// the strong property - not one corrupt body is OWNED - but it runs the
+/// steer arm alone, so nothing in CI has ever said how much damage the
+/// steer is routing away. The fault matrix's own answer
+/// (research/FAULT-MATRIX-2026-08-05.md) is that this shape was our one
+/// outright loss to the field, and TODO 237's line round finally saw the
+/// part gate bite on a real provider on 23 Aug 2026; neither is a number
+/// a test prints. This is that number, on loopback, in the suite.
+///
+/// Both legs are the same storm: server A corrupts every body it serves
+/// with 3 of the 4 connections, server B holds a clean copy of every id.
+/// The only difference is `crc_steer`. Off, every damaged body the
+/// consumer decodes is ACCEPTED and survives to par2 repair - which on a
+/// set with no recovery capacity is the job failing. On, each one is
+/// requeued after claim and refetched from the peer.
+#[tokio::test(flavor = "multi_thread")]
+async fn crc_steer_ab_prices_the_damage_it_routes_away() {
+    async fn leg(steer: bool) -> (usize, usize) {
+        let data: Vec<u8> = (0..240_000u32).map(|i| (i >> 3) as u8).collect();
+        let mk = || {
+            let mut articles = std::collections::HashMap::new();
+            let segs = crate::mock::make_file_articles("s.bin", &data, 8_000, "ab", &mut articles);
+            (articles, segs)
+        };
+        let (arts_a, segs) = mk();
+        let (arts_b, _) = mk();
+        let ids: Vec<ArticleReq> = segs
+            .iter()
+            .map(|(id, _, part)| ArticleReq {
+                id: format!("<{id}>").into(),
+                age_days: 0,
+                part: *part,
+                file: u32::MAX,
+            })
+            .collect();
+        let a = crate::mock::MockServer::start(
+            arts_a,
+            crate::mock::Chaos {
+                corrupt_every: 1,
+                ..Default::default()
+            },
+        )
+        .await;
+        let b = crate::mock::MockServer::start(arts_b, Default::default()).await;
+        let cfg = PoolConfig {
+            crc_steer: steer,
+            window: 2,
+            ..Default::default()
+        };
+        let servers = vec![payout_server(&a, 3, cfg.clone()), payout_server(&b, 1, cfg)];
+        let (_, done, bad, _, _) = payout_leg_steered(servers, ids).await;
+        (done, bad)
+    }
+
+    let (off_done, off_bad) = leg(false).await;
+    let (on_done, on_bad) = leg(true).await;
+    println!(
+        "crc_steer A/B over {off_done} articles in a total corrupt storm:\n  \
+         steer off: {off_bad} damaged bodies OWNED - they survive the decode and reach par2\n  \
+         steer on : {on_bad} damaged bodies owned, the rest refetched from the clean peer"
+    );
+
+    assert_eq!(
+        off_done, on_done,
+        "both legs must deliver the whole release"
+    );
+    assert!(
+        off_bad > 0,
+        "the storm never bit with the steer off - the rig is measuring nothing"
+    );
+    assert_eq!(
+        on_bad, 0,
+        "the steer must route every damaged body away from the consumer"
     );
 }
 

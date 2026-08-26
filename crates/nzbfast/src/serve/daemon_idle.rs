@@ -48,14 +48,20 @@ impl Daemon {
         if was == want_offline {
             return;
         }
-        // Bumped either way: an in-flight job has to wind down whether or
-        // not this transition was the thing that paused the queue,
+        // Cleared either way: an in-flight job has to wind down whether
+        // or not this transition was the thing that paused the queue,
         // because staying connected is exactly what offline forbids.
-        // Flag, deadline, and generation move under the pause_until lock
-        // so the auto-resume timer's check-and-clear cannot interleave
-        // (see `set_paused_cancel_timer`) - and the transition is DECIDED
+        // Flag and deadline move under the pause_until lock so the
+        // auto-resume worker's check-and-clear cannot interleave (see
+        // `set_paused_cancel_timer`) - and the transition is DECIDED
         // under it too: read outside, a resume landing in between was
         // computed away and the queue stuck paused with nothing saying so.
+        //
+        // BOTH edges drop the deadline, which is what the generation
+        // bump this replaced did: it cancelled the pending timer on the
+        // way back online as well, and left the deadline behind for
+        // `pause_int` to report as time still to run on a timer that had
+        // already been cancelled.
         {
             let mut until = self.pause_until.lock_ok();
             let (paused, by_offline) = offline_pause_transition(
@@ -63,13 +69,18 @@ impl Daemon {
                 self.paused.load(Ordering::Relaxed),
                 self.paused_by_offline.load(Ordering::Relaxed),
             );
-            self.pause_gen.fetch_add(1, Ordering::Relaxed);
             self.paused.store(paused, Ordering::Relaxed);
             self.paused_by_offline.store(by_offline, Ordering::Relaxed);
-            if want_offline {
-                *until = None;
-            }
+            *until = None;
         }
+        // Outside the lock: the worker wakes, reads no deadline, and
+        // retires rather than sleeping out the rest of a cancelled pause.
+        self.pause_wake.notify_all();
+        // The offline transition writes the flag under the `pause_until`
+        // lock itself (the whole point of that block), so it owes the
+        // edge by hand once the lock is gone. Idempotent, so the arms
+        // below are free to reach paths that announce again.
+        crate::serve::announce_pause(self);
         match want_offline {
             true => {
                 // The pause flag above is a START-time gate (`pick_job`);

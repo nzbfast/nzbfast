@@ -86,9 +86,22 @@ pub(crate) fn write_archives_to_spending(
     // may not retry is a pass that has already eaten source volumes:
     // the retry would read files the first attempt deleted.
     let eaten_any = std::sync::atomic::AtomicBool::new(false);
+    // TODO 205 follow-up: TODO 217's rewind above is a second go at ONE
+    // set, so
+    // the queue row's unpack lane must be put back to where this call
+    // found it before the pass reports itself again. Without it the
+    // first pass's figures were banked as a whole extra set and the
+    // lane read at half the progress it had made. Taken here rather
+    // than inside the closure (which is the retry), and replayed at the
+    // top of every pass - on the first that restores the state to what
+    // it already is. See [`crate::unpackprog::mark`].
+    let mark = crate::unpackprog::mark();
     crate::resumeout::with_mismatch_retry(
         || !eaten_any.load(std::sync::atomic::Ordering::Relaxed),
-        |mismatch| unpack_pass(dir, archives, password, sources, mismatch, &eaten_any),
+        |mismatch| {
+            mark.rewind();
+            unpack_pass(dir, archives, password, sources, mismatch, &eaten_any)
+        },
     )
 }
 

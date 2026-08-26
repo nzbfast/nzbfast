@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast"
-version = "1.2.3"
+version = "1.2.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -33,6 +33,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # opt-in native HTTPS (§129 2a): a rustls acceptor on tiny_http's own accept
 # loop, fed a prebuilt rustls::ServerConfig from take_listener.
 tiny_http = { path = "../../vendor/tiny_http", features = ["ssl-rustls"] }
+# Dual-stack listener for an IPv6 --bind (issue #58): std's TcpListener
+# offers no way to clear IPV6_V6ONLY, and Windows defaults it ON - so
+# `--bind ::` there answered IPv6 alone and an IPv4-only client (Radarr
+# on 127.0.0.1) was refused. take_listener builds the socket itself and
+# hands it to tiny_http prebuilt. Already in the lockfile via tokio -
+# no new dependency tree.
+socket2 = "0.6"
 # Two consumers, one entry: §129 2a builds the daemon's HTTPS server config
 # (--tls-cert/--tls-key, fed prebuilt into tiny_http), and §129 2e is the
 # native SMTP sender's client TLS (whose ClientConfig is nzbkit's shared

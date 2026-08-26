@@ -81,6 +81,44 @@ pub fn raise_fd_limit() -> u64 {
     0
 }
 
+/// How much of a `remaining`-byte span to take into a `cap`-byte buffer:
+/// the span, CLAMPED IN u64, and only then narrowed.
+///
+/// THE ORDER IS THE WHOLE POINT, and getting it backwards is a class of
+/// bug this tree carried at nineteen sites. `(remaining as usize).min(cap)`
+/// narrows FIRST, and `usize` is 32 bits on the shipped
+/// `armv7-unknown-linux-musleabihf` target - so a remaining span of
+/// exactly 4 GiB narrows to ZERO and the caller takes nothing. In a
+/// decrementing loop that is no progress at all, forever; in a reader it
+/// is `Ok(0)`, which every consumer in this tree - and the vendored rars
+/// engine, whose `BlockingRangeSource` contract says `Ok(0)` means the
+/// source ends here - reads as a clean end of file.
+///
+/// AND IT IS NOT AN ALIGNMENT COINCIDENCE. The near-miss case funnels
+/// into the zero case: with a cap of B the last short read takes
+/// `remaining % 2^32` bytes, which lands `remaining` exactly on a
+/// multiple of 2^32, and the next call returns zero. So the trigger is
+/// "any span of 4 GiB or more", deterministically - an ordinary large
+/// video, a zip64 member, a PAR2 target file.
+///
+/// On a 64-bit host this is bit-identical to the narrow-first spelling
+/// (`u64::MAX as usize == usize::MAX`), which is why the class was
+/// invisible to every suite this fleet runs.
+///
+/// Returns 0 ONLY for an empty span or an empty buffer - the debug
+/// assertion pins that, and it is the assertion that would have caught
+/// all nineteen, since every one of those call sites had already proved
+/// its span non-empty before it narrowed.
+#[inline]
+pub fn chunk_len(remaining: u64, cap: usize) -> usize {
+    let n = remaining.min(cap as u64) as usize;
+    debug_assert!(
+        n > 0 || remaining == 0 || cap == 0,
+        "chunk_len({remaining}, {cap}) took nothing from a non-empty span"
+    );
+    n
+}
+
 /// Positioned read: unix pread never touches the file cursor; Windows
 /// `seek_read` does move it, so every access to engine-written files must
 /// go through these helpers (nothing reads via the cursor today).
@@ -1477,6 +1515,11 @@ fn pace_flush(fd: std::os::unix::io::RawFd) {
     unsafe {
         libc::fsync(fd);
     }
+    // SAFETY: as above. Spelled out a second time rather than left to the
+    // block comment above: the two arms are cfg-exclusive, so on Linux the
+    // macos block and its comment are BOTH gone and this block is the first
+    // thing `undocumented_unsafe_blocks` sees. That is a Linux-only clippy
+    // error no run on a mac can reach, and it held `check` red on main.
     #[cfg(target_os = "linux")]
     unsafe {
         match pace_mode() {

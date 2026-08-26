@@ -84,6 +84,24 @@ pub(super) fn sab_warnings(
         ));
     }
 
+    // The queue is no longer reaching disk. Every add is still accepted
+    // and everything still downloads, so nothing else anywhere reports
+    // this - and a restart then comes back to whatever the last save
+    // that landed held. It belongs here on the same terms as the two
+    // above: it is true now, it degrades work now, and it does not
+    // resolve itself - a full disk, a read-only spool or a failing
+    // volume is something the user has to go and fix. The next save
+    // that lands clears it (`Daemon::save_failed_at`).
+    let failed_at = d.save_failed_at.load(Ordering::Relaxed);
+    if failed_at > 0 {
+        out.push(format!(
+            "The queue could not be saved at {} - added or changed jobs will be \
+             lost if nzbfast restarts. Check free space and permissions on the \
+             .spool folder.",
+            crate::logging::stamp_for_report(failed_at as i64)
+        ));
+    }
+
     // Jobs that have stopped and will not move without the user. A
     // password prompt is invisible to an *arr, which just sees a job
     // that never finishes.
@@ -1033,6 +1051,25 @@ fn slot_json(
         "password_needed": pw_wanted.as_deref() == Some(j.nzo_id.as_str()),
         "deferred": j.deferred,
         "defer_reason": j.defer_reason,
+        // When the watchdog last benched it, and how many times. Both
+        // additive and ours, like `deferred` above - SAB has no such
+        // field and the *arrs ignore what they don't know.
+        //
+        // The stamp is the point. `deferred` is scheduling state that a
+        // later run does NOT clear, so the reason beside it can be an
+        // hour old with nothing saying so, and a queue row that renders
+        // it as a bare badge is making an undated claim. 0 means never
+        // deferred (and a queue restored from a store written before
+        // this field existed reads 0 too, which renders as the
+        // date-less form rather than as "just now").
+        "defer_at": j.defer_at,
+        // The count is the evidence for the thing the row was failing
+        // to say at all: a job that has been picked up and set aside
+        // three times has been TRIED three times. Live 25 Aug 2026 the
+        // engine deferred four jobs in twenty minutes, each with a
+        // precise reason in the log, and every one of them rendered as
+        // an untouched "Queued 0%".
+        "defer_count": j.defer_count,
         // TODO §77 pre-flight verdict, ours like `origin` and
         // `deferred` beside it - SAB has no such field and the
         // *arrs ignore what they don't know. Null until the
@@ -1275,12 +1312,17 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
     // stored: `paused_by_offline` is already the state that decides
     // whether coming back online may resume, and a second copy of it
     // could only ever disagree with it.
+    // §129 1b(b)'s BELT, and it is here rather than at a tenth pause
+    // door on purpose. `announce_pause` is idempotent - it emits only
+    // when the flag differs from what was last announced - so calling
+    // it on every queue poll can neither double-fire nor race the nine
+    // doors that call it themselves. What it buys is that a writer
+    // added later, by someone who never read this file, costs one poll
+    // of lateness instead of the chime. Before any of the loads below,
+    // so `paused_now` and the event cannot disagree about this tick.
+    crate::serve::announce_pause(d);
     let paused_now = d.paused.load(Ordering::Relaxed);
-    let pause_source = if d.paused_by_offline.load(Ordering::Relaxed) {
-        "offline"
-    } else {
-        *d.pause_source.lock_ok()
-    };
+    let pause_source = crate::serve::pause_source_now(d);
     let resume_at = resume_at(d, paused_now, pause_source);
     // Who chose the speed cap now in force. The auto governor moves the
     // number every second, so it names itself here rather than writing
@@ -1969,7 +2011,7 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
                         None,
                         0,
                         &api_origin(ua_hdr, "arr"),
-                        false,
+                        DupeExempt::Nobody,
                     ) {
                         Ok(Enqueued { nzo_id: nzo, .. }) => json!(nzo_int(&nzo)),
                         Err(e) => {
@@ -2047,6 +2089,46 @@ fn jr_append(d: &Arc<Daemon>, params: &[Value], ua_hdr: &str) -> Value {
     }
 }
 
+/// The `Param` of an `editqueue` call, as text.
+///
+/// NZBGet spells this slot two ways - `[Command, Param, IDs]` since v13,
+/// and `[Command, Offset, Text, IDs]` before it - and every subcommand
+/// that wants a NUMBER (`GroupMoveOffset`, `GroupSetPriority`) parses
+/// this string back to an integer, so the two shapes have to arrive here
+/// as one.
+///
+/// Reading it as `find_map(Value::as_str)` alone was wrong in both
+/// shapes, and silently: JSON-RPC clients send a numeric argument as a
+/// JSON NUMBER, which is not a string, so the search ran past it, found
+/// nothing else (the trailing IDs are an array), and handed back `""`.
+/// `"".parse::<i64>().unwrap_or(0)` is 0 - a move of no places, and
+/// `nzbget_priority(0)` is Normal - so an offset the user asked for was
+/// dropped and a priority write landed on the wrong rung, both answering
+/// `true`. The legacy four-element shape fails the same way from the
+/// other side: its `Offset` sits at index 1 as a number while `Text` at
+/// index 2 is the empty string, so the string search found the EMPTY one
+/// and `GroupMoveOffset` moved nothing there either.
+///
+/// So: a non-empty string wins where there is one (that is `Text`, which
+/// is what `GroupSetName` and `GroupSetParameter` mean), and otherwise
+/// the first number after the command is rendered. Booleans and objects
+/// are not part of this API and stay unread.
+fn editqueue_param(params: &[Value]) -> String {
+    if let Some(s) = params
+        .iter()
+        .skip(1)
+        .find_map(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return s.to_string();
+    }
+    params
+        .iter()
+        .skip(1)
+        .find_map(|p| p.as_number().map(std::string::ToString::to_string))
+        .unwrap_or_default()
+}
+
 fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String>) -> Value {
     {
         // [Command, Param, IDs] (v13+) or [Command, Offset, Text, IDs].
@@ -2057,12 +2139,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
             .find_map(|p| p.as_array())
             .map(|a| a.iter().filter_map(Value::as_i64).collect())
             .unwrap_or_default();
-        let param_str = params
-            .iter()
-            .skip(1)
-            .find_map(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let param_str = editqueue_param(params);
         let mut ok = false;
         match cmd {
             // Body in api/remote.rs, with the tail-guard, suspend and
@@ -2071,7 +2148,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 ok = super::api::remote::pause_by_ids(d, &ids, cmd == "GroupPause");
             }
             "GroupDelete" | "GroupDupeDelete" | "GroupFinalDelete" | "GroupParkDelete" => {
-                ok = group_delete(d, cmd, &ids);
+                ok = group_delete(d, cmd, &ids, rpc_error);
             }
             "GroupMoveTop" | "GroupMoveBottom" => {
                 let mut q = d.queue.lock_ok();
@@ -2212,29 +2289,80 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 } else {
                     let before = h.len();
                     let mut gone: Vec<String> = Vec::new();
+                    // Where each row sat, so a store that refuses the
+                    // tombstone can have every one of them back exactly
+                    // as the request found it (P2-1); see
+                    // `Daemon::history_restore`.
+                    let mut removed: Vec<(usize, Arc<Mutex<Job>>)> = Vec::new();
+                    let mut at = 0usize;
                     h.retain(|j| {
-                        let g = j.lock_ok();
+                        let mut g = j.lock_ok();
                         let hit = ids.contains(&nzo_int(&g.nzo_id));
                         if hit {
-                            // Record deleted for good - drop its spooled
-                            // .nzb. Through `drop_spool` rather than a
-                            // swallowed `remove_file` (Codex sweep F-05):
-                            // the row is gone durably by the time this
-                            // returns, so a copy whose unlink is REFUSED
-                            // is a file under the adoptable name that no
-                            // record names, and `recover_orphaned_spool`
-                            // downloads the deleted release again at the
-                            // next start. The REST history delete has gone
-                            // through `hold_or_drop_spool` since that fix;
-                            // this facade is the hand-copy that did not.
-                            drop_spool(&g.nzb_path);
+                            // A parked move_pending row may still have
+                            // its Arc in the mover's queue; the popped
+                            // Arc must find nothing to do for a record
+                            // that no longer exists.
+                            g.tombstone = true;
                             gone.push(g.nzo_id.clone());
+                            drop(g);
+                            removed.push((at, j.clone()));
+                        } else {
+                            at += 1;
                         }
                         !hit
                     });
                     ok = h.len() < before;
                     drop(h);
-                    d.history_tombstone(&gone);
+                    // NOTHING THIS DELETE DESTROYS MAY GO BEFORE THE
+                    // TOMBSTONE IS DURABLE, and until 26 Aug 2026 both
+                    // halves did: the spool copy was unlinked inside the
+                    // retain above and the early copies right after it,
+                    // while the tombstone came last and its answer was
+                    // dropped. `history_replay` drops a row only when it
+                    // finds a `"deleted": true` line, so a store that
+                    // refused that append (0444, or owned by a uid this
+                    // daemon no longer runs as - one `sudo nzbfast` is
+                    // enough) resurrected the record at the next start
+                    // with its retry `.nzb` and its published copies
+                    // already destroyed, under a `true` this handler had
+                    // already answered (P2-1).
+                    if d.history_tombstone(&gone) {
+                        // §296 (sweep S9): destination copies of a job
+                        // whose move never settled. With the record gone
+                        // this list is the only thing that names those
+                        // files. Same take the REST history delete makes;
+                        // this facade is the hand-copy that did not,
+                        // exactly as it once was for `drop_spool`.
+                        let mut early_gone: Vec<std::path::PathBuf> = Vec::new();
+                        for (_, j) in &removed {
+                            let mut g = j.lock_ok();
+                            early_gone.extend(d.early_take(&mut g));
+                            // Record deleted for good - drop its spooled
+                            // .nzb. Through `drop_spool` rather than a
+                            // swallowed `remove_file` (Codex sweep F-05):
+                            // the row IS gone durably by the time this
+                            // runs, so a copy whose unlink is REFUSED is
+                            // a file under the adoptable name that no
+                            // record names, and `recover_orphaned_spool`
+                            // downloads the deleted release again at the
+                            // next start.
+                            drop_spool(&g.nzb_path);
+                        }
+                        crate::serve::earlyfile::early_unlink(&early_gone);
+                    } else {
+                        for (_, j) in &removed {
+                            j.lock_ok().tombstone = false;
+                        }
+                        d.history_restore(removed);
+                        *rpc_error = Some(
+                            "the history store could not be written, so the \
+                             records were left exactly as they were - check \
+                             the permissions on the data folder"
+                                .into(),
+                        );
+                        ok = false;
+                    }
                 }
             }
             "HistoryRedownload" | "HistoryReturn" | "HistoryRetry" => {
@@ -2576,6 +2704,9 @@ pub(super) fn handle_jsonrpc(
 }
 
 #[cfg(test)]
+mod editqueue_param_tests;
+
+#[cfg(test)]
 mod tail_truth_tests;
 
 #[cfg(test)]
@@ -2587,3 +2718,9 @@ mod delete_durability_tests;
 // windows-clippy's -D warnings reds on them.
 #[cfg(all(test, unix))]
 mod history_custody_tests;
+
+// Unix-gated at the declaration for the same reason as the module
+// above: its one test forces the save refusal with a read-only spool
+// directory, which Windows mode bits do not express.
+#[cfg(all(test, unix))]
+mod save_warning_tests;

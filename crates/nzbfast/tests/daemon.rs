@@ -15,6 +15,9 @@ mod daemon_bomb;
 mod daemon_finish;
 // §138 opt-in give-up legs (sibling dir, size gate).
 mod daemon_health;
+// §303 grab-time preview: the completable verdict before the grab, as
+// a measured A/B, plus its stand-down leg (sibling dir, size gate).
+mod daemon_preview;
 // §239 feed_preview dry run (sibling dir, size gate).
 mod daemon_feedpreview;
 // The four NZBGet delete verbs and the prefetch-delete leg (sibling
@@ -34,6 +37,25 @@ mod daemon_indexbusy;
 mod daemon_noservers;
 // Sweep 8 M3's id-floor leg (sibling dir, size gate).
 mod daemon_idfloor;
+// Retention insurance: the fault-injected decay A/B and the not-hinder
+// default (sibling dir, size gate).
+mod daemon_insurance;
+// §292 same-post duplicate arm, measured as an A/B (sibling dir, size
+// gate).
+mod daemon_samepost;
+// §293 stage 2: a promoted replacement adopts the failed
+// predecessor's blocks - the fail-vs-success A/B (sibling dir, size
+// gate).
+mod daemon_donor;
+// Round B: the recovery ladder scored end to end - which rung rescues
+// a broken post, and the seam where the parked offer does not reach
+// §282's own founding shape (sibling dir, size gate).
+mod daemon_ladder;
+
+/// §296: the per-file early publish, as a measured A/B - episode 1 at
+/// the destination while episode 3 is still on the wire, against the
+/// same pack downloaded with the arm off.
+mod daemon_earlyfile;
 // Passworded archives end to end (sibling dir, size gate).
 mod daemon_password;
 // Bug sweep 23 Aug 2026 F8: an absurd pause length is clamped, not
@@ -52,6 +74,13 @@ mod daemon_sfx;
 mod daemon_mediafast;
 // TODO 207: the persisted "why was this slow" verdict (sibling dir).
 mod daemon_whyslow;
+// Codex F-06: the relocation fence - the runner must not start a job
+// into a destination whose earlier progress is still being moved in
+// (sibling dir, size gate).
+mod daemon_relocate;
+// A materialize-for-repair job must still reach a terminal history row
+// (sibling dir, size gate).
+mod daemon_repairhist;
 // The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
 // serve / wait_ready), one copy for every suite that spawns a daemon.
 mod harness;
@@ -3432,6 +3461,29 @@ async fn slow_single_server_job_deferred() {
         );
         assert!(queue_has(&q, &slow_id), "{q}");
         assert!(q.contains("defer_reason"), "{q}");
+        // The stamp, not merely the reason. `deferred` is scheduling
+        // state that a later run does NOT clear, so the reason beside it
+        // outlives the moment it describes - measured on the live daemon
+        // 26 Aug 2026, a job sat Downloading with `deferred` still true
+        // from a bench hours earlier. `defer_at` is what dates the
+        // verdict, and the queue row renders it as "tried <t> ago", so a
+        // payload that carried the sentence without the clock would put
+        // an undated claim on the row. Asserted as a LIVE wall clock
+        // rather than for presence: a 0 (the never-deferred default, and
+        // what a store written before this field existed reads back)
+        // serialises as the key just the same.
+        let slot = queue_slot(&q, &slow_id);
+        let at = slot["defer_at"].as_u64().unwrap_or(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            at > 0 && at <= now && now - at < 600,
+            "defer_at should be the wall clock of the deferral just \
+             observed, got {at} against now {now}: {q}"
+        );
+        assert_eq!(slot["defer_count"].as_u64(), Some(1), "{q}");
 
         // The fast job overtakes and completes while the slow one is
         // still pending.

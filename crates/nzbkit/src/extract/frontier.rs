@@ -765,11 +765,15 @@ impl FrontierBuffer {
         self.state.lock_ok().rewritten_low
     }
 
-    /// One past the highest offset the decode has read. Test-only: the
-    /// rewrite judgement reads `st.served` under the lock it already
-    /// holds, so this accessor exists for the tests and for
-    /// `testutil::child_chase_served`.
-    #[cfg(test)]
+    /// One past the highest offset the decode has read. The rewrite
+    /// judgement itself reads `st.served` under the lock it already
+    /// holds, so this accessor is for readers OUTSIDE that path: the
+    /// tests, `testutil::child_chase_served`, and - since 26 Aug 2026 -
+    /// `Extractor::chase_served`, which is what lets TODO 278's ordering
+    /// hook wait for the decode to reach the bytes a repair is about to
+    /// rewrite instead of racing it. It was `#[cfg(test)]` until that
+    /// third reader arrived; it is still nobody's production input, and
+    /// a caller that wants the VERDICT reads `conflicted` instead.
     pub(super) fn served(&self) -> u64 {
         self.state.lock_ok().served
     }
@@ -1465,29 +1469,41 @@ impl FrontierBuffer {
                 st = self.state.lock_ok();
                 continue;
             }
+            // How far the §94 B gate lets this read run, NARROWED ONCE
+            // and only after the guard above has proved it is at least 1.
+            // `(lim - offset) as usize` inline in the three arms below
+            // was 32-bit poison: `lim` is `u64::MAX` whenever the gate is
+            // absent or released, so the low 32 bits of `lim - offset`
+            // reach ZERO at offset 2^32-1 - and the clamp walks the
+            // reader onto exactly that offset - answering `Ok(0)` one
+            // byte short of 4 GiB. Both doc comments on these two
+            // functions promise `Ok(0)` only at the declared end, and the
+            // vendored rars `BlockingRangeSource` contract turns that
+            // promise into `Error::TooShort`.
+            let room = crate::disk::chunk_len(lim - offset, usize::MAX);
             let frontier = st.frontier_ram();
             if offset < frontier {
                 let start = (offset - st.base) as usize;
-                let take = buf
-                    .len()
-                    .min(st.data.len() - start)
-                    .min((lim - offset) as usize);
+                let take = buf.len().min(st.data.len() - start).min(room);
                 buf[..take].copy_from_slice(&st.data[start..start + take]);
                 st.served = st.served.max(offset + take as u64);
                 return Ok(take);
             }
             if let Some((s, v)) = st.pending_at(offset) {
                 let a = (offset - s) as usize;
-                let take = buf.len().min(v.len() - a).min((lim - offset) as usize);
+                let take = buf.len().min(v.len() - a).min(room);
                 buf[..take].copy_from_slice(&v[a..a + take]);
                 st.served = st.served.max(offset + take as u64);
                 return Ok(take);
             }
             if let Some((s, po, len)) = st.paged_at(offset) {
-                let take = buf
-                    .len()
-                    .min(len - (offset - s) as usize)
-                    .min((lim - offset) as usize);
+                // chunk-narrow-gate: `paged_at` answers only for an offset
+                // INSIDE the span it names, so `offset - s < len` - and `len`
+                // is the page's own `usize` length, so the delta is below a
+                // `usize` by construction. Clamping it here would turn a
+                // contract violation into a silent `Ok(0)`, which is the very
+                // false EOF this class is about.
+                let take = buf.len().min(len - (offset - s) as usize).min(room);
                 let sc = self
                     .scratch
                     .as_ref()
@@ -1587,13 +1603,17 @@ impl rars::BlockingRangeSource for FrontierBuffer {
                 st = self.state.lock_ok();
                 continue;
             }
+            // See `read_covered_blocking` above for why this is narrowed
+            // here rather than inline in each arm. `saturating_sub`
+            // because this guard, unlike that one, lets `offset >= lim`
+            // through when the declared end is already behind us - the
+            // `offset >= st.total` arm below is what answers that, and it
+            // must not be reached through an underflow.
+            let room = crate::disk::chunk_len(lim.saturating_sub(offset), usize::MAX);
             let frontier = st.frontier_ram();
             if offset < frontier {
                 let start = (offset - st.base) as usize;
-                let take = buf
-                    .len()
-                    .min(st.data.len() - start)
-                    .min((lim - offset) as usize);
+                let take = buf.len().min(st.data.len() - start).min(room);
                 buf[..take].copy_from_slice(&st.data[start..start + take]);
                 st.served = st.served.max(offset + take as u64);
                 return Ok(take);
@@ -1609,10 +1629,13 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             // ones (identical-delivery reconciliation holds for every
             // retained copy).
             if let Some((s, po, len)) = st.paged_at(offset) {
-                let take = buf
-                    .len()
-                    .min(len - (offset - s) as usize)
-                    .min((lim - offset) as usize);
+                // chunk-narrow-gate: `paged_at` answers only for an offset
+                // INSIDE the span it names, so `offset - s < len` - and `len`
+                // is the page's own `usize` length, so the delta is below a
+                // `usize` by construction. Clamping it here would turn a
+                // contract violation into a silent `Ok(0)`, which is the very
+                // false EOF this class is about.
+                let take = buf.len().min(len - (offset - s) as usize).min(room);
                 let sc = self
                     .scratch
                     .as_ref()
@@ -1623,7 +1646,7 @@ impl rars::BlockingRangeSource for FrontierBuffer {
             }
             if let Some((s, v)) = st.pending_at(offset) {
                 let a = (offset - s) as usize;
-                let take = buf.len().min(v.len() - a).min((lim - offset) as usize);
+                let take = buf.len().min(v.len() - a).min(room);
                 buf[..take].copy_from_slice(&v[a..a + take]);
                 st.served = st.served.max(offset + take as u64);
                 return Ok(take);
@@ -2547,5 +2570,209 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         buf2.abort("test cancel");
         assert!(h2.join().unwrap().is_err());
+    }
+
+    /// A [`crate::live::ChaseGate`] that runs one action the first time
+    /// it is asked for a watermark, and otherwise withholds nothing.
+    ///
+    /// This is the injection seam for the released-lock window inside
+    /// [`FrontierBuffer::gate_limit_unlocked`], and it needs no
+    /// test-only hook in production code: that function DROPS the state
+    /// guard precisely so it can ask the gate, so `watermark` runs
+    /// inside the window by construction. `u64::MAX` keeps the caller
+    /// off the `offset >= lim` arm, so the read falls straight through
+    /// to the checks the window is about.
+    struct WindowGate {
+        /// Set after construction - the buffer holds the gate, so the
+        /// gate can only hold it back weakly.
+        buf: std::sync::OnceLock<Weak<FrontierBuffer>>,
+        act: fn(&FrontierBuffer),
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    impl WindowGate {
+        fn arm(act: fn(&FrontierBuffer)) -> Arc<WindowGate> {
+            Arc::new(WindowGate {
+                buf: std::sync::OnceLock::new(),
+                act,
+                fired: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+
+        fn attach(&self, buf: &Arc<FrontierBuffer>) {
+            let _ = self.buf.set(Arc::downgrade(buf));
+        }
+
+        /// Did the window actually open? The teeth on every case below:
+        /// a reader that never consults the gate never enters it, and
+        /// then a green assertion would be about nothing.
+        fn fired(&self) -> bool {
+            self.fired.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    impl crate::live::ChaseGate for WindowGate {
+        fn watermark(&self) -> u64 {
+            if !self.fired.swap(true, std::sync::atomic::Ordering::AcqRel)
+                && let Some(b) = self.buf.get().and_then(|w| w.upgrade())
+            {
+                (self.act)(&b);
+            }
+            u64::MAX
+        }
+
+        fn wait_past(&self, _offset: u64, _timeout: std::time::Duration) {}
+    }
+
+    /// What a reader driven into the gate window did. `Parked` is the
+    /// lost wakeup itself; `Panicked` is the trim guard's version of it
+    /// (an unchecked `offset - base` underflows).
+    #[derive(Debug)]
+    enum WindowRead {
+        Returned(io::Result<usize>),
+        Parked,
+        Panicked,
+    }
+
+    /// Run one blocking read at offset 0 with `act` armed inside the
+    /// gate window, and report what it did WITHOUT EVER HANGING.
+    ///
+    /// The read is on its own thread behind a bounded `recv_timeout`,
+    /// which is the whole point: the defect these cases pin wedged a
+    /// real suite for 4,666 seconds, and a pin that reproduces a
+    /// deadlock BY DEADLOCKING is not a usable test. A reverted fix
+    /// fails here in five seconds with a name on it.
+    ///
+    /// A parked reader is woken before returning, so even the failing
+    /// run leaves no thread behind: the abort or trim the window
+    /// injected is already in place, so one notify sends the reader's
+    /// next loop pass out through the checks at the top of the loop.
+    fn read_in_the_gate_window(
+        total: u64,
+        prime: fn(&FrontierBuffer),
+        act: fn(&FrontierBuffer),
+        forward: bool,
+    ) -> (Arc<WindowGate>, WindowRead) {
+        let gate = WindowGate::arm(act);
+        let buf = Arc::new(FrontierBuffer::new_gated(
+            total,
+            Some(Arc::clone(&gate) as Arc<dyn crate::live::ChaseGate>),
+            None,
+            None,
+        ));
+        gate.attach(&buf);
+        prime(&buf);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let b = Arc::clone(&buf);
+        std::thread::spawn(move || {
+            let mut out = [0u8; 16];
+            let r = if forward {
+                rars::BlockingRangeSource::read_at(&*b, 0, &mut out)
+            } else {
+                b.read_covered_blocking(0, &mut out)
+            };
+            let _ = tx.send(r);
+        });
+        let got = match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(r) => WindowRead::Returned(r),
+            // The sender went with a panicking reader.
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => WindowRead::Panicked,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                buf.abort("test teardown: release the parked reader");
+                WindowRead::Parked
+            }
+        };
+        (gate, got)
+    }
+
+    /// THE 23 AUG 2026 LOST WAKEUP, pinned deterministically - both
+    /// blocking readers, both conditions that end a read.
+    ///
+    /// [`FrontierBuffer::gate_limit_unlocked`] releases the state lock
+    /// to ask the gate and then re-acquires it. Both readers checked
+    /// `abort` and the `offset < base` trim guard BEFORE that call and
+    /// fell through, in one uninterrupted guard hold, to
+    /// `arrived.wait(st)`. An `abort()` landing in the released window
+    /// sets the flag and calls `notify_all` while no reader is on the
+    /// condvar yet, so the reader parks on a buffer nothing will ever
+    /// notify again - the chase worker then sleeps for the life of the
+    /// process and `finish()`'s join never returns.
+    ///
+    /// WHY THIS IS WORTH A PIN AND NOT A NOTE. It was found as an
+    /// intermittent 4,666-second wedge of
+    /// `zip_nested_budget_demote_materializes_byte_exact`, which
+    /// nextest RETRIED and passed in 0.028 s, reporting the run as
+    /// "6101 passed (1 flaky)", exit 0. This class does not announce
+    /// itself: it looks like a flake, and a flake looks like noise. The
+    /// stress harness that proved the fix (30 concurrent loops on a
+    /// loaded box; 60 sequential runs find nothing) is a probabilistic
+    /// argument and cannot live in a suite.
+    ///
+    /// Deterministic because the window is entered on the READER's own
+    /// thread: no sleep, no second thread racing it, no retry. Delete
+    /// either arm of either reader's `if relocked` block and one of
+    /// these four cases fails - the abort cases by parking, the trim
+    /// cases by underflowing `offset - base` in the serve that should
+    /// never have been reached.
+    #[test]
+    fn an_abort_or_trim_inside_the_gate_window_ends_both_blocking_reads() {
+        for forward in [false, true] {
+            let who = if forward {
+                "forward (rars::BlockingRangeSource)"
+            } else {
+                "random-access (read_covered_blocking)"
+            };
+            // ABORT. An empty 1000-byte buffer is a hole at 0, so the
+            // read reaches the gate and then has nothing to serve: the
+            // only ways out are the re-check (Err) or the condvar
+            // (forever).
+            let (gate, got) = read_in_the_gate_window(
+                1000,
+                |_| {},
+                |b| b.abort("aborted inside the gate window"),
+                forward,
+            );
+            assert!(gate.fired(), "{who}: the gate window never opened");
+            match got {
+                WindowRead::Returned(Err(e)) => assert!(
+                    e.to_string().contains("aborted"),
+                    "{who}: ended on the wrong error: {e}"
+                ),
+                other => panic!(
+                    "{who}: an abort inside the gate window must end the read, got {other:?} \
+                     (Parked = the lost wakeup is back: the re-check after the gate relocked \
+                     is missing, so the reader is on a condvar nothing will notify)"
+                ),
+            }
+            // TRIM. 100 bytes retained, all of them trimmed away inside
+            // the window, so offset 0 is now behind `base`. Without the
+            // re-check the reader believes it is below the frontier and
+            // indexes `data` at `offset - base`, which underflows.
+            let (gate, got) = read_in_the_gate_window(
+                1000,
+                |b| {
+                    b.write_span(0, &[7u8; 100]);
+                },
+                |b| {
+                    assert!(
+                        b.trim_to(100, 1).is_some(),
+                        "the trim the case depends on was refused"
+                    );
+                },
+                forward,
+            );
+            assert!(gate.fired(), "{who}: the gate window never opened");
+            match got {
+                WindowRead::Returned(Err(e)) => assert!(
+                    e.to_string().contains("behind the trim point"),
+                    "{who}: ended on the wrong error: {e}"
+                ),
+                other => panic!(
+                    "{who}: a trim inside the gate window must end the read, got {other:?} \
+                     (Panicked = the trim re-check after the gate relocked is missing, so the \
+                     reader served from a `data` the trim had already drained)"
+                ),
+            }
+        }
     }
 }

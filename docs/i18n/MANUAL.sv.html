@@ -321,6 +321,16 @@ omedelbar: den aktiva överföringen stoppar inom sekunder och återupptas senar
 journalen utan att förlora något. (Jobb med Tvinga-prioritet fortsätter ladda ner, SABnzbd-stil.)</li>
 <li>En <b>uppdateringsbanner</b> dyker upp här när en ny version är tillgänglig
 (se <a href="#updates">Uppdateringar</a>).</li>
+<li>Varje <b>chip för bakgrundsarbete</b> visar vad nzbfast gör just nu -
+indexering, hämtning av metadata, utgåvoflöde, mätning av anslutningar,
+bevakningslistan, listsynkronisering, flytt av färdiga filer, underhåll av
+databasen. Klicka på ett för att se vad du kan göra: pausa eller stäng av de
+delar som har en brytare, eller hoppa direkt till bevakningslistan,
+listkällorna eller kön. Flytt, underhåll och listsynkronisering slutförs av
+sig själva och säger det, i stället för att erbjuda en brytare.</li>
+<li><b>Statusindikatorn för kön</b> öppnas på samma sätt, med <b>Pausa</b>
+(låter artiklar som redan är på väg bli klara), <b>Pausa nu</b> (släpper dem
+och frigör linjen direkt) och <b>Återuppta</b>.</li>
 </ul>
 <h3>Hastighet</h3>
 <p>Live MB/s med ett rullande diagram; de streckade vattenmärkena markerar sessionens
@@ -354,7 +364,7 @@ Knappen <b>Hämta .nzb-filen</b> sparar jobbets <code>.nzb</code>-fil - nzbfast
 behåller en egen kopia, så det fungerar för varje jobb, även när originalfilen
 sedan länge är borta.</li>
 <li><b>"Varför är det långsamt?"</b> Medan ett jobb laddar ner bär raden under förloppsindikatorn ett utlåtande om <em>det</em> jobbet, inte om maskinen: <i>dina leverantörer är gränsen</i>, <i>den här maskinen är vid sin CPU-gräns</i>, <i>lagringen hinner inte med</i>, och så vidare. Klicka på det så öppnas raden på underlaget: vad din lina klarar, vad leverantörerna levererade, vad som kommer in nu, och en tabell per server där en strypt leverantör syns direkt. Ett jobb i full fart säger ingenting här, och inte heller ett vars utlåtande fortfarande formas.</li>
-<li>Märken visar specialtillstånd: <i>uppskjuten (långsam)</i>, <i>prefetchar</i>,
+<li>Märken visar specialtillstånd: <i>försökt, lagt åt sidan</i>, <i>prefetchar</i>,
 <i>pausad</i> (se <a href="#performance">Prestandaverktyg</a>).</li>
 <li>Ett nedräkningsdiagram spårar totalt GB kvar i hela kön.</li>
 </ul>
@@ -763,14 +773,6 @@ varje uppdatering blir dåliga. Och en stor andel av installationerna är Docker
 skärmlösa servrar och NAS-lådor där det inte finns någon nyckelring alls, vilket skulle
 lämna två olika lagringsvägar att hålla korrekta. Ett enda välförstått format som
 beter sig likadant överallt är tills vidare den bättre affären.</p>
-<p>Två ytterligare alternativ per server har ännu ingen kontroll i panelen: lägg in
-dem för hand i serverns post i <code>config.local.json</code>
-(se <a href="#files">§17</a>) och starta om.</p>
-<div class="tblwrap"><table>
-<tr><th>Nyckel</th><th>Noteringar</th></tr>
-<tr><td><code>bind_ip</code></td><td>Binder den här serverns utgående anslutningar till en bestämd lokal adress, för maskiner med flera utgångar och delade VPN-tunnlar. Adressfamiljen väljer också målfamiljen: en v4-bindning ansluter till serverns v4-adress.</td></tr>
-<tr><td><code>socks5</code></td><td>Skickar den här serverns NNTP-trafik genom en SOCKS5-proxy: <code>host:port</code>, eller <code>user:pass@host:port</code>. Värdnamnet slås upp <em>av proxyn</em>, så det blir ingen lokal DNS-läcka.</td></tr>
-</table></div>
 <ul>
 <li><b>Bocken</b> bredvid varje server är dess på/av-reglage: ibockad betyder att
 servern är med i nedladdningspoolen, urbockad betyder inaktiverad. En inaktiverad server
@@ -982,6 +984,7 @@ arbetar mot de kontona i stället.</div>
 <tr><td>Ingest-filter</td><td>JSON-regler som filtrerar vad som kommer in i indexet: typer (obfuskerat skräp släpps som standard), år/upplösning/språk, storleksgränser.</td></tr>
 <tr><td>Skanna nu / djup omskanning</td><td>Kör ett pass direkt; med ett djup, skanna om så här många färska headers.</td></tr>
 <tr><td>OMDb-nyckel / metadatauppdatering / radera</td><td>Berikningskontroller för väggen (<a href="#wall">§6</a>). Radera bygger om databasen från grunden - återställningsvägen om den någonsin blir korrupt.</td></tr>
+<tr><td>Pausa metadata</td><td>Slutar hämta titlar, omslag och skådespelare från metadatasajterna (<a href="#wall">§6</a>), medan själva skanningen fortsätter för sig. Inget av det som redan hämtats går förlorat; poster som hittas under pausen behåller helt enkelt namnet de postades under tills du slår på det igen. Den enda inställningen på det här kortet som inte rör någon usenetleverantör.</td></tr>
 <tr><td>Pre-flöde</td><td><b>Av tills du slår på det.</b> Många uppladdningar publiceras utan sitt namn, och då har en genomsökning inget att läsa. Publika relräkanaler annonserar det riktiga namnet, den enda öppna vägen att para ihop sådana inlägg. Att slå på håller en anslutning till ett IRC-nät öppen och lyssnar: ingenting skickas någonsin och inget konto skapas. Kräver att indexeraren är på, för ett flöde utan någonstans att lägga det den hör är bara en socket som står öppen i onödan.</td></tr>
 <tr><td>Reläserver, Reläkanaler</td><td>IRC-nätet som bär annonserna (värd eller värd:port) och kanalerna att lyssna i, kommaseparerade. En ändring träder i kraft vid nästa anslutning: slå av och på flödet för att tillämpa den direkt.</td></tr>
 <tr><td>Namnge genom korrelation</td><td>De publika direktreläerna bär inga filnamn, så de flesta fördunklade inlägg går inte att para ihop direkt. Vad en annons däremot fastslår är när en utgåva dök upp och hur stor den är. Detta jämför annonserad tid och storlek med namnlösa inlägg och föreslår, när de passar, det riktiga namnet under Bläddra. Ett förslag är märkt som ett förslag, kräver din klickning och byter aldrig namn på filer på disk.</td></tr>
@@ -1082,15 +1085,16 @@ utlåtande fortsätter tillägget orört och loggen säger varför.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (ett automatiskt nytt försök har köat om en misslyckad nedladdning),
-<code>job.switched</code> (ett jobb som inte kunde slutföras ersattes av en
+<code>job.requeued</code> (en nedladdning lämnade historiken och kom tillbaka i kön - ett nytt försök, eller en uppspelad bibliotekspost), <code>job.switched</code> (ett jobb som inte kunde slutföras ersattes av en
 alternativ kopia som hölls undan för det), <code>job.replaced</code> (samma utfall, utom att ingen kopia hölls
 undan, så en ersättare söktes fram och hämtades) och
 <code>job.delete_kept</code> (en radering tog bort posten men kunde inte ta bort
 dess filer), plus <code>watch.picked</code> (en .nzb hämtades ur bevakningsmappen),
 <code>nzb.refeed</code> (en färdig nedladdnings egen NZB-fil lades i kön, pausad), <code>watchlist.upgraded</code> (en uppgradering från bevakningslistan landade och
 den ersatta kopian togs bort),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> och <code>quota.reached</code>. Var och en bär
+<code>queue.idle</code>, <code>queue.paused</code> och <code>queue.resumed</code> (kön stannade eller startade igen, vem eller vad som än gjorde det), <code>queue.finished_action</code>
+(åtgärden vid köns slut aktiverades, kördes eller avbröts), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> och <code>update.available</code> (en nyare nzbfast-version hittades). Var och en bär
 <code>schema_version</code> (för närvarande 1; nya nycklar kan dyka upp utan höjning -
 ignorera det du inte känner till), ett monotont <code>seq</code> och en
 <code>at</code>-tidsstämpel i millisekunder.</p>
@@ -1433,7 +1437,7 @@ SABnzbd-kompatibel, så befintliga SAB-integrationer fungerar oförändrade. Tv�
 <tr><td>Automatisering</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostik</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: valfri användare, API-nyckel som lösenord)</td></tr>
-<tr><td>Förhandsgranskning / uppspelning</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; att starta ett parkerat biblioteksjobb kräver <code>?t=</code>-token eller nyckel), <code>/m3u/&lt;id&gt;</code> (kräver nyckel; skapar token), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Förhandsgranskning / uppspelning</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; att starta ett parkerat biblioteksjobb kräver <code>?t=</code>-token eller nyckel), <code>/m3u/&lt;id&gt;</code> (kräver nyckel eller jobbets eget token; skapar token), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Filer &amp; platser</h2>

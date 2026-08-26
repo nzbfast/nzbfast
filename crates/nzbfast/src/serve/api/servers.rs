@@ -193,6 +193,35 @@ fn m_server_secret(
     })
 }
 
+/// Take a server out of the pool, or put it back, without removing it
+/// from the list.
+///
+/// **This writes the config and nothing else - it never signals the
+/// running warm pool.** The enabled set is read once per job, in
+/// `get/plan.rs`'s `build_intake`, which is what builds the pool; so a
+/// server switched off here keeps the sockets it already holds until
+/// the next plan build, and the planner then logs
+/// `<host> disabled - not in the pool`. Same timing as the scheduled
+/// twin in `serve/sched.rs` (`SchedAction::ServerEnable`), which says
+/// so too and is keyed by host rather than by list index.
+///
+/// That gap is normally the tail of the running job. It is not bounded
+/// by anything: measured on the live daemon 26 Aug 2026, five providers
+/// disabled at 14:21:40Z still held 3 to 4 warm sockets each an hour
+/// later and cleared only at the 15:29:51Z plan build - 68 minutes,
+/// because the daemon was sitting on one long job at 0.0 MB/s with
+/// nothing to trigger a re-plan. A lane read the config back, saw
+/// `enabled: false`, and posted to three bench coordination files that
+/// the accounts were free; they were not - the whole measurement is in
+/// `research/COORD-PHANTOM-CLEARED-2026-08-26.md`, finding 2.
+///
+/// The dashboard toast (`toast.srvOff`) names that timing, and must
+/// keep naming it. Whether the click should instead tear the pool down
+/// immediately is an open PRODUCT question and not an oversight to fix
+/// in passing: an immediate teardown fails the articles in flight on
+/// those sockets, and any of them the surviving pool cannot serve
+/// become misses on a post that is not missing. Do not change the
+/// timing here without that decision.
 fn m_server_enable(
     _d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,

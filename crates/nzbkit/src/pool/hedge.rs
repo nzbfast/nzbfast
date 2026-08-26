@@ -58,6 +58,49 @@ impl Shared {
         }
     }
 
+    /// A speculative duplicate left flight WITHOUT emitting anything -
+    /// shed with its pipeline (`shed_pipeline`) or lost with its
+    /// connection (`requeue_or_fail`). Nothing is requeued, because the
+    /// original still owns the outcome; what must come back is the
+    /// article's one hedge budget.
+    ///
+    /// `pick_dup` and the TTFB rescue charge `inf.dups += 1` at PICK
+    /// time and nothing ever gave it back, so an article whose dup died
+    /// before it read a byte spent its rescue on a dispatch that never
+    /// happened - `pick_dup` then refuses it at `dups >= 1` and the TTFB
+    /// picker at `dups == 0`, for the rest of the article's life. The
+    /// cost is throughput only (the original walks its own ladder), and
+    /// it lands exactly where it hurts: a shed is how a stream-mode
+    /// seek abandons a pipeline, so the article the player is now
+    /// waiting on is the one that can no longer be rescued.
+    ///
+    /// `dup_servers` is deliberately NOT rolled back: that bit records
+    /// that this server has already been sent at this article, which
+    /// stays true whatever happened to the socket.
+    pub(super) fn uncharge_dup(&self, w: &Work) {
+        if !w.dup {
+            return;
+        }
+        // Bound in its own statement so the map guard is gone before
+        // `bump_inflight_gen` - the same lock discipline as
+        // `deregister_inflight_done` below.
+        let uncharged = {
+            let mut map = self.inflight.lock_ok();
+            match map.get_mut(&w.id) {
+                // Already gone: the original completed while this dup was
+                // in flight, so there is no budget left to hold.
+                None => false,
+                Some(inf) => {
+                    inf.dups = inf.dups.saturating_sub(1);
+                    true
+                }
+            }
+        };
+        if uncharged {
+            self.bump_inflight_gen();
+        }
+    }
+
     pub(super) fn deregister_inflight(&self, w: &Work) {
         if !w.dup {
             self.inflight.lock_ok().remove(&w.id);

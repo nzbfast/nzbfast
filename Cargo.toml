@@ -41,12 +41,24 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/nzbfast/nzbfast"
 
 # Workspace-wide lints; each first-party crate opts in with
-# `[lints] workspace = true`. vendor/ crates keep their own tables.
-# Start small and ratchet: clashing extern declarations are UB and were
-# a real bug (mem.rs task_info); undocumented unsafe is the next target
-# once the existing prose comments are converted to SAFETY: form.
+# `[lints] workspace = true`. vendor/ crates keep their own tables, and
+# nothing here reaches them. All four first-party crates opt in since
+# 26 Aug 2026 - nzbtray was the last holdout, and it is nearly all Win32
+# `unsafe`, so it was the crate that most wanted the two below.
 [workspace.lints.rust]
 clashing_extern_declarations = "deny"
+# The unsafe-policy ratchet, on since 26 Aug 2026 (TODO 307 item 3).
+#
+# WHAT `deny` BUYS OVER THE DEFAULT, since the honest answer is "less
+# than it looks and still worth having": in edition 2024 this lint is
+# already warn-by-default (measured, not assumed - a probe crate at
+# edition 2024 with a bare deref in an `unsafe fn` warns with nothing
+# configured), and CI's clippy gate runs `-D warnings`, so the tree was
+# already held to it by that ONE job. Denying it here moves the refusal
+# into every ordinary `cargo build` / `cargo check` / `cargo test`, so a
+# lane sees it at the moment it writes the code rather than at the gate
+# - and it survives an edition that ever relaxes the default.
+unsafe_op_in_unsafe_fn = "deny"
 # `--cfg fuzzing` is set by cargo-fuzz for every crate in its build, and
 # par2repair reads it to lower the verify pool's byte gate so
 # par2_verify_diff can reach the parallel branch. Declared here or the
@@ -60,6 +72,30 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 # divider is still debt (fix one, delete its line); everything below it
 # is house style, is expected to stay, and says why.
 [workspace.lints.clippy]
+# The other half of the 26 Aug 2026 unsafe ratchet, and the half that
+# actually found something: every `unsafe` block, `unsafe impl` and
+# `unsafe fn` body must carry a `// SAFETY:` line on the line above
+# saying WHY it is sound. 53 first-party sites had no such line when
+# this went on - 49 the host clippy gate reaches, plus four that ONLY
+# `--target x86_64-pc-windows-gnu` can see (three in nzbkit's logtee
+# log-capper, one in the GetDiskFreeSpaceExW arm of diskfree). Every one
+# was documented rather than rewritten: the deliverable was the argument
+# and the ratchet, not a refactor of working platform code.
+#
+# ONE CLIPPY RUN SHOWS ONE LAYER, which is the same trap CLAUDE.md's
+# SIXTEENTH gate entry writes up for the Windows recipe and it applies
+# to the host run just as hard: a lib that fails to compile is never
+# followed by the bin and test targets that depend on it, so four
+# errors in nzbkit's lib hid 38 more behind them. Turning either of
+# these on somewhere new means ITERATING to exit 0, not fixing the
+# batch the first run named.
+#
+# A `// SAFETY:` note states the INVARIANT that makes the operation
+# sound - which pointer is live, which contract the caller already owes,
+# why the bit pattern is valid. "This is safe" is not one. Where the
+# obligation is the caller's, say so and point at the `# Safety` clause
+# that puts it there.
+undocumented_unsafe_blocks = "deny"
 too_many_arguments = "allow"
 type_complexity = "allow"
 large_enum_variant = "allow"

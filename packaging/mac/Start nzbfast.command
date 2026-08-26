@@ -143,10 +143,20 @@ say "[4 of 4]  Starting the dashboard…"
 # so THIS copy still starts instead of dying on a "port in use" error.
 # bash's /dev/tcp probe = "can I connect?" = the port is in use.
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && exec 3>&- 3<&-; }
-PORT=6789
+# EMPTY sentinel, not 6789. Seeded with 6789 the loop reported "port
+# 6789 is free" when every candidate was in use, and then started a
+# daemon that failed to bind - so the one message the user got was the
+# opposite of what had happened.
+PORT=""
 for p in 6789 6790 6791 6792 6793 6794; do
     if ! port_in_use "$p"; then PORT=$p; break; fi
 done
+if [ -z "$PORT" ]; then
+    fail "web ports 6789-6794 are all in use, so nzbfast has nowhere to listen."
+    echo "      Quit whatever is using them (another nzbfast window?) and"
+    echo "      double-click \"Start nzbfast.command\" again."
+    exit 1
+fi
 if [ "$PORT" = "6789" ]; then
     ok "web port 6789 is free"
 else
@@ -172,7 +182,15 @@ echo
 
 # NOT 'exec' - control returns here when the daemon stops, so we can
 # tell you what happened and keep the window open. --open pops the browser.
-./nzbfast --config "$DATA/config.local.json" serve --watch "$WATCH" --out "$OUT" --port "$PORT" --open
+# --index-db is ABSOLUTE and under $DATA. The flag defaults to the
+# relative `index.db`, which for a portable copy is beside the binary:
+# on read-only media the daemon cannot create it at all, and on a normal
+# unzip the index is lost the moment the extracted folder is replaced by
+# the next release. Everything else this launcher passes is already
+# under $DATA; the index was the one thing that was not.
+[ -f ./index.db ] && [ ! -f "$DATA/index.db" ] && mv -f ./index.db* "$DATA/" 2>/dev/null
+./nzbfast --config "$DATA/config.local.json" serve --watch "$WATCH" --out "$OUT" \
+    --index-db "$DATA/index.db" --port "$PORT" --open
 code=$?
 
 echo

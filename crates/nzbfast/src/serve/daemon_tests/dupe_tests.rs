@@ -344,6 +344,200 @@ fn an_exact_mode_failure_does_not_release_another_releases_hold() {
     });
 }
 
+/// §292: an NZB declaring exactly `ids`, under a subject that derives
+/// no dupe_key - so the NAME arm can never meet two of them, and
+/// whatever holds them held them by message-id identity.
+fn samepost_nzb(ids: &[&str]) -> String {
+    let segs: String = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            format!(
+                "<segment bytes=\"1000\" number=\"{}\">{id}</segment>",
+                i + 1
+            )
+        })
+        .collect();
+    format!(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\
+         <file poster=\"x\" date=\"0\" subject=\"&quot;b.bin&quot; yEnc (1/{})\">\
+         <groups><group>g</group></groups><segments>{segs}</segments></file></nzb>",
+        ids.len()
+    )
+}
+
+/// §292, the core: two grabs of the SAME POST under different
+/// obfuscated names - stems that derive no dupe_key, so the name arm
+/// is structurally blind to them - and the second is held exactly as a
+/// name-keyed duplicate would be, pointing at the first. A disjoint
+/// post under an equally obfuscated name still queues normally, and
+/// `allow_dupe` (the wall's asked-and-said-yes) suppresses this arm
+/// like every other.
+#[test]
+fn a_second_grab_of_the_same_post_is_held_whatever_its_name() {
+    with_daemon("dupe-samepost", |d| {
+        let add = |xml: &str, name: &str, allow: bool| {
+            d.enqueue(xml.as_bytes(), name, "", -100, None, None, "test", allow)
+                .map(|e| e.nzo_id)
+                .unwrap()
+        };
+        let post = samepost_nzb(&["sp1@x", "sp2@x", "sp3@x"]);
+        let first = add(&post, "a9f3c2b1d4e5.nzb", false);
+        assert!(!d.held_as_duplicate(&first));
+        // Same articles, different name: held, and held against FIRST.
+        let second = add(&post, "0b7e9d1aa2c8.nzb", false);
+        assert!(
+            d.held_as_duplicate(&second),
+            "the same post under a different name downloaded twice"
+        );
+        assert_eq!(
+            d.queue_job(&second).unwrap().lock_ok().held_for,
+            first,
+            "the hold names the row that already carries these articles"
+        );
+        // A DIFFERENT post, equally obfuscated: not a duplicate.
+        let other = add(
+            &samepost_nzb(&["dp1@x", "dp2@x", "dp3@x"]),
+            "ffeeddccbbaa.nzb",
+            false,
+        );
+        assert!(
+            !d.held_as_duplicate(&other),
+            "message-id identity must separate what names cannot"
+        );
+        // The user was asked and said yes: no hold, same as the name arm.
+        let allowed = add(&post, "123456abcdef.nzb", true);
+        assert!(!d.held_as_duplicate(&allowed));
+    });
+}
+
+/// §292's directional threshold: a queue row that is a SMALL SUBSET of
+/// the add must never hold it - the row finishing would deliver less
+/// than the add would - while an add that is a subset of a queued row
+/// is safely held, because the row covers everything it declares. This
+/// is why `post_covers` measures the ADD's coverage rather than
+/// spare.rs's smaller-set containment.
+#[test]
+fn a_small_subset_row_does_not_hold_a_larger_add() {
+    with_daemon("dupe-subset", |d| {
+        let add = |xml: &str, name: &str| {
+            d.enqueue(xml.as_bytes(), name, "", -100, None, None, "test", false)
+                .map(|e| e.nzo_id)
+                .unwrap()
+        };
+        let small = add(&samepost_nzb(&["ss1@x"]), "0a0b0c0d0e0f.nzb");
+        let big = add(
+            &samepost_nzb(&["ss1@x", "ss2@x", "ss3@x", "ss4@x"]),
+            "1a1b1c1d1e1f.nzb",
+        );
+        assert!(
+            !d.held_as_duplicate(&big),
+            "a row covering a quarter of the add held the add"
+        );
+        // ...but an add the big row fully covers IS held, against it.
+        let sub = add(&samepost_nzb(&["ss2@x", "ss3@x"]), "2a2b2c2d2e2f.nzb");
+        assert!(d.held_as_duplicate(&sub));
+        assert_eq!(d.queue_job(&sub).unwrap().lock_ok().held_for, big);
+        let _ = small;
+    });
+}
+
+/// §292: a row that is itself HELD (`held_for` non-empty - a §282
+/// spare, or an already-held duplicate) is not a collision target. A
+/// third grab of the same post collides with the live first row, never
+/// with the paused second - a hold chained behind a hold would park a
+/// user's add behind a row that is not downloading either.
+#[test]
+fn a_held_row_is_not_a_same_post_collision_target() {
+    with_daemon("dupe-heldrow", |d| {
+        let add = |xml: &str, name: &str| {
+            d.enqueue(xml.as_bytes(), name, "", -100, None, None, "test", false)
+                .map(|e| e.nzo_id)
+                .unwrap()
+        };
+        let post = samepost_nzb(&["hr1@x", "hr2@x", "hr3@x"]);
+        let first = add(&post, "445566778899.nzb");
+        let second = add(&post, "556677889900.nzb");
+        assert!(d.held_as_duplicate(&second));
+        let third = add(&post, "667788990011.nzb");
+        assert!(d.held_as_duplicate(&third));
+        assert_eq!(
+            d.queue_job(&third).unwrap().lock_ok().held_for,
+            first,
+            "the third grab must be held against the LIVE row, not the held one"
+        );
+    });
+}
+
+/// §292's do-not-hinder instrument: the message-id arm reads queue
+/// spools on every add, and this measures the arm's MARGINAL cost as
+/// an A/B on one daemon. Leg A: a hundred queued rows whose declared
+/// size differs from the add's by more than 4x, so the prefilter
+/// skips every one and the arm parses nothing - the add's own cost.
+/// Leg B: a hundred rows at the add's own size, so every spool is
+/// parsed and nothing collides (no early exit) - the worst case. The
+/// printed delta is the measurement; the assertion is only a
+/// catastrophe net, set far above loaded-box jitter, because a
+/// wall-clock budget tight enough to be interesting is exactly the
+/// §289 class of flake. Measured 25 Aug 2026, dev box, debug build:
+/// leg A ~34 ms per add, leg B ~57 ms - the hundred worst-case parses
+/// cost ~23 ms per add, ~230 us per parsed spool, on top of an add
+/// that already writes its own spool and runs the hooks. Acceptable
+/// for a user-scale event against a deliberately pathological queue;
+/// if a real queue shape ever makes it matter, the remedy §292's
+/// design already named is a PostIds cache keyed by nzo_id, evicted
+/// to queue membership - build that, do not widen the prefilter.
+#[test]
+fn the_same_post_arm_stays_cheap_against_a_wide_queue() {
+    with_daemon("dupe-addcost", |d| {
+        let add = |xml: &str, name: &str| {
+            d.enqueue(xml.as_bytes(), name, "", -100, None, None, "test", false)
+                .map(|e| e.nzo_id)
+                .unwrap()
+        };
+        // Leg A's queue: 100 disjoint keyless posts, each ONE segment
+        // (1 KB declared) - more than 4x from the 40 KB adds below, so
+        // the prefilter skips them all.
+        for i in 0..100 {
+            add(
+                &samepost_nzb(&[&format!("tiny{i}@x")]),
+                &format!("{i:012x}.nzb"),
+            );
+        }
+        let n = 10u32;
+        let t0 = std::time::Instant::now();
+        for i in 0..n {
+            let ids: Vec<String> = (0..40).map(|s| format!("la{i}x{s}@x")).collect();
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            add(&samepost_nzb(&refs), &format!("a{i:011x}.nzb"));
+        }
+        let skipped = t0.elapsed() / n;
+        // Leg B's queue: the ten 40-segment adds above are now rows of
+        // the SAME size as the next adds, plus ninety more like them -
+        // every row parsed, nothing colliding.
+        for i in 0..90 {
+            let ids: Vec<String> = (0..40).map(|s| format!("wq{i}x{s}@x")).collect();
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            add(&samepost_nzb(&refs), &format!("b{i:011x}.nzb"));
+        }
+        let t0 = std::time::Instant::now();
+        for i in 0..n {
+            let ids: Vec<String> = (0..40).map(|s| format!("nw{i}x{s}@x")).collect();
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            add(&samepost_nzb(&refs), &format!("f{i:011x}.nzb"));
+        }
+        let parsed = t0.elapsed() / n;
+        println!(
+            "§292 add cost A/B: prefilter-skipped {skipped:?} per add, \
+             100 rows parsed {parsed:?} per add"
+        );
+        assert!(
+            parsed < std::time::Duration::from_secs(2),
+            "the same-post arm has become catastrophically expensive: {parsed:?} per add"
+        );
+    });
+}
+
 /// Codex sweep J, 13 Aug 2026: the exact identity was built with an
 /// ASCII-only filter, so every non-Latin letter became a space. Two
 /// DIFFERENT CJK titles sharing a tag tail reduced to the same key and

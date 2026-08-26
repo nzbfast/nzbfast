@@ -819,3 +819,319 @@ async fn a_kept_files_notice_can_add_the_release_again() {
     let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// §296 (sweep S9): a REST history delete takes back the copies the job
+/// already published at the destination, del_files or not.
+///
+/// The seeded row is the restart snapshot the sweep describes: a job
+/// parked Completed whose whole-job move has not settled, its early
+/// record still naming a copy in the completed folder. Before the fix
+/// the delete arm never called `early_take`, so the record - the ONLY
+/// thing naming that copy - went down with the row, and the copy sat
+/// orphaned at the destination forever: an *arr import of a download
+/// the user deleted. The record's own `dest` addresses the copy, so
+/// the daemon needs no move_completed configured at delete time - that
+/// is sweep S6's half of the same fix.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_delete_takes_back_the_published_copies() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-histearly-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    // A daemon with a server configured and nothing to download: the
+    // row under test is seeded straight into the history store.
+    let srv = MockServer::start(HashMap::new(), Chaos::default()).await;
+
+    const ID: &str = "SABnzbd_nzo_early9296";
+    let out_dir = dir.join("complete/Early.Publish");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::write(out_dir.join("ep1.mkv"), b"payload-bytes").unwrap();
+    let nas_dest = dir.join("nas/Early.Publish");
+    std::fs::create_dir_all(&nas_dest).unwrap();
+    std::fs::write(nas_dest.join("ep1.mkv"), b"payload-bytes").unwrap();
+
+    let spool = dir.join("complete/.spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    let row = serde_json::json!({
+        "nzo_id": ID,
+        "name": "Early.Publish",
+        "nzb_path": dir.join("early.nzb").to_string_lossy(),
+        "out_dir": out_dir.to_string_lossy(),
+        "state": "Completed",
+        "category": "",
+        "total_bytes": 13u64,
+        "finished_unix": 1_722_000_000i64,
+        "fail_message": "",
+        "early_published": [{
+            "name": "ep1.mkv", "len": 13, "mtime_ns": 0, "nzf_id": "",
+            "dest": nas_dest.to_string_lossy(),
+        }],
+    });
+    std::fs::write(
+        spool.join("history.jsonl"),
+        format!("{}\n", serde_json::to_string(&row).unwrap()),
+    )
+    .unwrap();
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("1");
+        c
+    })
+    .await;
+    let port = d.port;
+    let out_dir2 = out_dir.clone();
+    let nas_dest2 = nas_dest.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let h = http(port, "/api?mode=history&output=json", None);
+        assert!(history_has(&h, ID), "the seeded row must restore: {h}");
+
+        // No del_files: the record half only. The destination copies go
+        // regardless - with the files kept the payload is still whole in
+        // out_dir, so the copies are a partial duplicate either way.
+        let r = http(
+            port,
+            &format!("/api?mode=history&name=delete&value={ID}&output=json"),
+            None,
+        );
+        assert!(r.contains("\"removed\":1"), "the delete must land: {r}");
+
+        let h = http(port, "/api?mode=history&output=json", None);
+        assert!(!history_has(&h, ID), "the row is gone: {h}");
+        assert!(
+            !nas_dest2.join("ep1.mkv").exists(),
+            "the early copy at the destination goes with the record"
+        );
+        assert!(
+            !nas_dest2.exists(),
+            "the emptied destination job folder goes with it"
+        );
+        assert!(
+            out_dir2.join("ep1.mkv").exists(),
+            "without del_files the download's own files stay"
+        );
+    })
+    .await
+    .unwrap();
+
+    let _log = d.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// P2-1: a REST history delete over a store whose FILE cannot be
+/// appended to must still forget the record, and must not destroy the
+/// record's spool copy on the strength of a tombstone that never
+/// landed.
+///
+/// `Daemon::history_write_locked` opens `history.jsonl` with
+/// `create(true).append(true)`, so it needs write permission ON THE
+/// FILE, while `queue.json` and the atomic rewrite go through
+/// `persist::write_atomic` - private temp file, rename - and need only
+/// the DIRECTORY. One `sudo nzbfast` is enough to separate them, and a
+/// store left 0444 in a writable folder is exactly the state the report
+/// names. The delete arm unlinked the spool copy and the published
+/// copies, tombstoned LAST and threw the answer away, so the record came
+/// back at the next start naming files it no longer had - under a
+/// `"status": true` it had already answered.
+///
+/// Unix only, and not by reflex: on Windows a read-only file also
+/// refuses the RENAME that replaces it, so the very asymmetry this test
+/// turns on does not exist there and the fixture could not describe the
+/// fault.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_history_delete_survives_a_store_that_refuses_the_append() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = std::env::temp_dir().join(format!("nzbfast-histro-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let srv = MockServer::start(HashMap::new(), Chaos::default()).await;
+
+    const ID: &str = "SABnzbd_nzo_readonly1";
+    // A second row for the harder half below, where the FOLDER goes too.
+    const ID2: &str = "SABnzbd_nzo_readonly2";
+    let spool = dir.join("complete/.spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    let store = spool.join("history.jsonl");
+    let mut seeded = String::new();
+    let mut nzbs = Vec::new();
+    for (id, stem) in [(ID, "Readonly.Store"), (ID2, "Readonly.Folder")] {
+        let out_dir = dir.join("complete").join(stem);
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(out_dir.join("ep1.mkv"), b"payload-bytes").unwrap();
+        // The retry copy: the one thing a resurrected record would need
+        // and the one thing the old order destroyed first.
+        let nzb = dir.join(format!("{stem}.nzb"));
+        std::fs::write(&nzb, b"<nzb/>").unwrap();
+        let row = serde_json::json!({
+            "nzo_id": id,
+            "name": stem,
+            "nzb_path": nzb.to_string_lossy(),
+            "out_dir": out_dir.to_string_lossy(),
+            "state": "Completed",
+            "category": "",
+            "total_bytes": 13u64,
+            "finished_unix": 1_722_000_000i64,
+            "fail_message": "",
+        });
+        seeded.push_str(&serde_json::to_string(&row).unwrap());
+        seeded.push('\n');
+        nzbs.push(nzb);
+    }
+    std::fs::write(&store, &seeded).unwrap();
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("1");
+        c
+    })
+    .await;
+    let port = d.port;
+    // The daemon MOVES its state out of the download directory at
+    // startup ("moved daemon state out of the download directory" in the
+    // log), so the file to make read-only is the one it landed on, not
+    // the one the fixture seeded.
+    let store2 = dir.join(".spool/history.jsonl");
+    let spool2 = dir.join(".spool");
+    let nzb2 = nzbs[0].clone();
+    let nzb3 = nzbs[1].clone();
+
+    tokio::task::spawn_blocking(move || {
+        let h = http(port, "/api?mode=history&output=json", None);
+        assert!(history_has(&h, ID), "the seeded row must restore: {h}");
+        assert!(history_has(&h, ID2), "and so must the second: {h}");
+        assert!(
+            store2.exists(),
+            "the store did not land where the fixture expects: {}",
+            store2.display()
+        );
+
+        // The fault: the store file itself, and nothing else, stops
+        // taking writes. Applied AFTER the restore, so the daemon has
+        // read what it is about to be unable to append to.
+        let mut perms = std::fs::metadata(&store2).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&store2, perms).unwrap();
+
+        let r = http(
+            port,
+            &format!("/api?mode=history&name=delete&value={ID}&output=json"),
+            None,
+        );
+        assert!(
+            r.contains("\"removed\":1"),
+            "the atomic rewrite needs only the folder, so the delete has a way \
+             through: {r}"
+        );
+        assert!(
+            !nzb2.exists(),
+            "the removal is durable, so the record's spool copy goes with it"
+        );
+
+        // THE ASSERTION THE OLD ORDER FAILED. Read the store as a
+        // restart would: a record is live unless a `"deleted": true`
+        // line for it follows, and a rewrite that does not name it at
+        // all is the strongest form of that. The old code left the
+        // seeded row untouched and no tombstone anywhere, so the
+        // deleted release came back with its `.nzb` already gone.
+        let raw = std::fs::read_to_string(&store2).unwrap_or_default();
+        assert!(
+            !raw.contains(ID),
+            "the store still names the deleted record, so a restart brings it \
+             back: {raw}"
+        );
+
+        let h = http(port, "/api?mode=history&output=json", None);
+        assert!(!history_has(&h, ID), "the row is gone: {h}");
+
+        // THE OTHER HALF, and the one that pins the ORDER rather than
+        // the rescue: take the FOLDER as well, so the append is refused
+        // and the atomic rewrite that stands in for it is refused too.
+        // Nothing is left to try, so the delete has to refuse - and it
+        // has to refuse having destroyed nothing, because the record it
+        // could not remove is still live in the store on disk.
+        let mut perms = std::fs::metadata(&store2).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&store2, perms).unwrap();
+        std::fs::set_permissions(&spool2, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let r = http(
+            port,
+            &format!("/api?mode=history&name=delete&value={ID2}&del_files=1&output=json"),
+            None,
+        );
+        // Put the folder back before anything can fail on it: the
+        // daemon has to be able to stop, and the scratch has to be able
+        // to be cleaned up.
+        std::fs::set_permissions(&spool2, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // 0600, not `set_readonly(false)`: this store holds credentials
+        // and the daemon creates it 0600 for that reason - handing it
+        // back world-writable would undo the thing `history_write_locked`
+        // takes the trouble to set.
+        std::fs::set_permissions(&store2, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(
+            r.contains("\"status\":false"),
+            "a delete that could not remove the record must not report success: {r}"
+        );
+        assert!(
+            nzb3.exists(),
+            "the retry .nzb went before the removal was durable"
+        );
+        let h = http(port, "/api?mode=history&output=json", None);
+        assert!(
+            history_has(&h, ID2),
+            "a refused delete must leave the record where it found it: {h}"
+        );
+    })
+    .await
+    .unwrap();
+
+    let _log = d.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}

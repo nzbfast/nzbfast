@@ -42,6 +42,8 @@ fn server(host: &str, level: u32) -> ServerConfig {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     }
 }
 
@@ -219,7 +221,17 @@ async fn a_bad_fill_body_keeps_the_spent_evidence_that_opened_its_tier() {
         sh.register_inflight(&w, 0);
         let mut inflight: VecDeque<Work> = VecDeque::new();
         inflight.push_back(w);
-        requeue_or_fail(&sh, &tx, &cfg, ctx_a, &mut inflight, "rst", true).await;
+        requeue_or_fail(
+            &sh,
+            &tx,
+            &cfg,
+            ctx_a,
+            &mut inflight,
+            FailCode::Transport,
+            "rst",
+            true,
+        )
+        .await;
     }
     assert_eq!(
         sh.spent_mask(&id),

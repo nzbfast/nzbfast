@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "nzbfast"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1442,6 +1442,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha2",
+ "socket2",
  "tiny_http",
  "tokio",
  "tracing",
@@ -1500,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "nzbtray"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "rustls",
  "serde_json",

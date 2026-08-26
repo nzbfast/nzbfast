@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use crate::config::ServerConfig;
 use crate::nntp::Connection;
+use crate::par2::Par2Set;
 
 /// Availability of one article on one server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -790,6 +791,48 @@ impl ProbedSet {
 /// digests EVERY packet it keeps - which is what lets a caller place a
 /// member file's block grid on a number it did not have to estimate.
 pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Option<ProbedSet> {
+    let set = probe_par2_set(servers, ids).await?;
+    // Keyed by lowercased name because the NZB subject and the
+    // FileDesc packet are two records of one filename, written
+    // by different tools. Two set members whose names collide
+    // there are recorded as ambiguous rather than as either
+    // one: a length attached to the wrong file would misplace
+    // that file's block grid.
+    let mut described: std::collections::HashMap<String, Option<u64>> =
+        std::collections::HashMap::new();
+    for f in &set.files {
+        described
+            .entry(f.name.to_ascii_lowercase())
+            .and_modify(|v| {
+                if *v != Some(f.length) {
+                    *v = None;
+                }
+            })
+            .or_insert(Some(f.length));
+    }
+    Some(ProbedSet {
+        block_size: set.block_size,
+        described,
+    })
+}
+
+/// The probe underneath [`probe_recovery_set`], handing back the WHOLE
+/// parsed set rather than the two facts pre-flight wants from it.
+///
+/// §293's plan-side arm is the second caller and the reason this is its
+/// own door: donating a predecessor's file to a successor turns on the
+/// FileDesc packet's `md5`/`md5_16k`/`length`, which `ProbedSet`
+/// deliberately throws away. Every guarantee above is this function's -
+/// the per-server byte cap, the three-server allowance, the timeout, and
+/// the MD5 bar `Par2Set::parse` holds every kept packet to - so a caller
+/// that skips a download on what comes back is standing on the same
+/// digests the repair engine does.
+///
+/// `None` for every failure, and the zero-block-size rejection lives
+/// here rather than in the caller: a set that divides every consumer by
+/// zero is not one anybody posted, and answering `None` lets the loop
+/// try the NEXT server instead of settling for it.
+pub async fn probe_par2_set(servers: &[ServerConfig], ids: &[String]) -> Option<Par2Set> {
     let mut delivering = 0usize;
     for server in servers {
         if delivering >= MAX_PROBE_SERVERS {
@@ -852,28 +895,7 @@ pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Opt
             if set.block_size == 0 {
                 return None;
             }
-            // Keyed by lowercased name because the NZB subject and the
-            // FileDesc packet are two records of one filename, written
-            // by different tools. Two set members whose names collide
-            // there are recorded as ambiguous rather than as either
-            // one: a length attached to the wrong file would misplace
-            // that file's block grid.
-            let mut described: std::collections::HashMap<String, Option<u64>> =
-                std::collections::HashMap::new();
-            for f in &set.files {
-                described
-                    .entry(f.name.to_ascii_lowercase())
-                    .and_modify(|v| {
-                        if *v != Some(f.length) {
-                            *v = None;
-                        }
-                    })
-                    .or_insert(Some(f.length));
-            }
-            Some(ProbedSet {
-                block_size: set.block_size,
-                described,
-            })
+            Some(set)
         };
         if let Ok(Some(probed)) = tokio::time::timeout(PROBE_TIMEOUT, one).await {
             return Some(probed);

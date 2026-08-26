@@ -154,8 +154,15 @@ pub struct ComputeReport {
     pub(crate) md5: StageRate,
     /// The binding stage of the pipeline (decode once + verify once).
     pub verify: StageRate,
-    /// All-core verify Gbps - the compute ceiling.
+    /// All-core Gbps with full MD5+CRC32 verify - the compute ceiling
+    /// when `fast_verify` is off.
     pub ceiling_gbps: f64,
+    /// All-core Gbps with CRC32-only verify - the compute ceiling when
+    /// `fast_verify` is on, which has been the shipped default since
+    /// 21 Jul 2026 (TODO §10). Same measurement as `crc32.all_core`,
+    /// exposed as a ceiling so a caller outside this crate need not
+    /// reach `crc32` (`pub(crate)`) to see what fast verify buys.
+    pub fast_ceiling_gbps: f64,
 }
 
 /// Run the per-stage compute benchmark. `mb` = payload per stage.
@@ -216,6 +223,7 @@ pub fn compute(mb: usize) -> ComputeReport {
         md5,
         verify,
         ceiling_gbps: verify.all_core * 8.0,
+        fast_ceiling_gbps: crc32.all_core * 8.0,
     }
 }
 
@@ -1120,7 +1128,17 @@ pub async fn conn_ladder(
 #[derive(serde::Serialize)]
 pub struct SystemReport {
     pub network_gbps: f64,
+    /// The compute ceiling under the ACTIVE verify mode - this is what
+    /// bounds `expected_gbps` and draws the compute bar. Equals
+    /// `compute_fast_gbps` when fast verify is on (the shipped
+    /// default) and `compute_full_gbps` when it is off.
     pub compute_gbps: f64,
+    /// All-core ceiling with full MD5+CRC32 verify (fast verify off).
+    pub compute_full_gbps: f64,
+    /// All-core ceiling with CRC32-only verify (fast verify on). The
+    /// pair exists so a reader can see what fast verify actually buys
+    /// on their box, whichever mode is active (TODO §10).
+    pub compute_fast_gbps: f64,
     pub disk_gbps: f64,
     pub bottleneck: String,
     /// Expected sustained download speed = min of the three.
@@ -1152,9 +1170,24 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-pub fn verdict(network_gbps: f64, compute: &ComputeReport, disk_gbps: f64) -> SystemReport {
+/// `fast_verify` is the mode a real download would actually run under -
+/// pass the daemon's live `fast_verify` setting (or the shipped default,
+/// `true`, when there is no daemon to ask). It decides which of
+/// `compute.ceiling_gbps` / `compute.fast_ceiling_gbps` is the real
+/// compute ceiling; both are reported on `SystemReport` regardless, so
+/// the caller can show what the OTHER mode would buy.
+pub fn verdict(
+    network_gbps: f64,
+    compute: &ComputeReport,
+    disk_gbps: f64,
+    fast_verify: bool,
+) -> SystemReport {
     let n = network_gbps;
-    let c = compute.ceiling_gbps;
+    let c = if fast_verify {
+        compute.fast_ceiling_gbps
+    } else {
+        compute.ceiling_gbps
+    };
     let d = disk_gbps * 8.0;
     let expected = n.min(c).min(d);
     let (bottleneck, advice) = if expected == n {
@@ -1186,12 +1219,30 @@ pub fn verdict(network_gbps: f64, compute: &ComputeReport, disk_gbps: f64) -> Sy
     } else if expected == c {
         (
             "compute",
-            format!(
-                "CPU verification is your limit ({:.0} Gbps). Rare - only \
-                 on very fast links. A faster CPU, or a CRC32-only \
-                 fast-verify mode, would raise it.",
-                c
-            ),
+            // Rare - only on very fast links, which is why the advice
+            // spells out where the setting lives rather than assuming
+            // the reader has seen it. `fast_verify` has shipped, DEFAULT
+            // ON, since 21 Jul 2026 (TODO §10) - so the common case on
+            // this branch is ALREADY running the fast ceiling, and the
+            // old text ("a CRC32-only fast-verify mode would raise it")
+            // described a feature the reader already had turned on.
+            if fast_verify {
+                format!(
+                    "CPU verification is your limit ({:.0} Gbps), even with fast \
+                     verify (CRC32-only block checks) already on - full MD5 \
+                     verify would be {:.0} Gbps. Rare - only on very fast links. \
+                     Only a faster CPU raises it further.",
+                    c, compute.ceiling_gbps
+                )
+            } else {
+                format!(
+                    "CPU verification is your limit ({:.0} Gbps). Rare - only \
+                     on very fast links. Turn on \"Checking while downloading: \
+                     fast\" in Settings to raise it to {:.0} Gbps, or use a \
+                     faster CPU.",
+                    c, compute.fast_ceiling_gbps
+                )
+            },
         )
     } else {
         (
@@ -1206,6 +1257,8 @@ pub fn verdict(network_gbps: f64, compute: &ComputeReport, disk_gbps: f64) -> Sy
     SystemReport {
         network_gbps: n,
         compute_gbps: c,
+        compute_full_gbps: compute.ceiling_gbps,
+        compute_fast_gbps: compute.fast_ceiling_gbps,
         disk_gbps: d,
         bottleneck: bottleneck.to_string(),
         expected_gbps: expected,
@@ -1558,6 +1611,12 @@ mod tests {
         // SIMD decode must beat MD5 (it does in reality by ~5×).
         assert!(r.decode_simd.all_core > r.md5.all_core);
         assert!(r.ceiling_gbps > 0.0);
+        assert!(r.fast_ceiling_gbps > 0.0);
+        // CRC32-only must beat MD5+CRC32 combined (it does in reality by
+        // roughly the same ~5× MD5 is behind CRC32 alone) - if this ever
+        // inverts, fast_verify would be advertised as a speed-up that
+        // slows the box down.
+        assert!(r.fast_ceiling_gbps > r.ceiling_gbps);
     }
 
     #[test]
@@ -1585,26 +1644,88 @@ mod tests {
             one_core: 1.0,
             all_core: 8.0,
         };
+        // Two distinct ceilings, exactly as the real `compute()` reports:
+        // full MD5+CRC verify is the SLOWER one, CRC32-only fast verify
+        // the faster one - `fast_ceiling_gbps` keeps the value the
+        // pre-existing assertions below already expected (40.0), so the
+        // fixture change is additive rather than a silent re-derivation.
         let c = ComputeReport {
             cores: 8,
             decode_simd: flat,
             crc32: flat,
             md5: flat,
             verify: flat,
-            ceiling_gbps: 40.0,
+            ceiling_gbps: 20.0,
+            fast_ceiling_gbps: 40.0,
         };
         // Network tiny → network is the bottleneck.
-        let v = verdict(1.0, &c, 5.0);
+        let v = verdict(1.0, &c, 5.0, true);
         assert_eq!(v.bottleneck, "network");
         assert!((v.expected_gbps - 1.0).abs() < 1e-9);
         // Disk tiny (0.05 GB/s = 0.4 Gbps) → disk bottleneck.
-        let v = verdict(50.0, &c, 0.05);
+        let v = verdict(50.0, &c, 0.05, true);
         assert_eq!(v.bottleneck, "disk");
         // ...and compute when it is genuinely the floor, which the measured
         // version could never pin because it did not know its own value.
-        let v = verdict(50.0, &c, 100.0);
+        // fast_verify=true picks fast_ceiling_gbps (40.0), not ceiling_gbps.
+        let v = verdict(50.0, &c, 100.0, true);
         assert_eq!(v.bottleneck, "compute");
         assert!((v.expected_gbps - 40.0).abs() < 1e-9);
+        assert!((v.compute_gbps - 40.0).abs() < 1e-9);
+        assert!((v.compute_fast_gbps - 40.0).abs() < 1e-9);
+        assert!((v.compute_full_gbps - 20.0).abs() < 1e-9);
+        // fast_verify=false picks ceiling_gbps (20.0) instead.
+        let v = verdict(50.0, &c, 100.0, false);
+        assert_eq!(v.bottleneck, "compute");
+        assert!((v.expected_gbps - 20.0).abs() < 1e-9);
+        assert!((v.compute_gbps - 20.0).abs() < 1e-9);
+    }
+
+    /// The compute advice names the real setting and its actual state,
+    /// instead of describing fast verify as hypothetical - TODO §10's
+    /// last unticked box. Both directions: on (the shipped default),
+    /// the advice must say so and must NOT claim a faster mode is
+    /// available to turn on; off, it must name where to turn it on.
+    #[test]
+    fn compute_advice_matches_the_fast_verify_state() {
+        let flat = StageRate {
+            one_core: 1.0,
+            all_core: 8.0,
+        };
+        let c = ComputeReport {
+            cores: 8,
+            decode_simd: flat,
+            crc32: flat,
+            md5: flat,
+            verify: flat,
+            ceiling_gbps: 20.0,
+            fast_ceiling_gbps: 40.0,
+        };
+        let on = verdict(50.0, &c, 100.0, true);
+        assert_eq!(on.bottleneck, "compute");
+        assert!(
+            on.advice.contains("already on"),
+            "advice must say fast verify is already on: {}",
+            on.advice
+        );
+        assert!(
+            !on.advice.contains("would raise it"),
+            "the on-state advice must not offer fast verify as an unactivated fix: {}",
+            on.advice
+        );
+
+        let off = verdict(50.0, &c, 100.0, false);
+        assert_eq!(off.bottleneck, "compute");
+        assert!(
+            off.advice.contains("Checking while downloading"),
+            "advice must name the setting by its dashboard label: {}",
+            off.advice
+        );
+        assert!(
+            off.advice.contains(&format!("{:.0}", c.fast_ceiling_gbps)),
+            "off-state advice must quote the fast-verify ceiling it promises: {}",
+            off.advice
+        );
     }
 
     /// Regression (East Coast bench box, 5 Gbps): a fixed article supply drained in

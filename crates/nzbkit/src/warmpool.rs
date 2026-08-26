@@ -17,11 +17,32 @@
 //!
 //! Design notes:
 //!
-//! - **Only fully-drained connections are parked.** A connection is
-//!   reusable exactly when it has no unread pipelined responses on the
-//!   socket. The pool parks from its two drained exits and nowhere else;
-//!   every other exit (abort, pipeline shed, promote shed, protocol error,
-//!   read stall) deliberately abandons in-flight responses and MUST close.
+//! - **Only fully-drained connections are parked, and every drained one
+//!   is.** A connection is reusable exactly when it has no unread
+//!   pipelined responses on the socket, so drainedness is the whole
+//!   test: the pipeline shed, the promote shed, a protocol error and a
+//!   read stall all deliberately abandon in-flight responses and MUST
+//!   close, while a worker sitting at the reuse point with an empty
+//!   pipeline parks however its run ended.
+//!
+//!   The second half of that used to read "aborts close too", and the
+//!   25-26 Aug 2026 live-daemon incident is what it cost. The abort flag
+//!   is not only the user's stop button - it is also the defer
+//!   watchdog's teeth and the job-switch seam, and the workers those
+//!   find on a server with nothing fetchable are idle by definition. So
+//!   every defer quit 9-13 authenticated sessions to one provider and
+//!   the next job redialled them seconds later; against a per-account
+//!   40-session cap whose server holds torn-down sessions for minutes,
+//!   the storm kept its own wall up ("502 connection limit (40)
+//!   reached", for hours, across a restart). Nothing was gained by it
+//!   either: a job that ENDS parks and a graceful pause parks, so the
+//!   old rule only meant that finishing a job and stopping one left the
+//!   account in different states.
+//!
+//!   Wanting the account back for real is a different operation and has
+//!   its own switch: going offline and shutting down call
+//!   [`WarmPool::set_accepting`]`(false)` and [`WarmPool::clear`], and
+//!   `give` closes whatever arrives after that. No exit has to guess.
 //!
 //! - **Validated on the way out, not on the way in.** `take` sends a DATE
 //!   and requires the response before handing the connection over, so a
@@ -59,7 +80,17 @@ use crate::nntp::Connection;
 /// NNTP session somewhere between two and ten minutes, and RFC 3977 lets
 /// a server close whenever it likes, so this stays well inside the
 /// shortest timeout we have seen.
-const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
+///
+/// `pub(crate)` because the pool's IDLE WORKERS probe on the same
+/// cadence (`pool::session::idle_turn`): a worker whose server has
+/// nothing fetchable holds its connection in a 25 ms look-again loop and
+/// never touches the socket, which is the same silence this tick exists
+/// to break for parked connections. Measured live, 25 Aug 2026: a
+/// backbone with 100% of the job's articles missing FIN'd all nine of a
+/// job's idle sessions and the sockets sat in CLOSE_WAIT indefinitely,
+/// reported as nine live connections. One shared constant keeps the two
+/// reapers from drifting apart.
+pub(crate) const KEEPALIVE_EVERY: Duration = Duration::from_secs(60);
 
 /// A parked connection older than this is closed rather than kept alive:
 /// it is occupying one of the account's connection slots that the user's
@@ -90,6 +121,23 @@ pub const DEFAULT_IDLE_RELEASE: Duration = Duration::from_secs(300);
 /// generous connection allowance, it is one of two or three IP slots for
 /// the whole account, so the user's other machines are locked out
 /// entirely rather than merely slowed.
+///
+/// A provider that caps concurrent SESSIONS is a different constraint
+/// and must NOT be folded in here, however alike the two read. Asked
+/// directly after the 25-26 Aug 2026 incident, whose provider capped
+/// sessions at 40: against a session cap, holding a warm session and
+/// churning one cost the same slot, and only one of them provokes the
+/// cap. That provider's server held every torn-down session for minutes
+/// before reaping it, so QUITTING freed nothing on the timescale that
+/// mattered while redialling walked straight into the wall the previous
+/// teardown was still occupying. Shortening the release there would buy
+/// no slot back and pay for it in dial storms - the opposite of what
+/// this constant does for an IP cap, where one held socket occupies
+/// exactly as much of the cap as sixty and letting go really does hand
+/// the slot over. Session-capped providers keep
+/// [`DEFAULT_IDLE_RELEASE`], and the fix for them is upstream of this
+/// module: not tearing the fleet down at the seam in the first place
+/// (`pool::session`'s abort exit).
 pub const CAPPED_IDLE_RELEASE: Duration = Duration::from_secs(120);
 
 /// Most connections the daemon parks per server.
@@ -119,7 +167,11 @@ pub const MAX_PER_SERVER: usize = 64;
 /// connect, which is what a dead session needs anyway. But it must stay
 /// well clear of a merely slow provider, which is why this is seconds and
 /// not the 40-160 ms a warm validate actually measures.
-const VALIDATE_TIMEOUT: Duration = Duration::from_secs(8);
+///
+/// `pub(crate)` for the same reason as [`KEEPALIVE_EVERY`]: the idle
+/// workers' probe faces the identical black-holed-flow shape and must
+/// give up on the same bound.
+pub(crate) const VALIDATE_TIMEOUT: Duration = Duration::from_secs(8);
 
 struct Parked {
     conn: Connection,
@@ -245,6 +297,16 @@ fn key(s: &ServerConfig) -> String {
     s.password.hash(&mut h);
     s.socks5.hash(&mut h);
     s.bind_ip.hash(&mut h);
+    // §291: the preference decides which of the host's addresses the
+    // socket is actually connected to, so a parked IPv4 session must not
+    // be handed out after the server is flipped to prefer IPv6 - same
+    // reasoning as `bind_ip` above.
+    s.address_family.hash(&mut h);
+    // §291: and the TLS name, because a parked session was VERIFIED
+    // against whatever that was when it was dialled. Handing it out
+    // after the name changed would serve a connection whose peer
+    // identity nobody has checked against the name now configured.
+    s.tls_hostname.hash(&mut h);
     format!("{}:{}:{}:{:016x}", s.host, s.port, s.tls, h.finish())
 }
 
@@ -681,6 +743,38 @@ mod tests {
         MockServer::start(Default::default(), Chaos::default()).await
     }
 
+    /// §291: a parked session's identity includes the name it was
+    /// VERIFIED against, so flipping `tls_hostname` cannot be answered
+    /// out of the pool with a socket whose peer nobody has checked
+    /// against the name now configured.
+    ///
+    /// Pinned rather than left to the comment at `key`, because this is
+    /// the failure mode that would never look like a bug: the wrong
+    /// session works perfectly, and the certificate check the user just
+    /// asked for silently never happened.
+    #[test]
+    fn a_parked_session_is_not_reused_across_a_change_of_tls_name() {
+        let base = bare_config("127.0.0.1:563".parse().expect("addr"));
+        let with = ServerConfig {
+            tls_hostname: Some("news.cert.example".into()),
+            ..base.clone()
+        };
+        let other = ServerConfig {
+            tls_hostname: Some("news.other.example".into()),
+            ..base.clone()
+        };
+        assert_ne!(key(&base), key(&with), "setting the name must re-key");
+        assert_ne!(key(&with), key(&other), "changing it must re-key");
+        assert_eq!(
+            key(&base),
+            key(&ServerConfig {
+                tls_hostname: None,
+                ..base.clone()
+            }),
+            "and nothing else about it may move"
+        );
+    }
+
     /// Points at a bare loopback listener, for the tests that need a peer
     /// they can kill, hold mute or answer on cue - none of which a
     /// MockServer will do.
@@ -706,6 +800,8 @@ mod tests {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         }
     }
 

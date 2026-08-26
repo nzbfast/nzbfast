@@ -769,23 +769,111 @@ pub(crate) fn tag_text<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 pub(crate) fn unescape(s: &str) -> String {
-    // &amp; MUST be decoded LAST: doing it first turns `&amp;lt;` (an escaped
-    // literal "&lt;") into `&lt;`, which the later pass then wrongly decodes
-    // to "<", corrupting the title/link (and its dedupe identity).
-    s.replace("<![CDATA[", "")
-        .replace("]]>", "")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    // ONE LEFT-TO-RIGHT PASS, which is what makes `&amp;` safe rather
+    // than an ordering rule to remember. The chain of `replace` calls
+    // this used to be had to decode `&amp;` LAST - doing it first turns
+    // `&amp;lt;` (an escaped literal "&lt;") into `&lt;`, which the next
+    // pass then wrongly decodes to "<". A single scan never revisits
+    // what it has already emitted, so the hazard cannot arise.
+    //
+    // NUMERIC CHARACTER REFERENCES are decoded too, decimal and hex.
+    // They are ordinary, valid XML that this parser used to leave
+    // literal - and in a feed's `<link>` that is not cosmetic: `&#35;`
+    // stayed as the four characters `&#35;`, so an indexer URL carrying
+    // an escaped `#` was passed on with a fragment marker the server
+    // never sees, silently truncating the query.
+    let stripped = s.replace("<![CDATA[", "").replace("]]>", "");
+    let mut out = String::with_capacity(stripped.len());
+    let mut rest = stripped.as_str();
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        // Bounded: an unterminated `&` must not scan to the end of a
+        // megabyte of feed, and anything that reaches whitespace or a
+        // second `&` was never an entity to begin with.
+        let semi = rest
+            .char_indices()
+            .skip(1)
+            .take(12)
+            .find(|(_, c)| *c == ';' || *c == '&' || c.is_whitespace())
+            .filter(|(_, c)| *c == ';')
+            .map(|(i, _)| i);
+        let decoded = semi.and_then(|semi| match &rest[1..semi] {
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "amp" => Some('&'),
+            n => n.strip_prefix('#').and_then(|n| {
+                match n.strip_prefix(['x', 'X']) {
+                    Some(h) => u32::from_str_radix(h, 16).ok(),
+                    None => n.parse::<u32>().ok(),
+                }
+                .and_then(char::from_u32)
+            }),
+        });
+        match (decoded, semi) {
+            (Some(c), Some(semi)) => {
+                out.push(c);
+                rest = &rest[semi + 1..];
+            }
+            // Not an entity: the `&` is a literal, exactly as before.
+            _ => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
+/// The value of attribute `name` in a start tag, to the XML attribute
+/// grammar rather than to one spelling of it.
+///
+/// `format!("{name}=\"")` matched exactly one shape and got two things
+/// wrong, both of which appear in valid feeds every day. SINGLE QUOTES
+/// are as legal as double (`<enclosure url='...'/>`), and so is
+/// whitespace either side of the `=`; a feed written that way lost the
+/// attribute entirely, which for `url` means the row is dropped and for
+/// a Newznab `<error code=.. description=..>` means a real quota
+/// refusal reads as an empty result set, so the backoff never engages.
+/// And the match was UNANCHORED, so asking for `url` found the tail of
+/// `xmlUrl=` or `thumbnailUrl=` and returned that value instead - the
+/// wrong link, silently.
 pub(crate) fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let pat = format!("{name}=\"");
-    let start = tag.find(&pat)? + pat.len();
-    let end = tag[start..].find('"')? + start;
-    Some(&tag[start..end])
+    let b = tag.as_bytes();
+    let mut from = 0usize;
+    while let Some(hit) = tag[from..].find(name) {
+        let at = from + hit;
+        from = at + name.len();
+        // A whole attribute name: what precedes it is the tag opener or
+        // separating whitespace, never the tail of a longer name.
+        if at > 0 && !b[at - 1].is_ascii_whitespace() && b[at - 1] != b'<' {
+            continue;
+        }
+        let mut j = from;
+        while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        if b.get(j) != Some(&b'=') {
+            continue;
+        }
+        j += 1;
+        while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+            j += 1;
+        }
+        let Some(&q) = b.get(j) else { continue };
+        if q != b'"' && q != b'\'' {
+            continue;
+        }
+        j += 1;
+        let Some(end) = tag[j..].find(q as char) else {
+            continue;
+        };
+        return Some(&tag[j..j + end]);
+    }
+    None
 }
 
 /// A body that came back HTTP 200 and is not a feed at all.
@@ -1210,6 +1298,78 @@ mod tests {
         let j = rules_judge(&["Accept(colour=blue): *x*".to_string()], &item("x", 0));
         assert!(j.accept);
         assert_eq!(j.opts, RuleOpts::default());
+    }
+
+    /// Attributes are read to the XML GRAMMAR, not to one spelling of
+    /// it, and the name has to be a whole name.
+    ///
+    /// Single quotes and whitespace around `=` are as valid as the
+    /// double-quoted no-space form, and a feed written either way used
+    /// to lose the attribute outright - which for `url` drops the row
+    /// and for a Newznab `<error code=.. description=..>` turns a real
+    /// quota refusal into an empty result set, so the backoff never
+    /// engages. The unanchored match was the quieter half: asking for
+    /// `url` found the tail of `xmlUrl=` and returned the WRONG link
+    /// with nothing to say so.
+    #[test]
+    fn attributes_are_read_to_the_xml_grammar() {
+        assert_eq!(attr(r#"<a url="x">"#, "url"), Some("x"));
+        assert_eq!(attr(r#"<a url='x'>"#, "url"), Some("x"), "single quotes");
+        assert_eq!(attr(r#"<a url = "x">"#, "url"), Some("x"), "space around =");
+        assert_eq!(attr("<a url	=	'x'>", "url"), Some("x"), "tabs around =");
+        // A value containing the OTHER quote character survives.
+        assert_eq!(attr(r#"<a url='a"b'>"#, "url"), Some(r#"a"b"#));
+        assert_eq!(attr(r#"<a url="a'b">"#, "url"), Some("a'b"));
+        // Anchoring: a longer attribute whose tail spells the name is
+        // not this attribute.
+        assert_eq!(
+            attr(r#"<a xmlUrl="wrong" url="right">"#, "url"),
+            Some("right")
+        );
+        assert_eq!(attr(r#"<a thumbnailUrl="wrong">"#, "url"), None);
+        // Absent, and malformed, stay None rather than reading past.
+        assert_eq!(attr(r#"<a href="x">"#, "url"), None);
+        assert_eq!(attr("<a url=>", "url"), None);
+        assert_eq!(attr("<a url=x>", "url"), None, "unquoted is not XML");
+        assert_eq!(attr(r#"<a url="unterminated>"#, "url"), None);
+    }
+
+    /// Entities are decoded in one left-to-right pass, numeric ones
+    /// included.
+    ///
+    /// A decimal or hex character reference is ordinary valid XML that
+    /// this parser used to leave literal - and inside a `<link>` that is
+    /// not cosmetic: `&#35;` stayed as four characters, so an indexer
+    /// URL carrying an escaped `#` was handed on with a fragment marker
+    /// the server never sees, truncating the query. The single pass is
+    /// also what keeps the old ordering hazard from coming back:
+    /// `&amp;lt;` must stay `&lt;`, never become `<`.
+    #[test]
+    fn entities_including_numeric_references_are_decoded_once() {
+        assert_eq!(unescape("a &amp; b"), "a & b");
+        assert_eq!(unescape("&lt;i&gt;"), "<i>");
+        assert_eq!(unescape("&quot;q&quot; &apos;a&apos;"), "\"q\" 'a'");
+        // The ordering hazard, which a single pass cannot reintroduce.
+        assert_eq!(unescape("&amp;lt;"), "&lt;");
+        // Numeric, decimal and hex, upper and lower x.
+        assert_eq!(unescape("a&#35;b"), "a#b");
+        assert_eq!(unescape("a&#x23;b"), "a#b");
+        assert_eq!(unescape("a&#X23;b"), "a#b");
+        assert_eq!(unescape("&#233;t&#233;"), "été");
+        assert_eq!(unescape("&#x1F600;"), "\u{1F600}");
+        // Not entities: a bare ampersand, an unterminated one, a
+        // nonsense name, an out-of-range code point. All stay literal.
+        assert_eq!(unescape("a & b"), "a & b");
+        assert_eq!(unescape("a &amp b"), "a &amp b");
+        assert_eq!(unescape("&nosuch;"), "&nosuch;");
+        assert_eq!(unescape("&#xFFFFFFFF;"), "&#xFFFFFFFF;");
+        assert_eq!(unescape("&#;"), "&#;");
+        // ...and an unterminated `&` at the very end does not hang or
+        // eat the tail.
+        assert_eq!(unescape("tail &"), "tail &");
+        assert_eq!(unescape("&#3"), "&#3");
+        // CDATA wrappers still come off.
+        assert_eq!(unescape("<![CDATA[a &amp; b]]>"), "a & b");
     }
 
     #[test]

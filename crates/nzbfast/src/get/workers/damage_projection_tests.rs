@@ -97,3 +97,66 @@ fn live_bad_blocks_count_toward_the_projection() {
     assert!(project_damage(1_000, 1_000, 8, 0, 100).is_none());
     assert!(project_damage(1_000, 1_000, 8, 192, 100).is_some());
 }
+
+/// A post that declares NO recovery is one whose volumes subject-line
+/// classification could not see (obfuscated names, the in-stream magic
+/// sniff), not one where any damage is fatal. Without the floor the
+/// comparison is `projected >= 0`, which is always true, so the warning
+/// fired on every such job the moment the sample gates passed.
+#[test]
+fn a_post_declaring_no_recovery_never_projects() {
+    assert!(project_damage(1_000, 1_000, 8, 0, 0).is_none());
+    assert!(project_damage(17_130, 17_130, 540, 192, 0).is_none());
+}
+
+/// The `.vol-NN.par2` form numbers a volume without SIZING it, so the
+/// name declares no count. The prefetch ladder floors that at 1 to keep
+/// escalating; this projection must NOT reuse that floor, or a set of
+/// twelve full volumes reads as twelve blocks and a trivially
+/// repairable post clears the 2x margin.
+#[test]
+fn undeclared_volumes_are_sized_from_bytes_not_floored_at_one() {
+    const BLOCK: u64 = 500_000;
+    let n = Arc::new(
+        Nzb::parse(
+            br#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"m.part1.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="700000" number="1">pay@t</segment></segments>
+ </file>
+ <file subject='"m.vol-01.par2" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="21000000" number="1">v1@t</segment></segments>
+ </file>
+ <file subject='"m.vol-02.par2" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="21000000" number="1">v2@t</segment></segments>
+ </file>
+</nzb>"#,
+        )
+        .unwrap(),
+    );
+    let vols = declared_volumes(&n);
+    assert_eq!(vols.len(), 2, "both recovery volumes, payload excluded");
+    assert!(
+        vols.iter().all(|&(c, _)| c.is_none()),
+        "the .vol-NN name declares no count: {vols:?}"
+    );
+    // What the ladder would have handed the projection, against what
+    // the volumes actually hold.
+    let floored: usize = super::recovery::spec_ladder(&n)
+        .iter()
+        .map(|&(_, c, _)| c)
+        .sum();
+    let sized: usize = vols
+        .iter()
+        .map(|&(c, b)| c.unwrap_or_else(|| nzbkit::par2::est_recovery_blocks(b, BLOCK).max(1)))
+        .sum();
+    assert_eq!(floored, 2);
+    assert!(sized >= 60, "two 21 MB volumes hold far more: {sized}");
+    // 30 blocks of damage over a full run: doomed against the floor,
+    // comfortably repairable against the real capacity.
+    assert!(project_damage(1_000, 1_000, 30, 0, floored).is_some());
+    assert!(project_damage(1_000, 1_000, 30, 0, sized).is_none());
+}

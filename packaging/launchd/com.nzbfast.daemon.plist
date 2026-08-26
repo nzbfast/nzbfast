@@ -23,7 +23,20 @@
         <string>REPLACE_HOME/Downloads/nzbfast</string>
         <string>--watch</string>
         <string>REPLACE_HOME/Downloads/nzbfast/watch</string>
+        <!--
+          ABSOLUTE, because the flag defaults to a RELATIVE `index.db`
+          and launchd gives an agent no working directory of its own
+          choosing - so the built-in indexer's database landed wherever
+          launchd happened to start us, or could not be created at all.
+          Every other path this agent passes is already absolute; the
+          index was the one that was not.
+        -->
+        <string>--index-db</string>
+        <string>REPLACE_HOME/.config/nzbfast/index.db</string>
     </array>
+    <!-- Belt for anything else that resolves a relative path. -->
+    <key>WorkingDirectory</key>
+    <string>REPLACE_HOME/.config/nzbfast</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

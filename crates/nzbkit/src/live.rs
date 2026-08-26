@@ -978,7 +978,18 @@ impl LiveVerifier {
             return;
         }
         let data = &data[..len];
-        let span = offset as usize..offset as usize + len;
+        // FILE COORDINATES ARE u64, EVERY ONE OF THEM. This whole block
+        // used to compute in `usize`, which is 32 bits on the armv7 beta
+        // target: an article at 5 GiB became a span at 1 GiB, and the
+        // blocks it claimed were hashed against the wrong region of the
+        // file entirely. Disk writes go through `pwrite` at u64 offsets,
+        // so the real bytes stayed where they were - a high block could
+        // be marked Ok from a region 4 GiB below it, `settle` would then
+        // see `damage == 0`, and repair would never run over bytes that
+        // were never verified. Only the offsets INTO `data` narrow to
+        // `usize`, and those are bounded by one article.
+        let span = offset..offset + len as u64;
+        let bs64 = bs as u64;
         // Instrument-first census, no behaviour: could this article have
         // been claimed on the CRC32 its decoder already verified? See the
         // reuse-geometry section note above [`LiveVerifier`].
@@ -1003,23 +1014,25 @@ impl LiveVerifier {
             && (matches!(src, Src::Fresh | Src::Rehash)
                 || (matches!(src, Src::Lean)
                     && self.lean.load(std::sync::atomic::Ordering::Relaxed)));
-        let first_block = span.start / bs;
-        let last_block = (span.end - 1) / bs;
+        let first_block = (span.start / bs64) as usize;
+        let last_block = ((span.end - 1) / bs64) as usize;
         let mut full: Vec<usize> = Vec::new(); // hash straight from `data`
         let mut ready: Vec<(usize, Vec<u8>)> = Vec::new(); // completed byte partials
-        let mut crc_jobs: Vec<(usize, usize, usize)> = Vec::new(); // (bi, os, oe)
+        let mut crc_jobs: Vec<(usize, u64, u64)> = Vec::new(); // (bi, os, oe)
         for bi in first_block..=last_block.min(file.blocks.len() - 1) {
             if s.blocks[bi] != BlockState::Pending {
                 continue;
             }
-            let bstart = bi * bs;
+            let bstart = bi as u64 * bs64;
             let blen = block_len(file.length, bs, bi);
-            let bend = bstart + blen;
+            let bend = bstart + blen as u64;
             if span.start <= bstart && bend <= span.end {
                 full.push(bi);
                 continue;
             }
-            // Boundary block: track the overlapping fragment.
+            // Boundary block: track the overlapping fragment. Still file
+            // coordinates; every use below subtracts a base first, and
+            // the difference is bounded by one block or one article.
             let os = span.start.max(bstart);
             let oe = span.end.min(bend);
             match s.partials.get_mut(&bi) {
@@ -1041,7 +1054,10 @@ impl LiveVerifier {
                 Some(PartialBuf::Bytes(p)) => {
                     // Byte-mode block (created under full-MD5 or by a disk
                     // span): keep filling bytes whatever this span's mode.
-                    p.fill(os - bstart, &data[os - span.start..oe - span.start]);
+                    p.fill(
+                        (os - bstart) as usize,
+                        &data[(os - span.start) as usize..(oe - span.start) as usize],
+                    );
                     if p.complete() {
                         let Some(PartialBuf::Bytes(p)) = s.partials.remove(&bi) else {
                             unreachable!()
@@ -1071,7 +1087,10 @@ impl LiveVerifier {
                     self.partials_peak.fetch_max(prev + blen, Ordering::Relaxed);
                     s.partial_bytes += blen;
                     let mut p = Partial::new(blen);
-                    p.fill(os - bstart, &data[os - span.start..oe - span.start]);
+                    p.fill(
+                        (os - bstart) as usize,
+                        &data[(os - span.start) as usize..(oe - span.start) as usize],
+                    );
                     // A single span can't complete a boundary block it
                     // just created (some other article owns the rest).
                     s.partials.insert(bi, PartialBuf::Bytes(p));
@@ -1101,9 +1120,9 @@ impl LiveVerifier {
         let file = &set.files[fi];
         let mut results: Vec<(usize, bool)> = Vec::with_capacity(full.len() + ready.len());
         for bi in full {
-            let bstart = bi * bs;
+            let bstart = bi as u64 * bs64;
             let blen = block_len(file.length, bs, bi);
-            let rel = bstart - span.start;
+            let rel = (bstart - span.start) as usize;
             let ok = check(&file.blocks[bi], bs, &data[rel..rel + blen]);
             results.push((bi, ok));
         }
@@ -1120,10 +1139,11 @@ impl LiveVerifier {
         }
         // B1: fragment CRCs, also outside the lock (hardware CRC is fast,
         // but a block-sized fragment is still real work at 2 cores).
-        let crc_frags: Vec<(usize, usize, usize, u32)> = crc_jobs
+        let crc_frags: Vec<(usize, u64, u64, u32)> = crc_jobs
             .into_iter()
             .map(|(bi, os, oe)| {
-                let crc = crc32fast::hash(&data[os - span.start..oe - span.start]);
+                let crc =
+                    crc32fast::hash(&data[(os - span.start) as usize..(oe - span.start) as usize]);
                 (bi, os, oe, crc)
             })
             .collect();
@@ -1165,8 +1185,8 @@ impl LiveVerifier {
                 let Some(PartialBuf::Crc(parts)) = s.partials.get_mut(&bi) else {
                     continue; // vanished (mixed-trust abandon) - stays Pending
                 };
-                let bstart = bi * bs;
-                if !parts.insert(os - bstart, oe - bstart, crc) {
+                let bstart = bi as u64 * bs64;
+                if !parts.insert((os - bstart) as usize, (oe - bstart) as usize, crc) {
                     // Overlapping re-feed - can't compose CRCs losslessly.
                     s.partials.remove(&bi);
                     self.partials_spilled.fetch_add(1, Ordering::Relaxed);
@@ -1258,16 +1278,16 @@ impl LiveVerifier {
         &self,
         src: Src,
         raw_len: usize,
-        span: &std::ops::Range<usize>,
+        span: &std::ops::Range<u64>,
         bs: usize,
         file_length: u64,
     ) {
-        let len = span.end - span.start;
+        let len = (span.end - span.start) as usize;
         let qualifies = src == Src::Fresh
             && self.fast.load(std::sync::atomic::Ordering::Relaxed)
             && len == raw_len
-            && span.start.is_multiple_of(bs)
-            && len == block_len(file_length, bs, span.start / bs);
+            && span.start.is_multiple_of(bs as u64)
+            && len == block_len(file_length, bs, (span.start / bs as u64) as usize);
         self.geom.note(len, qualifies);
         CRC_REUSE_GEOMETRY.note(len, qualifies);
     }
@@ -1416,15 +1436,17 @@ impl LiveVerifier {
                 let ok = if bs <= READBACK_CHUNK {
                     let got = match (&src, &f) {
                         (ReadAt::Path(_), Some(f)) => {
-                            crate::disk::read_exact_at(f, &mut buf[..blen], (bi * bs) as u64)
+                            crate::disk::read_exact_at(f, &mut buf[..blen], bi as u64 * bs as u64)
                                 .is_ok()
                         }
-                        (ReadAt::Reader(r), _) => r((bi * bs) as u64, &mut buf[..blen]).is_ok(),
+                        (ReadAt::Reader(r), _) => {
+                            r(bi as u64 * bs as u64, &mut buf[..blen]).is_ok()
+                        }
                         _ => false,
                     };
                     got && check_block(&file.blocks[bi], bs, &buf[..blen])
                 } else {
-                    read_block_chunked(&src, f.as_ref(), (bi * bs) as u64, blen, &mut buf)
+                    read_block_chunked(&src, f.as_ref(), bi as u64 * bs as u64, blen, &mut buf)
                         .is_some_and(|check| check.finish(&file.blocks[bi], bs))
                 };
                 s.blocks[bi] = if ok { BlockState::Ok } else { BlockState::Bad };
@@ -1487,7 +1509,10 @@ impl SlotState {
 
     fn head_want(&self) -> usize {
         if self.file_size > 0 {
-            (self.file_size as usize).min(HEAD_LEN)
+            // Clamp in u64 BEFORE narrowing: `self.file_size as usize`
+            // truncates a >4 GiB file on a 32-bit target, so a 4 GiB + 10
+            // byte file asked for a 10-byte head.
+            self.file_size.min(HEAD_LEN as u64) as usize
         } else {
             HEAD_LEN
         }
@@ -1495,7 +1520,10 @@ impl SlotState {
 
     fn capture_head(&mut self, offset: u64, data: &[u8]) {
         let want = self.head_want();
-        if want == 0 || offset as usize >= want {
+        // In u64: `offset as usize` wrapped on a 32-bit target, so an
+        // article at 4 GiB + 16 read as offset 16 and its bytes were
+        // captured as the head of the file.
+        if want == 0 || offset >= want as u64 {
             return;
         }
         let head = self.head.get_or_insert_with(|| Partial::new(want));
@@ -1507,6 +1535,8 @@ impl SlotState {
         if head.complete() {
             return;
         }
+        // Proven < `want` (a few KiB) by the guard above, so this narrows
+        // on every target.
         let off = offset as usize;
         let end = (off + data.len()).min(want);
         if end > off {
@@ -1727,8 +1757,14 @@ pub fn bench_match(
 
 /// Real (unpadded) length of block `bi` of a `length`-byte file.
 fn block_len(length: u64, bs: usize, bi: usize) -> usize {
-    let start = (bi * bs) as u64;
-    ((length - start.min(length)) as usize).min(bs)
+    // Multiply in u64, and CLAMP before narrowing. Both halves were
+    // 32-bit wraps: `(bi * bs) as u64` cast after a `usize` multiply, so
+    // every block past 4 GiB reported the start of a block 4 GiB lower;
+    // and `(length - start) as usize` truncated a >4 GiB remainder
+    // BEFORE `.min(bs)`, so a mid-file block of a huge file could report
+    // a short length. See the file-coordinate note in `add_span`.
+    let start = bi as u64 * bs as u64;
+    (length - start.min(length)).min(bs as u64) as usize
 }
 
 /// Hash `bytes` (the real bytes of one block, zero-padded to `block_size`
@@ -1885,7 +1921,12 @@ fn src_md5(src: &ReadAt<'_>, expect_len: u64) -> io::Result<[u8; 16]> {
             let mut buf = vec![0u8; 1 << 20];
             let mut off = 0u64;
             while off < expect_len {
-                let n = ((expect_len - off) as usize).min(buf.len());
+                // Clamp in u64 before narrowing: on a 32-bit target
+                // `(expect_len - off) as usize` truncates, and a
+                // remainder that is an exact multiple of 4 GiB narrows to
+                // ZERO - a read of nothing, no progress, and this loop
+                // never ends.
+                let n = (expect_len - off).min(buf.len() as u64) as usize;
                 r(off, &mut buf[..n])?;
                 md5.update(&buf[..n]);
                 off += n as u64;
@@ -2074,6 +2115,119 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A single-file set whose file is DECLARED huge without any of its
+    /// bytes existing: real IFSC entries for every block, but only the
+    /// one named in `real` carries the checksums of `data` (the rest are
+    /// zeroed and never checked). The only way to exercise a PAR2 offset
+    /// past `u32::MAX` in a unit test - `par2_meta` hashes the file it is
+    /// given, and a 4 GiB fixture is not a unit test.
+    fn par2_meta_declared(
+        set_id: [u8; 16],
+        block_size: usize,
+        name: &str,
+        length: u64,
+        real: usize,
+        data: &[u8],
+    ) -> Vec<u8> {
+        use crate::par2::{TYPE_FILEDESC, TYPE_IFSC, TYPE_MAIN};
+        let mut main = Vec::new();
+        main.extend_from_slice(&(block_size as u64).to_le_bytes());
+        main.extend_from_slice(&1u32.to_le_bytes());
+        main.extend_from_slice(&fid(0));
+        let mut out = pkt(set_id, TYPE_MAIN, &main);
+
+        let mut desc = Vec::new();
+        desc.extend_from_slice(&fid(0));
+        desc.extend_from_slice(&[0u8; 16]); // whole-file MD5: never settled here
+        desc.extend_from_slice(&[0u8; 16]); // md5-16k: matched by NAME
+        desc.extend_from_slice(&length.to_le_bytes());
+        let mut nb = name.as_bytes().to_vec();
+        while !nb.len().is_multiple_of(4) {
+            nb.push(0);
+        }
+        desc.extend_from_slice(&nb);
+        out.extend(pkt(set_id, TYPE_FILEDESC, &desc));
+
+        let blocks = length.div_ceil(block_size as u64) as usize;
+        let mut body = fid(0).to_vec();
+        for bi in 0..blocks {
+            if bi == real {
+                let mut md5 = Md5::new();
+                md5.update(data);
+                pad_to(block_size, data.len(), |z| md5.update(z));
+                body.extend_from_slice(&<[u8; 16]>::from(md5.finalize()));
+                let mut crc = crc32fast::Hasher::new();
+                crc.update(data);
+                pad_to(block_size, data.len(), |z| crc.update(z));
+                body.extend_from_slice(&crc.finalize().to_le_bytes());
+            } else {
+                body.extend_from_slice(&[0u8; 20]);
+            }
+        }
+        out.extend(pkt(set_id, TYPE_IFSC, &body));
+        out
+    }
+
+    /// A PAR2 offset past `u32::MAX` claims the block it really names.
+    ///
+    /// Nothing on a 64-bit host can regress this - the test exists for
+    /// the linux-armv7 beta, where nightly runs the suite under qemu and
+    /// `usize` is 32 bits. Before the fix `add_span` computed the whole
+    /// span, every block start and every fragment bound in `usize`, so
+    /// this article at exactly 4 GiB became a span at offset 0: block
+    /// 4096 stayed Pending and a boundary fragment of block 0 was
+    /// claimed from bytes belonging four gigabytes away. Writes go out at
+    /// u64 `pwrite` offsets, so the real bytes never moved - the verdict
+    /// did, and `settle` then saw no damage to repair.
+    #[test]
+    fn a_span_past_four_gibibytes_claims_the_block_it_names() {
+        const BS: usize = 1 << 20;
+        const LEN: u64 = (1u64 << 32) + 4096;
+        let tail = data_of(4096, 3);
+        let last = (LEN.div_ceil(BS as u64) - 1) as usize;
+        assert_eq!(last, 4096, "the block a 32-bit multiply cannot reach");
+
+        let v = LiveVerifier::new(1);
+        let meta = par2_meta_declared([9u8; 16], BS, "huge.bin", LEN, last, &tail);
+        let set = v.activate(&[meta.as_slice()]).expect("fixture parses");
+        assert_eq!(set.files[0].blocks.len(), last + 1);
+
+        v.on_data(0, "huge.bin", LEN, 1u64 << 32, &tail);
+        assert_eq!(
+            v.live_counts(),
+            (1, 0),
+            "the last block hashes clean from its own bytes"
+        );
+        let (peak, spilled) = v.partials_stats();
+        assert_eq!(
+            (peak, spilled),
+            (0, 0),
+            "and nothing was held as a fragment of some other block"
+        );
+    }
+
+    /// The head capture is in file coordinates too: an article at 4 GiB +
+    /// 16 is not the head of the file. `offset as usize` wrapped it to 16
+    /// on a 32-bit target and captured those bytes as the first sixteen
+    /// of the file, which is what `md5_16k` matching then judged.
+    #[test]
+    fn the_head_capture_ignores_an_article_past_four_gibibytes() {
+        const BS: usize = 1 << 20;
+        const LEN: u64 = (1u64 << 32) + 4096;
+        let tail = data_of(4096, 4);
+        let last = (LEN.div_ceil(BS as u64) - 1) as usize;
+        let v = LiveVerifier::new(1);
+        let meta = par2_meta_declared([9u8; 16], BS, "huge.bin", LEN, last, &tail);
+        v.activate(&[meta.as_slice()]).expect("fixture parses");
+        // Before activation matters not at all here: capture_head runs on
+        // every span, and this one is far past the head either way.
+        v.on_data(0, "huge.bin", LEN, (1u64 << 32) + 16, &tail);
+        assert!(
+            v.slots[0].lock_ok().head.is_none(),
+            "no head buffer was opened for a span past the head"
+        );
     }
 
     fn data_of(len: usize, seed: u8) -> Vec<u8> {

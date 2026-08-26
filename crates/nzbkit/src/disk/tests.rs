@@ -1117,3 +1117,41 @@ fn a_replayed_range_is_credited_back_when_its_writer_is_abandoned() {
     drop((spill, out));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// [`chunk_len`] clamps in u64, so a span of 4 GiB or more still yields
+/// positive progress.
+///
+/// The assertions that matter are the 32-bit ones, and they are written
+/// so they hold on EVERY target: `chunk_len(4 GiB, 64 KiB)` must be
+/// 64 KiB, not 0. The narrow-first spelling this helper replaces -
+/// `(remaining as usize).min(cap)` - answers 0 there wherever `usize` is
+/// 32 bits, which is the shipped armv7 beta, and 0 is either an infinite
+/// loop (a decrementing reader makes no progress) or a false EOF (every
+/// consumer in this tree reads `Ok(0)` as the end of the source).
+///
+/// Nothing here can fail on a 64-bit host by construction, which is
+/// exactly why the class went unseen: this test earns its keep under
+/// nightly's armv7-cross job, and as the one place the contract is
+/// written down as executable text.
+#[test]
+fn chunk_len_clamps_in_u64_so_a_huge_span_still_makes_progress() {
+    const G4: u64 = 1u64 << 32;
+    const BUF: usize = 64 << 10;
+
+    assert_eq!(super::chunk_len(G4, BUF), BUF, "exactly 4 GiB");
+    assert_eq!(super::chunk_len(G4 * 3, BUF), BUF, "a multiple of 4 GiB");
+    assert_eq!(super::chunk_len(G4 + 7, BUF), BUF, "just past 4 GiB");
+    assert_eq!(super::chunk_len(u64::MAX, BUF), BUF);
+
+    // The near-miss the class funnels through: a remaining span whose
+    // low 32 bits are small still hands back those bytes, and the NEXT
+    // call - now on an exact multiple - must not answer zero.
+    assert_eq!(super::chunk_len(G4 + 7, BUF), BUF);
+    assert_eq!(super::chunk_len(7, BUF), 7);
+
+    // Ordinary spans are untouched.
+    assert_eq!(super::chunk_len(0, BUF), 0, "an empty span takes nothing");
+    assert_eq!(super::chunk_len(100, BUF), 100);
+    assert_eq!(super::chunk_len(BUF as u64 + 1, BUF), BUF);
+    assert_eq!(super::chunk_len(500, 0), 0, "an empty buffer takes nothing");
+}

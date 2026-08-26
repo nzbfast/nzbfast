@@ -470,6 +470,7 @@ fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<S
         ("media_chip_color", &daemon.media_chip_color),
         ("shape_chip_color", &daemon.shape_chip_color),
         ("rename_junk", &daemon.rename_junk),
+        ("early_file_publish", &daemon.early_file_publish),
         ("rename_media_only", &daemon.rename_media_only),
         ("rename_from_nzb", &daemon.rename_from_nzb),
         ("skip_samples", &daemon.skip_samples),
@@ -589,6 +590,12 @@ fn restore_ui_and_index_settings(daemon: &Arc<Daemon>, saved: &serde_json::Map<S
         daemon
             .watchlist_instant_max
             .store(v.min(3600) as u32, Ordering::Relaxed);
+    }
+    if let Some(v) = saved.get("insurance_cap_gb").and_then(Value::as_u64) {
+        daemon.insurance_cap_gb.store(v, Ordering::Relaxed);
+    }
+    if let Some(v) = saved.get("watchlist_deferred").and_then(Value::as_bool) {
+        daemon.watchlist_deferred.store(v, Ordering::Relaxed);
     }
     if let Some(v) = saved.get("index_gapfill").and_then(Value::as_u64) {
         daemon.index_gapfill.store(v.min(100), Ordering::Relaxed);
@@ -735,6 +742,18 @@ pub(super) fn seed_index_paused(settings_path: &Path) -> std::sync::atomic::Atom
     std::sync::atomic::AtomicBool::new(
         load_settings(settings_path)
             .get("index_paused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+}
+
+/// Metadata lanes: paused only if the user saved it so. Same seed shape
+/// as `index_paused`, and deliberately a separate key - see
+/// `Daemon::enrich_paused`.
+pub(super) fn seed_enrich_paused(settings_path: &Path) -> std::sync::atomic::AtomicBool {
+    std::sync::atomic::AtomicBool::new(
+        load_settings(settings_path)
+            .get("enrich_paused")
             .and_then(Value::as_bool)
             .unwrap_or(false),
     )
@@ -1305,10 +1324,15 @@ pub(super) fn take_listener(
     // readiness banner" - both still hold with the bind up here - and it
     // needs the daemon's launcher token, which is only constructed below.
     match tls {
-        None => {
-            bind_past_a_closing_predecessor(bind, port, || tiny_http::Server::http((bind, port)))
-                .map_err(|e| anyhow::anyhow!("bind {bind}:{port}: {e}"))
-        }
+        None => bind_past_a_closing_predecessor(bind, port, || match bind.parse() {
+            Ok(a6) => tiny_http::Server::from_listener(
+                dual_stack_v6_listener(a6, port)?,
+                None,
+                tiny_http::ServerLimits::default(),
+            ),
+            Err(_) => tiny_http::Server::http((bind, port)),
+        })
+        .map_err(|e| anyhow::anyhow!("bind {bind}:{port}: {e}")),
         Some((cert, key)) => {
             // Certificate problems are diagnosed HERE, before the bind,
             // so the error names the file and what is wrong with it -
@@ -1316,16 +1340,61 @@ pub(super) fn take_listener(
             // refusal says it in a different tab on a different machine.
             let config = tls_server_config(cert, key)?;
             bind_past_a_closing_predecessor(bind, port, || {
-                tiny_http::Server::https(
-                    (bind, port),
-                    tiny_http::SslConfig {
-                        server_config: config.clone(),
-                    },
-                )
+                let ssl = tiny_http::SslConfig {
+                    server_config: config.clone(),
+                };
+                match bind.parse() {
+                    Ok(a6) => tiny_http::Server::from_listener(
+                        dual_stack_v6_listener(a6, port)?,
+                        Some(ssl),
+                        tiny_http::ServerLimits::default(),
+                    ),
+                    Err(_) => tiny_http::Server::https((bind, port), ssl),
+                }
             })
             .map_err(|e| anyhow::anyhow!("bind {bind}:{port} (tls): {e}"))
         }
     }
+}
+
+/// An IPv6 `--bind` gets its listener built by hand, because the one
+/// socket option that decides what `::` MEANS is out of std's reach.
+///
+/// `IPV6_V6ONLY` defaults per platform: off on Linux and macOS (a `::`
+/// bind answers IPv4 too, as `::ffff:a.b.c.d`), ON on Windows - where
+/// `--bind ::` therefore served IPv6 alone, and an IPv4-only client on
+/// the same box (issue #58: Radarr, which connects to `localhost` as
+/// 127.0.0.1) was refused with nothing in any log to say why. Clearing
+/// the flag here makes `::` mean the same thing on every platform we
+/// ship.
+///
+/// Cleared for every IPv6 bind, not just `::`, because the flag only
+/// has an effect on the unspecified address - on `::1` or a real
+/// address it is inert, and one code path beats two. Best-effort on
+/// purpose: a platform that refuses (OpenBSD forbids dual-stack
+/// outright) keeps the v6-only listener it would have had before this
+/// function existed, and the log says so rather than the start failing.
+fn dual_stack_v6_listener(
+    addr: std::net::Ipv6Addr,
+    port: u16,
+) -> std::result::Result<std::net::TcpListener, BindError> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    if let Err(e) = sock.set_only_v6(false) {
+        warn!(
+            target: "startup",
+            "could not clear IPV6_V6ONLY on [{addr}]:{port} - listening IPv6-only: {e}"
+        );
+    }
+    // std's own bind sets SO_REUSEADDR on unix (and deliberately not on
+    // Windows, where it means something dangerous); mirror it so a
+    // restart does not trip over the predecessor's TIME_WAIT sockets.
+    #[cfg(unix)]
+    sock.set_reuse_address(true)?;
+    sock.bind(&std::net::SocketAddr::from((addr, port)).into())?;
+    // 128 is what std's TcpListener::bind passes.
+    sock.listen(128)?;
+    Ok(sock.into())
 }
 
 /// How long "address already in use" may be a lie before we believe it.
@@ -1670,6 +1739,10 @@ pub(super) fn spawn_core_tasks(
         }
     }
     mover::spawn_mover(daemon);
+    // §296: and the per-file half of it - a finished, PAR2-vouched
+    // plain file reaches the destination while the rest of the job is
+    // still on the wire. Inert unless `early_file_publish` is on.
+    super::earlyfile::spawn(daemon);
 
     // §76: the queue-row quality chip - reads the running job's own
     // container header so the row can say what the file IS, and warn
@@ -2083,11 +2156,13 @@ fn build_daemon(
         life_seq: AtomicU64::new(0),
         life_events: Mutex::new(VecDeque::new()),
         queue_idle_latch: AtomicBool::new(true),
+        pause_announced: AtomicBool::new(false),
         postproc_backlog: Arc::new(AtomicUsize::new(0)),
         finish: Default::default(),
         save_soon: AtomicBool::new(false),
         save_wake: tokio::sync::Notify::new(),
         saver_armed: AtomicBool::new(false),
+        save_failed_at: AtomicU64::new(0),
         hooks_tx: Mutex::new(None),
         history_keep_count: AtomicU64::new(0),
         history_keep_secs: AtomicU64::new(0),
@@ -2098,6 +2173,12 @@ fn build_daemon(
         mover_wake: tokio::sync::Notify::new(),
         mover_bucket: Mutex::new(mover::PaceState::default()),
         move_pace: Mutex::new("yield".to_string()),
+        // §296. OFF by default - see the field docs for why the answer
+        // is not "it is safe, so turn it on": it engages only for a job
+        // whose tail renames and sweeps nothing, so for everyone else it
+        // is a poll and a second read of every finished file in
+        // exchange for no early file at all.
+        early_file_publish: std::sync::atomic::AtomicBool::new(false),
         reserved: Mutex::new(std::collections::HashSet::new()),
         progress: ProgressCell::default(),
         drain_dl: Mutex::new(None),
@@ -2212,6 +2293,10 @@ fn build_daemon(
         // field. Saved settings replay over these below.
         watchlist_instant: AtomicBool::new(true),
         watchlist_instant_max: std::sync::atomic::AtomicU32::new(INSTANT_MAX_DEFAULT),
+        // Retention insurance: 0 = off, and off means byte-identical to
+        // a daemon without the feature. Saved settings replay below.
+        insurance_cap_gb: AtomicU64::new(0),
+        watchlist_deferred: AtomicBool::new(false),
         #[cfg(feature = "indexer")]
         instant_kicks: Mutex::new(std::collections::VecDeque::new()),
         #[cfg(feature = "indexer")]
@@ -2260,6 +2345,8 @@ fn build_daemon(
         ladder_live: Mutex::new(None),
         ladder_busy: std::sync::atomic::AtomicBool::new(false),
         ladder_cancel: std::sync::atomic::AtomicBool::new(false),
+        preview_cache: Mutex::new(Vec::new()),
+        preview_busy: std::sync::atomic::AtomicBool::new(false),
         media_chip_color: std::sync::atomic::AtomicBool::new(true),
         shape_chip_color: std::sync::atomic::AtomicBool::new(true),
         rename_junk: std::sync::atomic::AtomicBool::new(true),
@@ -2285,6 +2372,7 @@ fn build_daemon(
         index_retention: seed_index_retention(&settings_path),
         index_pause_on_download: seed_index_pause_on_download(&settings_path),
         index_paused: seed_index_paused(&settings_path),
+        enrich_paused: seed_enrich_paused(&settings_path),
         index_enabled: std::sync::atomic::AtomicBool::new(index_enabled),
         // Pre feed: OFF unless the user has explicitly saved it on. A
         // missing key, a null, or a non-bool all land here - there is no
@@ -2372,7 +2460,8 @@ fn build_daemon(
         ),
         run_usage_flushed: Mutex::new(Default::default()),
         pause_until: Mutex::new(None),
-        pause_gen: AtomicU64::new(0),
+        pause_wake: std::sync::Condvar::new(),
+        pause_timer_live: std::sync::atomic::AtomicBool::new(false),
         connections: std::sync::atomic::AtomicUsize::new(connections.max(1)),
         window: std::sync::atomic::AtomicUsize::new(window.max(1)),
         decoders: std::sync::atomic::AtomicUsize::new(decoders.max(1)),
@@ -2567,5 +2656,36 @@ mod bind_grace_tests {
             .expect("the port frees up well inside the grace");
         assert!(started.elapsed() >= Duration::from_millis(100));
         drop(server);
+    }
+
+    /// The hand-built v6 path answers a v6 client, everywhere. Loopback
+    /// on purpose: a `::` bind in a test raises the macOS firewall
+    /// dialog, and `::1` exercises the same socket2 construction.
+    #[test]
+    fn take_listener_v6_serves_a_v6_client() {
+        let server = take_listener("::1", 0, None).expect("bind ::1");
+        let port = match server.server_addr().to_ip() {
+            Some(a) => a.port(),
+            None => unreachable!("a TCP bind has an IP address"),
+        };
+        let conn = std::net::TcpStream::connect(("::1", port));
+        assert!(conn.is_ok(), "v6 loopback connect failed: {conn:?}");
+    }
+
+    /// Issue #58, and Windows-only twice over: IPV6_V6ONLY defaults ON
+    /// there alone, so only there does this assert bite - and only
+    /// there does binding `::` not raise the macOS firewall dialog.
+    /// windows-unit runs it; without `set_only_v6(false)` the connect
+    /// is refused.
+    #[cfg(windows)]
+    #[test]
+    fn a_wildcard_v6_bind_answers_an_ipv4_client() {
+        let server = take_listener("::", 0, None).expect("bind ::");
+        let port = match server.server_addr().to_ip() {
+            Some(a) => a.port(),
+            None => unreachable!("a TCP bind has an IP address"),
+        };
+        let conn = std::net::TcpStream::connect(("127.0.0.1", port));
+        assert!(conn.is_ok(), "IPv4 connect to a :: bind failed: {conn:?}");
     }
 }

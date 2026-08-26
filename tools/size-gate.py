@@ -106,8 +106,14 @@ BASELINE_FILES = {
     # so the Providers-card cap gauge could not land without a split:
     # everything the pool REPORTS rather than does (the per-server
     # gauges, the event ring, the two refusal records) is one subject
-    # and moved whole to pool/livestats.rs: 3,365.
-    "crates/nzbkit/src/pool.rs": 3365,
+    # and moved whole to pool/livestats.rs: 3,365. Regrown to 3,432 -
+    # its whole 2% of slack, so the §166-class handoff CLAIM counter
+    # (26 Aug 2026) could not land without a split: `WorkerLife`, one
+    # worker's lifetime in the fleet's two head-counts, moved whole to
+    # pool/runlife.rs, which already owns `worker` (holds one for its
+    # whole life) and `note_server_dark` (what both of its exits call):
+    # 3,389.
+    "crates/nzbkit/src/pool.rs": 3389,
     # rig_tests.rs was here at 2,988 (born in the TODO 113 split of the
     # pool's payout/safety rigs), then 3,125 when the §114 consumer-steer
     # rigs replaced the pool-gate ones, then 3,372 through the §129
@@ -210,7 +216,96 @@ BASELINE_FILES = {
     # beside, and moved whole to outage.rs - a ninth child on the
     # daemon_index shape, re-exported so every call site still names it
     # unqualified. 3,764, so the entry ratchets DOWN.
-    "crates/nzbfast/src/serve/daemon.rs": 3764,
+    # ...and regrown to 3,821, which left 18 lines of headroom - under
+    # one ordinary function, and the state that let this file cross on
+    # 25 Aug by MERGE ARITHMETIC rather than by anyone's commit.
+    # 68df57712 combined two sides at 3,837 and 3,810, BOTH legitimately
+    # under the ceiling, into 3,849; every author ran this gate and saw
+    # green, truthfully, on the tree they held, and no lane could have
+    # seen that red from its own branch. Written up in
+    # research/SIZE-GATE-DAEMON-RS-2026-08-25.md, whose sharper lesson is
+    # that the gate belongs INSIDE the fetch/merge/push retry loop,
+    # because on a main taking a push every ~90 s the merge that ships is
+    # not the merge you tested. WHEN INDEX MAINTENANCE MAY RUN is one
+    # subject asked at three ranges - the two "is this a moment for it"
+    # predicates, the VACUUM disk-space verdict, and the arm/abort
+    # rendezvous that stands down a statement ALREADY executing, which
+    # the other two structurally cannot reach - and all three moved to
+    # daemon_maint.rs, by two lanes an hour apart who could not see each
+    # other (ae6d4e5a6 took the rendezvous, the follow-on took the rest
+    # into the same module rather than beside it). 3,608.
+    # WORTH READING BEFORE THE NEXT LANE REACHES FOR THIS LINE: an
+    # entry's slack is 2% of ITSELF, so re-baselining after a split buys
+    # about 70 lines and NO cohesive split of any size buys more while
+    # the entry exists. Real headroom is DELETING the entry, which needs
+    # the file under FILE_CEILING - about 600 lines further. The seams
+    # are there and none of them is a shave: category/dir routing
+    # (CatMeta, cat_list, register_cat, cat_dir, base_out_dir,
+    # dir_claim), the auto-speed ceiling with the live rate and cpu
+    # readings, the bounded index read pool at the top of the file, and
+    # suspend/pause. Each is its own module on this same seam.
+    # THAT BURN-DOWN IS UNDER WAY, one seam per commit so a lost push
+    # race is re-merged on a small diff rather than a huge one. The
+    # BOUNDED READ POOL went first and did not become a new child: its
+    # types exist for `index_read_acquire`, which has lived in
+    # daemon_index.rs since that module was split off, and nothing else
+    # in the tree names `Reader`, `IndexReader` or `IndexReadState`. So
+    # they moved INTO daemon_index.rs, which costs daemon.rs no `mod`
+    # declaration back and makes three of the four types module-private
+    # where a sibling module would have had to widen them. 3,518.
+    # Then WHICH CATEGORY A JOB IS, AND WHICH DIRECTORY IT LANDS IN to
+    # daemon_cats.rs - the offered set and its defaults, the
+    # per-category overrides, `cat_dir`/`base_out_dir`, and the
+    # `dir_claim` a candidate path is tested against. One module and not
+    # two because the routing half READS the category half: a category's
+    # `dir` override is the entire difference between `cat_dir` and
+    # `out_dir().join(category)`, and computing the second where the
+    # first was meant is what silently re-parented every renamed payload
+    # out of the folder the user configured. 3,351.
+    # Then HOW FAST THE LINE IS RUNNING, WHAT IT COSTS AND WHAT CEILING
+    # IS IMPOSED ON IT to daemon_speed.rs - `current_speed_bps`,
+    # `cpu_pct`, the `set_speed_ceiling*` door every manual/API/schedule
+    # cap goes through, and `auto_speed_step` with its four constants.
+    # One module because the halves are WIRED: the AIMD governor
+    # deliberately bypasses `set_speed_ceiling_from` so its per-second
+    # steps cannot flood the event ring or bump `queue_rev` on a hot
+    # path, a claim stated twice in that method and checkable only
+    # against the governor, which is now on the same screen. 3,217.
+    # Then WINDING DOWN THE RUNNING TRANSFER WITHOUT ENDING THE JOB to
+    # daemon_suspend.rs. Its own child and not folded into either
+    # neighbour: daemon_park is how a job stops FOR GOOD, daemon_shutdown
+    # is how the DAEMON stops plus the queue-wide pause timer, and this
+    # is per-JOB and reversible - the job stays in the queue and resumes
+    # from the article journal. Five of its seven callers (the pause
+    # button, the *arr remote, the scheduler, the slow-disk hold, the
+    # idle-release policy) are in neither of those files. 3,076.
+    # And finally MAY A BACKGROUND INDEX PASS RUN RIGHT NOW, AND HOW
+    # DOES IT SAY WHY NOT to daemon_indexgate.rs - the two per-source
+    # stand-down reasons, the phrase the log prints, the cheap
+    # is-a-download-imminent both reasons share, whether anything wants
+    # the database open, and `begin_index_job`, which is the WRITE end
+    # of the same rendezvous: it raises the very counter both reasons
+    # read. 2,945.
+    # UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE - which is the whole
+    # point of the six commits above and the thing a further split of
+    # any size could not buy. An entry's slack is 2% of ITSELF, so
+    # re-baselining after a split leaves ~70 lines of headroom whatever
+    # the split's SIZE, and daemon.rs spent a year regrowing into that
+    # 70 and crossing again, most recently by MERGE ARITHMETIC between
+    # two lanes who each saw a green gate on their own branch
+    # (research/SIZE-GATE-DAEMON-RS-2026-08-25.md). It is now held to
+    # the same ceiling as every other file and stops being special.
+    # The narrative above is kept rather than deleted with the entry,
+    # exactly as serve/tasks.rs's is: it is the record of which subject
+    # went where, and the next lane reaching for this file needs it.
+    # ONE FURTHER SEAM WENT THE SAME DAY, for margin rather than for the
+    # entry: WHICH OF THE USER'S INDEXER ACCOUNTS A BACKGROUND LANE
+    # SPEAKS TO, to daemon_indexref.rs. Crossing at 2,945 left 55 lines
+    # under the ceiling, and 55 is inside the range two ordinary lanes
+    # add between them - which is the merge arithmetic this whole
+    # burn-down exists to stop, arriving through the plain ceiling
+    # instead of through a baseline. 2,820: margin measured in hundreds,
+    # which is the lesson of the pool.rs round.
     # 5,150, then 5,397 after the 8 Aug burst. The inline `mod tests`
     # (the repair math and the mapped driver) moved to
     # par2repair/inline_tests.rs, beside unit_tests.rs: 4,206. Regrown
@@ -231,6 +326,14 @@ BASELINE_FILES = {
     # pushed it past the slack, so `mod compress_tests` (518 lines)
     # moved whole to nntp/compress_tests.rs, the unit_tests pattern.
     # 3339 with it, so the entry ratchets DOWN.
+    # By 26 Aug 2026 it had regrown into the last line of that slack -
+    # 3,405 against a 3,405 limit, so the unsafe-policy ratchet (TODO 307
+    # item 3) could not add a three-line `// SAFETY:` note to
+    # `set_keepalive` without reddening this gate. `mod capped_read_tests`
+    # (68 lines) moved out-of-line to nntp/capped_read_tests.rs, which is
+    # the pattern the five `mod *_tests;` declarations at the foot of that
+    # file already are. 3,349 with the note in. The baseline stays 3339:
+    # it is the recorded low and only ever goes down.
     "crates/nzbkit/src/nntp.rs": 3339,
     # release.rs was here at 3,505 and reached 3,586 as the dark-verdict
     # and year-is-an-extension rounds landed. Its inline `mod tests` was

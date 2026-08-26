@@ -651,7 +651,7 @@ fn chase_multi_volume_patched_spans_complete() {
     for (si, o) in outers.iter().enumerate() {
         let (s, e) = (lost[si] * art, ((lost[si] + 1) * art).min(o.len()));
         assert!(
-            !ex.covered(si, s as u64, e - s),
+            !ex.covered(si, s as u64, (e - s) as u64),
             "vol {si} hole really is a hole"
         );
         ex.patch_volume_span(si, s as u64, &o[s..e]).unwrap();

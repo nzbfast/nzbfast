@@ -949,14 +949,28 @@ fn repair_prefix_streaming_impl(
         .zip(&scan.group_states)
         .zip(damaged_by_group)
     {
-        if states.is_empty() || slots.is_empty() {
-            // No usable record for this group. Nothing to repair it with; if
-            // its data is damaged the caller's own verify reports the file
-            // still broken rather than us writing a guess.
+        // UNDAMAGED FIRST, and the order is the fix rather than a tidy-up.
+        // (nzbfast-local change, 26 Aug 2026 - re-apply on the next rars
+        // re-sync, see vendor/rars/VENDORING.md.)
+        // A group with no usable record was skipped before this test ran,
+        // so a group that WAS damaged and had nothing to repair it with
+        // left no trace at all: if every damaged group went that way the
+        // walk returned an empty rebuilt-shard list, which is the value
+        // this function's own contract reserves for "the recovery record
+        // says the prefix is already intact". The caller cannot tell the
+        // two apart - `rarfix` published the destination on it and
+        // reported the volume repaired, over a byte-for-byte copy of the
+        // broken one, with the member CRCs still wrong.
+        if damaged.is_empty() {
+            // Nothing to do for this group whether or not it has a record.
             continue;
         }
-        if damaged.is_empty() {
-            continue;
+        if states.is_empty() || slots.is_empty() {
+            // Damaged, and no usable record to repair it with. That is
+            // exactly what the shard arithmetic below says when it is
+            // reached with no rows (`rows.len() < damaged.len()`), so it
+            // gets the same answer here rather than a silent skip.
+            return Err(RecoveryError::TooManyDamagedShards.into());
         }
 
         // Distinct recovery rows, one equation per damaged shard. Rows are
@@ -1425,6 +1439,73 @@ mod tests {
 
         assert_eq!(rebuilt, vec![2, 5], "both damaged shards must be named");
         assert_eq!(repaired, pristine, "a streamed multi-group repair is byte-exact");
+    }
+
+    /// A DAMAGED group with no usable record is an error, never an empty
+    /// "already intact" answer.
+    ///
+    /// The walk skipped such a group before it had looked at whether the
+    /// group was damaged at all, so if every damaged group went that way
+    /// the whole repair returned `Ok(vec![])` - the value this function's
+    /// contract reserves for "the record says the prefix is intact". The
+    /// caller cannot tell the two apart: `rarfix` renamed its destination
+    /// over the volume on it and reported a repair, over a byte-for-byte
+    /// copy of the broken file with the member CRCs still wrong.
+    /// (nzbfast-local change, 26 Aug 2026 - re-apply on the next rars
+    /// re-sync, see vendor/rars/VENDORING.md.)
+    #[test]
+    fn a_damaged_group_with_no_usable_record_is_refused_not_reported_intact() {
+        let prefix_len = 200 * 0x10000 + 8192;
+        let (archive, protected) = archive_with_recovery(prefix_len, 10);
+        let scan = scan_inline_recovery_chunks(&MemorySource(archive.clone()), 1 << 20).unwrap();
+        let plan = scan.plan().unwrap();
+        let groups = rar5::recovery_groups(plan).unwrap();
+        assert!(groups.len() >= 2, "this test is pointless with one group");
+
+        // Damage the LAST group only.
+        let mut damaged_archive = archive;
+        let hit = 5 * plan.group_count as usize + groups.last().unwrap().offset as usize + 3;
+        assert!(hit < protected);
+        damaged_archive[hit] ^= 0xff;
+
+        let source = MemorySource(damaged_archive);
+        let mut scan = scan_inline_recovery_chunks(&source, 1 << 20).unwrap();
+        let by_group = scan.chunks_by_group().unwrap();
+        let last = by_group.len() - 1;
+        assert!(!by_group[last].is_empty());
+        assert!(!scan.group_states[last].is_empty(), "its CRC table survived");
+
+        // Take the last group's parity records away, leaving its CRC table
+        // in place: the group can be SEEN to be damaged and there is
+        // nothing to repair it with.
+        let dropped: std::collections::HashSet<usize> = by_group[last].iter().copied().collect();
+        scan.chunks = scan
+            .chunks
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !dropped.contains(slot))
+            .map(|(_, chunk)| chunk.clone())
+            .collect();
+
+        let dest_path = temp_path("unrepairable-group");
+        let mut dest = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&dest_path)
+            .unwrap();
+        let result = repair_prefix_streaming(&source, 0, &scan, &source, &mut dest, 1 << 20);
+        drop(dest);
+        std::fs::remove_file(&dest_path).ok();
+        assert!(
+            matches!(
+                result,
+                Err(crate::Error::Rar5Recovery(
+                    rar5::Error::TooManyDamagedShards
+                ))
+            ),
+            "expected a refusal, got {result:?}"
+        );
     }
 
     #[test]

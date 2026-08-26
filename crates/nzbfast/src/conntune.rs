@@ -928,7 +928,15 @@ pub fn local_hour() -> u8 {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as libc::time_t;
+        // SAFETY: `libc::tm` is a plain C struct of integers and a
+        // pointer, so an all-zero bit pattern is a valid (if meaningless)
+        // value for it - and it is overwritten wholesale below before
+        // anything is read out of it.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: localtime_r's contract is that both pointers are valid
+        // and non-overlapping for the call. `&t` and `&mut tm` are live
+        // locals of exactly the expected types, and the exclusive borrow
+        // rules out overlap.
         if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
             return tm.tm_hour as u8;
         }

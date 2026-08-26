@@ -858,6 +858,62 @@ mod tests {
         );
     }
 
+    /// §129 1b(b)'s four cues reach the page, and each one reaches it
+    /// through EVERY door the daemon can raise it from.
+    ///
+    /// The failure this pins is silence, which is the one thing no other
+    /// check in this repo can see. `handleLifeEvents` dispatches on
+    /// `e.kind` through a chain with NO fallthrough arm, so a kind it
+    /// does not name is dropped without a word - that is exactly how
+    /// `job.switched` and `job.replaced` were heard by every webhook
+    /// subscriber and by no open dashboard for four hours. A cue lost
+    /// this way leaves the emit test green, the i18n gate green (the
+    /// string is still in all 27 catalogues, just never rendered) and
+    /// every build-free gate green.
+    ///
+    /// THE ARRIVAL PAIR IS THE POINT. `job.added` alone looks like the
+    /// whole of "a row reached the queue" and is not: a retry never goes
+    /// near `enqueue`, it comes back through `commit_to_queue`, which is
+    /// what emits `job.requeued`. Drop that half and a manual retry
+    /// makes no sound at all - the specific regression §129 1b(b) was
+    /// held back two days to avoid.
+    #[test]
+    fn the_dashboard_hears_every_cue_that_left_the_queue_payload() {
+        let body = fn_body("handleLifeEvents");
+        for kind in [
+            // Both arrival doors, and both are load-bearing.
+            "job.added",
+            "job.requeued",
+            // "All done", pause/resume, and the update chime.
+            "queue.idle",
+            "queue.paused",
+            "queue.resumed",
+            "update.available",
+        ] {
+            assert!(
+                body.contains(&format!("e.kind==='{kind}'")),
+                "handleLifeEvents must dispatch on {kind} - a kind it does not name \
+                 is dropped in silence, with every other gate green"
+            );
+        }
+        // The "all done" guard. `queue.idle` is every drain, including
+        // the user deleting the last row; the cue is only for a drain
+        // something FINISHED into, which `job.completed` stamps.
+        assert!(
+            body.contains("lastCompleteAt"),
+            "the all-done cue must still be gated on a recent completion, or \
+             deleting the last queued row announces that everything finished"
+        );
+        // The promote door plays the arrival sound by hand, because the
+        // spare it promotes was enqueued when it was HELD and emits no
+        // arrival now. The hunt door must NOT, because its replacement
+        // is an enqueue and `job.added` is in the same batch.
+        assert!(
+            body.contains("if(e.kind==='job.switched') snd('added')"),
+            "the promote door is the only switch door that owes its own arrival sound"
+        );
+    }
+
     /// A batch of lifecycle events may not clobber itself down to one
     /// sentence.
     ///
@@ -1003,28 +1059,41 @@ mod tests {
         );
     }
 
-    /// The retired cue stays retired.
+    /// The retired cues stay retired, and the whole diff went with them.
     ///
-    /// Before item 18 the promote door was narrated by a queue-SNAPSHOT
-    /// diff in `sndQueueEvents` - "this row stopped being a Duplicate,
-    /// so say the copy it was held behind failed". It could not name the
-    /// abandoned release or the reason, said nothing on a page that
-    /// loaded after the promotion, could not see a hunt at all (that row
-    /// was never held), and fired on any hand-edit of a held row's
-    /// priority. It also ran AFTER `handleLifeEvents` in the tick, and
-    /// the toast element holds exactly one message - so reintroducing it
-    /// beside the event arm would silently overwrite the event's own
-    /// sentence and leave every gate green.
+    /// Before §282 item 18 the promote door was narrated by a
+    /// queue-SNAPSHOT diff in `sndQueueEvents` - "this row stopped being
+    /// a Duplicate, so say the copy it was held behind failed". It could
+    /// not name the abandoned release or the reason, said nothing on a
+    /// page that loaded after the promotion, could not see a hunt at all
+    /// (that row was never held), and fired on any hand-edit of a held
+    /// row's priority. It also ran AFTER `handleLifeEvents` in the tick,
+    /// and the toast element holds exactly one message - so
+    /// reintroducing it beside the event arm would silently overwrite
+    /// the event's own sentence and leave every gate green.
+    ///
+    /// §129 1b(b) then took the last four cues off that function (25 Aug
+    /// 2026) and the function itself with them, so this asserts the
+    /// stronger thing: there is no queue-snapshot cue watcher on the
+    /// page AT ALL. `qSeen` and `prevPaused2` were its two memories of
+    /// the previous poll, and `updToldFor` was the per-PAGE "already
+    /// told them" the ring's cursor replaced - a name reappearing here
+    /// means somebody rebuilt a diff beside the arms that supersede it,
+    /// which is the one change no gate above could see.
     #[test]
     fn the_queue_snapshot_diff_does_not_narrate_switches() {
-        let body = fn_body("sndQueueEvents");
-        assert!(
-            !body.contains("toast("),
-            "sndQueueEvents must not toast: the switch moment comes off the event ring              now, and this function runs after it (see handleLifeEvents)"
-        );
-        assert!(
-            !DASHBOARD_HTML.contains("qHeld"),
-            "the held-at-Duplicate snapshot set is retired - `job.switched` replaced it"
-        );
+        for gone in [
+            "function sndQueueEvents",
+            "qHeld",
+            "qSeen",
+            "prevPaused2",
+            "updToldFor",
+        ] {
+            assert!(
+                !DASHBOARD_HTML.contains(gone),
+                "`{gone}` is retired - the lifecycle event ring replaced it, and a \
+                 snapshot diff beside those arms would overwrite their sentences"
+            );
+        }
     }
 }

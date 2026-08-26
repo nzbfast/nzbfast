@@ -138,7 +138,22 @@ pub(super) fn spawn_spec_prefetch(
                     // unchanged.
                     let mut reqs = Vec::new();
                     let mut idm = std::collections::HashMap::new();
-                    crate::repair::volume_reqs(&nzb2, fi, &mut reqs, &mut idm);
+                    // Sweep 9, finding 7: the omitted-duplicate count
+                    // is part of this rung's completeness, exactly as
+                    // it is for `fetch_volumes` (Codex F-02). A segment
+                    // whose message-id an earlier segment of this same
+                    // volume already claimed is never requested, so no
+                    // `Missing`/`Failed` outcome comes back for it and
+                    // `f.total()` reads 0 over a volume that is short.
+                    // Recorded complete, settle strikes the whole
+                    // volume off the post-settle fetch list and the
+                    // slices that lived only on those ids can never be
+                    // asked for again. One volume per rung and a fresh
+                    // id map each time, so this is intra-volume
+                    // duplication only - a malformed or hostile
+                    // recovery set, never a healthy NZB.
+                    let omitted =
+                        crate::repair::volume_reqs(&nzb2, fi, &mut reqs, &mut idm);
                     if want > miss {
                         info!(
                             target: "repair",
@@ -189,12 +204,14 @@ pub(super) fn spawn_spec_prefetch(
                         // total and this file's own count are the same
                         // number here - `total()` reads it without
                         // threading the rung's file index in.
-                        Ok((f, paths)) if f.total() == 0 && !paths.is_empty() => {
+                        Ok((f, paths))
+                            if f.total().saturating_add(omitted) == 0 && !paths.is_empty() =>
+                        {
                             covered += count.max(1);
                             pre.lock_ok().push((fi, paths));
                         }
                         Ok((f, paths)) if !paths.is_empty() => {
-                            let failures = f.total();
+                            let failures = f.total().saturating_add(omitted);
                             // A PARTIAL volume: some articles failed.
                             // Recording its file index would strike the
                             // WHOLE volume off the post-settle fetch
@@ -260,6 +277,29 @@ pub(in crate::get) fn spec_ladder(nzb: &Nzb) -> Vec<(usize, usize, u64)> {
         .collect();
     ladder.sort_by_key(|&(_, _, bytes)| bytes);
     ladder
+}
+
+/// §282 item 3: what each recovery volume DECLARES, as
+/// `(count read off the name, encoded bytes)` per volume.
+///
+/// Deliberately not [`spec_ladder`]'s pre-summed count. That ladder
+/// floors an undeclared volume at 1 so escalation keeps going, which is
+/// the conservative direction for a prefetch and exactly the wrong way
+/// round for a projection that compares against the post's total
+/// recovery: an undercount there fires the doom warning on a post that
+/// repairs comfortably. The `.vol-NN.par2` form is the live shape - it
+/// numbers the volume without sizing it. So the count is left as
+/// `None` here and the size-based estimate is substituted in
+/// [`DamageWatch::project`], where the block size is known.
+pub(in crate::get) fn declared_volumes(nzb: &Nzb) -> Vec<(Option<usize>, u64)> {
+    nzb.files
+        .iter()
+        .filter(|f| f.kind() == FileKind::Par2Volume)
+        .map(|f| {
+            let name = f.filename_hint().unwrap_or(&f.subject);
+            (vol_count_from_name(name), f.bytes())
+        })
+        .collect()
 }
 
 /// Exact-fit rung: the smallest unfetched volume covering the whole

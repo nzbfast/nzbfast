@@ -8,6 +8,11 @@
 
 use super::*;
 
+/// Every `requeue_or_fail` below is a link that died: the SENTENCE
+/// varies, the code does not. Named so the calls stay one-liners - this
+/// file sits a handful of lines under the size gate's ceiling.
+const LINK: FailCode = FailCode::Transport;
+
 #[test]
 fn retention_mask_excludes_only_outdated_servers() {
     // Servers: [unlimited, 10-day, 100-day, unlimited].
@@ -66,6 +71,8 @@ fn seed_masks_and_unservable_split() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -230,6 +237,8 @@ fn shared_new_dedupes_repeated_ids() {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         },
         PoolConfig::default(),
     );
@@ -323,6 +332,8 @@ async fn futile_scan_throttles_before_retrying() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -420,6 +431,8 @@ async fn endgame_fans_out_dup_races_for_laddering_articles() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -557,6 +570,8 @@ async fn tail_fanout_races_healthy_articles_in_the_endgame() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig {
                 tail_fanout: fanout,
@@ -754,6 +769,8 @@ async fn a_futile_idle_dup_scan_gates_until_the_map_moves_or_the_window_ends() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig {
                 tail_fanout: true,
@@ -900,6 +917,8 @@ async fn a_server_with_more_connections_is_not_mistaken_for_a_faster_one() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -992,6 +1011,8 @@ async fn a_fill_server_never_duplicates_primary_work_on_speed() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -1128,6 +1149,8 @@ pub(super) fn one_server() -> Vec<(ServerConfig, PoolConfig)> {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         },
         PoolConfig::default(),
     )]
@@ -1219,7 +1242,17 @@ async fn a_dead_pipeline_releases_exactly_what_dispatch_charged() {
         "every item in a worker's pipeline carries exactly one charge"
     );
 
-    requeue_or_fail(&shared, &tx, &cfg, ctx, &mut inflight, "send failed", true).await;
+    requeue_or_fail(
+        &shared,
+        &tx,
+        &cfg,
+        ctx,
+        &mut inflight,
+        LINK,
+        "send failed",
+        true,
+    )
+    .await;
     assert_eq!(
         shared.inflight_body_bytes.load(Ordering::Acquire),
         0,
@@ -1262,7 +1295,7 @@ async fn a_productive_sessions_death_charges_no_article() {
         inflight.push_back(w);
     }
     // Productive session died between responses: nobody is charged.
-    requeue_or_fail(&shared, &tx, &cfg, ctx, &mut inflight, "eof", false).await;
+    requeue_or_fail(&shared, &tx, &cfg, ctx, &mut inflight, LINK, "eof", false).await;
     {
         let q = shared.queue.lock().await;
         assert_eq!(q.len(), 2, "both articles requeue");
@@ -1283,7 +1316,7 @@ async fn a_productive_sessions_death_charges_no_article() {
         inflight.push_back(w);
     }
     let front_id = inflight[0].id.clone();
-    requeue_or_fail(&shared, &tx, &cfg, ctx, &mut inflight, "rst", true).await;
+    requeue_or_fail(&shared, &tx, &cfg, ctx, &mut inflight, LINK, "rst", true).await;
     let q = shared.queue.lock().await;
     let front = q.iter().find(|w| w.id == front_id).expect("requeued");
     assert_eq!(front.attempts, 1, "zero-work death charges the front");
@@ -1355,6 +1388,8 @@ async fn promoted_work_routes_to_the_faster_server() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -1433,6 +1468,103 @@ async fn promoted_work_routes_to_the_faster_server() {
         .await
         .expect("slow takes it when alone");
     assert_eq!(&*w.id, "<b0>");
+}
+
+/// A dup that leaves flight without emitting gives the article its one
+/// hedge budget BACK.
+///
+/// `pick_dup` charges `inf.dups += 1` at pick time, and nothing ever
+/// gave it back: an article whose dup was shed (or died with its
+/// connection) before reading a byte had spent its rescue on a dispatch
+/// that never happened, and both pickers then refuse it forever -
+/// `pick_dup` at `dups >= 1`, the TTFB rescue at `dups == 0`.
+///
+/// The dup rides a DIFFERENT worker's pipeline from its original, which
+/// is what makes the leak reachable at all: shed together, the original
+/// deregisters the whole entry on its way out and the next dispatch
+/// starts from zero anyway.
+#[tokio::test]
+async fn a_shed_dup_gives_the_hedge_budget_back() {
+    let reqs: Vec<ArticleReq> = (0..3)
+        .map(|i| ArticleReq::fresh(format!("<a{i}>")))
+        .collect();
+    let (shared, _) = Shared::new(reqs, &one_server());
+
+    // Worker A dispatches the original and keeps holding it.
+    let original = {
+        let mut q = shared.queue.lock().await;
+        let w = q.pop_front().unwrap();
+        shared.charge_wire();
+        shared.register_inflight(&w, 0);
+        w
+    };
+    assert_eq!(&*original.id, "<a0>");
+
+    // Worker B races it - the pick charges the article's one budget.
+    shared
+        .inflight
+        .lock_ok()
+        .get_mut(&original.id)
+        .unwrap()
+        .dups += 1;
+    shared.charge_wire();
+    let mut b_pipeline: VecDeque<Work> = VecDeque::new();
+    b_pipeline.push_back(Work {
+        age_days: original.age_days,
+        part: original.part,
+        file: original.file,
+        ord: original.ord,
+        id: original.id.clone(),
+        attempts: 0,
+        promoted: false,
+        tried_430: 0,
+        tried_fail: 0,
+        dup: true,
+        prebyte_expiries: 0,
+        soft_430: 0,
+        fenced: false,
+        rearms: 0,
+        ladder: false,
+        probe: false,
+    });
+
+    shed_pipeline(&shared, &mut b_pipeline).await;
+    assert!(b_pipeline.is_empty());
+    assert_eq!(
+        shared.queue.lock().await.len(),
+        2,
+        "a dup is dropped, never requeued - the original still owns it"
+    );
+    assert_eq!(
+        shared.inflight.lock_ok().get(&original.id).unwrap().dups,
+        0,
+        "the budget is back, so a later stale/TTFB rescue is still legal"
+    );
+
+    // And an entry that is already gone (the original landed while the
+    // dup was in flight) is a no-op rather than a panic.
+    shared.deregister_inflight(&original);
+    let mut late: VecDeque<Work> = VecDeque::new();
+    shared.charge_wire();
+    late.push_back(Work {
+        age_days: original.age_days,
+        part: original.part,
+        file: original.file,
+        ord: original.ord,
+        id: original.id.clone(),
+        attempts: 0,
+        promoted: false,
+        tried_430: 0,
+        tried_fail: 0,
+        dup: true,
+        prebyte_expiries: 0,
+        soft_430: 0,
+        fenced: false,
+        rearms: 0,
+        ladder: false,
+        probe: false,
+    });
+    shed_pipeline(&shared, &mut late).await;
 }
 
 #[tokio::test]
@@ -1545,6 +1677,8 @@ async fn drain_signals_graceful_and_leaves_the_queue_intact() {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         },
         PoolConfig::default(),
     )];

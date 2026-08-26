@@ -114,6 +114,77 @@ pub(crate) fn print_failure_diagnostics(
     }
 }
 
+/// Which of the two failures behind one `decode/write error` counter
+/// actually happened, as a value rather than as the opening words of a
+/// sentence.
+///
+/// The two share `derrs` and have OPPOSITE remedies, so
+/// [`incomplete_reason`] has to tell them apart to pick a verdict: a
+/// corrupt article is the SERVER's copy failing its own yEnc CRC, where
+/// free space and permissions are irrelevant and a re-fetch from
+/// another provider is the fix, while a write fault is this machine and
+/// the folder is where the evidence is. That choice reaches the user as
+/// `fail_hint` (`corrupt`) and therefore as `fail_action` (`retry`
+/// against `path`).
+///
+/// Until 26 Aug 2026 it was decided by `sample.starts_with("decode
+/// error")` over a string, and both writers - in
+/// `crates/nzbfast/src/get/workers.rs` - already KNEW which one it was
+/// at the moment they wrote it. TODO 307 item 1 named that as an
+/// instance of the tree's string-classification class and left it for
+/// its own claim, this one, beside `repair::sidefetch`'s. What the
+/// string cost is what any of them costs: the opening is prose, an
+/// edited word moves a machine's disk fault into "the copies on the
+/// server are corrupt" with nothing anywhere going red, and the two
+/// producers are in a different module from the reader that parses
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeFault {
+    /// The server handed us bytes that failed their own yEnc CRC or
+    /// length check. Every article arrived; the copies are corrupt.
+    Corrupt,
+    /// The bytes decoded and this machine could not store them - a full
+    /// volume, a permission, a share gone read-only.
+    Write,
+}
+
+/// The first decode-or-write error of a run, paired with the producer's
+/// own verdict about which it was. See [`DecodeFault`].
+///
+/// The pairing is set at ONE `get_or_insert_with`, in the same
+/// statement as the text, so the two cannot drift apart: a fault
+/// recorded beside a message it does not describe is the same defect
+/// the string test had, just harder to see.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DecodeSample {
+    pub(crate) fault: DecodeFault,
+    /// The sentence itself - the OS's own words in the OS's own
+    /// language, quoted into the verdict's `(first error: ...)` tail
+    /// and read back by `disk_full_failure` for the full-volume arm.
+    pub(crate) text: String,
+}
+
+/// The run's first decode-or-write error, shared between the decode
+/// workers that record it and the tail that reads it into
+/// [`LossCauses`]. First writer wins.
+pub(crate) type DecodeSampleCell = Arc<std::sync::Mutex<Option<DecodeSample>>>;
+
+impl DecodeSample {
+    pub(crate) fn corrupt(text: String) -> Self {
+        DecodeSample {
+            fault: DecodeFault::Corrupt,
+            text,
+        }
+    }
+
+    pub(crate) fn write(text: String) -> Self {
+        DecodeSample {
+            fault: DecodeFault::Write,
+            text,
+        }
+    }
+}
+
 /// Why a download did not come out whole - as a sentence whose OPENING
 /// says which of the two it was, because the daemon's policies read it.
 ///
@@ -218,8 +289,9 @@ pub(crate) struct LossCauses<'a> {
     pub(crate) recovery_unobtainable: bool,
     /// First transport error, verbatim.
     pub(crate) transport_sample: Option<String>,
-    /// First decode/write error, verbatim.
-    pub(crate) decode_sample: Option<String>,
+    /// First decode/write error, verbatim, with the producer's own
+    /// verdict about which of the two it was. See [`DecodeSample`].
+    pub(crate) decode_sample: Option<DecodeSample>,
     /// Decode/write errors charged to RECOVERY slots. Excluded from
     /// `derrs` on purpose - they are not payload damage - but they are
     /// still damage, and a journal-resume retry can fetch clean parity
@@ -359,6 +431,7 @@ const PAYLOAD_INTACT_DEN: u64 = 20;
 /// the one this rung exists to displace.
 fn recovery_is_the_casualty(
     causes: &LossCauses,
+    derrs: u64,
     post_gone: bool,
     size_header_lies: bool,
     all_transport: bool,
@@ -375,8 +448,25 @@ fn recovery_is_the_casualty(
     // The comparative claim needs its other half PROVEN, not assumed.
     // Both sides can be short at once, and a run that lost a third of
     // its payload has no business being told the payload was fine.
+    //
+    // `derrs` counts with `missing_segments` here, for the reason the
+    // `size_header_lies` block below spells out: a decode or write
+    // error leaves `missing_segments` at zero while the failed
+    // article's bytes ARE a real gap in the payload. Both counters are
+    // payload-only, so the sum is the payload's whole loss - and a
+    // damaged payload is exactly what sends the repair ladder after
+    // volumes it then cannot fetch, so `recovery_unobtainable` beside a
+    // pile of decode errors is a natural pairing rather than a contrived
+    // one. Counted rather than a flat `derrs == 0` test: one corrupt
+    // article out of 17130 should no more stand the clause down than one
+    // absent article does, and the same twentieth governs both kinds of
+    // gap.
     causes.total_segments > 0
-        && causes.missing_segments * PAYLOAD_INTACT_DEN <= causes.total_segments
+        && causes
+            .missing_segments
+            .saturating_add(derrs)
+            .saturating_mul(PAYLOAD_INTACT_DEN)
+            <= causes.total_segments
 }
 
 pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCauses) -> String {
@@ -503,7 +593,25 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         // was supposed to fix it. See [`recovery_is_the_casualty`] for
         // why it sits exactly here in the precedence.
         let recovery_casualty =
-            recovery_is_the_casualty(causes, post_gone, size_header_lies, all_transport);
+            recovery_is_the_casualty(causes, derrs, post_gone, size_header_lies, all_transport);
+        // The seam's wording: a verdict about the SOURCE, with no
+        // segment census behind it to quote. "this repair needed" is
+        // SCOPE, for the overlap arm: unqualified, it lands after a
+        // census saying 4% and reads as walking that census back. Exact
+        // rather than decorative - `Unservable` measures the volumes
+        // `fetch_volumes` asked for, a subset of the set chosen for the
+        // damage in hand.
+        //
+        // Out here rather than inside the `recovery_casualty` arm
+        // because the rung can stand DOWN with the flag still set - a
+        // payload short by more than a twentieth loses the comparative
+        // claim, not the repair ladder's verdict - and the clause below
+        // is then the only surface that verdict has. Every counter in
+        // `rec_lost` is zero by construction on a conventionally named
+        // recovery set (`get::plan` gives a named `Par2Volume` no slot),
+        // so nothing else would carry it.
+        const UNOBTAINABLE: &str = "the PAR2 recovery volumes this repair needed could not be fetched from \
+             any server that has the post";
         let mut msg = if size_header_lies {
             format!(
                 "post size header disagrees with its parts: every payload article \
@@ -562,15 +670,6 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                     causes.recovery_segments
                 )
             });
-            // The seam's wording: a verdict about the SOURCE, with no
-            // segment census behind it to quote. "this repair needed"
-            // is SCOPE, for the overlap arm: unqualified, it lands
-            // after a census saying 4% and reads as walking that
-            // census back. Exact rather than decorative - `Unservable`
-            // measures the volumes `fetch_volumes` asked for, a subset
-            // of the set chosen for the damage in hand.
-            const UNOBTAINABLE: &str = "the PAR2 recovery volumes this repair needed could not be fetched from \
-                 any server that has the post";
             let lost = match (census, causes.recovery_unobtainable) {
                 (Some(c), true) => format!("{c}, and {UNOBTAINABLE}"),
                 (Some(c), false) => c,
@@ -655,6 +754,26 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                  takedown request, so waiting will not bring the parity back",
                 causes.takedown_430_recovery
             ));
+        }
+        // The seam's half of the same evidence, and it needs its own
+        // clause for the reason the census half does not: `rec_lost`
+        // counts download-time slots, and a conventionally named
+        // recovery set has none, so a stood-down rung would drop the
+        // repair ladder's `Unservable` verdict entirely and the user
+        // would read the plain "N file(s) with missing segments" with no
+        // word about the volume fetch having failed. Suppressed when the
+        // rung fired, which already spent it on the headline; joined to
+        // the clause above rather than repeating its tail when both have
+        // something to say.
+        if causes.recovery_unobtainable && !recovery_casualty {
+            if rec_lost > 0 {
+                msg.push_str(&format!("; and {UNOBTAINABLE}"));
+            } else {
+                msg.push_str(&format!(
+                    "; {UNOBTAINABLE}, so there was less parity available to repair \
+                     with than the post carries"
+                ));
+            }
         }
         // The segment census, right behind the classifying clause. "94
         // file(s) with missing segments" was the whole story a user got,
@@ -808,10 +927,15 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         // article is a wild goose chase - found by the wire-corruption
         // leg of the 11 Aug soak, which serves deliberately damaged
         // articles from a healthy machine.
+        // Which of the two it was is the PRODUCER's verdict, carried
+        // here as a value: both writers in `get/workers.rs` know it at
+        // the moment they record the sample, and until 26 Aug 2026 they
+        // spent it on the opening words of a string this line then read
+        // back. See [`DecodeFault`].
         let corrupt = causes
             .decode_sample
-            .as_deref()
-            .is_some_and(|s| s.starts_with("decode error"));
+            .as_ref()
+            .is_some_and(|s| s.fault == DecodeFault::Corrupt);
         let mut msg = if corrupt {
             format!(
                 "the articles did not decode: {derrs} damaged article(s) and no missing \
@@ -827,7 +951,7 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
             )
         };
         if let Some(e) = &causes.decode_sample {
-            msg.push_str(&format!(" (first error: {e})"));
+            msg.push_str(&format!(" (first error: {})", e.text));
         }
         msg
     }

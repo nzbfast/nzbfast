@@ -188,11 +188,31 @@ pub(in crate::serve) fn rename_queued(
         return Err("empty name");
     }
     let cat = job.lock_ok().category.clone();
-    queue::requeue_category(d, job, &newname, &cat)?;
-    // The label follows the directory swap; requeue_category has
-    // already refused non-queued jobs, and a job that starts in this
-    // gap still downloads into the directory just derived from the
-    // new name, so the two can never disagree.
+    // Codex F-06: the fence is BOUND, so it covers the label write too.
+    // The directory swap and the move behind it are fenced by
+    // `requeue_category` itself, but this door publishes a second thing
+    // after that call returns, and dropping the guard on the `?` would
+    // reopen the window for exactly as long as the two statements below
+    // take. A job started in that gap would emit `job.started` with the
+    // OLD name beside the directory derived from the new one - the two
+    // halves of one rename, disagreeing, in the record the user reads.
+    // Non-queued jobs are already refused inside.
+    let _fence = queue::requeue_category(d, job, &newname, &cat)?;
+    // Test hook: hold exactly that second window open - the directory
+    // is published and the label has not caught up yet - so the suite
+    // can let the runner at the job inside it. It is two statements
+    // wide on a live daemon, so nothing can land in it on purpose and
+    // the BINDING above was pinned by no test at all (measured 25 Aug
+    // 2026: downgrade `_fence` to `_` and the whole repo stays green).
+    // Announced, so the case can rendezvous on the log instead of on a
+    // sleep. No effect unless the suite sets it.
+    if let Some(ms) = std::env::var("NZBFAST_TEST_STALL_RENAME_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        info!(target: "queue", "test stall in the rename fence window");
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     job.lock_ok().name = newname;
     // The name is a queue payload rider AND, since N12, an input to the
     // cached owned-title set, so the store above owes the revision a

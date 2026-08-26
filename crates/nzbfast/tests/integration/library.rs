@@ -454,6 +454,38 @@ async fn unauthenticated_stream_cannot_start_parked_job() {
             .collect();
         assert!(!tok.is_empty(), "empty token in {m3u}");
 
+        // TODO 23 low1, CLI half: that same token authenticates /m3u
+        // ITSELF, so `nzbfast stream` can hand a player a link with no
+        // credential in it - a spawned process's command line is
+        // readable by every other local account. It widens nothing: the
+        // answer is the token the caller already presented.
+        let (head, tokened) = http_raw(port, &format!("/m3u/{id}?t={tok}"), "");
+        assert!(head.contains("200"), "tokened /m3u rejected: {head}");
+        let tokened = String::from_utf8_lossy(&tokened);
+        assert!(tokened.contains(&marker), "no tokened URL in {tokened}");
+        assert!(
+            !tokened.contains("sesame"),
+            "the playlist handed back the API key: {tokened}"
+        );
+        // Another job's token, and a wrong one, are still 401 - the token
+        // is per-job, so it must not open the playlist for anything else.
+        for bad in [
+            format!("/m3u/{id}?t=deadbeef"),
+            format!("/m3u/{id}?t={}", "0".repeat(tok.len())),
+        ] {
+            let (head, _) = http_raw(port, &bad, "");
+            assert!(head.contains("401"), "{bad} was not refused: {head}");
+        }
+        // The no-id playlist is "whatever is downloading now", not a job:
+        // no token opens it. (`/m3u/` normalizes to `/m3u`, which is a
+        // 404; `/m3u//` is the spelling that really reaches the handler
+        // with an empty id, which is the guard being pinned.)
+        let (head, _) = http_raw(port, &format!("/m3u//?t={tok}"), "");
+        assert!(
+            head.contains("401"),
+            "a job token opened the no-id playlist: {head}"
+        );
+
         // The tokened URL is the play trigger: fire it (the response only
         // arrives once writers appear, so poll the mock for the download
         // actually starting instead of waiting on it).

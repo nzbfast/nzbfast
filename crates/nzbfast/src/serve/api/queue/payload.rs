@@ -72,33 +72,16 @@ pub(super) fn m_queue(
                 // `stop_deleted_transfer`), and a batch delete of a
                 // whole category names every row in the queue.
                 let mut stopped_ids: Vec<String> = Vec::new();
-                // Collected under the queue lock, recorded after it -
-                // the notice's own lock is a leaf and must stay one.
-                let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
-                // The file removal goes the same way, and for a
-                // sharper reason: a Trash call is bounded at 30 s per
-                // route and macOS runs TWO of them (Finder, then
-                // NSFileManager), so doing this inside `q.retain`
-                // held the GLOBAL queue lock for up to a minute on a
-                // headless mac or a share with no .Trashes. pick_job,
-                // queue_json, save_queue and every *arr status poll
-                // stall behind it, and the *arr marks the client
-                // unhealthy. Deleting after the lock is dropped costs
-                // a reservation instead: `dir_claim` consults
-                // `reserved` before anything else, precisely so a
-                // directory with no record naming it cannot be
-                // handed to a new job - which is exactly the window
-                // that opens between the record going and the files.
-                let mut doomed: Vec<(String, std::path::PathBuf, bool, crate::smart::FiledTail)> =
-                    Vec::new();
-                // The same, for the one job whose writers are the
-                // sidecar's: removed only once that has wound down.
-                let mut pending_sidecar: Vec<(
-                    String,
-                    std::path::PathBuf,
-                    bool,
-                    crate::smart::FiledTail,
-                )> = Vec::new();
+                // The file removal goes the same way and is the sharper
+                // case: it cannot happen inside `q.retain` (a Trash call
+                // holds the GLOBAL queue lock for up to a minute) and
+                // its reservation cannot happen outside it (the gap
+                // between the row going and the files is exactly what
+                // `dir_claim` must not hand out). So it is two halves of
+                // one transaction rather than a local, and the JSON-RPC
+                // delete arm takes the same one - `CustodyBatch` carries
+                // the whole argument and the incidents behind it.
+                let mut custody = CustodyBatch::default();
                 // The releases this request removes: stamped after the
                 // lock as the user's own statement that they no longer
                 // have them, so a re-add is not held as a duplicate of
@@ -128,6 +111,26 @@ pub(super) fn m_queue(
                         // arm and relies on the tombstone making its
                         // tail a no-op at park.
                         let lane = g.state == JobState::Finishing;
+                        // The custody transaction, shared with the
+                        // JSON-RPC delete arm: the §296 take (which is
+                        // NOT gated on the files half - with the files
+                        // KEPT the whole payload is still in `out_dir`,
+                        // so the destination copies are a partial
+                        // duplicate either way, and an *arr that imports
+                        // them has imported a download the user
+                        // stopped), then, if the files half was asked
+                        // for, the reservation and the choice between
+                        // removing now, deferring to `park()` and
+                        // waiting on the prefetch wind-down. Every one
+                        // of those rules, and the incident behind each,
+                        // lives on `CustodyBatch::plan`.
+                        //
+                        // Before the arms below touch the record, so
+                        // custody is decided from the state the request
+                        // found - the JSON-RPC arm carries the same call
+                        // in the same position and says what goes wrong
+                        // when it does not.
+                        custody.plan(d, &mut g, sidecar_owner.as_ref(), del_files);
                         if active {
                             // The pipeline is running - mark it
                             // for silent drop and abort below.
@@ -165,92 +168,11 @@ pub(super) fn m_queue(
                             // files half is about to be attempted: the
                             // notice's "download it again" needs that
                             // NZB when the removal is refused.
-                            hold_or_drop_spool(del_files, &g.out_dir, &g.nzb_path, &mut nzb_by_dir);
-                        }
-                        if del_files {
-                            if active || lane || g.finalizing {
-                                // Writers are still live; removing
-                                // now just lets the next positioned
-                                // write recreate the files and
-                                // orphan them. Defer to park(),
-                                // which runs after the fetch drains.
-                                //
-                                // `finalizing` matters for the same
-                                // reason and is NOT covered by
-                                // `active`: a Completed job whose
-                                // post-processing (unlock, rename,
-                                // TV filing, NAS move) is still
-                                // running has left Downloading, so
-                                // this used to take the else arm and
-                                // remove_dir_all the very directory
-                                // the mover was reading from - half
-                                // deleting a tree under it, or
-                                // deleting an emptied source while
-                                // the payload sat at the destination
-                                // with no record left to delete it
-                                // by. park() already implements the
-                                // deferral and is always reached for
-                                // a finalizing job (its tail holds
-                                // its own Arc and parks after
-                                // finalize_completed), so the files
-                                // still go. Deferring on `finalizing`
-                                // only, not on every non-active
-                                // state: a never-run Queued job has
-                                // no tail, so park would never fire
-                                // and its files would never be
-                                // removed at all.
-                                g.del_on_drop = true;
-                                // Reserve for the SAME reason the
-                                // non-deferred arm below does, and
-                                // for longer: the queue row goes
-                                // now and the files go in `park()`,
-                                // once the fetch has drained. A
-                                // tombstoned job is dropped rather
-                                // than filed, so in between
-                                // `dir_claim` finds the directory in
-                                // neither queue nor history and
-                                // calls it free - and a re-add of
-                                // the same release (a user retry, an
-                                // *arr re-grab) can claim it and be
-                                // writing there when `park()`
-                                // finally removes the whole
-                                // directory. `park()` releases it.
-                                d.reserved.lock_ok().insert(g.out_dir.clone());
-                            } else if sidecar_owner
-                                .as_ref()
-                                .is_some_and(|(id, _)| *id == g.nzo_id)
-                            {
-                                // The exception the comment above
-                                // names: a never-run Queued job has no
-                                // tail, but a PREFETCHING one has a
-                                // whole pipeline, and removing here let
-                                // the next file's first article
-                                // recreate the directory and lay a
-                                // fresh payload nothing names (M2).
-                                // park is still the wrong destination -
-                                // the abort's ordinary outcome is the
-                                // sidecar's Err arm, which never parks -
-                                // so the removal waits on the wind-down
-                                // instead, and releases the reservation
-                                // itself.
-                                let tail = delete_tail(&g, || d.job_suffix(filed_stem(&g)));
-                                d.reserved.lock_ok().insert(g.out_dir.clone());
-                                pending_sidecar.push((
-                                    filed_stem(&g).to_string(),
-                                    g.out_dir.clone(),
-                                    g.filed,
-                                    tail,
-                                ));
-                            } else {
-                                let tail = delete_tail(&g, || d.job_suffix(filed_stem(&g)));
-                                d.reserved.lock_ok().insert(g.out_dir.clone());
-                                doomed.push((
-                                    filed_stem(&g).to_string(),
-                                    g.out_dir.clone(),
-                                    g.filed,
-                                    tail,
-                                ));
-                            }
+                            // ...unless PARK owns the removal, in which
+                            // case park owns the copy too and this
+                            // masks it instead. Sweep 9, finding 2, and
+                            // the helper carries the whole argument.
+                            park_or_drop_spool(&mut g, del_files, lane, &mut nzb_by_dir);
                         }
                         false
                     } else {
@@ -259,41 +181,12 @@ pub(super) fn m_queue(
                 });
                 let count = before - q.len(); // counted, as history's arm is
                 drop(q);
-                // Now that no global lock is held: the slow half.
-                //
-                // Every reservation is released AFTER the whole batch,
-                // never per entry. `reserved` is a set, so two entries
-                // naming one directory are one member: releasing after
-                // the first would unreserve a directory a later entry
-                // has not reached yet, and the gap is a whole Trash
-                // call wide (30 s per route, two routes on macOS).
-                let reserved_dirs: Vec<std::path::PathBuf> =
-                    doomed.iter().map(|(_, dir, _, _)| dir.clone()).collect();
-                for (name, dir, filed, tail) in doomed {
-                    let outcome = remove_job_files(&dir, &name, filed, &tail);
-                    if let FilesGone::Kept(why) = outcome {
-                        kept.push((name, dir, why));
-                    }
-                }
-                {
-                    let mut r = d.reserved.lock_ok();
-                    for dir in &reserved_dirs {
-                        r.remove(dir);
-                    }
-                }
-                // The row is gone from the queue either way - that is
-                // what was asked for and it worked. What did NOT work
-                // was the files half, and with the row went the only
-                // place the user could see this download named.
-                note_kept_files(d, kept, &mut nzb_by_dir);
-                // The sidecar's job waits for the sidecar. Its own
-                // reservation is released by the drain, not by the batch
-                // above - the removal is still ahead of it.
-                if let Some((_, target)) = sidecar_owner {
-                    for (name, dir, filed, tail) in pending_sidecar {
-                        d.remove_after_sidecar_drain(target.clone(), name, dir, filed, tail);
-                    }
-                }
+                // Now that no global lock is held: the slow half of the
+                // same transaction - the unlinks, the removals, the
+                // reservations coming back down, the kept-files notices
+                // and the handoff to the prefetch drain, in that order
+                // and for the reasons on `CustodyBatch::settle`.
+                custody.settle(d, sidecar_owner.as_ref(), &mut nzb_by_dir);
                 // Only the job that OWNS the hub may fire its
                 // abort. `state == Downloading` is NOT that
                 // test: job N stays Downloading through its
@@ -658,11 +551,91 @@ pub(super) fn m_history(
                     bool,
                     crate::smart::FiledTail,
                 )> = Vec::new();
-                for (j, p) in h.iter().zip(&plan) {
-                    if !p.doomed {
-                        continue;
+                // §296 (sweep S9): destination copies of a job whose
+                // move never settled. Path arithmetic here, unlinked in
+                // the slow half below - the same division the queue arm
+                // makes, and for its reason: with the record gone this
+                // list is the ONLY thing that names those files, so a
+                // restart after this delete orphans them at the
+                // destination forever.
+                let mut early_gone: Vec<std::path::PathBuf> = Vec::new();
+                // What the user just told us they no longer have. Taken
+                // from the plan rather than from `value`, so the bulk
+                // words (`all`, `failed`, `completed`) and an id list
+                // stamp exactly the records that are leaving - see
+                // `Daemon::note_releases_deleted`.
+                let deleted_names: Vec<String> = h
+                    .iter()
+                    .zip(&plan)
+                    .filter(|(_, p)| p.doomed)
+                    .map(|(j, _)| j.lock_ok().name.clone())
+                    .collect();
+                // By id, not by position: nzo_ids are unique,
+                // and a positional retain would be one refactor
+                // away from deleting the wrong record.
+                let doomed: std::collections::HashMap<&str, bool> = records
+                    .iter()
+                    .zip(&plan)
+                    .filter(|(_, p)| p.doomed)
+                    .map(|(r, p)| (r.nzo_id.as_str(), p.may_remove_files))
+                    .collect();
+                // Where each row sat, so a store that refuses the
+                // tombstone below can have every one of them back
+                // exactly as the request found it (P2-1).
+                let mut removed: Vec<(usize, Arc<Mutex<Job>>)> = Vec::new();
+                let mut at = 0usize;
+                h.retain(|j| {
+                    let keep = !doomed.contains_key(j.lock_ok().nzo_id.as_str());
+                    if keep {
+                        at += 1;
+                    } else {
+                        removed.push((at, j.clone()));
                     }
-                    let g = j.lock_ok();
+                    keep
+                });
+                // §129 1a: the store forgets them too, once the lock is
+                // down (below).
+                let doomed_ids: Vec<String> = doomed.keys().map(|s| (*s).to_string()).collect();
+                // A bulk sweep needs to say how much it swept:
+                // "Cleared." over a list that still has rows in
+                // it is indistinguishable from a no-op. `status`
+                // keeps its old meaning for every existing
+                // caller (SAB clients included).
+                let count = before - h.len();
+                drop(h);
+                // NOTHING THIS DELETE DESTROYS MAY GO BEFORE THE
+                // TOMBSTONE IS DURABLE, and until 26 Aug 2026 all of it
+                // did: the early copies, the spool copies and
+                // `remove_job_files` all ran on the way to a tombstone
+                // that came last and whose answer was dropped, under a
+                // `"status": true` this handler had already decided on.
+                // `history_replay` drops a row only when it finds a
+                // `"deleted": true` line, so a store that refused that
+                // append - 0444, or owned by a uid this daemon no longer
+                // runs as, one `sudo nzbfast` being enough - brought the
+                // record back at the next start naming files that had
+                // been destroyed on the strength of the delete (P2-1).
+                if !d.history_tombstone(&doomed_ids) {
+                    d.history_restore(removed);
+                    return Some(json!({"status": false,
+                            "error": "the history store could not be written, so the \
+                                      records were left exactly as they were - check the \
+                                      permissions on the data folder"}));
+                }
+                for (_, j) in &removed {
+                    let mut g = j.lock_ok();
+                    let may_remove_files = doomed.get(g.nzo_id.as_str()).copied().unwrap_or(false);
+                    // Not gated on del_files, the queue arm's rule: with
+                    // the files kept the payload is still whole in
+                    // out_dir, so the destination copies are a partial
+                    // duplicate either way.
+                    early_gone.extend(d.early_take(&mut g));
+                    // A parked move_pending row may still have its Arc
+                    // in the mover's queue. The record it would move is
+                    // gone as of this request, so the popped Arc must
+                    // find nothing to do - without this it re-runs the
+                    // whole-job move for a job that no longer exists.
+                    g.tombstone = true;
                     // The record is being deleted for good - its spooled
                     // .nzb (kept until now for retry) is now dead
                     // weight. Unless the files half is about to be
@@ -672,13 +645,13 @@ pub(super) fn m_history(
                     // from where they are standing. Held back and
                     // decided after the outcome is known, below.
                     hold_or_drop_spool(
-                        del_files && p.may_remove_files,
+                        del_files && may_remove_files,
                         &g.out_dir,
                         &g.nzb_path,
                         &mut nzb_by_dir,
                     );
                     if del_files {
-                        if p.may_remove_files {
+                        if may_remove_files {
                             let tail = delete_tail(&g, || d.job_suffix(filed_stem(&g)));
                             d.reserved.lock_ok().insert(g.out_dir.clone());
                             to_remove.push((
@@ -746,37 +719,6 @@ pub(super) fn m_history(
                         }
                     }
                 }
-                // What the user just told us they no longer have. Taken
-                // from the plan rather than from `value`, so the bulk
-                // words (`all`, `failed`, `completed`) and an id list
-                // stamp exactly the records that are leaving - see
-                // `Daemon::note_releases_deleted`.
-                let deleted_names: Vec<String> = h
-                    .iter()
-                    .zip(&plan)
-                    .filter(|(_, p)| p.doomed)
-                    .map(|(j, _)| j.lock_ok().name.clone())
-                    .collect();
-                // By id, not by position: nzo_ids are unique,
-                // and a positional retain would be one refactor
-                // away from deleting the wrong record.
-                let doomed: std::collections::HashSet<&str> = records
-                    .iter()
-                    .zip(&plan)
-                    .filter(|(_, p)| p.doomed)
-                    .map(|(r, _)| r.nzo_id.as_str())
-                    .collect();
-                h.retain(|j| !doomed.contains(j.lock_ok().nzo_id.as_str()));
-                // §129 1a: the store forgets them too, once the lock is
-                // down (below, beside save_queue).
-                let doomed_ids: Vec<String> = doomed.iter().map(|s| s.to_string()).collect();
-                // A bulk sweep needs to say how much it swept:
-                // "Cleared." over a list that still has rows in
-                // it is indistinguishable from a no-op. `status`
-                // keeps its old meaning for every existing
-                // caller (SAB clients included).
-                let count = before - h.len();
-                drop(h);
                 // Now that no global lock is held: the slow half.
                 // Released after the whole batch - see the queue arm
                 // above. It matters more here: `plan_history_delete`
@@ -786,6 +728,7 @@ pub(super) fn m_history(
                 // once.
                 let reserved_dirs: Vec<std::path::PathBuf> =
                     to_remove.iter().map(|(_, dir, _, _)| dir.clone()).collect();
+                crate::serve::earlyfile::early_unlink(&early_gone);
                 for (name, dir, filed, tail) in to_remove {
                     let outcome = remove_job_files(&dir, &name, filed, &tail);
                     if let FilesGone::Kept(why) = outcome {
@@ -807,7 +750,6 @@ pub(super) fn m_history(
                 note_kept_files(d, kept, &mut nzb_by_dir);
                 if count > 0 {
                     d.note_releases_deleted(&deleted_names);
-                    d.history_tombstone(&doomed_ids);
                     d.save_queue();
                 }
                 // A class sweep (all/completed/failed) is idempotent:

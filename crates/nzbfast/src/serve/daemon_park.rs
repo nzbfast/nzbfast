@@ -15,6 +15,7 @@
 //! the ORIGINAL visibility meant here and what every existing call site
 //! across serve/ still needs.
 
+use super::histstore::HistWrite;
 use super::*;
 
 /// Test seam: `note_queue_idle` trips between its empty scan and its
@@ -81,6 +82,59 @@ impl Drop for SidecarTailGuard {
             .lock_ok()
             .retain(|t| !Arc::ptr_eq(t, &self.target));
     }
+}
+
+/// What a `Refused` [`Daemon::park_prewrite`] costs, and the sentence
+/// the user is shown for it.
+///
+/// The report is owed HERE and not by the filings further down
+/// `park_gen`, which is the one thing about the ordering worth reading
+/// twice. The prewrite's own rescue attempt is what CLOSES
+/// `hist_rescue_open`'s one-a-minute gate, so a `history_publish` a
+/// hundred lines on finds it shut and reports without an event; and the
+/// two arms that file nothing at all - a tombstoned park, and the M5
+/// delete arm's `already` path - have no later write to report for them
+/// either. So the prewrite carries the sentence, and a park costs the
+/// event ring exactly one entry however many of its writes the store
+/// refuses.
+fn prewrite_cost(job: &Arc<Mutex<Job>>) -> String {
+    let g = job.lock_ok();
+    format!(
+        "{}: its history row did not reach the store before it left the queue - after \
+         a restart nothing names it or the files in {}",
+        g.name,
+        g.out_dir.display()
+    )
+}
+
+/// What a `Refused` filing costs on the ordinary park road: the record
+/// is correct in memory and the payload is on disk, and nothing names
+/// either of them from the next start on.
+fn filed_cost(job: &Arc<Mutex<Job>>) -> String {
+    let g = job.lock_ok();
+    format!(
+        "{}: the finished job's history row did not reach the store - after a restart \
+         nothing names it or the files in {}",
+        g.name,
+        g.out_dir.display()
+    )
+}
+
+/// What a `Refused` filing costs on the M5 arm, which is more than one
+/// row.
+///
+/// `delete_prewrite` overrode the terminal keys in its placeholder;
+/// `park_prewrite` then wrote the LIVE job over the top of it, still
+/// nonterminal and still tombstoned, and a nonterminal state replays as
+/// `Queued` (job_wire.rs). So losing this write does not merely forget
+/// the delete - it leaves a queued-looking history row for a job the
+/// user cancelled.
+fn deleted_cost(job: &Arc<Mutex<Job>>) -> String {
+    format!(
+        "{}: the deleted job's final record did not reach the store - after a restart \
+         its history row is the one written while it was still downloading",
+        job.lock_ok().name
+    )
 }
 
 impl Daemon {
@@ -217,7 +271,7 @@ impl Daemon {
             // A failure-link replacement inherits nothing useful from the
             // failed job, but "we picked this for you" is worth saying.
             "failure-link",
-            false,
+            DupeExempt::Nobody,
         ) {
             Ok(Enqueued { nzo_id: id, .. }) => {
                 info!(target: "failurelink", "{name}: queued a replacement ({id})")
@@ -389,6 +443,58 @@ impl Daemon {
             }
             d.reserved.lock_ok().remove(&dir);
         });
+    }
+
+    /// Remove ONE record's payload under the same custody the delete
+    /// arms take, for a caller that settles a single record rather than
+    /// a batch.
+    ///
+    /// Both facades' delete arms - `api::queue::payload`'s `delete` and
+    /// `sabcompat::editqueue_delete::group_delete` - take this exact
+    /// transaction, in batch form: reserve every doomed directory while
+    /// the queue lock is still held, remove after it drops, and hand the
+    /// one directory the prefetch sidecar is still writing into to
+    /// [`Self::remove_after_sidecar_drain`] instead of removing it here.
+    /// The batch shape is what the queue lock forces on them; the
+    /// transaction is this, and it is the reservation that does the
+    /// work. `dir_claim` consults `reserved` before it consults either
+    /// store, precisely so a directory that no record names any more
+    /// cannot be handed to a NEW job in the window between the record
+    /// going and the files - a window that is a Trash call wide (bounded
+    /// at 30 s per route, and macOS runs two).
+    ///
+    /// A single-record caller takes it here rather than growing a third
+    /// choreography beside those two. Watchlist upgrade settlement WAS
+    /// that third choreography, and it removed a superseded release's
+    /// directory with no reservation at all (Codex sweep 24 Aug, F-05).
+    ///
+    /// `sidecar` is the [`Self::sidecar_owner`] snapshot, taken BEFORE
+    /// the queue lock for the reason that function gives. `None` comes
+    /// back when the sidecar owns this directory and the drain has taken
+    /// the removal: there is no outcome to report yet, and a refusal
+    /// that lands out there reaches the user through the kept-files
+    /// notice rather than through this return.
+    pub(in crate::serve) fn remove_files_in_custody(
+        self: &Arc<Self>,
+        sidecar: Option<&(String, Arc<AtomicBool>)>,
+        nzo_id: &str,
+        name: String,
+        dir: std::path::PathBuf,
+        filed: bool,
+        tail: crate::smart::FiledTail,
+    ) -> Option<FilesGone> {
+        self.reserved.lock_ok().insert(dir.clone());
+        if let Some((_, target)) = sidecar.filter(|(id, _)| id == nzo_id) {
+            // Live writers. The removal is the drain's, and so is the
+            // reservation it gives back - see the note on that function
+            // for why the wait is unbounded rather than the minute it
+            // used to be.
+            self.remove_after_sidecar_drain(target.clone(), name, dir, filed, tail);
+            return None;
+        }
+        let outcome = remove_job_files(&dir, &name, filed, &tail);
+        self.reserved.lock_ok().remove(&dir);
+        Some(outcome)
     }
 
     /// Is anything from the run this delete aborted still holding its
@@ -703,7 +809,17 @@ impl Daemon {
         if let Some(nzb) = gone_nzb
             && kept_nzb.as_ref() != Some(&nzb)
         {
-            let _ = std::fs::remove_file(&nzb);
+            // `drop_spool` and not a raw unlink (sweep 9, finding 3):
+            // a refusal here is the last thing standing between a
+            // cancelled release and `recover_orphaned_spool` adopting
+            // it at the next start. The helper renames out of the
+            // adoptable `SABnzbd_nzo_nzbfast*.nzb` shape and, failing
+            // that, empties the file so recovery skips it. The
+            // Downloading arm has usually masked the name already, so
+            // this is the leftover road where the request-time rename
+            // was refused too - but that is a fault path, not a reason
+            // to keep the one spelling that re-adopts.
+            drop_spool(&nzb);
         }
     }
 
@@ -813,6 +929,24 @@ impl Daemon {
             return;
         }
         self.spend_deferred_delete(&job);
+        // §296: a job that ends FAILED never reaches the mover, so
+        // nothing would ever reconcile what it published early - and two
+        // episodes of a three-episode pack sitting in the completed
+        // folder is precisely the partial an *arr imports as though the
+        // job had worked. Take them back. A watchdog DEMOTE lands here
+        // too and wants the same answer for a different reason: the
+        // retry re-publishes whatever it re-verifies, so leaving the old
+        // copies would have the move merge over them.
+        //
+        // The take is path arithmetic under the job lock; the unlinks
+        // are outside it, like every other file removal on this path.
+        if failed {
+            let taken = {
+                let mut g = job.lock_ok();
+                self.early_take(&mut g)
+            };
+            crate::serve::earlyfile::early_unlink(&taken);
+        }
         // Read LIVE, not from the snapshot above: everything between the two
         // is unlocked, and file removal is slow. A queue or JSON-RPC delete
         // landing in that window used to be decided against a stale
@@ -894,6 +1028,11 @@ impl Daemon {
                 g.clear_attempt_verdicts();
                 g.demote = false;
                 g.deferred = true;
+                // The stamp goes on with the flag, never apart from it:
+                // `deferred` survives the next run by design, so a row
+                // that says nothing about WHEN is a verdict with no age
+                // on it. The queue row prints this as "tried <t> ago".
+                g.defer_at = unix_now().max(0) as u64;
                 g.defer_count += 1;
             }
             // §158.7: the row leaves and rejoins the queue under ONE hold
@@ -958,7 +1097,12 @@ impl Daemon {
         // removal on the next line until that arm files it, which is the
         // window §158.7 closed for every other park.
         let dropping = tombstone && job.lock_ok().delete_status.is_empty();
-        let filed_early = self.park_prewrite(&job, dropping);
+        // Three answers, not two, and `park_prewrite` carries why: only
+        // `Wrote` means a row is on disk to bury, and `Refused` is the
+        // §158.7 window reopening rather than the demote it used to be
+        // indistinguishable from.
+        let prewrite = self.park_prewrite(&job, dropping, || prewrite_cost(&job));
+        let filed_early = prewrite == HistWrite::Wrote;
         // From the retain below until an arm files the record into
         // `self.history`, the job is in NEITHER store in memory - and
         // `dir_claim` scans exactly those two stores, so a concurrent
@@ -1043,7 +1187,14 @@ impl Daemon {
             // reaches history, and the lifecycle event replaces the
             // dashboard's snapshot-diff toast inference. Then retention,
             // which is a no-op unless the optional knobs are set.
-            let _ = self.history_upsert(std::slice::from_ref(&job));
+            //
+            // `history_publish` and not a `let _ = history_upsert`: the
+            // answer was dropped, and this brings the rescue AND the
+            // `_if_present` guard this site never had - `publish` was
+            // released above, so a delete can land right here and a raw
+            // append would write the record back after its tombstone
+            // (H6). `filed_cost` has the rest.
+            self.history_publish(&job, || filed_cost(&job));
             // §76: the record is in history, so the media prober's final
             // on-disk pass has something to read. Owed HERE, as an event,
             // rather than inferred by that task noticing the job stop
@@ -1115,7 +1266,9 @@ impl Daemon {
             // `dir_claim` again.
             publish.take();
             if !already {
-                let _ = self.history_upsert(std::slice::from_ref(&job));
+                // The delete's OWN row - `deleted_cost` carries what a
+                // dropped answer costs, which is more than one row.
+                self.history_publish(&job, || deleted_cost(&job));
                 self.history_enforce_retention();
             }
         } else if filed_early {
@@ -1127,7 +1280,19 @@ impl Daemon {
             // `park_prewrite`. The job is dropped rather than filed, so
             // bury the row it already wrote or the next boot replays a
             // history record for the job the user cancelled.
-            self.history_tombstone(std::slice::from_ref(&id));
+            //
+            // Nothing here can be held back on a refusal - the payload
+            // was removed above, on the strength of the user's delete -
+            // so the answer is reported rather than acted on: what
+            // survives is a record naming files that have gone, which is
+            // exactly what the log line has to say.
+            if !self.history_tombstone(std::slice::from_ref(&id)) {
+                error!(
+                    target: "queue",
+                    "{id}: the deleted job's history row could not be buried, so a \
+                     restart brings it back - its files were already removed"
+                );
+            }
         }
         // The remaining arm (a tombstone with nothing prewritten) files
         // nothing either; make the release explicit before the promotion
@@ -1144,14 +1309,55 @@ impl Daemon {
         // has to ask BEFORE the promotion: the winner leaves priority
         // -3 and the runners-up are repointed at it, so the same
         // question answered afterwards answers about a different queue.
+        // The harness's window: the record is in history, `job.failed`
+        // has gone out, and nothing has been unpaused yet.
+        #[cfg(test)]
+        super::storecut::promote_gap(self);
+        // Sweep 9, finding 5: is the failure the two decisions below
+        // are ABOUT still in history? `tombstone` cannot answer that -
+        // it is a statement about the QUEUE row, and the history row is
+        // deleted through a different door entirely. Park has already
+        // emitted `job.failed` by now, deliberately (the page pairs
+        // that emit with the replacement one), so a subscriber acting
+        // on it - an *arr script, a dashboard history delete - can
+        // remove the record in the gap. The user then dismissed a
+        // failure and watched the same title start downloading anyway:
+        // as the promoted spare here, or as the hunt below.
+        //
+        // By pointer, the idiom `histstore`, `history` and the unlock
+        // path already use: this is the same Arc park pushed, and a
+        // delete removes it from the vector under the history lock, so
+        // whichever committed second sees the other. Only ever
+        // consulted under `failed && !tombstone`, which is the one road
+        // that put the record there.
+        let still_filed = self.history.lock_ok().iter().any(|j| Arc::ptr_eq(j, &job));
         let mut spare_held = false;
         if failed
             && !tombstone
             && !armed_auto_retry
             && let Some(key) = key
         {
-            spare_held = self.spare_held_for(&id, &key);
-            self.promote_held_alternative(&job, &id, &key, &nzb_path);
+            if still_filed {
+                spare_held = self.spare_held_for(&id, &key);
+                self.promote_held_alternative(&job, &id, &key, &nzb_path);
+            } else {
+                // Dropped rather than merely skipped, because "the
+                // owner is in neither store" is precisely the state
+                // `drop_stranded_spares` exists to clear - reaching it
+                // here just means the spares go now rather than at the
+                // next sweep, and a PROMOTED row would be past that
+                // sweep's reach anyway (it drops HELD rows only).
+                // Retention cannot take this row: it ages from the
+                // front and the push above is at the back, so a record
+                // that has gone is somebody's delete.
+                info!(
+                    target: "queue",
+                    "{id}: the failure was deleted from history while it \
+                     was being parked, so its held alternative is \
+                     dropped rather than started"
+                );
+                self.drop_spares_for(&id);
+            }
         }
         // TODO 282 item 5's other half: a job that COMPLETED (or that
         // the user deleted) has nothing left for a spare to be a spare
@@ -1177,7 +1383,13 @@ impl Daemon {
         // for the same reason: the original is coming back through the
         // queue in minutes, so this is not yet a terminal verdict. A
         // tombstone is the user's own delete, not a failure.
-        if failed && !tombstone && !armed_auto_retry && !spare_held {
+        //
+        // `still_filed` for the reason given at the promotion above:
+        // hunting a replacement for a failure the user has just deleted
+        // from history puts a download in front of them for a job they
+        // dismissed, which is the promotion's own bug reached by the
+        // other road.
+        if failed && !tombstone && !armed_auto_retry && !spare_held && still_filed {
             self.hunt_request(&job);
         }
         // Coalesced: the record is already durable in history.jsonl (the
@@ -1339,6 +1551,11 @@ impl Daemon {
         if !self.alt.auto_switch.load(Ordering::Relaxed) {
             return;
         }
+        // §290 (Codex F-11). Held the whole way down, so the winner is
+        // weighed and unpaused without a hunt or a click slipping a
+        // second copy in between. Taken BEFORE any store lock, which is
+        // the order every door takes (see `altspend`).
+        let _gate = self.alt_gate();
         // §282 item 14's half, read off the FAILED record before
         // anything is promoted: the clause names it, and by the time the
         // winner is chosen the queue lock has been dropped and retaken a
@@ -1374,22 +1591,67 @@ impl Daemon {
         // toward a candidate on a different group and poster (item
         // 7). Both degrade to the pre-282 pure-rank pick when a
         // spool file cannot be read; see `spare::best_alternative`.
-        let candidates: Vec<(Arc<Mutex<Job>>, String, PathBuf)> = self
+        let candidates: Vec<(Arc<Mutex<Job>>, String, PathBuf, u32)> = self
             .queue
             .lock_ok()
             .iter()
             .filter_map(|j| {
                 let g = j.lock_ok();
-                (g.priority == -3 && g.paused && held_against(&g, id, key))
-                    .then(|| (j.clone(), g.name.clone(), g.nzb_path.clone()))
+                (g.priority == -3 && g.paused && held_against(&g, id, key)).then(|| {
+                    (
+                        j.clone(),
+                        g.name.clone(),
+                        g.nzb_path.clone(),
+                        // §295: the prober now visits held rows, so a
+                        // spare can carry a real verdict by the time it
+                        // matters - here. The band outranks the quality
+                        // rank inside `best_alternative`.
+                        crate::health::promote_band(g.health.as_ref()),
+                    )
+                })
             })
             .collect();
-        let named: Vec<(String, PathBuf)> = candidates
+        let named: Vec<(String, PathBuf, u32)> = candidates
             .iter()
-            .map(|(_, n, p)| (n.clone(), p.clone()))
+            .map(|(_, n, p, b)| (n.clone(), p.clone(), *b))
             .collect();
+        // §290 (F-11): the ceilings, at the one moment payload spend
+        // begins. Built here rather than at the top because it reads the
+        // failed row out of whichever store now has it, and `park_gen`
+        // has only just finished deciding which that is.
+        let ctx = self.alt_ctx(
+            id,
+            &failed_name,
+            crate::serve::giveup::target_keys(&crate::wall::parse_release(&failed_name)),
+        );
         let promoted = spare::best_alternative(nzb_path, &named).and_then(|(i, rank)| {
             let j = &candidates[i].0;
+            // §290: the mechanism-wide ceilings, which this door
+            // consulted NOWHERE until then - not the copy cap, not the
+            // byte cap, not the metered rule - while being the only one
+            // of the three that ships ON. With the shipped defaults
+            // (hold 2, max_copies 2) the original failed, spare A was
+            // promoted, A failed, and the repointed spare B started as a
+            // THIRD copy of one release. `altcand::AltSettings` has
+            // always documented both limits as governing "this whole
+            // mechanism"; this is where that becomes true.
+            //
+            // The spare is left HELD on a refusal rather than dropped:
+            // §284's parked offer draws it on the abandoned row's
+            // history entry, so the answer degrades to the click, which
+            // is §282's documented safe posture on any account type.
+            // The job lock is taken and released on its own line - it
+            // must NOT be held across `alt_admit`, which walks the
+            // stores and takes job locks of its own.
+            let want = j.lock_ok().total_bytes;
+            if let Err(no) = self.alt_admit(&ctx, want, super::hunt::Trigger::Auto) {
+                info!(
+                    target: "queue",
+                    "{id}: a copy is held for this download but was not started - {}",
+                    no.why()
+                );
+                return None;
+            }
             let mut g = j.lock_ok();
             // Re-check now that the queue lock has been dropped and
             // retaken a world away: a delete landing in the gap sets
@@ -1434,9 +1696,13 @@ impl Daemon {
         // not known in time for that write. So it takes one more append,
         // and only when a promotion actually happened.
         // `_if_present` rather than `history_upsert`: a delete landing in
-        // between must not resurrect the record.
+        // between must not resurrect the record. Through
+        // `history_publish_change`, which is that call plus the rewrite
+        // rescue and a sentence for the refusal that cannot be rescued -
+        // the loss here is the ordinary one that helper is for, a field
+        // the store's existing line simply does not carry.
         failed.lock_ok().alt_to_name = name.clone();
-        let _ = self.history_upsert_if_present(failed);
+        self.history_publish_change(failed, "the alternative that replaced this job");
         // Last, and with no job lock held: `life_emit` takes the ring
         // lock and then offers the event to the webhook dispatcher, and
         // no job mutex may be held across either (the rule
@@ -1571,6 +1837,194 @@ impl Daemon {
     }
 }
 
+/// One directory a delete is about to remove, as the slow half needs to
+/// see it: the stem its files on disk were built from, the directory,
+/// whether the job was FILED into a shared library folder, and the tail
+/// that tells a filed delete which episode in there is this record's.
+type DoomedDir = (String, std::path::PathBuf, bool, crate::smart::FiledTail);
+
+/// The BATCH form of [`Daemon::remove_files_in_custody`], for a caller
+/// that settles a whole delete REQUEST rather than one record.
+///
+/// Same transaction, in two halves, and the halves are what the queue
+/// lock forces rather than a taste for phases: a Trash call is bounded
+/// at 30 s per route and macOS runs TWO of them (Finder, then
+/// NSFileManager), so removing inside `q.retain` held the GLOBAL queue
+/// lock for up to a minute on a headless mac or a share with no
+/// .Trashes - pick_job, queue_json, save_queue and every *arr status
+/// poll stalling behind it, and the *arr marking the client unhealthy.
+/// [`Self::plan`] runs under the lock and does only what has to be
+/// atomic with the row leaving the queue - the arm choice, the
+/// RESERVATION, and the §296 path arithmetic - and [`Self::settle`]
+/// does the slow half once the lock has dropped.
+///
+/// It is the reservation that carries the transaction. `dir_claim`
+/// consults `reserved` before it consults either store, precisely so a
+/// directory that no record names any more cannot be handed to a NEW job
+/// in the window between the record going and the files - a window a
+/// Trash call wide.
+///
+/// Both facade delete arms take it here - `api::queue::payload`'s
+/// `m_queue` delete and `sabcompat::editqueue_delete::group_delete` -
+/// rather than hand-copying the choreography a third time. That
+/// hand-copy is the shape this repo keeps being bitten by, and
+/// `group_delete` says so about ITSELF at its `owns_hub` block: the REST
+/// path was fixed for that hazard, the JSON-RPC facade was a copy that
+/// never got it, and which client type the user had configured in Sonarr
+/// decided whether the bug was reachable.
+///
+/// It had happened AGAIN by the time this was extracted, in the very
+/// commit that added the §296 arm (0e225e890, 25 Aug 2026). That commit
+/// set out to reconcile early-published copies at three places - the
+/// mover, the delete tombstone and `park_gen` - and wrote the take into
+/// BOTH of `group_delete`'s arms but only the non-active arm of the REST
+/// delete's. So a REST delete of a DOWNLOADING job left whatever it had
+/// already published sitting in the completed folder until `park_gen`
+/// reached its `if failed` arm, which is the DEFERRED removal (unbounded
+/// on a hung NAS) and never fires at all for a job that does not end
+/// `Failed` - while the identical delete through JSON-RPC took the
+/// copies back at once. An *arr polling in that window imports a partial
+/// as though the job had worked, which is the one outcome an early
+/// publish must not be able to produce. Structural now: the take is the
+/// first thing [`Self::plan`] does, before the `del_files` gate, so
+/// neither facade can have it and the other not.
+#[derive(Default)]
+pub(in crate::serve) struct CustodyBatch {
+    /// Directories to remove as soon as the queue lock is down.
+    doomed: Vec<DoomedDir>,
+    /// The one directory whose live writers are the prefetch sidecar's:
+    /// removed only once that has wound down, by the drain, which also
+    /// hands back its reservation.
+    pending_sidecar: Vec<DoomedDir>,
+    /// §296 destination copies of jobs that will never reach the mover.
+    /// Path arithmetic under the queue lock, the unlinks in the slow
+    /// half - a destination that has gone offline must not turn a delete
+    /// into a stalled queue.
+    early_gone: Vec<std::path::PathBuf>,
+}
+
+impl CustodyBatch {
+    /// Phase one, UNDER the queue lock, once per record this request is
+    /// taking out of the queue. Call it for EVERY hit row, files half or
+    /// not: the §296 take is not gated on `del_files`, because with the
+    /// files kept the whole payload is still in `out_dir` and the
+    /// destination copies are a partial duplicate either way.
+    ///
+    /// Three arms past that gate, and the divider is who is still
+    /// WRITING into the directory:
+    ///
+    /// * Live pipeline writers - `Downloading`, `Finishing`, or
+    ///   `finalizing`. Removing now just lets the next positioned write
+    ///   recreate the files and orphan them, so the removal is deferred
+    ///   to `park()`, which runs after the fetch drains and releases the
+    ///   reservation itself. `finalizing` is NOT covered by the state
+    ///   test and is why it is asked separately: a Completed job whose
+    ///   post-processing (unlock, rename, TV filing, NAS move) is still
+    ///   running has left `Downloading`, so it used to take the plain arm
+    ///   and `remove_dir_all` the very directory the mover was reading
+    ///   from. The deferral is on those three ONLY, never on every
+    ///   non-active state: a never-run `Queued` job has no tail, so
+    ///   `park` would never fire and its files would never go at all.
+    /// * The prefetch sidecar's own job - which is the exception that
+    ///   rule leaves open, and it bit: a PREFETCHING job is `Queued` and
+    ///   not `finalizing`, so it fell to the plain arm and had its
+    ///   directory removed while the sidecar was still writing into it,
+    ///   after which the next file's first article recreated it and laid
+    ///   a fresh payload nothing named (M2). `park` is the wrong
+    ///   destination too - the abort's ordinary outcome is the sidecar's
+    ///   `Err` arm, which never parks - so this waits on the wind-down.
+    /// * Everything else: removed by [`Self::settle`] below.
+    ///
+    /// The reservation is taken for all three, which is why it is one
+    /// unconditional line at the top rather than a line inside each arm:
+    /// the deferred arm needs it LONGEST (a tombstoned job is dropped
+    /// rather than filed, so between the row going and `park()` running,
+    /// `dir_claim` finds the directory in neither store and calls it
+    /// free - and a re-add of the same release can be writing there when
+    /// `park()` finally removes the whole tree).
+    ///
+    /// `sidecar` is the [`Daemon::sidecar_owner`] snapshot, taken BEFORE
+    /// the queue lock for the reason that function gives: reading the
+    /// sidecar mutex inside `q.retain` would take it under queue+job, a
+    /// lock edge nothing else in the daemon has.
+    pub(in crate::serve) fn plan(
+        &mut self,
+        d: &Daemon,
+        g: &mut Job,
+        sidecar: Option<&(String, Arc<AtomicBool>)>,
+        del_files: bool,
+    ) {
+        self.early_gone.extend(d.early_take(g));
+        if !del_files {
+            return;
+        }
+        d.reserved.lock_ok().insert(g.out_dir.clone());
+        if matches!(g.state, JobState::Downloading | JobState::Finishing) || g.finalizing {
+            g.del_on_drop = true;
+            return;
+        }
+        let stem = filed_stem(g).to_string();
+        let tail = delete_tail(g, || d.job_suffix(&stem));
+        let entry = (stem, g.out_dir.clone(), g.filed, tail);
+        if sidecar.is_some_and(|(id, _)| *id == g.nzo_id) {
+            self.pending_sidecar.push(entry);
+        } else {
+            self.doomed.push(entry);
+        }
+    }
+
+    /// Phase two, once the queue lock has DROPPED: the slow half.
+    ///
+    /// Every reservation is released AFTER the whole batch, never per
+    /// entry. `reserved` is a set, so two entries naming one directory
+    /// are one member: releasing after the first would unreserve a
+    /// directory a later entry has not reached yet, and the gap is a
+    /// whole Trash call wide.
+    ///
+    /// `held` is the spool copies `park_or_drop_spool` set aside for the
+    /// records whose removal may be refused - a notice's "download it
+    /// again" needs that NZB, and everything still held afterwards
+    /// belongs to a directory that went cleanly and so goes.
+    pub(in crate::serve) fn settle(
+        self,
+        d: &Arc<Daemon>,
+        sidecar: Option<&(String, Arc<AtomicBool>)>,
+        held: &mut std::collections::HashMap<std::path::PathBuf, Vec<std::path::PathBuf>>,
+    ) {
+        let reserved_dirs: Vec<std::path::PathBuf> = self
+            .doomed
+            .iter()
+            .map(|(_, dir, _, _)| dir.clone())
+            .collect();
+        crate::serve::earlyfile::early_unlink(&self.early_gone);
+        let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
+        for (name, dir, filed, tail) in self.doomed {
+            if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
+                kept.push((name, dir, why));
+            }
+        }
+        {
+            let mut r = d.reserved.lock_ok();
+            for dir in &reserved_dirs {
+                r.remove(dir);
+            }
+        }
+        // The row is gone from the queue either way - that is what was
+        // asked for and it worked. What did NOT work was the files half,
+        // and with the row went the only place the user could see this
+        // download named.
+        note_kept_files(d, kept, held);
+        // The sidecar's job waits for the sidecar. Its own reservation is
+        // released by the drain, not by the batch above - the removal is
+        // still ahead of it.
+        if let Some((_, target)) = sidecar {
+            for (name, dir, filed, tail) in self.pending_sidecar {
+                d.remove_after_sidecar_drain(target.clone(), name, dir, filed, tail);
+            }
+        }
+    }
+}
+
 /// Was this held row held against the job that just failed?
 ///
 /// The `dupe_key` filter alone asks "same title", which is what
@@ -1592,10 +2046,170 @@ fn held_against(g: &Job, failed_id: &str, failed_key: &str) -> bool {
     g.held_for == failed_id
 }
 
+// §290 (Codex F-11): the ceilings the automatic promotion now consults.
+// A separate file under the size gate, and a CHILD of this module so it
+// can reach `promote_held_alternative`, which nothing outside calls.
+#[cfg(test)]
+#[path = "daemon_park_spend_tests.rs"]
+mod daemon_park_spend_tests;
+
 #[cfg(test)]
 mod park_custody_tests {
     use super::*;
     use crate::serve::testutil::test_daemon;
+
+    /// A queue row as `CustodyBatch::plan` needs to see it, with one
+    /// file already published to the completed folder.
+    ///
+    /// The state is stamped after the parse rather than through it:
+    /// `job_from_json` restores a record caught mid-download as `Queued`
+    /// on purpose (it goes back through the scheduler), and the live
+    /// state is exactly what the deferral asks about.
+    fn early_job(dir: &std::path::Path, state: JobState) -> Arc<Mutex<Job>> {
+        let out = dir.join("out").join("Pack.S01");
+        let job = Arc::new(Mutex::new(
+            job_from_json(&serde_json::json!({
+                "nzo_id": "nzo-custody-1",
+                "name": "Pack.S01",
+                "nzb_path": dir.join("spool").join("Pack.S01.nzb").to_string_lossy(),
+                "out_dir": out.to_string_lossy(),
+                "state": "Queued",
+            }))
+            .expect("job"),
+        ));
+        {
+            let mut g = job.lock_ok();
+            g.state = state;
+            g.early_published = vec![crate::serve::earlyfile::EarlyFile {
+                name: "ep1.mkv".into(),
+                len: 1 << 20,
+                mtime_ns: 0,
+                nzf_id: String::new(),
+                // Pre-dest record: the take derives the destination,
+                // which is the configuration this rig sets up.
+                dest: None,
+            }];
+        }
+        job
+    }
+
+    /// A delete of a job that is still DOWNLOADING takes back whatever
+    /// it had already published at the destination, right here, rather
+    /// than leaving it to `park_gen`.
+    ///
+    /// The divergence this pins is the one that motivated the shared
+    /// batch. 0e225e890 wrote the §296 take into BOTH arms of the
+    /// JSON-RPC `group_delete` and only the non-active arm of the REST
+    /// delete, so the identical cancel left episodes sitting in the
+    /// completed folder or did not, according to which client type the
+    /// user had configured. `park_gen`'s own take is NOT the same
+    /// promise: it is the deferred removal, and it never fires at all
+    /// for a job that does not end `Failed`.
+    #[test]
+    fn an_active_delete_takes_its_early_copies_back_at_once() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-custody-a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+        let dest = dir.join("completed");
+        *d.move_completed.write_ok() = Some(dest.clone());
+
+        let job = early_job(&dir, JobState::Downloading);
+        let mut batch = CustodyBatch::default();
+        batch.plan(&d, &mut job.lock_ok(), None, true);
+
+        assert_eq!(
+            batch.early_gone,
+            vec![dest.join("Pack.S01").join("ep1.mkv")],
+            "the destination copy of a job being cancelled mid-download was left behind"
+        );
+        assert!(
+            job.lock_ok().early_published.is_empty(),
+            "the record must stop naming copies this delete has taken back"
+        );
+        assert!(
+            job.lock_ok().del_on_drop,
+            "a job with live pipeline writers defers its removal to park()"
+        );
+        assert!(
+            batch.doomed.is_empty() && batch.pending_sidecar.is_empty(),
+            "nothing may remove a directory a running pipeline is still writing into"
+        );
+        assert!(
+            d.reserved.lock_ok().contains(&job.lock_ok().out_dir),
+            "the deferred arm needs the reservation LONGEST - park() releases it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ...and the take is not gated on the files half. With the files
+    /// KEPT the whole payload is still in `out_dir`, so a copy left at
+    /// the destination is a partial duplicate either way, and an *arr
+    /// that imports it has imported a download the user stopped.
+    ///
+    /// `GroupParkDelete` is the verb that reaches this, and the REST
+    /// delete without `del_files=1` is the other.
+    #[test]
+    fn the_early_take_is_not_gated_on_the_files_half() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-custody-k-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+        let dest = dir.join("completed");
+        *d.move_completed.write_ok() = Some(dest.clone());
+
+        let job = early_job(&dir, JobState::Queued);
+        let mut batch = CustodyBatch::default();
+        batch.plan(&d, &mut job.lock_ok(), None, false);
+
+        assert_eq!(
+            batch.early_gone,
+            vec![dest.join("Pack.S01").join("ep1.mkv")],
+            "a files-KEPT delete still owes the destination copy back"
+        );
+        assert!(
+            d.reserved.lock_ok().is_empty(),
+            "a delete that removes no files must reserve no directory"
+        );
+        assert!(
+            !job.lock_ok().del_on_drop,
+            "a files-KEPT delete must not arm park's removal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The slow half removes the directory and hands the reservation
+    /// back, and it hands it back only once the WHOLE batch is through.
+    #[test]
+    fn settle_removes_the_directory_and_releases_its_reservation() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-custody-s-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+
+        let job = early_job(&dir, JobState::Queued);
+        let out = job.lock_ok().out_dir.clone();
+        std::fs::create_dir_all(&out).expect("payload dir");
+        std::fs::write(out.join("ep1.mkv"), b"payload").expect("payload");
+
+        let mut batch = CustodyBatch::default();
+        batch.plan(&d, &mut job.lock_ok(), None, true);
+        assert!(
+            d.reserved.lock_ok().contains(&out),
+            "the reservation goes up while the row is still leaving the queue"
+        );
+
+        let mut held = std::collections::HashMap::new();
+        batch.settle(&d, None, &mut held);
+
+        assert!(!out.exists(), "the payload was not removed");
+        assert!(
+            d.reserved.lock_ok().is_empty(),
+            "a directory that is gone must not stay reserved - `dir_claim` would \
+             refuse a re-add of the same release forever"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The smallest NZB that parses and enqueues, so "the retry can
     /// still use it" is a claim about real bytes rather than a stat().
@@ -1694,6 +2308,190 @@ mod park_custody_tests {
         let bytes = std::fs::read(&named).expect("the retry's NZB read");
         d.enqueue(&bytes, "Kept.Release", "", -100, None, None, "test", true)
             .expect("the kept spool copy must still parse and enqueue");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sweep 9, finding 2: a HISTORY-LESS delete of a FINISHING job
+    /// defers its files to park, so the spool copy has to reach park
+    /// too - a refusal there is the only thing the user ever sees, and
+    /// "download it again" is the only way back to the release.
+    ///
+    /// The Downloading arm masks the copy and leaves it for park. A
+    /// Finishing (or `finalizing`) job is not `active`, so it took the
+    /// non-active arm, which HELD the NZB for a kept-files notice this
+    /// request will never raise - the files have not been attempted
+    /// yet - and `note_kept_files` then unlinked it as leftover from a
+    /// removal that went cleanly. Park's own refusal, minutes later,
+    /// handed `note_delete_kept` a path that was already gone.
+    ///
+    /// The test above cannot see this: it is a `delete_status`
+    /// history-KEEPING delete, whose spool copy is kept for the retry
+    /// and never goes near `hold_or_drop_spool`.
+    #[test]
+    fn a_finishing_jobs_deferred_delete_still_has_an_nzb_to_offer() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-parkfin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+
+        // The ADOPTABLE name, because that is what `enqueue_as` writes
+        // and what the masking is about: a copy left under this shape
+        // with no record naming it is re-downloaded at the next start.
+        let spool_nzb = d
+            .spool
+            .join("SABnzbd_nzo_nzbfast4242-Finishing.Release.nzb");
+        std::fs::write(&spool_nzb, NZB).expect("spool copy");
+        // The same cheap honest refusal the test above uses.
+        let out = dir.join("Finishing.Release");
+        std::fs::write(&out, b"not a directory").expect("blocker");
+
+        let job = Arc::new(Mutex::new(
+            job_from_json(&serde_json::json!({
+                "nzo_id": "SABnzbd_nzo_nzbfast4242",
+                "name": "Finishing.Release",
+                "nzb_path": spool_nzb.to_string_lossy(),
+                "out_dir": out.to_string_lossy(),
+                "state": "Finishing",
+            }))
+            .expect("job"),
+        ));
+        // The request half, in the order `m_queue`'s delete arm runs it
+        // for a Finishing row with `del_files=1` and no history status:
+        // tombstone, settle the spool, defer the files to park, then
+        // drain the holds with no refusal to pair them against.
+        let mut held = std::collections::HashMap::new();
+        {
+            let mut g = job.lock_ok();
+            g.tombstone = true;
+            g.del_on_drop = true;
+            park_or_drop_spool(&mut g, true, true, &mut held);
+        }
+        note_kept_files(&d, Vec::new(), &mut held);
+        let carried = job.lock_ok().nzb_path.clone();
+        assert!(
+            carried.exists(),
+            "the request destroyed the copy park is about to need: {}",
+            carried.display()
+        );
+        assert!(
+            !spool_nzb.exists(),
+            "it must not sit under the adoptable name - a kill before park would re-download it"
+        );
+
+        d.queue.lock_ok().push_back(job.clone());
+        d.park_gen(job.clone(), None);
+
+        let note = d
+            .delete_kept
+            .lock_ok()
+            .front()
+            .cloned()
+            .expect("the refused removal must raise a kept-files notice");
+        assert!(
+            !note.nzb.is_empty(),
+            "the refusal had no NZB to offer - the user cannot get the release back"
+        );
+        assert!(
+            std::path::Path::new(&note.nzb).exists(),
+            "the notice names a file that is gone: {}",
+            note.nzb
+        );
+        let bytes = std::fs::read(&note.nzb).expect("the offer's NZB read");
+        d.enqueue(
+            &bytes,
+            "Finishing.Release",
+            "",
+            -100,
+            None,
+            None,
+            "test",
+            true,
+        )
+        .expect("\"download it again\" must parse and enqueue");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sweep 9, finding 3: park's own last unlink is a `drop_spool`,
+    /// not a raw `remove_file`.
+    ///
+    /// The record is gone durably by the time this runs, so a survivor
+    /// under the adoptable `SABnzbd_nzo_nzbfast*.nzb` name is
+    /// re-enqueued at the next start - the release the user cancelled
+    /// downloads again. `drop_spool` renames it out of that shape and,
+    /// failing that (a read-only spool DIRECTORY refuses the rename for
+    /// the same reason it refused the unlink), empties the file, which
+    /// recovery skips. The raw call here had neither resort.
+    ///
+    /// The fault path this closes is narrow, and named rather than
+    /// hidden: the Downloading arm has usually masked the name at
+    /// request time already, so reaching an adoptable copy here means
+    /// that rename was refused too. Narrow is not the same as unwritten.
+    #[cfg(unix)]
+    #[test]
+    fn park_does_not_leave_a_refused_unlink_under_the_adoptable_name() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("nzbfast-parkrefuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let d = test_daemon(&dir);
+
+        let spool_nzb = d
+            .spool
+            .join("SABnzbd_nzo_nzbfast7373-Cancelled.Release.nzb");
+        std::fs::write(&spool_nzb, NZB).expect("spool copy");
+        // A control of the same shape under an unknown id, written
+        // before the directory goes read-only: without it this would
+        // pass against a recovery that adopts nothing at all.
+        let control = d.spool.join("SABnzbd_nzo_nzbfast7374-Other.Release.nzb");
+        let other = String::from_utf8_lossy(NZB).replace("one@x", "two@x");
+        std::fs::write(&control, other).expect("control copy");
+
+        let job = Arc::new(Mutex::new(
+            job_from_json(&serde_json::json!({
+                "nzo_id": "SABnzbd_nzo_nzbfast7373",
+                "name": "Cancelled.Release",
+                "nzb_path": spool_nzb.to_string_lossy(),
+                "out_dir": dir.join("Cancelled.Release").to_string_lossy(),
+                "state": "Failed",
+            }))
+            .expect("job"),
+        ));
+        // History-less and tombstoned is what makes park the last thing
+        // naming this file. No `del_on_drop`: the spool half runs
+        // either way, and a deferred file removal would only add noise.
+        job.lock_ok().tombstone = true;
+
+        let was = std::fs::metadata(&d.spool)
+            .expect("spool")
+            .permissions()
+            .mode();
+        std::fs::set_permissions(&d.spool, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+        d.spend_deferred_delete(&job);
+        std::fs::set_permissions(&d.spool, std::fs::Permissions::from_mode(was))
+            .expect("chmod back");
+        assert!(
+            spool_nzb.exists(),
+            "the fault under test is an unlink that was REFUSED"
+        );
+
+        assert_eq!(
+            d.recover_orphaned_spool(),
+            1,
+            "only the control is an orphan - the cancelled release came back"
+        );
+        let back: Vec<String> = d
+            .queue
+            .lock_ok()
+            .iter()
+            .map(|j| j.lock_ok().nzo_id.clone())
+            .collect();
+        assert!(
+            !back.contains(&"SABnzbd_nzo_nzbfast7373".to_string()),
+            "the cancelled release was re-adopted: {back:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

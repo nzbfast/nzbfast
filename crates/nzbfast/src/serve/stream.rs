@@ -1,19 +1,36 @@
 use super::*;
 
-/// The library pointer Jellyfin/Emby index: a one-line .strm whose URL
-/// plays (and on first play, downloads) the job. 127.0.0.1 is a
-/// placeholder - the daemon only knows its own port, not its public host.
+/// The library pointer a media server indexes: a one-line .strm whose URL
+/// plays (and on first play, downloads) the job.
 ///
-/// `scheme` is not a placeholder, though: it is what this run's listener
-/// actually bound ([`Daemon::scheme`]). There is no request here to read
-/// a forwarded scheme off - the file is written at finalize and read back
-/// by Jellyfin possibly months later - so a hardcoded `http` on a TLS
-/// daemon wrote a pointer that could never play.
+/// Neither half of that URL is a placeholder any more. `scheme` is what
+/// this run's listener actually bound ([`Daemon::scheme`]) - there is no
+/// request here to read a forwarded scheme off, the file is written at
+/// finalize and read back possibly months later, so a hardcoded `http`
+/// on a TLS daemon wrote a pointer that could never play. `authority`
+/// is the same argument one field over, and [`pointer_authority`] is
+/// where it is derived.
+///
+/// **Plex will never describe what this points at, and no change here can
+/// fix it.** Measured 25 Aug 2026 in
+/// `research/PLEX-STRM-ANALYZE-2026-08-25.md`: Plex's scanner treats the
+/// .strm FILE as the media, recording a part whose size and path are the
+/// pointer's own, and resolves the URL at one moment only - playback, as a
+/// 301 the client follows. Four pointer shapes in one library, including a
+/// bare path ending in `.mp4` and a trailing filename after the id, all
+/// report no duration and no container, and the origin logged ZERO requests
+/// across the library scan AND an explicit analyze of every item. So do not
+/// reshape this URL to carry an extension (that would want the id taken as
+/// the FIRST path segment in `serve/http.rs`, which is the change to not
+/// make), and do not reach for a response header such as
+/// `Content-Disposition`: there is no request to answer. The only thing that
+/// gives Plex metadata is real bytes on disk, which is what library mode
+/// exists to avoid. Jellyfin and Emby fetch server-side and are unaffected.
 pub(super) fn write_strm(
     out_dir: &std::path::Path,
     name: &str,
     scheme: &str,
-    port: u16,
+    authority: &str,
     nzo_id: &str,
     token: &str,
 ) -> Result<()> {
@@ -21,10 +38,97 @@ pub(super) fn write_strm(
     let path = out_dir.join(nzbkit::disk::sanitize_filename(&format!("{name}.strm")));
     std::fs::write(
         &path,
-        format!("{scheme}://127.0.0.1:{port}/stream/{nzo_id}?t={token}\n"),
+        format!("{scheme}://{authority}/stream/{nzo_id}?t={token}\n"),
     )?;
     info!(target: "library", "wrote {}", path.display());
     Ok(())
+}
+
+/// The authority a library pointer has to name, derived from what this
+/// run's listener actually bound.
+///
+/// It was a hardcoded `127.0.0.1` until 25 Aug 2026, flagged in this
+/// module's own comment as a placeholder because the daemon knows its
+/// port and not its public host. That is still true, and loopback is
+/// still the wrong answer for every consumer that is not on this
+/// machine. Measured that day (`research/MOUNT-MEASUREMENT-2026-08-25.md`,
+/// Finding 5): Plex DOES read a .strm, contrary to the usual claim, and
+/// serves it as an HTTP 301 to the URL inside - so the CLIENT is what
+/// follows it, and a phone or a TV resolves loopback to ITSELF and gets
+/// nothing. Jellyfin and Emby fetch the URL server-side, which is why the
+/// placeholder survived: they are unaffected while the server shares this
+/// host, and they break the same way the moment it does not (another box,
+/// or a bridged container, where loopback is the container's own).
+///
+/// This is the BIND and not [`public_base`], and the difference is not a
+/// preference: `public_base` does the right header arithmetic but takes a
+/// `&tiny_http::Request`, and there is no request in scope at finalize -
+/// the file is written when the job settles and read back months later.
+/// So the listener is the only witness available, exactly as it is for
+/// the scheme above:
+///
+/// * a specific address is what the operator asked to be reachable on,
+///   so it IS the answer, and no guess is involved;
+/// * loopback stays loopback, because nothing else on this box is
+///   listening - a LAN address there would point at a closed port, which
+///   is a REGRESSION on the one deployment the placeholder served;
+/// * a wildcard (`0.0.0.0`, the shipped default for `serve`, so this is
+///   the row nearly every install takes) has no single answer, so the
+///   address on the default route is taken - the one a machine on the
+///   LAN would reach this one at - and loopback is the fallback when
+///   there is none.
+///
+/// The route is read through [`crate::serve::lanaddr::route_src`], at
+/// the same destination the "connect your phone" panel uses, which is
+/// load-bearing twice over: it sends no packet, and it is CACHED, so a
+/// queue of library jobs settling one after another costs one wildcard
+/// UDP bind per minute rather than one per job. That bind is a macOS
+/// firewall dialog (TODO 33), which is why `lanaddr` owns the only one
+/// in the daemon and a test refuses a second.
+///
+/// What this cannot name is a reverse proxy, a container's published
+/// port or an external hostname. That needs a setting nobody has decided
+/// on; TODO 298 is where the decision lives, and this deliberately does
+/// not pre-empt it.
+pub(super) fn pointer_authority(bind: &str, port: u16) -> String {
+    pointer_authority_from(bind, port, || {
+        crate::serve::lanaddr::route_src("8.8.8.8:53")
+            .filter(|ip| !ip.is_loopback() && !ip.is_unspecified())
+    })
+}
+
+/// The arithmetic behind [`pointer_authority`], split off the route
+/// lookup so it is testable without one - the answer would otherwise
+/// depend on which network the box running the test happens to be on.
+///
+/// The lookup is a closure and not a value because a bind that already
+/// names an address must not pay for one: on every path but the wildcard
+/// this opens no socket at all.
+fn pointer_authority_from(
+    bind: &str,
+    port: u16,
+    lan: impl FnOnce() -> Option<std::net::IpAddr>,
+) -> String {
+    use std::net::{IpAddr, Ipv4Addr};
+    let Ok(ip) = bind.parse::<IpAddr>() else {
+        // `--bind` takes a NAME too, and a name the operator typed is
+        // one they believe resolves. Passed through rather than
+        // resolved: a DNS answer that moves next month should not be
+        // frozen into a file read next month.
+        return format!("{bind}:{port}");
+    };
+    let host = if ip.is_loopback() {
+        ip
+    } else if ip.is_unspecified() {
+        lan().unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    } else {
+        ip
+    };
+    match host {
+        // A v6 literal is bracketed or the port reads as one more group.
+        IpAddr::V6(v6) => format!("[{v6}]:{port}"),
+        IpAddr::V4(v4) => format!("{v4}:{port}"),
+    }
 }
 
 /// Largest media-extension writer in the extractor owned by `want` (the
@@ -110,10 +214,13 @@ pub(super) fn serve_file_range(req: tiny_http::Request, path: &std::path::Path) 
         .headers()
         .iter()
         .find(|h| h.field.equiv("Range"))
-        .and_then(|h| byte_range(h.value.as_str(), total));
+        .map_or(RangeVerdict::Ignore, |h| {
+            byte_range(h.value.as_str(), total)
+        });
     let (start, end, status) = match range {
-        Some((s, e)) => (s, e, 206),
-        None => (0, total, 200),
+        RangeVerdict::Span(s, e) => (s, e, 206),
+        RangeVerdict::Ignore => (0, total, 200),
+        RangeVerdict::Unsatisfiable => return respond_unsatisfiable(req, total),
     };
     use std::io::{Read, Seek};
     if f.seek(std::io::SeekFrom::Start(start)).is_err() {
@@ -130,23 +237,41 @@ pub(super) fn serve_file_range(req: tiny_http::Request, path: &std::path::Path) 
     } else {
         b"video/x-matroska"
     };
-    // ONE clamped value behind the header, the reader and data_length,
-    // so a 32-bit target cannot disagree with itself. `Some(len as usize)`
-    // truncates on armv7, and tiny_http then DROPS the textual
-    // Content-Length (its add_header parses it into usize and gives up on
-    // Err) while `io::copy` ships the full body - a 5 GB file behind a
-    // 705 MB header. A no-op on 64-bit.
-    let len = (end - start).min(usize::MAX as u64);
-    let mut resp = tiny_http::Response::new(
-        tiny_http::StatusCode(status),
-        vec![
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype).unwrap(),
-            tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+    // THE READER'S LIMIT IS THE FULL u64 SPAN. Clamping it to
+    // `usize::MAX` first - which this line used to do, to keep one value
+    // behind the header, the reader and data_length - fixed the header
+    // disagreement by TRUNCATING THE BODY instead: on the armv7 beta a
+    // 5 GB completed file ended after ~4 GiB, and a 206 shipped fewer
+    // bytes than its own Content-Range claimed. `Take` is u64, so the
+    // reader was the one thing that never needed narrowing.
+    //
+    // What cannot carry a >4 GiB span on a 32-bit target is tiny_http's
+    // `data_length`, which is `Option<usize>`. So the two cases split:
+    // a span that FITS keeps the identity framing players want (exact
+    // Content-Length, no chunking - `with_chunked_threshold(usize::MAX)`
+    // below), and a span that does not is served CHUNKED with no
+    // Content-Length at all, which is the honest answer and is what
+    // tiny_http already does for `None` (see `choose_transfer_encoding`).
+    // Content-Range still names the true span either way; a chunked 206
+    // with a correct Content-Range is well-formed, a short one is not.
+    // Both arms are a no-op on 64-bit, where the span always fits.
+    let len = end - start;
+    let fits = usize::try_from(len).ok();
+    let mut headers = vec![
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype).unwrap(),
+        tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+    ];
+    if fits.is_some() {
+        headers.push(
             tiny_http::Header::from_bytes(&b"Content-Length"[..], len.to_string().into_bytes())
                 .unwrap(),
-        ],
+        );
+    }
+    let mut resp = tiny_http::Response::new(
+        tiny_http::StatusCode(status),
+        headers,
         f.take(len),
-        Some(len as usize),
+        fits,
         None,
     )
     // Identity encoding with an exact length, as the live path does:
@@ -164,95 +289,14 @@ pub(super) fn serve_file_range(req: tiny_http::Request, path: &std::path::Path) 
     let _ = req.respond(resp);
 }
 
-/// How long `/stream/<id>` waits for a job's writers to appear before
-/// giving up (M14i). Named because the §16m predicate below has to judge
-/// an armed auto-retry against it: a retry that fires after this request
-/// is already answered is no prospect for THIS request.
-const ADMIT_WAIT_SECS: u64 = 30;
-
-/// TODO 16m: may this `/stream/<id>` answer its 404 immediately, instead
-/// of sitting out the M14i admit wait for writers that are never coming?
-///
-/// The question is "are there writers, and is there any PROSPECT of
-/// any" - deliberately NOT "does the status word say Completed". Both
-/// halves of that distinction are live:
-///
-/// - A `Completed` job can still materialise its media LATE. Its
-///   extractor stays installed after the run for post-completion
-///   playback (`tasks/runner.rs` only clears it when the NEXT job
-///   claims the hub), the disk-unpack ladder outlives the download it
-///   belongs to (§205), and a completion with a move configured still
-///   owes the payload a move to its final home. So the writer registry
-///   and the settle state are asked, and a "yes" from either is enough
-///   to keep waiting.
-/// - A `Queued` job is the opposite error: its status word says nothing
-///   has happened yet, and its writers appear the moment the runner
-///   picks it up. That is the wait working as designed.
-///
-/// Hence: nothing in the queue, a terminal history row that owes
-/// nothing more (no move still owed, and no armed auto-retry that could
-/// bring the job back INSIDE `wait_ends`), no activity or unpack entry
-/// against the id, and no media writer in the extractor that belongs to
-/// it.
-///
-/// `wait_ends` is when this request's admit wait expires, in unix
-/// seconds - the horizon the retry stamp is judged against.
-///
-/// The job snapshot is taken and RELEASED before any hub lock: the
-/// serve/ order is queue -> job, and a job -> hub edge is exactly the
-/// shape issue #38's deadlock was built from.
-fn no_writers_and_no_prospect(
-    d: &Daemon,
-    id: &str,
-    parked: Option<&Arc<Mutex<Job>>>,
-    queued: bool,
-    wait_ends: u64,
-) -> bool {
-    // In the queue at all - being picked, downloading, or running its
-    // tail. Writers are coming or already here.
-    if queued {
-        return false;
-    }
-    // In neither store: `stream_request` has already answered that one
-    // with `unknown nzo_id`, so this arm is unreachable from there.
-    // Refusing rather than answering keeps it right for anyone else.
-    let Some(job) = parked else {
-        return false;
-    };
-    let settled = {
-        let j = job.lock_ok();
-        matches!(j.state, JobState::Completed | JobState::Failed)
-            // M32: an armed automatic retry brings the whole job back -
-            // but only a retry that lands while this request is still
-            // waiting can produce a writer FOR IT. Testing the stamp for
-            // None left the commonest failure of all still hanging: a
-            // partly-propagated post arms the 20-minute "articles
-            // missing" arm, the transport arm is 2 minutes, and neither
-            // can reach a 30 s deadline - so the shape a stale .strm
-            // most often points at sat out the full wait for a 404 that
-            // was knowable on arrival. `auto_retry_at` is an ABSOLUTE
-            // unix-seconds stamp (`unix_now() + secs`, daemon_park.rs /
-            // daemon_retry.rs), so it compares straight against the
-            // wait's own end. `<=` counts as a prospect: a retry due at
-            // the last instant is one the caller may still be given, and
-            // the delay is a user setting that can be shortened.
-            && j.auto_retry_at.is_none_or(|at| at > wait_ends)
-            && !j.move_pending
-    };
-    if !settled {
-        return false;
-    }
-    // Both maps are keyed by owning nzo_id precisely because a tail
-    // outlives its own download, so an entry here means the pipeline
-    // has not finished with this job whatever its row says.
-    if d.hub.activity.lock_ok().contains_key(id) || d.hub.unpack.lock_ok().contains_key(id) {
-        return false;
-    }
-    // And the registry itself, through the same ownership-checked pick
-    // the loop below uses - so "no writers" is the loop's own answer,
-    // not a second opinion that could disagree with it.
-    pick_media(d, Some(id)).is_none()
-}
+// TODO 16m's question - "may this request answer its 404 now?" - and
+// the store reading that supports it. A child module: see
+// stream/admit.rs.
+mod admit;
+use admit::{
+    ADMIT_WAIT_SECS, Custody, custody, hub_run_still_queued, no_writers_and_no_prospect,
+    refuse_finished,
+};
 
 /// Is this finished job's payload IN FLIGHT to its final folder right
 /// now - moving, or owed a move that has not run yet?
@@ -308,6 +352,14 @@ pub(super) fn payload_in_flight(d: &Daemon, job: &Arc<Mutex<Job>>) -> bool {
 /// away, and a straggling one answered first would serve a finished job
 /// in front of the gate.
 ///
+/// Ahead of, and not INSTEAD of. This function judges the record, and
+/// only one shape of it (`Completed && fetched && !tombstone`), while
+/// the hub goes on holding a spent run's writers until the next job
+/// claims it - so a `Failed` row, a tombstoned one, and the bare
+/// `/stream` route with no record to read at all each reached the open
+/// live path past this gate. [`hub_run_still_queued`] is the other half
+/// and carries the measurement.
+///
 /// `filed` decides which file: a filed job's out_dir is the shared
 /// `Show/Season NN` folder, where "the biggest media file in there" is a
 /// sibling episode as often as not, so only the episode this job filed -
@@ -333,15 +385,7 @@ fn serve_finished_from_disk(
         return Some(req);
     }
     if !authed {
-        let blocked = d.note_auth_failure(peer_ip(&req), "stream completed");
-        let _ = req.respond(if blocked {
-            tiny_http::Response::from_string("too many bad keys").with_status_code(429)
-        } else {
-            tiny_http::Response::from_string(
-                "playing a finished download needs an apikey or stream token (?t=)",
-            )
-            .with_status_code(401)
-        });
+        refuse_finished(d, req, "stream completed");
         return None;
     }
     // A private out_dir is all this job's, so the biggest media file in
@@ -494,7 +538,16 @@ pub(super) fn stream_request(
         // appear. When there are none and none can ever appear, the 404
         // is knowable NOW, and sitting out the 30 s only makes a player
         // (and the dashboard's ▶) look hung on an answer we already have.
-        if !triggered && no_writers_and_no_prospect(&d, id, parked.as_ref(), queued, wait_ends) {
+        // Not `custody` here: both stores were just read by name, and a
+        // record in neither of them has already been answered with
+        // `unknown nzo_id` above - so there is no third case to find,
+        // and asking again would only re-read what this scope knows.
+        let held = if queued {
+            Custody::Queued
+        } else {
+            Custody::Parked
+        };
+        if !triggered && no_writers_and_no_prospect(&d, id, parked.as_ref(), held, wait_ends) {
             let _ = req
                 .respond(tiny_http::Response::from_string("no active media").with_status_code(404));
             return;
@@ -523,8 +576,23 @@ pub(super) fn stream_request(
             && Instant::now() >= next_poll
         {
             next_poll = Instant::now() + std::time::Duration::from_secs(1);
-            let queued = d.queue.lock_ok().iter().any(|j| j.lock_ok().nzo_id == *id);
-            if no_writers_and_no_prospect(&d, id, tracked.as_ref(), queued, wait_ends) {
+            // The record's OWN custody, by identity - which is the half
+            // that reads a delete. `tracked` is always `Some` while
+            // `want` is (the entry path 404s before the loop when it is
+            // not), so the fallback is unreachable rather than a
+            // meaningful state; it is spelled as the waiting answer so
+            // that if it ever became reachable it would cost a wait and
+            // not a wrong 404.
+            let held = tracked
+                .as_ref()
+                .map_or(Custody::Queued, |job| custody(&d, job));
+            if no_writers_and_no_prospect(&d, id, tracked.as_ref(), held, wait_ends) {
+                // Still asked of a deleted record, deliberately: a
+                // history delete that KEPT the files leaves them
+                // playable, and this branch is what served them before
+                // the third case existed. `serve_finished_from_disk`
+                // refuses a tombstoned row on its own, which is every
+                // record the queue-delete arm produces.
                 if let Some(job) = &tracked {
                     let Some(back) = serve_finished_from_disk(&d, req, job, authed) else {
                         return;
@@ -543,6 +611,14 @@ pub(super) fn stream_request(
             Some(id) => d.active_stream.lock_ok().as_deref() == Some(id.as_str()),
         };
         if owner_ok && let Some((name, w)) = pick_media(&d, want.as_deref()) {
+            // ...and only while the run that made them is still on the
+            // queue. Past that they are a FINISHED download's residue,
+            // and this route is open on the premise that it is not -
+            // see [`hub_run_still_queued`].
+            if !authed && !hub_run_still_queued(&d, want.as_deref()) {
+                refuse_finished(&d, req, "stream spent");
+                return;
+            }
             // No pre-opened fd and no decryptor: an encrypted store
             // output holds PLAINTEXT while it downloads, so it serves
             // exactly like any other file. Until TODO 27 phase 3 it was
@@ -1518,7 +1594,7 @@ impl std::io::Read for LiveRangeReader {
             let hole = self
                 .uncovered_hole_len(self.dead_until - self.pos)
                 .min(self.dead_until - self.pos);
-            let gap = (hole as usize).min(n);
+            let gap = nzbkit::disk::chunk_len(hole, n);
             if gap > 0 {
                 buf[..gap].fill(0);
                 self.stats
@@ -1603,7 +1679,7 @@ impl std::io::Read for LiveRangeReader {
                     };
                     dead_votes = if dead { dead_votes + 1 } else { 0 };
                     if dead_votes >= dead_span_votes() && !self.covered(self.pos, n as u64) {
-                        let gap = (self.uncovered_hole_len(runway) as usize).min(n);
+                        let gap = nzbkit::disk::chunk_len(self.uncovered_hole_len(runway), n);
                         self.dead_until = self.pos + hole;
                         buf[..gap].fill(0);
                         self.stats
@@ -1647,23 +1723,100 @@ impl std::io::Read for LiveRangeReader {
 /// form as a start offset fails, and the whole-file fallback then answers
 /// a tail request with the HEAD of the file - the player waits out the
 /// download for bytes it will never use.
-pub(super) fn byte_range(v: &str, total: u64) -> Option<(u64, u64)> {
-    let v = v.strip_prefix("bytes=")?;
-    let (a, b) = v.split_once('-')?;
+pub(super) fn byte_range(v: &str, total: u64) -> RangeVerdict {
+    let Some(v) = v.strip_prefix("bytes=") else {
+        // RFC 9110 §14.2: an origin server MUST IGNORE a range unit it
+        // does not understand. This arm is not a judgement call.
+        return RangeVerdict::Ignore;
+    };
+    let Some((a, b)) = v.split_once('-') else {
+        return RangeVerdict::Ignore; // malformed, no byte-range-spec
+    };
     if a.is_empty() {
         // Suffix. A tail longer than the file is the whole file, never an
         // underflowed start.
-        let n: u64 = b.parse().ok()?;
+        let Ok(n) = b.parse::<u64>() else {
+            return RangeVerdict::Ignore; // malformed
+        };
         let start = total.saturating_sub(n);
-        return (n > 0 && start < total).then_some((start, total));
+        // `bytes=-0` is well formed and asks for nothing; an empty
+        // resource satisfies no suffix at all. Both are 416, not 200.
+        return if n > 0 && start < total {
+            RangeVerdict::Span(start, total)
+        } else {
+            RangeVerdict::Unsatisfiable
+        };
     }
-    let start: u64 = a.parse().ok()?;
-    let end: u64 = if b.is_empty() {
-        total
-    } else {
-        b.parse::<u64>().ok()?.saturating_add(1).min(total)
+    let Ok(start) = a.parse::<u64>() else {
+        return RangeVerdict::Ignore; // malformed
     };
-    (start < end).then_some((start, end))
+    let last: Option<u64> = if b.is_empty() {
+        None
+    } else {
+        match b.parse::<u64>() {
+            Ok(e) => Some(e),
+            Err(_) => return RangeVerdict::Ignore, // malformed
+        }
+    };
+    if last.is_some_and(|e| e < start) {
+        // §14.1.1: a last-byte-pos below the first-byte-pos makes the
+        // spec INVALID, and §14.2 says a header whose every range is
+        // invalid SHOULD be ignored - not answered 416.
+        return RangeVerdict::Ignore;
+    }
+    if start >= total {
+        // §14.1.2: a first-byte-pos at or past the representation's
+        // length is UNSATISFIABLE. This is the seek-to-EOF probe, and
+        // answering it with the whole file is how one stale seek pulls a
+        // multi-gigabyte transfer (measured on the sibling
+        // /preview/media endpoint: 99 probes, 123.7 GB in six minutes,
+        // before that one learned to say 416).
+        return RangeVerdict::Unsatisfiable;
+    }
+    let end = last.map_or(total, |e| e.saturating_add(1).min(total));
+    RangeVerdict::Span(start, end)
+}
+
+/// What a `Range:` header amounts to, which is THREE answers and not
+/// two.
+///
+/// `Option<(u64, u64)>` collapsed the last two, and both call sites then
+/// read `None` as "no range" and served the entire resource under a 200.
+/// That is right for [`Ignore`](Self::Ignore) and wrong for
+/// [`Unsatisfiable`](Self::Unsatisfiable): a player seeking to or past
+/// EOF, or probing with `bytes=-0`, asked for nothing and was handed a
+/// multi-gigabyte file - repeatedly, since the probe repeats.
+///
+/// The split follows RFC 9110 rather than taste. An unrecognised range
+/// UNIT must be ignored (§14.2), a malformed header may be, an INVALID
+/// spec (last-byte-pos below first) should be, and a well-formed spec
+/// this resource cannot satisfy gets 416 with `Content-Range: bytes
+/// */<total>` (§14.4 / §15.5.17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RangeVerdict {
+    /// Serve the whole resource under 200, exactly as before.
+    Ignore,
+    /// A satisfiable half-open span, `start < end <= total`.
+    Span(u64, u64),
+    /// Well formed, and this resource cannot satisfy it.
+    Unsatisfiable,
+}
+
+/// Answer a `Range:` this resource cannot satisfy: 416 with the
+/// `Content-Range: bytes */<total>` the spec requires, so the client
+/// learns the length instead of guessing again.
+pub(super) fn respond_unsatisfiable(req: tiny_http::Request, total: u64) {
+    let mut resp = tiny_http::Response::from_string("range not satisfiable").with_status_code(416);
+    if let Ok(h) = tiny_http::Header::from_bytes(
+        &b"Content-Range"[..],
+        format!("bytes */{total}").into_bytes(),
+    ) {
+        resp.add_header(h);
+    }
+    if let Ok(h) = tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]) {
+        resp.add_header(h);
+    }
+    let _ = req.respond(resp);
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -1683,10 +1836,17 @@ pub(super) fn serve_range(
         .headers()
         .iter()
         .find(|h| h.field.equiv("Range"))
-        .and_then(|h| byte_range(h.value.as_str(), total));
+        .map_or(RangeVerdict::Ignore, |h| {
+            byte_range(h.value.as_str(), total)
+        });
     let (start, end, status) = match range {
-        Some((s, e)) => (s, e, 206),
-        None => (0, total, 200),
+        RangeVerdict::Span(s, e) => (s, e, 206),
+        RangeVerdict::Ignore => (0, total, 200),
+        // The LIVE half is the worse of the two: `total` here is the
+        // full expected size, so a `bytes=<size>-` probe at EOF used to
+        // restart a live reader at byte 0 and then block on the write
+        // frontier from the beginning of the file.
+        RangeVerdict::Unsatisfiable => return respond_unsatisfiable(req, total),
     };
     // A caller that already holds the fd passes it in; otherwise open
     // through the writer's custody gate (sweep 8, M4/M6) - which also
@@ -1894,7 +2054,7 @@ mod dead_span_tests {
 
 #[cfg(test)]
 mod range_header_tests {
-    use super::byte_range;
+    use super::{RangeVerdict, byte_range};
 
     const FILE: u64 = 100_000_000;
 
@@ -1907,55 +2067,97 @@ mod range_header_tests {
     fn a_tail_request_serves_the_tail() {
         assert_eq!(
             byte_range("bytes=-65536", FILE),
-            Some((FILE - 65_536, FILE))
+            RangeVerdict::Span(FILE - 65_536, FILE)
         );
-        assert_eq!(byte_range("bytes=-1", FILE), Some((FILE - 1, FILE)));
+        assert_eq!(
+            byte_range("bytes=-1", FILE),
+            RangeVerdict::Span(FILE - 1, FILE)
+        );
     }
 
     /// Asking for more tail than there is file is the whole file, not a
     /// wrapped-around start offset near u64::MAX.
     #[test]
     fn a_tail_longer_than_the_file_is_the_whole_file() {
-        assert_eq!(byte_range("bytes=-4096", 1_000), Some((0, 1_000)));
+        assert_eq!(
+            byte_range("bytes=-4096", 1_000),
+            RangeVerdict::Span(0, 1_000)
+        );
         assert_eq!(
             byte_range(&format!("bytes=-{}", u64::MAX), 1_000),
-            Some((0, 1_000))
+            RangeVerdict::Span(0, 1_000)
         );
     }
 
     /// The seek forms every player already used must be unchanged.
     #[test]
     fn seek_ranges_still_work() {
-        assert_eq!(byte_range("bytes=0-99999", FILE), Some((0, 100_000)));
+        assert_eq!(
+            byte_range("bytes=0-99999", FILE),
+            RangeVerdict::Span(0, 100_000)
+        );
         assert_eq!(
             byte_range("bytes=20000000-20050000", FILE),
-            Some((20_000_000, 20_050_001))
+            RangeVerdict::Span(20_000_000, 20_050_001)
         );
-        assert_eq!(byte_range("bytes=500-", 1_000), Some((500, 1_000)));
+        assert_eq!(
+            byte_range("bytes=500-", 1_000),
+            RangeVerdict::Span(500, 1_000)
+        );
         // An end past the file clamps to the file.
-        assert_eq!(byte_range("bytes=990-99999", 1_000), Some((990, 1_000)));
+        assert_eq!(
+            byte_range("bytes=990-99999", 1_000),
+            RangeVerdict::Span(990, 1_000)
+        );
     }
 
-    /// Anything we cannot honour is "no range", which serves the whole
-    /// file under a 200 - never an empty or inverted span, because
+    /// A header we cannot READ is "no range" - serve the whole file
+    /// under a 200, never an empty or inverted span, because
     /// Content-Length is end - start and the reader is built from both.
+    ///
+    /// This is the half RFC 9110 keeps on 200: an unrecognised range
+    /// UNIT must be ignored (§14.2), a malformed header may be, and a
+    /// spec whose last-byte-pos is below its first is INVALID rather
+    /// than unsatisfiable (§14.1.1), so it is ignored too. The
+    /// well-formed-but-unsatisfiable half is the test below, and the two
+    /// used to be one answer.
     #[test]
-    fn unusable_ranges_are_no_range_at_all() {
+    fn unreadable_ranges_are_no_range_at_all() {
+        for v in [
+            "bytes=-",       // no number either side
+            "bytes=-abc",    // unparseable tail
+            "bytes=abc-1",   // unparseable start
+            "bytes=0-abc",   // unparseable end
+            "megabytes=0-1", // not a byte range
+            "0-99",          // no unit
+            "bytes=100-50",  // inverted: invalid, so ignored
+        ] {
+            assert_eq!(byte_range(v, 1_000), RangeVerdict::Ignore, "{v}");
+        }
+    }
+
+    /// A range this resource cannot satisfy is 416, not the whole file.
+    ///
+    /// Both of these used to collapse onto `None` and answer 200 with
+    /// the entire resource. A player seeking to EOF - which is one
+    /// ordinary stale seek - therefore pulled a multi-gigabyte file for
+    /// a request that asked for nothing, and asked again. The sibling
+    /// /preview/media endpoint learned this on 11 Aug 2026 (99 probes,
+    /// 123.7 GB in six minutes, from Safari); /stream never did.
+    #[test]
+    fn a_well_formed_range_the_file_cannot_satisfy_is_416() {
         for v in [
             "bytes=-0",        // zero-length tail
-            "bytes=-",         // no number either side
-            "bytes=-abc",      // unparseable tail
             "bytes=1000-",     // starts at EOF
             "bytes=1000-2000", // starts past EOF
-            "bytes=abc-1",     // unparseable start
-            "megabytes=0-1",   // not a byte range
-            "0-99",            // no unit
+            "bytes=5000-",     // far past EOF
         ] {
-            assert_eq!(byte_range(v, 1_000), None, "{v}");
+            assert_eq!(byte_range(v, 1_000), RangeVerdict::Unsatisfiable, "{v}");
         }
-        // A zero-length file has no span to hand out, tail or otherwise.
-        assert_eq!(byte_range("bytes=-10", 0), None);
-        assert_eq!(byte_range("bytes=0-9", 0), None);
+        // A zero-length resource can satisfy nothing, tail or otherwise.
+        assert_eq!(byte_range("bytes=-10", 0), RangeVerdict::Unsatisfiable);
+        assert_eq!(byte_range("bytes=0-9", 0), RangeVerdict::Unsatisfiable);
+        assert_eq!(byte_range("bytes=0-", 0), RangeVerdict::Unsatisfiable);
     }
 
     /// Whatever comes back, the invariant the response headers rely on
@@ -1970,7 +2172,7 @@ mod range_header_tests {
             "bytes=999-1000000",
             "bytes=1-2",
         ] {
-            if let Some((start, end)) = byte_range(v, 1_000) {
+            if let RangeVerdict::Span(start, end) = byte_range(v, 1_000) {
                 assert!(start < end && end <= 1_000, "{v} -> {start}..{end}");
             }
         }
@@ -1979,215 +2181,177 @@ mod range_header_tests {
 
 #[cfg(test)]
 mod strm_tests {
-    use super::write_strm;
+    use super::{pointer_authority, pointer_authority_from, write_strm};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// M2: the library pointer Jellyfin plays months later. There is no
-    /// request to read a forwarded scheme off, so a hardcoded `http` on
-    /// a TLS daemon wrote a .strm that could never play - the daemon's
-    /// own bound scheme is the only answer available, and it has to
-    /// reach the file.
+    fn v4(a: u8, b: u8, c: u8, d: u8) -> Option<IpAddr> {
+        Some(IpAddr::V4(Ipv4Addr::new(a, b, c, d)))
+    }
+
+    /// M2: the library pointer a media server plays months later. There
+    /// is no request to read a forwarded scheme off, so a hardcoded
+    /// `http` on a TLS daemon wrote a .strm that could never play - the
+    /// daemon's own bound scheme is the only answer available, and it
+    /// has to reach the file.
     #[test]
     fn the_pointer_carries_the_daemons_own_scheme() {
         let dir = std::env::temp_dir().join(format!("nzbfast-strm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        write_strm(&dir, "Cat.Show.S01E01", "https", 6789, "nzo_1", "tok").unwrap();
+        write_strm(
+            &dir,
+            "Cat.Show.S01E01",
+            "https",
+            "127.0.0.1:6789",
+            "nzo_1",
+            "tok",
+        )
+        .unwrap();
         let body = std::fs::read_to_string(dir.join("Cat.Show.S01E01.strm")).unwrap();
         assert_eq!(body, "https://127.0.0.1:6789/stream/nzo_1?t=tok\n");
 
-        write_strm(&dir, "Cat.Show.S01E02", "http", 6789, "nzo_2", "tok").unwrap();
+        write_strm(
+            &dir,
+            "Cat.Show.S01E02",
+            "http",
+            "127.0.0.1:6789",
+            "nzo_2",
+            "tok",
+        )
+        .unwrap();
         let body = std::fs::read_to_string(dir.join("Cat.Show.S01E02.strm")).unwrap();
         assert_eq!(body, "http://127.0.0.1:6789/stream/nzo_2?t=tok\n");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
-#[cfg(test)]
-mod stream_admit_tests {
-    use super::*;
-
-    /// A history record, from the same wire shape the stores replay.
-    fn rec(id: &str, state: &str, extra: serde_json::Value) -> Arc<Mutex<Job>> {
-        let mut v = serde_json::json!({
-            "nzo_id": id, "name": id, "nzb_path": "/tmp/x.nzb",
-            "out_dir": format!("/tmp/out/{id}"), "state": state,
-        });
-        if let Some(m) = extra.as_object() {
-            for (k, val) in m {
-                v[k] = val.clone();
-            }
-        }
-        Arc::new(Mutex::new(job_from_json(&v).expect("job_from_json")))
-    }
-
-    /// The horizon a live request judges an armed retry against: this
-    /// instant plus the admit wait, in unix seconds.
-    fn horizon() -> u64 {
-        unix_now() as u64 + ADMIT_WAIT_SECS
-    }
-
-    /// TODO 16m: the answer is knowable now for a terminal record that
-    /// owes nothing more - whichever way it ended, and with its own
-    /// spent extractor still installed (the hub keeps it for
-    /// post-completion playback until the next job claims the hub, and
-    /// an extractor holding no media writer is not a prospect of one).
-    #[test]
-    fn a_settled_terminal_record_needs_no_wait() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-16m-unit-{}", std::process::id()));
-        let d = crate::serve::testutil::test_daemon(&dir);
-        for state in ["Completed", "Failed"] {
-            let j = rec("s1", state, serde_json::json!({}));
-            assert!(
-                no_writers_and_no_prospect(&d, "s1", Some(&j), false, horizon()),
-                "{state} with nothing owed should answer at once"
-            );
-        }
-        *d.hub.extractor.lock_ok() = Some((
-            "s1".to_string(),
-            Arc::new(nzbkit::extract::Extractor::new(&dir, 1, false)),
-        ));
-        let j = rec("s1", "Failed", serde_json::json!({}));
-        assert!(
-            no_writers_and_no_prospect(&d, "s1", Some(&j), false, horizon()),
-            "a spent extractor with no media writer is not a writer to wait for"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// ...and every way a job can still acquire one waits. Each arm is
-    /// a record a "state is Completed/Failed" test would have answered
-    /// immediately and wrongly.
-    #[test]
-    fn every_remaining_prospect_still_waits() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-16m-unit2-{}", std::process::id()));
-        let d = crate::serve::testutil::test_daemon(&dir);
-
-        // In the queue: about to be picked, or running its tail. The
-        // record itself says nothing useful here, so the terminal one
-        // is used deliberately.
-        let j = rec("p1", "Completed", serde_json::json!({}));
-        assert!(!no_writers_and_no_prospect(
-            &d,
-            "p1",
-            Some(&j),
-            true,
-            horizon()
-        ));
-
-        // A record that reached history while its pipeline was still
-        // running - a park torn between its prewrite and its filing.
-        // `job_from_json` restores any nonterminal state as Queued.
-        let torn = rec("p2", "Downloading", serde_json::json!({}));
-        assert_eq!(torn.lock_ok().state, JobState::Queued);
-        assert!(!no_writers_and_no_prospect(
-            &d,
-            "p2",
-            Some(&torn),
-            false,
-            horizon()
-        ));
-
-        // The settle's other half: the payload still owes its move, so
-        // the media file materialises at its destination later.
-        let moving = rec("p3", "Completed", serde_json::json!({"move_pending": true}));
-        assert!(!no_writers_and_no_prospect(
-            &d,
-            "p3",
-            Some(&moving),
-            false,
-            horizon()
-        ));
-
-        // M32: an armed automatic retry brings the whole job back -
-        // when it lands inside the wait. Five seconds out, so it fires
-        // with most of the deadline still to run.
-        let soon = unix_now() as u64 + 5;
-        let armed = rec("p4", "Failed", serde_json::json!({"auto_retry_at": soon}));
-        assert!(!no_writers_and_no_prospect(
-            &d,
-            "p4",
-            Some(&armed),
-            false,
-            horizon()
-        ));
-
-        // And one already DUE: the retry worker is about to pick it up.
-        let due = rec(
-            "p4b",
-            "Failed",
-            serde_json::json!({"auto_retry_at": unix_now() as u64 - 1}),
-        );
-        assert!(!no_writers_and_no_prospect(
-            &d,
-            "p4b",
-            Some(&due),
-            false,
-            horizon()
-        ));
-
-        // The tail outlives the download it belongs to, and both maps
-        // are keyed by owning nzo_id for exactly that reason.
-        let busy = rec("p5", "Completed", serde_json::json!({}));
-        d.hub
-            .activity
-            .lock_ok()
-            .insert("p5".to_string(), "extracting");
-        assert!(!no_writers_and_no_prospect(
-            &d,
-            "p5",
-            Some(&busy),
-            false,
-            horizon()
-        ));
-
-        // And a record in neither store cannot be judged from here at
-        // all - the caller has its own answer for that one.
-        assert!(!no_writers_and_no_prospect(
-            &d,
-            "p6",
-            None,
-            false,
-            horizon()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// TODO 16m, the shape the first pass left behind: a Failed job
-    /// whose automatic retry cannot possibly fire before this request is
-    /// answered.
+    /// The 25 Aug 2026 defect: the authority was a hardcoded loopback,
+    /// which is unreachable for every consumer that is not on this
+    /// machine - always for a Plex CLIENT, which follows the 301 itself,
+    /// and for Jellyfin/Emby the moment the server is on another box or
+    /// in a bridged container.
     ///
-    /// Both arms `arm_auto_retry` can choose are here, at the values it
-    /// actually uses. Neither is reachable inside a 30 s deadline, and
-    /// the propagation one is armed by the COMMONEST failure there is -
-    /// a post that is only partly propagated - which is also the
-    /// likeliest thing a stale .strm in a media library points at. Under
-    /// the `is_none()` test those both sat out the whole wait for a 404
-    /// that was knowable on arrival.
+    /// The shipped default for `serve` is `--bind 0.0.0.0`, so the
+    /// wildcard row is the one nearly every install takes.
     #[test]
-    fn an_auto_retry_that_lands_after_the_deadline_is_no_prospect() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-16m-unit3-{}", std::process::id()));
-        let d = crate::serve::testutil::test_daemon(&dir);
-        for (secs, what) in [
-            (crate::serve::SHORT_RETRY_SECS, "the transport arm"),
-            (20 * 60, "the propagation arm"),
-        ] {
-            let at = unix_now() as u64 + secs;
-            let j = rec("r1", "Failed", serde_json::json!({ "auto_retry_at": at }));
-            assert!(
-                no_writers_and_no_prospect(&d, "r1", Some(&j), false, horizon()),
-                "{what} ({secs}s) cannot produce a writer inside a {ADMIT_WAIT_SECS}s wait"
-            );
-        }
+    fn a_wildcard_bind_names_the_lan_address_and_not_loopback() {
+        assert_eq!(
+            pointer_authority_from("0.0.0.0", 6789, || v4(192, 168, 1, 20)),
+            "192.168.1.20:6789"
+        );
+        assert_eq!(
+            pointer_authority_from("::", 6789, || v4(192, 168, 1, 20)),
+            "192.168.1.20:6789"
+        );
 
-        // The boundary belongs to the waiting side: a retry due at the
-        // very last instant of the wait is still one this caller may be
-        // given, and the delay is a user setting that can be shortened
-        // to anything.
-        let edge = horizon();
-        let j = rec("r2", "Failed", serde_json::json!({ "auto_retry_at": edge }));
-        assert!(!no_writers_and_no_prospect(&d, "r2", Some(&j), false, edge));
+        // No route to anywhere is the one case with no better answer
+        // than the placeholder this replaced.
+        assert_eq!(
+            pointer_authority_from("0.0.0.0", 6789, || None),
+            "127.0.0.1:6789"
+        );
+    }
+
+    /// A specific bind IS the answer - the operator named the address
+    /// they want to be reachable on - and the route is never consulted
+    /// to find that out. The count is the point: a wildcard UDP bind is
+    /// a macOS firewall dialog (TODO 33), so a path that does not need
+    /// the route must not pay for it.
+    #[test]
+    fn a_bind_that_already_names_an_address_never_asks_for_a_route() {
+        let asked = AtomicUsize::new(0);
+        let route = || {
+            asked.fetch_add(1, Ordering::Relaxed);
+            v4(192, 168, 1, 20)
+        };
+        assert_eq!(
+            pointer_authority_from("10.0.0.4", 6789, route),
+            "10.0.0.4:6789"
+        );
+        assert_eq!(asked.load(Ordering::Relaxed), 0, "no route lookup");
+
+        // A name is passed through rather than resolved: a DNS answer
+        // that moves next month must not be frozen into this file.
+        assert_eq!(
+            pointer_authority_from("nas.local", 6789, || v4(192, 168, 1, 20)),
+            "nas.local:6789"
+        );
+    }
+
+    /// Loopback STAYS loopback, and asks for no route either. A LAN
+    /// address on a loopback-bound daemon points at a closed port, which
+    /// would be a regression on the one deployment the old placeholder
+    /// actually served.
+    #[test]
+    fn a_loopback_bind_keeps_loopback_even_when_a_lan_address_exists() {
+        let asked = AtomicUsize::new(0);
+        let route = || {
+            asked.fetch_add(1, Ordering::Relaxed);
+            v4(192, 168, 1, 20)
+        };
+        assert_eq!(
+            pointer_authority_from("127.0.0.1", 6789, route),
+            "127.0.0.1:6789"
+        );
+        assert_eq!(asked.load(Ordering::Relaxed), 0, "no route lookup");
+        assert_eq!(
+            pointer_authority_from("::1", 6789, || v4(192, 168, 1, 20)),
+            "[::1]:6789"
+        );
+    }
+
+    /// A v6 literal is bracketed, or the port reads as one more group -
+    /// and the pointer is a URL, so this is the difference between a
+    /// playable file and an unparseable one.
+    #[test]
+    fn a_v6_authority_is_bracketed_all_the_way_into_the_file() {
+        let v6 = IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 7));
+        let auth = pointer_authority_from("::", 6789, || Some(v6));
+        assert_eq!(auth, "[fd00::7]:6789");
+
+        let dir = std::env::temp_dir().join(format!("nzbfast-strm6-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        write_strm(&dir, "V6.Show.S01E01", "http", &auth, "nzo_6", "tok").unwrap();
+        let body = std::fs::read_to_string(dir.join("V6.Show.S01E01.strm")).unwrap();
+        assert_eq!(body, "http://[fd00::7]:6789/stream/nzo_6?t=tok\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live path, wired to the real route lookup. Pins that the two
+    /// halves are joined - a `pointer_authority` that stopped consulting
+    /// the route would still pass every table-driven case above - and
+    /// that a box WITH a default route is not handed loopback, which is
+    /// the whole defect.
+    ///
+    /// Gated like every other wildcard-bind site in this crate: on macOS
+    /// the one bind behind `route_src` is a firewall dialog, and
+    /// `.github/workflows/pr-check.yml` sets the variable because a
+    /// Linux runner has no firewall to prompt. The loopback assertion is
+    /// ungated because that path opens no socket at all.
+    #[test]
+    fn the_live_lookup_yields_a_usable_authority() {
+        assert_eq!(pointer_authority("127.0.0.1", 6789), "127.0.0.1:6789");
+
+        if std::env::var("NZBFAST_LAN_TESTS").as_deref() != Ok("1") {
+            eprintln!("skipped the wildcard leg: set NZBFAST_LAN_TESTS=1 (binds a UDP socket)");
+            return;
+        }
+        let auth = pointer_authority("0.0.0.0", 6789);
+        assert!(auth.ends_with(":6789"), "{auth}");
+        match crate::serve::lanaddr::route_src("8.8.8.8:53") {
+            Some(IpAddr::V4(ip)) if !ip.is_loopback() && !ip.is_unspecified() => {
+                assert_eq!(
+                    auth,
+                    format!("{ip}:6789"),
+                    "a routed box must not get loopback"
+                )
+            }
+            Some(IpAddr::V6(ip)) if !ip.is_loopback() && !ip.is_unspecified() => {
+                assert_eq!(auth, format!("[{ip}]:6789"))
+            }
+            _ => assert_eq!(auth, "127.0.0.1:6789"),
+        }
     }
 }
 

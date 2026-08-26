@@ -1955,75 +1955,25 @@ struct DirContext {
     /// Every name any set in the directory declares. Payload, whoever
     /// owns it, and so never a spent adoption donor to sweep.
     declared: HashSet<String>,
+    /// §293: directories OUTSIDE the repair dir whose files are offered
+    /// to the adoption scan - a failed predecessor's output, handed to
+    /// the successor so blocks the wire will not serve again can still
+    /// be found on disk. Rides the context rather than every signature
+    /// between the entry points and the adopt call. Files under these
+    /// directories are candidates only: they are never patched, never
+    /// recreated, and never reported as spent donors (the sweep is
+    /// scoped to the repair dir - a donor is somebody else's payload).
+    donors: Vec<PathBuf>,
 }
 
-/// Files eligible as adoption sources: every regular non-.par2 file in
-/// `dir` that is not an identified target (identified files' bytes are
-/// already pinned block-by-block - scanning them again is the perf trap
-/// this gate exists to avoid).
-fn adoption_candidates(
-    dir: &Path,
-    targets: &[Target],
-    exclude: &HashSet<PathBuf>,
-) -> Result<Vec<(PathBuf, u64)>, RepairError> {
-    // Keyed by filesystem identity, not by spelling: the PAR2-declared name
-    // and the on-disk name routinely differ in case, and on a case-insensitive
-    // volume an exact compare would hand an identified target's OWN file to
-    // the sliding scan as an adoption source.
-    let fold = crate::disk::case_insensitive_dir(dir);
-    let identified: HashSet<PathBuf> = targets
-        .iter()
-        .filter(|t| t.exists && (t.intact || t.present.iter().any(|&p| p)))
-        .map(|t| path_identity_key(fold, &t.path))
-        .collect();
-    let mut out = Vec::new();
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
-        let p = e.path();
-        if !e.file_type()?.is_file()
-            || p.extension()
-                .is_some_and(|x| x.eq_ignore_ascii_case("par2"))
-            || identified.contains(&path_identity_key(fold, &p))
-            || exclude.contains(&p)
-        {
-            continue;
-        }
-        let len = e.metadata()?.len();
-        if len > 0 {
-            out.push((p, len));
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-// Extra-file adoption - the candidate walk, the whole-file fast path
-// and the rolling-CRC sliding scan - lives in par2repair/adopt.rs, a
-// child module (size gate, TODO 106), and fans out across candidates
-// (R2 / N11).
+// Extra-file adoption - the candidate walk (repair dir plus §293 donor
+// directories), the whole-file fast path and the rolling-CRC sliding
+// scan - lives in par2repair/adopt.rs, a child module (size gate,
+// TODO 106), and fans out across candidates (R2 / N11).
 mod adopt;
-
-/// Reads adopted block bytes from candidate files, keeping each source
-/// open across calls. Bytes past a candidate's end are the zero padding
-/// the block checksum was verified against.
-struct CandReader<'a> {
-    cands: &'a [(PathBuf, u64)],
-    open: HashMap<usize, File>,
-}
-
-impl CandReader<'_> {
-    fn read(&mut self, s: AdoptSrc, take: usize) -> Result<Vec<u8>, RepairError> {
-        let (path, len) = &self.cands[s.cand];
-        let f = match self.open.entry(s.cand) {
-            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-            std::collections::hash_map::Entry::Vacant(v) => v.insert(File::open(path)?),
-        };
-        let avail = take.min(len.saturating_sub(s.offset) as usize);
-        let mut v = vec![0u8; take];
-        crate::disk::read_exact_at(f, &mut v[..avail], s.offset)?;
-        Ok(v)
-    }
-}
+use adopt::CandReader;
+mod donate;
+pub use donate::{Donation, donate_whole_files, donor_candidates};
 
 // ---------------------------------------------------------------------------
 // Directory-level driver
@@ -2185,6 +2135,25 @@ pub fn repair_dir(dir: &Path) -> Result<RepairStatus, RepairError> {
     repair_dir_set(&mut cat, None, &DirContext::default(), true)
 }
 
+/// [`repair_dir`] with DONOR directories (§293): each donor's files
+/// join the extra-file adoption scan as candidates, so a block the
+/// recovery set cannot rebuild and the wire will not serve again can
+/// still be found in a failed predecessor's output. Donor files are
+/// read-only to the repair - never patched, never recreated, never
+/// reported in `consumed_sources` - and an unreadable donor directory
+/// degrades to "no donation" rather than failing the repair. Adoption
+/// still runs only when its gate fires (a file unidentified outright,
+/// or damage past the recovery on disk); donors widen what the scan
+/// can find, not when it runs.
+pub fn repair_dir_with_donors(dir: &Path, donors: &[PathBuf]) -> Result<RepairStatus, RepairError> {
+    let mut cat = PacketCatalog::build_lazy(dir)?;
+    let ctx = DirContext {
+        donors: donors.to_vec(),
+        ..DirContext::default()
+    };
+    repair_dir_set(&mut cat, None, &ctx, true)
+}
+
 /// Every file name the PAR2 packets in `dir` describe, across EVERY
 /// recovery set present (obfuscated volumes included - the same
 /// magic-sniff `repair_dir` uses finds them).
@@ -2311,6 +2280,7 @@ fn repair_sets_catalog(
             .map(|(k, _)| k.clone())
             .collect(),
         declared: claims.into_keys().collect(),
+        donors: Vec::new(),
     };
     let mut out = Vec::new();
     for id in &order {
@@ -2636,17 +2606,23 @@ fn repair_dir_set_inner(
     let any_unidentified = targets
         .iter()
         .any(|t| t.n_slices > 0 && !(t.exists && (t.intact || t.present.iter().any(|&p| p))));
-    let (mut cands, mut adopted) =
+    let (mut cands, donor_from, mut adopted) =
         if !missing.is_empty() && (any_unidentified || missing.len() > by_exp.len()) {
-            adopt::adopt_blocks(dir, &targets, &missing, bs, &sniffed)?
+            adopt::adopt_blocks(dir, &ctx.donors, &targets, &missing, bs, &sniffed)?
         } else {
-            (Vec::new(), HashMap::new())
+            (Vec::new(), 0, HashMap::new())
         };
+    // §293 donors are the walk's tail; fixed before the escalation appends.
+    let donor_cands = donor_from..cands.len();
     // Adopted slices are found, not missing - only the rest needs RS.
     let mut missing: Vec<usize> = missing
         .into_iter()
         .filter(|g| !adopted.contains_key(g))
         .collect();
+    // Sweep S3's residue: the solve and the patch reread donor bytes, so
+    // a donor deleted after the decision failed the repair from the lazy
+    // open. Pin them now; one already gone degrades to dropped adoptions.
+    let pinned = adopt::pin_donor_sources(&cands, &donor_cands, &mut adopted, &mut missing);
 
     // Last-resort escalation: still more damage than recovery on disk -
     // scan identified damaged targets too, which the normal pass skips.
@@ -2668,7 +2644,18 @@ fn repair_dir_set_inner(
         if cands.len() > start {
             let missing_set: HashSet<usize> = missing.iter().copied().collect();
             let indices: Vec<usize> = (start..cands.len()).collect();
-            adopt::sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut adopted)?;
+            // Empty donor range: every slot this scan reads is one of the
+            // identified damaged targets appended just above - the
+            // repair's OWN files, whose I/O errors must stay fatal.
+            adopt::sliding_scan(
+                &cands,
+                &indices,
+                0..0,
+                &targets,
+                &missing_set,
+                bs,
+                &mut adopted,
+            )?;
             missing.retain(|g| !adopted.contains_key(g));
         }
     }
@@ -2678,7 +2665,7 @@ fn repair_dir_set_inner(
     let missing = missing;
     let mut cand_reader = CandReader {
         cands: &cands,
-        open: HashMap::new(),
+        open: pinned,
     };
 
     let needed = missing.len();
@@ -2802,7 +2789,7 @@ fn repair_dir_set_inner(
         for (ci, mut list) in by_cand {
             list.sort_unstable_by_key(|&(_, off)| off);
             for (g, off) in list {
-                let take = bs.min(cands[ci].1.saturating_sub(off) as usize);
+                let take = crate::disk::chunk_len(cands[ci].1.saturating_sub(off), bs);
                 let data = cand_reader.read(
                     AdoptSrc {
                         cand: ci,
@@ -3061,6 +3048,14 @@ fn repair_dir_set_inner(
     let mut spent_donors: Vec<PathBuf> = Vec::new();
     for ci in donors {
         let (p, len) = &cands[ci];
+        // §293: a candidate from a DONOR directory is a predecessor
+        // job's payload, not this directory's junk - byte-identical to
+        // a target is exactly the good case there, and sweeping it
+        // would delete another job's files. Only the repair dir's own
+        // files can ever be spent.
+        if !p.starts_with(dir) {
+            continue;
+        }
         if target_keys.contains(&path_identity_key(fold, p))
             || p.file_name()
                 .map(|n| name_identity_key(fold, &n.to_string_lossy()))
@@ -3200,7 +3195,7 @@ fn hash_blocks_par(
                         let mut crc = crc32fast::Hasher::new();
                         let mut p = 0u64;
                         while p < avail {
-                            let take = ((avail - p) as usize).min(buf.len());
+                            let take = crate::disk::chunk_len(avail - p, buf.len());
                             read_at(off + p, &mut buf[..take])?;
                             crc.update(&buf[..take]);
                             p += take as u64;
@@ -3404,7 +3399,7 @@ pub fn verify_pass1(
     let limit = file.length.min(disk_len);
     let mut pos = 0u64;
     while pos < limit {
-        let take = ((limit - pos) as usize).min(buf.len());
+        let take = crate::disk::chunk_len(limit - pos, buf.len());
         read_full(&mut f, &mut buf[..take])?;
         if !snapping {
             whole.update(&buf[..take]);

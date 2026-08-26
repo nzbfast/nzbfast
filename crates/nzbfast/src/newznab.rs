@@ -22,11 +22,139 @@ use std::collections::HashMap;
 
 use crate::rss::{attr, tag_text, unescape};
 
+/// Which PROTOCOL a configured search source speaks.
+///
+/// TODO 297 (issue #57). The user wanted a source that is not a Newznab
+/// account, and nzbindex.com publishes a documented JSON API - so it is
+/// an adapter over another schema, not the HTML scraper the 24 Aug
+/// answer declined for binsearch and nzbking.
+///
+/// It rides on [`IndexerConfig`] rather than getting a settings list of
+/// its own, and that is the load-bearing decision in the whole feature.
+/// Everything a search source needs already hangs off this struct and
+/// is keyed by its name: the daily hit and grab budgets, the limit
+/// backoff, the enabled flag, the priority that decides which copy
+/// headlines a merged row, the result-token cache that keeps the
+/// credential out of the browser, and the origin binding that stops a
+/// hostile far end pointing our fetch at the user's LAN. A second list
+/// would have needed a second copy of all of it - and, worse, a second
+/// merge, so a release listed by both sources would have shown up as
+/// two rows. One list means every fan-out that already asks the user's
+/// indexers - pull search, the hunt, the watchlist, the `nzblnk:`
+/// ladder - asks this too, with no site knowing there are two kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceKind {
+    /// The Newznab/Torznab API every indexer account speaks. The
+    /// default, and what every entry saved before TODO 297 is: the
+    /// field is `#[serde(default)]`, so an older `indexers` setting
+    /// loads unchanged.
+    #[default]
+    Newznab,
+    /// nzbindex.com's own JSON API. See [`crate::nzbindex`].
+    Nzbindex,
+}
+
+impl SourceKind {
+    /// The label the API and the dashboard use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourceKind::Newznab => "newznab",
+            SourceKind::Nzbindex => "nzbindex",
+        }
+    }
+}
+
+/// The nzbindex-only knobs. Ignored entirely by a Newznab entry, which
+/// is why they are one nested object rather than five loose fields: a
+/// Newznab row in the settings JSON never carries them, so the shape
+/// of an existing entry does not change.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NzbIndexOpts {
+    /// Ask only for collections that are not missing parts.
+    ///
+    /// **Defaulted ON, and this is the product decision TODO 297 asked
+    /// for.** nzbindex indexes RAW SUBJECTS off the groups: it is not
+    /// curated the way a Newznab indexer's release list is, so an
+    /// unfiltered query returns a large number of collections that are
+    /// incomplete and can never finish, mixed in with the good ones and
+    /// looking identical in a result row. Measured 26 Aug 2026 on a
+    /// plain `q=ubuntu`: two of the first three rows were incomplete.
+    ///
+    /// A row the user cannot download is worse than a row that is not
+    /// there, and this whole product is a bet on downloads that finish
+    /// - so the default is the one that only offers what can. It is a
+    /// setting rather than a hardcode because "show me everything,
+    /// including the broken ones" is a legitimate thing to want when
+    /// you are hunting for something rare and a partial post plus par2
+    /// is better than nothing.
+    ///
+    /// Note this does NOT fix the OTHER half of the raw-subject
+    /// problem: complete or not, most nzbindex rows are obfuscated
+    /// hashes rather than release names. That is deliberately left
+    /// alone here - it is what the #55 unquoted-subject work and the
+    /// audio/video renamers exist to absorb, and filtering rows out for
+    /// having an ugly name would throw away exactly the posts a
+    /// raw-subject index is uniquely good at finding.
+    #[serde(default = "yes")]
+    pub complete_only: bool,
+    /// Smallest collection to return, in MEGABYTES. 0 = no floor.
+    ///
+    /// MB, not bytes, because that is the unit their API takes - and
+    /// this is the one place in this codebase where a size is not in
+    /// bytes, so the field name carries the unit.
+    ///
+    /// NOT defaulted to anything: a size floor is the other lever
+    /// against junk rows, but the right value depends entirely on what
+    /// the user is looking for, and a default floor would silently hide
+    /// every legitimately small post.
+    #[serde(default)]
+    pub min_size_mb: u32,
+    /// Largest collection to return, in MEGABYTES. 0 = no ceiling.
+    #[serde(default)]
+    pub max_size_mb: u32,
+    /// Ignore anything posted more recently than this many DAYS.
+    #[serde(default)]
+    pub min_age_days: u32,
+    /// Ignore anything posted longer than this many DAYS ago. 0 = no
+    /// limit; a user whose provider retention is 3000 days has a real
+    /// reason to set one.
+    #[serde(default)]
+    pub max_age_days: u32,
+    /// Restrict to these newsgroups. Empty = all of them.
+    #[serde(default)]
+    pub groups: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for NzbIndexOpts {
+    fn default() -> Self {
+        Self {
+            complete_only: true,
+            min_size_mb: 0,
+            max_size_mb: 0,
+            min_age_days: 0,
+            max_age_days: 0,
+            groups: Vec::new(),
+        }
+    }
+}
+
 /// One configured third-party indexer (the `indexers` setting).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IndexerConfig {
     pub name: String,
     pub url: String,
+    /// Which protocol this entry speaks. Absent in every entry saved
+    /// before TODO 297, and absent means Newznab.
+    #[serde(default)]
+    pub kind: SourceKind,
+    /// nzbindex-only knobs; inert for a Newznab entry.
+    #[serde(default)]
+    pub nzbindex: NzbIndexOpts,
     #[serde(default)]
     pub apikey: String,
     #[serde(default = "default_true")]
@@ -70,8 +198,16 @@ impl IndexerConfig {
     /// its searches against a site it never pointed at. The apikey is in
     /// the key because the same host answers different caps per account
     /// (a VIP tier advertising id search that the free tier does not).
+    /// The KIND is in the key too (TODO 297): the same host can be
+    /// configured twice, once per protocol, and "what this far end can
+    /// do" is a different answer for each.
     pub fn identity(&self) -> String {
-        format!("{}\u{1}{}", self.endpoint(), self.apikey.trim())
+        format!(
+            "{}\u{1}{}\u{1}{}",
+            self.kind.as_str(),
+            self.endpoint(),
+            self.apikey.trim()
+        )
     }
 }
 
@@ -676,6 +812,8 @@ mod tests {
 
     fn cfg(url: &str) -> IndexerConfig {
         IndexerConfig {
+            kind: Default::default(),
+            nzbindex: Default::default(),
             name: "geek".into(),
             url: url.into(),
             apikey: "K1".into(),

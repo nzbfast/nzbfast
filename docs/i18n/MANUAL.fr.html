@@ -341,6 +341,17 @@ plus tard depuis le journal, sans rien perdre. (Les tâches en priorité Forcé
 continuent de se télécharger, comme dans SABnzbd.)</li>
 <li>Une <b>bannière de mise à jour</b> apparaît ici quand une nouvelle version est
 disponible (voir <a href="#updates">Mises à jour</a>).</li>
+<li>Chaque <b>puce de tâche en arrière-plan</b> signale ce que nzbfast est en train
+de faire - indexation, récupération des métadonnées, flux de sorties, mesure des
+connexions, liste de suivi, synchronisation des listes, déplacement des fichiers
+terminés, entretien de la base de données. Cliquez sur l'une d'elles pour voir ce
+que vous pouvez faire : mettre en pause ou désactiver les tâches qui ont un
+interrupteur, ou aller directement à la liste de suivi, aux sources de listes ou à
+la file d'attente. Déplacement, entretien et synchronisation des listes se
+terminent d'eux-mêmes et le disent, plutôt que de proposer un interrupteur.</li>
+<li>La <b>pastille d'état de la file d'attente</b> s'ouvre de la même façon, avec
+<b>Pause</b> (laisse les articles déjà en cours se terminer), <b>Pause
+immédiate</b> (les abandonne et libère la ligne aussitôt) et <b>Reprendre</b>.</li>
 </ul>
 <h3>Débit</h3>
 <p>Les MB/s en direct avec un graphique défilant ; les repères en pointillés marquent
@@ -379,7 +390,7 @@ fichier, compteurs de blocs vérifiés, quel serveur a contribué combien à
 nzbfast en garde sa propre copie, donc cela fonctionne pour chaque tâche, même quand
 le fichier d'origine a disparu depuis longtemps.</li>
 <li><b>"Pourquoi est-ce lent ?"</b> Pendant qu'une tâche télécharge, la ligne sous sa barre de progression porte un verdict sur <em>cette</em> tâche, pas sur la machine : <i>vos fournisseurs sont la limite</i>, <i>cette machine est à la limite de son processeur</i>, <i>le stockage ne suit pas</i>, etc. Cliquez dessus et la ligne s'ouvre sur les preuves : ce que votre ligne peut faire, ce que les fournisseurs ont livré, ce qui arrive maintenant, et un tableau par serveur où un fournisseur bridé se voit du premier coup d'oeil. Une tâche à pleine vitesse ne dit rien ici, et une tâche dont le verdict se forme encore non plus.</li>
-<li>Des badges signalent les états particuliers : <i>reporté (lent)</i>,
+<li>Des badges signalent les états particuliers : <i>essayé, mis de côté</i>,
 <i>préchargement</i>, <i>en pause</i> (voir <a href="#performance">Outils de
 performance</a>).</li>
 <li>Un graphique de burn-down suit le total de GB restants dans la file.</li>
@@ -844,14 +855,6 @@ sont mauvais. Et une grande part des installations sont Docker, des serveurs san
 écran et des NAS où aucun trousseau n'existe, ce qui laisserait deux chemins de
 stockage différents à maintenir corrects. Un format unique et bien compris qui se
 comporte pareil partout est, pour l'instant, le meilleur compromis.</p>
-<p>Deux autres options par serveur n'ont pas encore de contrôle dans le tableau de
-bord : ajoutez-les à la main dans l'entrée de ce serveur dans
-<code>config.local.json</code> (voir <a href="#files">§17</a>), puis redémarrez.</p>
-<div class="tblwrap"><table>
-<tr><th>Clé</th><th>Notes</th></tr>
-<tr><td><code>bind_ip</code></td><td>Lie les connexions sortantes de ce serveur à une adresse locale précise, pour les machines multi-hébergées et les tunnels VPN partagés. La famille d'adresses choisit aussi la famille cible : une liaison v4 se connecte à l'adresse v4 du serveur.</td></tr>
-<tr><td><code>socks5</code></td><td>Fait passer le trafic NNTP de ce serveur par un proxy SOCKS5 : <code>host:port</code>, ou <code>user:pass@host:port</code>. Le nom d'hôte est résolu <em>par le proxy</em>, donc aucune fuite DNS locale.</td></tr>
-</table></div>
 <ul>
 <li>La <b>coche</b> à côté de chaque serveur est son interrupteur : cochée, le serveur
 est dans le pool de téléchargement ; décochée, il est désactivé. Un serveur désactivé
@@ -1084,6 +1087,7 @@ que vous avez ajoutés, et la liste de suivi travaille sur ces comptes.</div>
 <tr><td>Filtres d'ingestion</td><td>Règles JSON filtrant ce qui entre dans l'index : types (le tout-venant obfusqué est écarté par défaut), année/résolution/langue, bornes de taille.</td></tr>
 <tr><td>Scanner maintenant / rescan profond</td><td>Lance une passe immédiatement ; avec une profondeur, rescanne ce nombre d'en-têtes récents.</td></tr>
 <tr><td>Clé OMDb / rafraîchir les métadonnées / effacer</td><td>Contrôles d'enrichissement du mur (<a href="#wall">§6</a>). Effacer reconstruit la base de zéro - la voie de secours si elle est un jour corrompue.</td></tr>
+<tr><td>Mettre les métadonnées en pause</td><td>Arrête d'aller chercher titres, affiches et distribution sur les sites de métadonnées (<a href="#wall">§6</a>), pendant que le scan continue de son côté. Rien de ce qui a déjà été récupéré n'est perdu ; les nouveautés trouvées pendant la pause gardent simplement le nom sous lequel elles ont été postées jusqu'à la réactivation. Le seul réglage de cette carte qui ne touche à aucun fournisseur usenet.</td></tr>
 <tr><td>Flux de pres</td><td><b>Désactivé tant que vous ne l'activez pas.</b> Beaucoup d'envois sont publiés sans leur nom, et une analyse n'a alors rien à lire. Des canaux de relais publics annoncent le vrai nom, seule voie ouverte pour rapprocher ces envois. Activer garde une connexion ouverte vers un réseau IRC et écoute : rien n'est jamais envoyé et aucun compte n'est créé. Exige l'indexeur actif, car un flux sans endroit où ranger ce qu'il entend n'est qu'une socket ouverte pour rien.</td></tr>
 <tr><td>Serveur de relais, Canaux de relais</td><td>Le réseau IRC qui porte les annonces (hôte ou hôte:port) et les canaux à écouter, séparés par des virgules. Un changement prend effet à la connexion suivante : coupez puis rallumez le flux pour l'appliquer tout de suite.</td></tr>
 <tr><td>Nommer par corrélation</td><td>Les relais publics en direct ne portent aucun nom de fichier, donc la plupart des envois obscurcis ne peuvent pas être rapprochés directement. Ce qu'une annonce fixe, en revanche, c'est le moment d'apparition d'une release et sa taille. Ceci compare l'heure et la taille annoncées aux envois sans nom et, quand cela concorde, propose le vrai nom dans Parcourir. Une suggestion est signalée comme telle, demande votre clic, et ne renomme jamais de fichier sur le disque.</td></tr>
@@ -1191,15 +1195,16 @@ intact et le journal dit pourquoi.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (une reprise automatique a remis en file une tâche échouée),
-<code>job.switched</code> (une tâche qui ne pouvait pas aboutir a été remplacée
+<code>job.requeued</code> (un téléchargement a quitté l'historique et est revenu dans la file - une reprise, ou une entrée de bibliothèque lancée), <code>job.switched</code> (une tâche qui ne pouvait pas aboutir a été remplacée
 par une copie de rechange gardée pour elle), <code>job.replaced</code> (le même résultat, sauf qu'aucune copie
 n'était gardée, donc un remplacement a été cherché puis téléchargé) et
 <code>job.delete_kept</code> (une suppression a retiré l'entrée mais n'a pas pu
 supprimer ses fichiers), plus <code>watch.picked</code> (un .nzb a été retiré du
 dossier surveillé), <code>nzb.refeed</code> (le fichier NZB d’un téléchargement terminé a été ajouté à la file, en pause), <code>watchlist.upgraded</code> (une amélioration de liste de
 suivi a abouti et la copie remplacée a été supprimée),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> et <code>quota.reached</code>. Chacun porte
+<code>queue.idle</code>, <code>queue.paused</code> et <code>queue.resumed</code> (la file s'est arrêtée ou est repartie, quel qu'en soit l'auteur), <code>queue.finished_action</code>
+(l'action de fin de file a été armée, exécutée ou annulée), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> et <code>update.available</code> (une version plus récente de nzbfast a été trouvée). Chacun porte
 <code>schema_version</code> (actuellement 1 ; de nouvelles clés peuvent apparaître
 sans incrément - ignorez ce que vous ne connaissez pas), un <code>seq</code>
 monotone et un horodatage <code>at</code> en millisecondes.</p>
@@ -1569,7 +1574,7 @@ changement. Deux clés : la <b>clé API</b> (contrôle total) et la <b>clé NZB<
 <tr><td>Automatisation</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostics</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (auth Basic : n'importe quel utilisateur, la clé API comme mot de passe)</td></tr>
-<tr><td>Aperçu / lecture</td><td><code>/stream/&lt;nzo_id&gt;</code> (plages HTTP ; démarrer une tâche de bibliothèque en attente exige le jeton <code>?t=</code> ou la clé), <code>/m3u/&lt;id&gt;</code> (exige la clé ; génère le jeton), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Aperçu / lecture</td><td><code>/stream/&lt;nzo_id&gt;</code> (plages HTTP ; démarrer une tâche de bibliothèque en attente exige le jeton <code>?t=</code> ou la clé), <code>/m3u/&lt;id&gt;</code> (exige la clé ou le jeton de la tâche ; génère le jeton), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Fichiers &amp; emplacements</h2>

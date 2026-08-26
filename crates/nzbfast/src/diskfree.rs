@@ -18,7 +18,16 @@
 pub(crate) fn disk_stat(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: libc::statvfs is a plain C struct of integers, so the
+    // zeroed value is a valid one; it is only read below after the call
+    // that fills it returned 0.
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: the path is a NUL-terminated CString that outlives the
+    // call, and the out-parameter is a live local of exactly the type
+    // the signature names. Spelled out per block rather than once for
+    // the function: this arm is `cfg(all(unix, not(macos)))`, so no mac
+    // or Windows lane compiles it and `undocumented_unsafe_blocks` fires
+    // only on the Linux `check` job - which is what held main red.
     (unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0).then(|| {
         (
             s.f_bavail as u64 * s.f_frsize as u64,
@@ -39,7 +48,14 @@ pub(crate) fn disk_stat(path: &std::path::Path) -> Option<(u64, u64)> {
 pub(crate) fn disk_stat(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `libc::statfs` is a C struct of integers and fixed-size
+    // char arrays, so all-zero is a valid bit pattern for it, and the
+    // call below fills it before any field is read.
     let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: `c` is a live `CString` that outlives the call, so
+    // `c.as_ptr()` is a valid NUL-terminated path; `&mut s` is a live,
+    // exclusively borrowed struct of exactly the type statfs(2) writes.
+    // The fields are only read on the `== 0` success path.
     (unsafe { libc::statfs(c.as_ptr(), &mut s) } == 0)
         .then(|| (s.f_bavail * s.f_bsize as u64, s.f_blocks * s.f_bsize as u64))
 }
@@ -64,6 +80,12 @@ pub(crate) fn disk_stat(path: &std::path::Path) -> Option<(u64, u64)> {
     }
     wide.push(0);
     let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 buffer (the push
+    // above supplies the terminator, and an interior NUL was rejected),
+    // and the two out-pointers are live, exclusively borrowed `u64`s -
+    // exactly the ULARGE_INTEGER the API writes. The third out-pointer
+    // is optional and NULL is the documented way to decline it. The
+    // values are only read on the success path.
     let ok =
         unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) };
     (ok != 0).then_some((free, total))

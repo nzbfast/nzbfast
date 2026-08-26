@@ -983,7 +983,7 @@ impl Parts {
                 .find(|(_, s, l)| pos >= *s && pos < *s + *l)
                 .ok_or(ZipError::Malformed("gap in container parts"))?;
             let within = pos - start;
-            let n = ((len - within) as usize).min(buf.len() - done);
+            let n = crate::disk::chunk_len(len - within, buf.len() - done);
             crate::disk::read_exact_at(f, &mut buf[done..done + n], within)?;
             done += n;
             pos += n as u64;
@@ -1213,7 +1213,7 @@ impl std::io::Read for RangeReader<'_> {
         if left == 0 || buf.is_empty() {
             return Ok(0);
         }
-        let n = (left as usize).min(buf.len());
+        let n = crate::disk::chunk_len(left, buf.len());
         self.parts
             .read_exact_at(self.pos, &mut buf[..n])
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -2019,7 +2019,10 @@ impl<S: Source + ?Sized> std::io::Read for SourceRangeReader<'_, S> {
         if left == 0 || buf.is_empty() {
             return Ok(0);
         }
-        let take = (left as usize).min(buf.len());
+        // Same clamp as `RangeReader` above, and this one was NOT in
+        // the sweep's list: a zip64 member's `end - pos` is legitimately
+        // over 4 GiB and this reader serves the whole-container path.
+        let take = crate::disk::chunk_len(left, buf.len());
         self.src
             .read_exact_at(self.pos, &mut buf[..take])
             .map_err(|e| std::io::Error::other(e.to_string()))?;

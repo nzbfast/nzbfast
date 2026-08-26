@@ -9,7 +9,7 @@
 //!   the surviving one is enqueued runnable.
 
 use super::*;
-use crate::serve::testutil::test_daemon;
+use crate::serve::testutil::{flat_rate_config, test_daemon};
 use std::io::{Read, Write};
 
 fn tdir(tag: &str) -> PathBuf {
@@ -498,36 +498,6 @@ fn indexer_mock(routes: impl FnOnce(&str) -> Vec<(String, String)>) -> String {
 /// The candidate the mock below offers that must WIN: a genuine repost
 /// of the same episode, on articles of its own.
 const FRESH_POST: &str = "Some.Show.S01E05.1080p.WEB.H264-GOOD";
-/// Pin a FLAT-RATE server config at `d.cfg_path`, so the automatic road's
-/// metered guard has a real answer to read.
-///
-/// Every test that drives `hunt_one` down the AUTOMATIC road needs this,
-/// and until 25 Aug 2026 none of them had it - the file simply did not
-/// exist and the tests passed anyway, on this fleet, for a reason that
-/// has nothing to do with the code under test. `Config::load` falls back
-/// to a SABnzbd install's ini when its own file is missing, and its own
-/// doc comment says "every bench box here does" have one. So the guard
-/// was reading the DEVELOPER'S SABnzbd server list: flat rate, therefore
-/// not metered, therefore the hunt ran.
-///
-/// The Codex F-10 sweep then made `hunt_metered` answer TRUE rather than
-/// FALSE when the config will not load, which is the right way round -
-/// an unreadable config must not authorise unlimited automatic spend.
-/// That flipped the latent dependency into a visible one: four tests
-/// went red on every CI runner (no SABnzbd) and stayed green on every
-/// machine here (SABnzbd), which reads as "CI is broken" and is not.
-///
-/// Writing the file is what makes the answer the TEST'S, on any host.
-/// Do not drop it back to relying on the fallback, and do not "fix" a
-/// recurrence by loosening `hunt_metered` - the whole point of that
-/// guard is that it fails closed.
-fn flat_rate_config(d: &Daemon) {
-    std::fs::write(
-        &d.cfg_path,
-        r#"{"servers":[{"host":"flat.example","enabled":true}]}"#,
-    )
-    .expect("config");
-}
 
 /// Item 8's whole stage, shared by the two tests that walk the path end
 /// to end: a daemon with the hunt switched on, the request a park would
@@ -583,6 +553,8 @@ fn staged_hunt(dir: &Path) -> (Arc<Daemon>, HuntRequest) {
     });
 
     d.indexers.lock_ok().push(crate::newznab::IndexerConfig {
+        kind: Default::default(),
+        nzbindex: Default::default(),
         name: "mock".into(),
         url,
         apikey: "k".into(),
@@ -628,6 +600,361 @@ fn a_replacement_is_found_and_the_same_post_is_refused() {
         &hunt_origin(&target_keys(&crate::wall::parse_release(STEM))[0]),
         "the replacement records which target its bytes went on"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §282 item 21: the LOCAL-INDEX arm, end to end.
+///
+/// `hunt_candidates` collects `CandSrc::Local(r.id)` from
+/// `with_index_read(|ix| ix.search(..))` and `hunt_fetch` serves it with
+/// `ix.make_nzb(id)`. `index_db_wanted()` (`index_enabled || spot_enabled`)
+/// was already true in every `test_daemon` fixture in this file -
+/// `spot_enabled` defaults ON - so the local arm's two call sites were
+/// always reached; what never happened is a test putting a RELEASE behind
+/// them. `with_index_read` on the daemon's never-seeded `index.db` just
+/// answers "no rows", `hits.iter().filter(|r| r.complete)` is empty, and
+/// the hunt falls through to the external arm with nothing to show for
+/// it - a degradation, exactly as item 21 describes, and why nothing
+/// caught it. `grep -c "CandSrc::Local\|make_nzb" hunt_tests.rs` was 0
+/// before this.
+///
+/// No mock indexer is registered - `d.indexers` stays empty, so
+/// `hunt_search_external` returns nothing - which is what makes a
+/// passing test mean the LOCAL arm is what found and fetched the
+/// replacement, not the external one.
+///
+/// Two candidates are staged in the index, the same shape as item 8's
+/// external-arm test above: a same-post decoy carrying one of the dead
+/// job's own articles, ranked ABOVE the survivor (REMUX outranks WEB) so
+/// the sort reaches it first and item 6's admission test is what has to
+/// stop it - not the ranking - and a genuine local candidate on its own
+/// article that must win. The queued job's spooled .nzb is read back to
+/// confirm it carries the bytes `make_nzb` actually produced, not a
+/// stand-in: the survivor's article present, the decoy's absent.
+#[cfg(feature = "indexer")]
+#[test]
+fn a_local_index_replacement_is_found_and_the_same_post_is_refused() {
+    let dir = tdir("local");
+    let d = test_daemon(&dir);
+    flat_rate_config(&d);
+    d.alt.auto_search.store(true, Ordering::Relaxed);
+    d.alt.max_copies.store(4, Ordering::Relaxed);
+    // Not load-bearing on top of `test_daemon`'s default `spot_enabled`
+    // (which already opens `index_db_wanted()`), but this is what an
+    // own-index install actually has on, and the real toggle to name.
+    d.index_enabled.store(true, Ordering::Relaxed);
+
+    let dead_ids = ["d1@x", "d2@x", "d3@x", "d4@x"];
+    let r = req(&dir, STEM, "dashboard", REPAIR_FAIL, 400, &dead_ids);
+
+    const SAME_LOCAL: &str = "Some.Show.S01E05.2160p.REMUX.H265-SAMELOCAL";
+    const FRESH_LOCAL: &str = "Some.Show.S01E05.2160p.WEB.H265-GOODLOCAL";
+
+    {
+        let mut ix = nzbkit::index::Index::open(&d.index_db).expect("open index");
+        // The decoy: same post as the dead job (one of its own
+        // message-ids), so item 6's admission test must refuse it.
+        ix.ingest(
+            "alt.binaries.test",
+            &[nzbkit::nntp::OverEntry {
+                number: 1,
+                subject: format!(r#""{SAME_LOCAL}.rar" yEnc (1/1)"#),
+                from: "poster@example".into(),
+                message_id: format!("<{}>", dead_ids[0]),
+                bytes: 1_000,
+                date: days_ago(400),
+            }],
+            unix_now(),
+        )
+        .expect("ingest same-post decoy");
+        // The survivor: a genuine repost, its own article.
+        ix.ingest(
+            "alt.binaries.test",
+            &[nzbkit::nntp::OverEntry {
+                number: 1,
+                subject: format!(r#""{FRESH_LOCAL}.rar" yEnc (1/1)"#),
+                from: "poster@example".into(),
+                message_id: "<local-fresh@y>".into(),
+                bytes: 2_000,
+                date: days_ago(300),
+            }],
+            unix_now(),
+        )
+        .expect("ingest survivor");
+    }
+
+    assert_eq!(d.hunt_one(&r), Ok(()));
+
+    let queued: Vec<(String, i32, bool, PathBuf)> = d
+        .queue
+        .lock_ok()
+        .iter()
+        .map(|j| {
+            let g = j.lock_ok();
+            (g.name.clone(), g.priority, g.paused, g.nzb_path.clone())
+        })
+        .collect();
+    assert_eq!(queued.len(), 1, "exactly one replacement: {queued:?}");
+    let (name, priority, paused, nzb_path) = &queued[0];
+    assert_eq!(name, FRESH_LOCAL, "the same post must not be queued");
+    assert_eq!(*priority, 0);
+    assert!(!paused, "the replacement has to RUN, not sit held");
+
+    // The nzb the queue actually received must be what `make_nzb`
+    // produced from the index - not the same-post decoy's article, and
+    // not an empty stand-in.
+    let nzb_bytes = std::fs::read(nzb_path).expect("spooled nzb");
+    let nzb = String::from_utf8_lossy(&nzb_bytes);
+    assert!(
+        nzb.contains("local-fresh@y"),
+        "the queued nzb must carry the survivor's own article: {nzb}"
+    );
+    assert!(
+        !nzb.contains(dead_ids[0]),
+        "the queued nzb must not carry the same-post decoy's article: {nzb}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A live queue row that is NOT the one being replaced: the shape every
+/// test below stands a copy of the release up as.
+///
+/// `key` is spelled by the caller rather than derived, because
+/// `job_from_json` reads `dupe_key` verbatim off the record and never
+/// recomputes it - a row built here with the field left out is invisible
+/// to the name arm however its name reads, which would make a green test
+/// mean nothing.
+fn live_row(
+    dir: &Path,
+    id: &str,
+    name: &str,
+    ids: &[&str],
+    key: Option<String>,
+) -> Arc<Mutex<Job>> {
+    let nzb = dir.join(format!("{id}.nzb"));
+    std::fs::write(&nzb, nzb_with(days_ago(300), ids)).expect("row nzb");
+    Arc::new(Mutex::new(
+        job_from_json(&serde_json::json!({
+            "nzo_id": id, "name": name, "origin": "dashboard",
+            "state": "Queued", "paused": false,
+            "total_bytes": 1000 * ids.len() as u64,
+            "dupe_key": key,
+            "out_dir": dir.join(id).to_string_lossy(),
+            "nzb_path": nzb.to_string_lossy(),
+        }))
+        .expect("live row"),
+    ))
+}
+
+/// The replacement as it landed: name, paused, priority and what it is
+/// held against. Found by NAME, never by queue position - these tests
+/// stand other rows up in front of it.
+fn placed(d: &Daemon, name: &str) -> (bool, i32, String) {
+    let q = d.queue.lock_ok();
+    let job = q
+        .iter()
+        .find(|j| j.lock_ok().name == name)
+        .unwrap_or_else(|| panic!("{name} is not on the queue"));
+    let g = job.lock_ok();
+    (g.paused, g.priority, g.held_for.clone())
+}
+
+/// **§290 (Codex F-09), the residue.** A hunted replacement is a
+/// duplicate of the row it replaces and of NOTHING ELSE.
+///
+/// `hunt_enqueue` passed a bare `allow_dupe = true` until 25 Aug 2026,
+/// and that bool switched both duplicate arms off against every record
+/// in both stores. The exception is written for one row - the
+/// replacement IS a duplicate of the release that just failed, and
+/// without the exemption the M14f hold would park the only copy that can
+/// still deliver - and it was being applied to all of them. So a hunted
+/// copy started downloading beside a live copy of the same release the
+/// user, an *arr or a watchlist had already queued: two downloads of one
+/// episode, neither of them asked for by whoever queued the other.
+///
+/// The admission test above cannot see this. `hunt_one` holds every
+/// candidate to `spare::admits` against THE FAILED JOB's message-ids, so
+/// a candidate that is the same post as the row being replaced is
+/// already refused; nothing asks the question about a different live row.
+#[test]
+fn an_unrelated_live_copy_still_holds_a_hunted_replacement() {
+    let dir = tdir("dupe-name");
+    let (d, r) = staged_hunt(&dir);
+    // The same episode under a different release name, with articles of
+    // its own - so it is the NAME arm that must catch this, not §292's.
+    let mine = "Some.Show.S01E05.720p.WEB.H264-MINE";
+    d.queue.lock_ok().push_back(live_row(
+        &dir,
+        "nzo-mine",
+        mine,
+        &["m1@q", "m2@q", "m3@q", "m4@q"],
+        dupe_key(mine),
+    ));
+
+    assert_eq!(d.hunt_one(&r), Ok(()));
+
+    let (paused, priority, held_for) = placed(&d, FRESH_POST);
+    assert!(
+        paused,
+        "a hunted copy must not run beside a live copy nobody asked it to replace"
+    );
+    assert_eq!(priority, DUPE_PRIORITY);
+    assert_eq!(
+        held_for, "nzo-mine",
+        "and it is held against the copy that is already live, so it promotes if that one fails"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same defect through §292's arm, which is the half the name can
+/// never reach: two grabs of ONE post from two indexers routinely carry
+/// different release names, and only the message-id set can meet them.
+///
+/// The row here is deliberately unnameable as a duplicate - a different
+/// title with no `dupe_key` at all - so the name arm passes it and the
+/// hold can only come from the post identity. That is the arm
+/// `allow_dupe = true` switched off along with the other one.
+#[test]
+fn the_same_post_arm_still_holds_a_hunted_replacement() {
+    let dir = tdir("dupe-post");
+    let (d, r) = staged_hunt(&dir);
+    // `staged_hunt`'s surviving candidate is these four articles. The
+    // row carries them under a name that shares no identity with it.
+    d.queue.lock_ok().push_back(live_row(
+        &dir,
+        "nzo-samepost",
+        "Totally.Different.Title.2019.1080p.BluRay.x264-ZZZ",
+        &["g1@y", "g2@y", "g3@y", "g4@y"],
+        None,
+    ));
+
+    assert_eq!(d.hunt_one(&r), Ok(()));
+
+    let (paused, priority, held_for) = placed(&d, FRESH_POST);
+    assert!(
+        paused,
+        "the same post is already coming down under another name - do not fetch it twice"
+    );
+    assert_eq!(priority, DUPE_PRIORITY);
+    assert_eq!(held_for, "nzo-samepost");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other side of the narrowing, and the one a careless fix breaks:
+/// the row the hunt is REPLACING never holds its own replacement.
+///
+/// It is usually in history as Failed by the time the worker runs - park
+/// files it before `hunt_request` - and a Failed history row is not a
+/// collision target for either arm, so a fix that simply turned the
+/// exemption off would pass most of the time and fail in the window
+/// where the row is still on the queue. Here it IS on the queue,
+/// carrying the failed job's own id, name and articles, which is every
+/// way it could collide at once.
+#[test]
+fn the_row_the_hunt_replaces_never_holds_its_own_replacement() {
+    let dir = tdir("dupe-self");
+    let (d, r) = staged_hunt(&dir);
+    let dead = live_row(
+        &dir,
+        &r.nzo_id,
+        STEM,
+        &["d1@x", "d2@x", "d3@x", "d4@x"],
+        dupe_key(STEM),
+    );
+    d.queue.lock_ok().push_back(dead);
+
+    assert_eq!(d.hunt_one(&r), Ok(()));
+
+    let (paused, priority, held_for) = placed(&d, FRESH_POST);
+    assert!(
+        !paused,
+        "the replacement has to RUN - holding it behind the row it replaces \
+         parks the only copy that can still deliver"
+    );
+    assert_eq!(priority, 0);
+    assert!(held_for.is_empty(), "held against {held_for:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The forgiven row must not MASK the one behind it.
+///
+/// `dupe_collision` reports the FIRST hit it finds, so an exemption
+/// applied to its answer rather than inside its scans would drop the
+/// whole verdict whenever the replaced row happens to be found first -
+/// and the replaced row is the one that shares the failed job's exact
+/// name, so it is found first whenever it is still on the queue. Both
+/// rows are here, the exempt one FIRST, and the unrelated copy must
+/// still hold.
+#[test]
+fn a_forgiven_row_does_not_mask_the_live_copy_behind_it() {
+    let dir = tdir("dupe-mask");
+    let (d, r) = staged_hunt(&dir);
+    let mine = "Some.Show.S01E05.720p.WEB.H264-MINE";
+    {
+        let mut q = d.queue.lock_ok();
+        q.push_back(live_row(
+            &dir,
+            &r.nzo_id,
+            STEM,
+            &["d1@x", "d2@x", "d3@x", "d4@x"],
+            dupe_key(STEM),
+        ));
+        q.push_back(live_row(
+            &dir,
+            "nzo-mine",
+            mine,
+            &["m1@q", "m2@q", "m3@q", "m4@q"],
+            dupe_key(mine),
+        ));
+    }
+
+    assert_eq!(d.hunt_one(&r), Ok(()));
+
+    let (paused, _, held_for) = placed(&d, FRESH_POST);
+    assert!(paused, "the second live copy still holds the replacement");
+    assert_eq!(
+        held_for, "nzo-mine",
+        "the exempt row must be skipped INSIDE the scan, not subtracted from its answer"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **F-09's second hole, end to end.** The byte ceiling trusted the
+/// indexer's ADVERTISED size and never weighed the NZB it actually
+/// fetched, so a result advertising 1 MB and supplying 100 GB walked
+/// through a 1 GB ceiling.
+///
+/// The stage does it to scale rather than by contrivance:
+/// [`staged_hunt`]'s feed advertises `length="2000"` for the surviving
+/// candidate while its .nzb really carries four 1,000-byte segments. A
+/// ceiling of 3,000 therefore passes the pre-fetch filter - which is
+/// the point, since that filter is what stops an unaffordable candidate
+/// eating one of the four fetches - and the row must still not be
+/// queued, because the thing about to run is 4,000 bytes.
+///
+/// The recovery is asserted too: at 5,000 the same candidate lands. A
+/// refusal no setting can lift is a broken feature rather than a
+/// bounded one, and it would pass the first half of this test.
+#[test]
+fn the_fetched_nzbs_real_size_is_weighed_not_the_indexers_advertisement() {
+    let dir = tdir("realsize");
+    let (d, r) = staged_hunt(&dir);
+    d.alt.max_extra_bytes.store(3_000, Ordering::Relaxed);
+
+    assert_eq!(
+        d.hunt_one(&r).err(),
+        Some(NoHunt::ByteCap),
+        "advertised 2,000, actually 4,000, ceiling 3,000"
+    );
+    assert!(
+        d.queue.lock_ok().is_empty(),
+        "and nothing may be published before that is known"
+    );
+
+    d.alt.max_extra_bytes.store(5_000, Ordering::Relaxed);
+    assert_eq!(d.hunt_one(&r), Ok(()), "the real size fits under 5,000");
+    assert_eq!(d.queue.lock_ok().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -804,6 +1131,11 @@ fn a_hunted_replacement_announces_itself_in_the_promote_doors_vocabulary() {
 fn park_hunts_only_when_nothing_was_held() {
     let dir = tdir("trigger");
     let d = test_daemon(&dir);
+    // The promotion arm below runs on the AUTOMATIC road, so it reads
+    // the metered guard - see `flat_rate_config`. Without this the
+    // spare stays held on any host with no SABnzbd install, which is
+    // every CI runner and no machine on this fleet.
+    flat_rate_config(&d);
     d.alt.auto_search.store(true, Ordering::Relaxed);
 
     let failed = |id: &str| {
@@ -1142,6 +1474,27 @@ fn a_row_with_no_verdict_is_never_offered_a_search() {
         d.hunt_offer("nzo-healthy")
             .expect_err("no verdict, no search")
             .contains("cannot finish")
+    );
+
+    // A HELD SPARE with a verdict that would otherwise fire: the offer
+    // never renders on a held row (`offer_json`'s ac45c507e guard), and
+    // this door must refuse the direct API call the same way - a hunt
+    // FOR A SPARE is the junk-queue class that guard names (release-eve
+    // sweep S10). The health here is `doomed_row`'s own, so what is
+    // proven is that the refusal is the `held_for` field and not the
+    // verdict.
+    let held = doomed_row(&r, &dir);
+    {
+        let mut g = held.lock_ok();
+        g.nzo_id = "nzo-heldspare".into();
+        g.held_for = "nzo-some-primary".into();
+        g.paused = true;
+    }
+    d.queue.lock_ok().push_back(held);
+    assert!(
+        d.hunt_offer("nzo-heldspare")
+            .expect_err("a held spare is never hunted for")
+            .contains("spare held for another download")
     );
 
     // And a row the runner already owns: the verdict this reads is taken

@@ -258,19 +258,75 @@ async fn poster_side_corrupted_job_at(
     let cfg = fx.write_config(&[&srv]);
     let nzb = fx.write_nzb();
     let out = fx.dir.join("out");
+    // TODO 278: with the gate OFF the decode is free to walk unverified
+    // bytes, so whether it reaches this volume's damage before settle's
+    // mapped repair patches it is pure timing - and the two legs that
+    // pin the DECLINE need it to. Every box on this fleet won that race
+    // (macOS and Linux arm64 alike, starved to `--cpus 0.5` included);
+    // the ubuntu CI runner lost it every single time, six leg-attempts
+    // over three nights, and held nightly red for all three. The hook
+    // makes the ordering a WAIT rather than a bet: the repair holds
+    // until the decode has read past the last damaged block. A sleep
+    // would have been the same race with better odds.
+    //
+    // NOT set with the gate ON, and that is the whole of why this is
+    // derived here rather than passed in: under the gate the decode
+    // parks at exactly the block PAR2 will not vouch for and never
+    // reaches the damage at all, by design - that leg's ending is the
+    // one the gate exists for. A wait there would burn its whole
+    // timeout to arrive back where it started.
+    const GATED: &[(&str, &str)] = &[("NZBFAST_CHASE_VERIFY_GATE", "1")];
+    const UNGATED: &[(&str, &str)] = &[
+        ("NZBFAST_CHASE_VERIFY_GATE", "0"),
+        ("NZBFAST_TEST_WAIT_CHASE_CONSUMED_MS", "60000"),
+    ];
+    let env = match verify_gate {
+        "0" => UNGATED,
+        "1" => GATED,
+        other => panic!("no env table for verify gate {other:?}"),
+    };
     let (log, ok) = tokio::task::spawn_blocking(move || {
-        run_get_args(
-            &cfg,
-            &nzb,
-            &out,
-            &[("NZBFAST_CHASE_VERIFY_GATE", verify_gate)],
-            &["--mem-limit", "2G"],
-        )
+        run_get_args(&cfg, &nzb, &out, env, &["--mem-limit", "2G"])
     })
     .await
     .unwrap();
     let bodies = srv.body_log.lock().expect("body log").clone();
     (log, ok, doc, fx, names, bodies)
+}
+
+/// Why a leg that needs the conflict tripwire did not get it, in the
+/// reader's words rather than the assertion's.
+///
+/// Two opposite diagnoses look identical from a bare `contains` check,
+/// and telling them apart by hand has now cost three nightly triages
+/// (TODO 278). The one that keeps happening on the CI runner is the
+/// BENIGN one: the mapped repair patched the damaged bytes before the
+/// chase decode had read them, so `chase_repair_conflicted` had nothing
+/// to report and the in-place route was RIGHT to take. The job succeeds
+/// and the extracted bytes are byte-exact either way - only the ROUTE
+/// differs, and these two legs are about the route. The other reading -
+/// a decline that happened and then went wrong - is a real defect.
+/// Naming which one the log shows is the difference between a triage
+/// and an hour of log reading.
+fn no_decline_because(log: &str) -> &'static str {
+    if log.contains("the archive decode already consumed") {
+        "the mapped route DID decline on the conflict, so the tripwire \
+         armed and the failure is in what happened after it"
+    } else if log.contains("rebuilt directly into the output") {
+        "NO decline happened at all - the mapped repair rebuilt the \
+         damaged blocks in place BEFORE the chase decode had read them, \
+         so the conflict tripwire never armed. That is TODO 278's \
+         ordering going the other way: not a product bug (the job \
+         succeeded and the output is byte-exact), and not a claim this \
+         leg can make from here. The ordering hook \
+         `NZBFAST_TEST_WAIT_CHASE_CONSUMED_MS` is what holds it, so a \
+         leg reaching this message is one the hook did not cover or did \
+         not hold long enough"
+    } else {
+        "the mapped route neither declined on the conflict nor reported \
+         an in-place rebuild, so it never ran, or declined for some \
+         other reason - read the [repair] lines below"
+    }
 }
 
 /// The safety property, and the one case the in-place route must
@@ -314,7 +370,8 @@ async fn poster_side_corruption_still_declines_the_in_place_route() {
     assert!(
         log.contains("mapped repair declined")
             && log.contains("the archive decode already consumed"),
-        "the in-place route was taken on bytes the decode had consumed:\n{log}"
+        "the conflict decline this leg is built on never happened - {}:\n{log}",
+        no_decline_because(&log)
     );
     // The demote arrives through the TRIPWIRE, not through settle's
     // materialize loop: `chase_span` forfeits on the first differing
@@ -572,28 +629,38 @@ async fn a_declined_mapped_repair_still_lands_every_rebuilt_block() {
         "the mapped route no longer rebuilds every block the ledger \
          called bad:\n{gated}"
     );
-    assert!(
-        ungated.contains("set already verifies on disk"),
-        "the disk route still had blocks to rebuild - the declined \
-         mapped attempt did not land all three:\n{ungated}"
-    );
-    assert_eq!(
-        count_after(&ungated, "block(s) rebuilt across", "in place: "),
-        None,
-        "the disk route printed an in-place count at all, so it \
-         rebuilt blocks the mapped attempt had already solved:\n{ungated}"
-    );
-    // Teeth: without this the two assertions above also pass on a leg
-    // whose mapped route SUCCEEDED and never declined at all, which
-    // would mean the tripwire had stopped firing.
+    // THE PRECONDITION for the two assertions after it, and it is read
+    // first on purpose. It used to sit at the foot of this function as
+    // "teeth" - a true reading, and one that left the leg reporting
+    // "the declined mapped attempt did not land all three" on a run
+    // where nothing declined at all. That message has now cost three
+    // nightly triages (TODO 278), so the decline is asserted where it
+    // belongs: as the thing this leg needs before anything else it says
+    // can mean what it says.
     assert!(
         ungated.contains("the archive decode already consumed"),
-        "the ungated leg did not decline on the conflict, so its \
-         clean disk pass proves nothing about the tripwire:\n{ungated}"
+        "the ungated leg never reached the conflict decline this leg is \
+         built on, so nothing below it proves anything - {}:\n{ungated}",
+        no_decline_because(&ungated)
     );
     assert!(
         !ungated.contains("no backing data"),
         "a rebuilt block was still refused by the demoted slot:\n{ungated}"
+    );
+    // Past that line the decline DID happen, so these two say what they
+    // sound like: the disk route it fell back to found nothing left.
+    assert!(
+        ungated.contains("set already verifies on disk"),
+        "the mapped route declined on the conflict as it should, but the \
+         disk route it fell back to still had blocks to rebuild - the \
+         declined attempt did not land all three:\n{ungated}"
+    );
+    assert_eq!(
+        count_after(&ungated, "block(s) rebuilt across", "in place: "),
+        None,
+        "the mapped route declined on the conflict as it should, but the \
+         disk route printed an in-place count, so it rebuilt blocks the \
+         declined attempt had already solved:\n{ungated}"
     );
 }
 

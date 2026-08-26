@@ -95,24 +95,31 @@ class NzbfastClient(private val baseUrl: String, private val apiKey: String) {
     }
 
     /**
-     * URL the player should open for a job. The /m3u body embeds the
-     * per-job stream token, so the long-lived player URL never carries
-     * the API key. Falls back to an apikey-authed /stream URL if the
-     * m3u fetch fails.
+     * URL the player should open for a job, or null when one cannot be
+     * minted. The /m3u body embeds the per-job stream token, so the
+     * long-lived player URL never carries the API key.
+     *
+     * THERE IS NO APIKEY FALLBACK, and the fallback that used to be
+     * here is why this returns null. It built
+     * `/stream/<id>?apikey=<the full master key>` whenever /m3u errored
+     * or came back malformed, and handed that to ExoPlayer - where
+     * logcat, the media session, PiP metadata and any intermediary's
+     * access log can retain it. That key is the credential that also
+     * writes provider passwords through mode=server_save.
+     *
+     * The iOS twin never had one: `ApiClient.playURL(for:)` throws, and
+     * its own comment records the lesson ("the long-lived full
+     * credential rode a query string past every reverse proxy and URL
+     * diagnostic", Codex sweep 12 Aug). Android reintroduced on the
+     * fallback path what iOS had removed on the mint path.
      */
-    fun streamUrl(nzoId: String): String {
+    fun streamUrl(nzoId: String): String? {
         val id = Http.encode(nzoId)
         return try {
-            val m3u = Http.get("$baseUrl/m3u/$id", apiKey = apiKey)
-            Parse.m3uUrl(m3u) ?: fallbackStreamUrl(id)
+            Parse.m3uUrl(Http.get("$baseUrl/m3u/$id", apiKey = apiKey))
         } catch (e: Exception) {
-            fallbackStreamUrl(id)
+            null
         }
-    }
-
-    private fun fallbackStreamUrl(encodedId: String): String {
-        val key = if (apiKey.isEmpty()) "" else "?apikey=${Http.encode(apiKey)}"
-        return "$baseUrl/stream/$encodedId$key"
     }
 
     /** First-run news-server save. index -1 appends. */

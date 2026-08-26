@@ -98,6 +98,9 @@ pub(crate) async fn get_cmd(
         // nowhere here to ask. `always` needs no consent and
         // still applies to an offline `get`.
         false,
+        // §293: donor directories are a daemon switch-job concern; a
+        // CLI get has no predecessor to donate from.
+        Vec::new(),
         None,
         None,
         "",

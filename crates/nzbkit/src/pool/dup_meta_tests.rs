@@ -35,6 +35,8 @@ fn server(host: &str) -> ServerConfig {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     }
 }
 

@@ -83,7 +83,10 @@ pub fn rename_from_nzb(parent: &Path, out_dir: &Path, nzb_name: &str) -> Option<
 ///  * sample clips, by the same grammar the junk sweep uses;
 ///  * anything still packed - a `.rar`/`.r00`/`.7z.001` volume is
 ///    routinely the biggest file in a job that failed to unpack, and
-///    renaming one member of a multi-volume set breaks the set;
+///    renaming one member of a multi-volume set breaks the set. A
+///    numbered byte split is that same set with nothing in the name or
+///    the head to say so, in both its readings, so it is answered as
+///    MEMBERSHIP - see `is_packed_archive`;
 ///  * dotfiles. `.nzbfast.journal` and friends are our own state, and
 ///    they are hidden on macOS and Linux and NOTHING on Windows, so
 ///    "the user cannot see it" is not a reason it cannot be picked.
@@ -92,16 +95,33 @@ pub fn rename_from_nzb(parent: &Path, out_dir: &Path, nzb_name: &str) -> Option<
 ///
 /// Same reach as [`main_video`](super::main_video): the top level plus
 /// one directory down, which is where extraction puts things.
+///
+/// Membership is a property of the DIRECTORY a file sits in, so the
+/// three sets are rebuilt for each directory this reaches rather than
+/// taken once from the top. Built once, they answered a question about
+/// the parent for every file one level down, and the parent's sets never
+/// contain a subfolder's parts - so every set-based arm of
+/// `is_furniture` read a subfolder split as ordinary payload and the
+/// largest member took the release name, breaking the set. Observed 25
+/// Aug 2026 on the shape TODO 301 recorded as the reachable one: an
+/// `Extras/` folder holding a plain headerless split, whose part 1 came
+/// back as `Whatever This Is.001`. `keep_media_only` has always
+/// recomputed per directory - that asymmetry was the whole defect.
 pub fn main_payload(dir: &Path) -> Option<PathBuf> {
-    let zip_parts = zip_part_set(dir);
     let mut best: Option<(u64, PathBuf)> = None;
-    let mut consider = |path: PathBuf| {
-        if !is_real_file(&path) || is_furniture(&path, &zip_parts) {
-            return;
-        }
-        let len = path.metadata().map(|m| m.len()).unwrap_or(0);
-        if best.as_ref().is_none_or(|(b, _)| len > *b) {
-            best = Some((len, path));
+    let mut rank = |d: &Path, paths: &[PathBuf]| {
+        let zip_parts = zip_part_set(d);
+        // Both readings of the numbered byte split - see `is_packed_archive`.
+        let mut split_parts = crate::container_part_set(d);
+        split_parts.extend(crate::split_part_set(d));
+        for path in paths {
+            if !is_real_file(path) || is_furniture(path, &zip_parts, &split_parts) {
+                continue;
+            }
+            let len = path.metadata().map(|m| m.len()).unwrap_or(0);
+            if best.as_ref().is_none_or(|(b, _)| len > *b) {
+                best = Some((len, path.clone()));
+            }
         }
     };
     let tops: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -109,23 +129,26 @@ pub fn main_payload(dir: &Path) -> Option<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .collect();
-    for path in tops {
-        if is_real_dir(&path) {
-            if let Ok(rd) = std::fs::read_dir(&path) {
-                for e in rd.flatten() {
-                    consider(e.path());
-                }
-            }
-        } else {
-            consider(path);
-        }
+    let (subs, files): (Vec<PathBuf>, Vec<PathBuf>) =
+        tops.into_iter().partition(|p| is_real_dir(p));
+    rank(dir, &files);
+    for sub in subs {
+        let Ok(rd) = std::fs::read_dir(&sub) else {
+            continue;
+        };
+        let kids: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        rank(&sub, &kids);
     }
     best.map(|(_, p)| p)
 }
 
 /// Everything [`main_payload`] refuses to call the main file. See there
 /// for why each entry is on the list.
-fn is_furniture(p: &Path, zip_parts: &std::collections::HashSet<PathBuf>) -> bool {
+fn is_furniture(
+    p: &Path,
+    zip_parts: &std::collections::HashSet<PathBuf>,
+    split_parts: &std::collections::HashSet<PathBuf>,
+) -> bool {
     let name = p
         .file_name()
         .map(|n| n.to_string_lossy())
@@ -144,7 +167,7 @@ fn is_furniture(p: &Path, zip_parts: &std::collections::HashSet<PathBuf>) -> boo
         // rename decision; the junk sweep's is not, and keeps the
         // narrower rule.
         || is_sample_named(p)
-        || is_packed_archive(p, zip_parts)
+        || is_packed_archive(p, zip_parts, split_parts)
 }
 
 /// `file` -> `base.ext`, in place. Keeps the extension (that is what

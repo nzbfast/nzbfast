@@ -2,7 +2,7 @@
 # leg-warn, par2, provenance, iface, windows-portability, flatpak pin,
 # harness, index lock, rate format, payload id, bg token, test global,
 # manual parity, site parity, cross-link staleness, nav staleness, icon
-# derivation), on
+# derivation), plus the twelve build-free PACKAGING gates, on
 # EVERY branch instead of only on main.
 #
 # They all already run in ci-private's `check` job, and that is where
@@ -188,9 +188,15 @@
 # `"%.2f GB/s"`. This is still the whole of what stands between a
 # Swift-side unit mistake and a shipped menu bar.
 # Twenty-one is `tools/bg-token-gate.py`, added 24 Aug 2026, and the
-# numbering runs one behind the job count from here on: the payload-id
-# gate landed the same day and was wired without a number, so there are
-# thirty-two steps below and twenty-nine numbers above. Its subject is
+# numbering runs eight behind the job count from here on: the payload-id
+# gate landed the same day and was wired without a number, and seven more
+# have been wired without one since - the wait-recheck, event-arm,
+# js-scope and api-contract gates, the one-process and packaging-tests
+# roster jobs, and `packaging-gates` - plus the selftest-roster and
+# tool-selftests jobs, which makes it nine and ten: the selftest roster
+# IS numbered in CLAUDE.md (the fortieth) and is not numbered here, and its `tool-selftests` companion is a runner rather than a
+# gate. So there are forty-one steps below and twenty-nine numbers
+# above. Its subject is
 # `--bg`, the page ground, DEFINED once in web/ui-tokens.html and
 # hand-copied into five sites that cannot read a custom property - the
 # dashboard's and the wall's media-scoped <meta name="theme-color">
@@ -487,7 +493,7 @@
 # the design was settled, the hand-greyscaled one included, so no arm had
 # to be weakened and there was nothing stale to fix.
 #
-# The `paths:` filter is the union of what the thirty-two scripts actually
+# The `paths:` filter is the union of what the fifty scripts actually
 # read, worked out from the scripts rather than guessed, because a push
 # the filter skips is a push the gates silently miss:
 #
@@ -576,7 +582,7 @@
 #     above provably reaches its subject the file still names it
 #     separately (see the harness/i18n case just below), so a dot-prefixed
 #     path gets no less.
-#   - the thirty-two gate scripts and this file. `crates/**` and `**/*.rs`
+#   - the fifty gate scripts and this file. `crates/**` and `**/*.rs`
 #     already carry the harness gate's whole subject, so it adds only its
 #     own script to the list, and `**/*.py` already reaches
 #     all four of `web/i18n/manual-check.py`, `web/i18n/site-check.py`,
@@ -648,8 +654,23 @@ on:
       - '**/*.sh'
       - '**/*.zsh'
       - 'tools/iface-excess-gate.py'
+      - 'tools/stall-mark-gate.py'
+      - 'tools/rig-selftest-gate.py'
+      # For `rig-selftest-paths`, which holds rig-selftest.yml's own
+      # `paths:` filter to the files that selftest reads. The other two
+      # inputs of that arm are already covered - the selftest itself by
+      # `**/*.zsh` and the wrapper by `**/*.py` - but a .yml matches no
+      # other pattern in this list, so without this line an edit that
+      # narrowed the trigger would go unreported.
+      - '.github/workflows/rig-selftest.yml'
       - 'tools/win-portability-gate.py'
       - 'packaging/flatpak/**'
+      # For the `packaging-gates` job at the foot of this file. `**/*.sh`
+      # above already catches most of what those twelve scripts read, but
+      # not all of it: synology-compose-parity holds
+      # `packaging/synology/docker-compose.yml` against its website twin,
+      # and a .yml matches no pattern in this list.
+      - 'packaging/**'
       - 'tools/flatpak-pin-gate.py'
       - 'tools/harness-gate.py'
       - 'tools/index-lock-gate.py'
@@ -658,12 +679,34 @@ on:
       - 'tools/payload-id-gate.py'
       - 'tools/bg-token-gate.py'
       - 'tools/test-global-gate.py'
+      - 'tools/wait-recheck-gate.py'
+      - 'tools/wedge-gate.py'
+      # For `wedge-gate`. Nothing else in this list matches it -
+      # it is not .rs, .py, .sh or .md - so without this line the
+      # gate would not fire on the one file it exists to hold.
+      - '.config/nextest.toml'
       - 'tools/claude-clippy-gate.py'
       - 'tools/wco-drag-gate.py'
+      - 'tools/event-arm-gate.py'
+      - 'tools/host-config-gate.py'
+      - 'tools/js-scope-gate.py'
+      - 'tools/api-contract-gate.py'
+      - 'tools/selftest-roster.py'
+      - 'tools/workflow_scan.py'
+      - 'tools/bench-report-selftests.py'
       - 'tools/shot-version-gate.py'
       - 'tools/screens-derived-gate.py'
       - 'web/screens/**'
       - 'tools/icons-derived-gate.py'
+      - 'tools/cfg-safety-gate.py'
+      # For `cfg-safety-gate`, whose roster is DERIVED from the crate
+      # manifests: which packages opt into `[workspace.lints]`, and which
+      # carry its waiver. Nothing else in this list matches a Cargo.toml,
+      # so without these two lines a deleted waiver or a crate leaving the
+      # lint table is a change the gate never fires on.
+      - 'Cargo.toml'
+      - 'crates/**/Cargo.toml'
+      - 'vendor/**/Cargo.toml'
       - 'web/icons/**'
       - 'packaging/icon/**'
       - 'tools/icon-downstream-gate.py'
@@ -678,13 +721,18 @@ on:
       - '.claude/tools/memory-gate.py'
       - '.claude/tools/hooks-gate.py'
       - '.github/workflows/size-gate.yml'
+      # For the `packaging-tests-roster` job below, whose subject is
+      # every workflow in this directory: deleting a `run:` step from
+      # any of them can leave a packaging gate wired to nothing, and
+      # only the two named above fired this workflow before.
+      - '.github/workflows/**'
   workflow_dispatch:
 permissions:
   contents: read
-# Every job below is the same shape, deliberately spelled out thirty-two
+# Every job below is the same shape, deliberately spelled out thirty-nine
 # times rather than as a matrix, so each step's `run:` line is the bare
 # script exactly as ci-private runs it and the two can never disagree
-# about what passes - true of twenty-four of the thirty-two. The memory
+# about what passes - true of twenty-eight of the thirty-nine. The memory
 # and hooks gates have no ci-private line to match, see "Eighteen" above,
 # and neither does the clippy-doc gate, which is wired here alone - this
 # file runs on main's pushes too, so nothing is lost by that. The
@@ -695,21 +743,43 @@ permissions:
 # selftest ALONE, because the gate half is a statement about main's state
 # and would red the next lane. See "Twenty-three" above - that asymmetry
 # is the design, not drift, so do not "fix" it by appending the gate.
-# The wco-drag gate is the fifth, wired here alone at landing for the same
-# reason as the clippy-doc one; the arithmetic above counts it. The
-# screens-derived gate is the sixth, wired here alone for the same reason
+# The screens-derived gate is the sixth, wired here alone for the same reason
 # again - this file runs on main's pushes too, so nothing is lost by it,
 # and its subject is a picture a lane can only fix while it still has the
-# mac in front of it. The icons-derived gate is the seventh and last, wired
+# mac in front of it. The icons-derived gate is the seventh, wired
 # here alone for that same reason one more time: its regenerate-and-compare
 # half needs qlmanage, so the lane holding the mac is the only lane that
 # can act on a hit at all. The downstream icon gate is the eighth, wired
 # here alone for exactly that reason again - its own mac half is `--check`
-# on two generators that need sips.
+# on two generators that need sips. The wait-recheck gate is the ninth
+# and the api-contract gate the tenth, both wired here alone at
+# landing for the same reason as the clippy-doc one. The selftest roster
+# is the eleventh and last, wired here alone for that reason once more -
+# this file runs on main's pushes too, so nothing is lost by it, and the
+# lane that adds an unwired selftest is the one lane that can be told.
+# The arithmetic above counts them all.
+#
+# THE FORTIETH JOB, `packaging-gates`, IS ONE OF TWO EXCEPTIONS to
+# the paragraph above, and it says why at its own site rather than here. In
+# short: its subject is twelve shell scripts rather than one python gate,
+# they total about eleven seconds between them, and six of them need an
+# interpreter the ubuntu image does not ship - so they share one runner
+# as twelve STEPS. A step still reports its own verdict and names itself
+# when it fails, which is the property one-job-per-gate is really buying.
+# Its `run:` lines are the bare scripts exactly as pr-check.yml spells
+# the five it shares, so that rule holds unchanged.
+#
+# `tool-selftests`, the last job in this file, is the SECOND exception
+# and is the same shape for the same reason: ten `--selftest` arms
+# that nothing anywhere ran, about twenty seconds between them, one
+# runner, one step each. It stops there for a reason worth keeping - a
+# step that is a bare `<script> --selftest` is exactly what a session
+# would type, so `tools/selftest-roster.py` can read it back and say
+# which arms are covered.
 #
 # Concurrency is on the JOB, not the workflow, which is ci-private.yml's
 # hard-won lesson written down: a workflow-level group cancels every job
-# in the run, so one slow leg kills the fast one. With thirty-two jobs that
+# in the run, so one slow leg kills the fast one. With forty-two jobs that
 # is no longer hypothetical - a per-job group means the overflow gate's
 # selftest can never take the lock gate's verdict down with it.
 #
@@ -851,6 +921,109 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: iface threshold gate
         run: tools/iface-excess-gate.py --selftest && tools/iface-excess-gate.py
+  stall-mark-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: stall-mark-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The rig library's per-leg scans scope themselves on a byte offset
+      # recorded before the leg. That is right for a client log that
+      # APPENDS and wrong for one the driver TRUNCATES, which is what
+      # every nzbfast arm does - so from the day the mark was written
+      # until 25 Aug 2026 every leg after the first in a round could
+      # silently lose conns_held=, sharded= and WARN=conn_capped, the
+      # field that exists to stop a contaminated leg being published. A
+      # leg that lost them reads exactly like a clean one. The one check
+      # that reads this library, rig-lib-selftest.zsh, was run by no
+      # workflow here for as long as it existed, and by MACHINES.md on the
+      # bench box after a deploy - long after the push, the position
+      # bench2j's check sat in while its subject rotted twice. It runs in
+      # CI since 26 Aug 2026, in rig-selftest.yml on a macOS runner,
+      # because it is macOS-only by construction; the two are complements
+      # and the division is measured rather than asserted. A signature
+      # function rewritten to return a constant passes THIS gate at exit 0
+      # and reddens that job - verified both ways on 26 Aug 2026. Wrapper
+      # under tools/ and
+      # private repo only, same reason as the iface gate: that path is
+      # private vocabulary and this file ships to the public repo.
+      - name: stall mark identity gate
+        run: tools/stall-mark-gate.py --selftest && tools/stall-mark-gate.py
+  shell-selftests:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: shell-selftests-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # THE SHELL HALF of the selftest roster. tools/selftest-roster.py built
+      # its population from `git ls-files '*.py'` until 26 Aug 2026, so no
+      # shell selftest outside packaging/tests/ was rostered by anything -
+      # that directory has its own gate, and between the two there was a hole
+      # the size of every other .sh in the repo. It went the way this family
+      # always goes: `tools/publish-site.sh --self-test` was RED on
+      # origin/main and had been since the day it was written, 6 of 7, because
+      # `git init --bare` points HEAD at init.defaultBranch and git's built-in
+      # is still `master` while every world it builds pushes `main` - so the
+      # one world that clones checked out nothing. Nobody knew, because
+      # nothing ran it.
+      #
+      # All four are hermetic and together take under two seconds - they build
+      # throwaway git repos and shim every privileged call. Each was measured
+      # on this box before being wired, and the run to WATCH is the first one
+      # on a Linux runner: a sibling of these was 30/30 on the dev Mac and
+      # 26/30 on the first Linux box ever to execute it.
+      #
+      # bench-accounts.sh's arm is an `exec` of bench-accounts-parse.py's,
+      # which the job below already runs. It is wired anyway rather than
+      # waived on that ground: what this step adds is that the WRAPPER still
+      # dispatches, which is the half a direct call to the python cannot see.
+      #
+      # `packaging/scan-release-assets.sh --self-test` is NOT here and that
+      # is measured, not stylistic: it is `#!/bin/zsh`, and ubuntu-latest has
+      # no zsh. Wired here first, it failed on the runner with exit 127,
+      # `cannot execute: required file not found` - found by a probe branch
+      # before it could redden anybody else's push, which is the whole reason
+      # this family probes rather than reasons. It belongs in
+      # `packaging-gates` below, which installs zsh for exactly this and is
+      # where the other packaging scripts already run. Everything left here
+      # is `#!/bin/sh` and was verified under REAL dash locally, because
+      # ubuntu's /bin/sh is dash while this fleet's is bash in posix mode -
+      # the other half of the same trap.
+      - name: shell selftests
+        run: |
+          .claude/tools/bench-accounts.sh --selftest
+          packaging/freebsd/smoke.sh --self-test
+          tools/publish-site.sh --self-test
+  rig-selftest-paths:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: rig-selftest-paths-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The PORTABLE half of the rig selftest's wiring. That selftest runs
+      # on a macOS runner in rig-selftest.yml, behind a NARROW native path
+      # filter - it cannot ride this workflow's filter, which is a union
+      # covering `**/*.rs`, `**/*.py`, `**/*.sh` and `*.md`, because that
+      # would spin a macOS runner on very nearly every push. A narrow
+      # filter is a LIST, and a list is a gate that cannot see the
+      # fifteenth file. This arm derives the file set from the selftest
+      # ITSELF and refuses a name no pattern there matches, so a driver
+      # the selftest starts replaying reddens on the AUTHOR's push instead
+      # of leaving that job quietly un-triggered by the file it now reads.
+      # Build-free, and `--selftest` first for the reason every gate here
+      # runs its own: a matcher that has stopped matching reads as a clean
+      # tree forever.
+      - name: rig selftest trigger roster
+        run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --paths
   win-portability-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -999,6 +1172,152 @@ jobs:
       # quietly stopped matching, which reads as a clean tree forever.
       - name: test global gate
         run: tools/test-global-gate.py --selftest && tools/test-global-gate.py
+  wait-recheck-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: wait-recheck-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A state guard released inside a wait loop that then falls through
+      # to an unbounded `Condvar::wait` without re-checking what ends the
+      # wait: the abort lands in the released window, notifies an empty
+      # condvar, and the reader parks forever. Measured 23 Aug 2026 as a
+      # 4,666-second wedge of the zip nested-budget test - which nextest
+      # RETRIED and reported as "6101 passed (1 flaky)", exit 0. Here
+      # rather than only in ci-private for exactly that reason: this class
+      # cannot be relied on to show up as a red test at all, so the push
+      # that introduces it is the only moment anyone will look. A grep for
+      # `drop(st)` would never have found it either - the incident's
+      # release is the guard MOVED into a helper that hands a fresh one
+      # back. `--selftest` first, and it is the gate: the arms are
+      # regexes over a five-loop population, and one that quietly stops
+      # matching reports a clean tree forever, which is what nav-regen's
+      # dead picker arm did for months.
+      - name: wait recheck gate
+        run: tools/wait-recheck-gate.py --selftest && tools/wait-recheck-gate.py
+  chunk-narrow-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: chunk-narrow-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A u64 byte span narrowed to `usize` BEFORE it is bounded by a
+      # buffer - `(remaining as usize).min(buf.len())`. `usize` is 32 bits
+      # on the shipped armv7-unknown-linux-musleabihf target, so a span of
+      # exactly 4 GiB narrows to ZERO and the caller takes nothing: no
+      # progress at all in a decrementing loop, and Ok(0) in a reader,
+      # which every consumer in this tree reads as a clean end of file.
+      # Not an alignment coincidence - the last short read takes
+      # `remaining % 2^32` and lands the cursor exactly on the multiple,
+      # so the trigger is any span of 4 GiB or more, every time.
+      # Here rather than only in ci-private for the reason no test job can
+      # cover it: on a 64-bit host the hazardous spelling is BIT-IDENTICAL
+      # to the safe one, so nothing this fleet runs can see the class, and
+      # the push that introduces it is the only moment anyone will look.
+      # `adb3681e9` converted nineteen sites; this holds the twentieth.
+      # `--selftest` first, and it is the gate: the arms are a hand-written
+      # left-walk over 777 casts, and one that quietly stops matching
+      # reports a clean tree forever, which is what nav-regen's dead picker
+      # arm did for months. It needs no new `paths:` entry - `**/*.rs` and
+      # `**/*.py` above already reach every file it reads.
+      - name: chunk narrow gate
+        run: tools/chunk-narrow-gate.py --selftest && tools/chunk-narrow-gate.py
+  host-config-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: host-config-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A test that hands the daemon a config path it never wrote.
+      # `Config::load` answers a MISSING file by finding a SABnzbd
+      # install's ini under `$HOME`, this fleet has SABnzbd from the
+      # competitive benchmarking and a runner does not, so the same test
+      # gives opposite answers decided by the box. It went red on main
+      # twice in two days on two different doors (f63b6a3af, e0f94fc60),
+      # the second time taking linux-tests, unit-one-process and
+      # windows-unit down for ninety minutes, and it is INVISIBLE on every
+      # machine here - which is why this belongs on the author's own push
+      # rather than only in ci-private. `--selftest` first and it is the
+      # gate rather than the habit: the arms are a hand-written lexer over
+      # a 3,100-function test tree, and one that quietly stops matching
+      # reports a clean tree forever - nav-regen's picker arm did exactly
+      # that for months. It prints how many test functions, doors and
+      # consumers it REACHED, so an inert scan shows a zero, not a green.
+      - name: host config gate
+        run: tools/host-config-gate.py --selftest && tools/host-config-gate.py
+  cfg-safety-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: cfg-safety-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # An `unsafe` block whose only SAFETY note sits above a
+      # cfg-EXCLUSIVE sibling arm. On the platform that arm is gated for,
+      # the sibling AND its comment are both gone and
+      # `undocumented_unsafe_blocks` fires on the block below - and every
+      # clippy run on this fleet is host-native, where the LINUX arm is
+      # the one that vanishes. `cargo clippy --target
+      # x86_64-unknown-linux-gnu` does not work from the dev Mac at all
+      # (md5-asm and libsqlite3-sys want a C cross-toolchain and no
+      # `brew install` supplies one), so unlike the Windows case in
+      # CLAUDE.md's SIXTEENTH entry there is no local run that sees it.
+      # Measured: main went red on this FIVE times in eighty-four minutes
+      # on 26 Aug 2026, the middle three being the SAME defect fixed by
+      # three lanes independently inside ten minutes - because a red on
+      # main is a broadcast, so every lane that looks races every other
+      # lane that looks. Belongs on the author's own push for exactly
+      # that reason. `--selftest` first and it is the gate rather than the
+      # habit: the arms are a hand-written Rust lexer plus a two-level
+      # walk-back, and one that quietly stops matching reports a clean
+      # tree forever - nav-regen's picker arm did that for months. It
+      # prints how many files, unsafe sites, cfg attributes and statement
+      # lifts it REACHED, so an inert scan shows a zero, not a green. It
+      # reads the crate MANIFESTS as well as the sources, to derive its
+      # roster and to see a waiver, and `**/*.rs` does not reach those -
+      # hence the two `Cargo.toml` lines in the filter above. Without
+      # them a deleted waiver, or a crate dropping out of the lint table,
+      # is a change this job never runs on.
+      - name: cfg safety gate
+        run: tools/cfg-safety-gate.py --selftest && tools/cfg-safety-gate.py
+  wedge-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: wedge-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The CONFIG arm only - the junit arm needs a test run and lives in
+      # the test jobs themselves, which is where it can redden the shard
+      # that saw the wedge. This half holds the ceiling machinery in
+      # .config/nextest.toml live: `[profile.ci]` must still carry a
+      # `terminate-after` (without it NOTHING in the workspace has a
+      # ceiling and the junit arm is inert), every `slow-timeout` table
+      # must carry one or say at its site why not, and a key nextest does
+      # not define inside such a table is refused - because nextest treats
+      # `terminate-aftr = 5` as a WARNING, so the ceiling vanishes in
+      # silence. Here as well as in ci-private because this workflow fires
+      # on branch pushes: a lane that takes the cover off should learn it
+      # on its own push, not leave a silent hole for whoever wedges next.
+      # `--selftest` first, and it is the gate rather than the house habit:
+      # the handoff that commissioned this recorded the junit discriminator
+      # as `message="test timeout"` when it is `type=`, so a version
+      # written from it would have passed every run while matching nothing.
+      - name: wedge gate
+        run: tools/wedge-gate.py --selftest && tools/wedge-gate.py
   bg-token-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1051,6 +1370,93 @@ jobs:
       # zero instead of the clean tree it would otherwise report forever.
       - name: wco drag gate
         run: tools/wco-drag-gate.py --selftest && tools/wco-drag-gate.py
+  event-arm-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: event-arm-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `handleLifeEvents` in web/dashboard.html dispatches on `e.kind`
+      # through an if/else-if chain with NO fallthrough arm, so a kind it
+      # does not name is DROPPED IN SILENCE - the daemon-side emit test
+      # stays green, the 27 catalogues still carry its string, and every
+      # other gate here stays green. That is how `job.switched` and
+      # `job.replaced` reached every webhook subscriber and no dashboard
+      # for four hours on 24 Aug 2026, found by a person reading the page.
+      # It does not demand an arm for everything: seven of the 23 kinds
+      # are STATES the queue payload already renders, and each carries a
+      # waiver at its emit site naming the surface that does. The point is
+      # that the question cannot be skipped. `--selftest` first, and it is
+      # the gate: it pins how many kinds, arms and manual entries each
+      # fixture reached, so a scanner that has quietly stopped matching
+      # shows a zero instead of the clean tree it would report forever.
+      - name: event arm gate
+        run: tools/event-arm-gate.py --selftest && tools/event-arm-gate.py
+  js-scope-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: js-scope-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A call, in the dashboard's inline JavaScript, to a name that is
+      # declared only inside some OTHER function: a guaranteed
+      # ReferenceError the moment that line runs. `saveInterests` shipped
+      # one - every `put` in web/dashboard.html is a const local to a
+      # different function, so `put('s_index_groups', ...)` threw on the
+      # SUCCESS path and took pollIdxStats() and the "Saved" toast with
+      # it, so a save that WORKED looked like one that did nothing. Here
+      # rather than only in ci-private because the failure mode is a green
+      # screen telling the user a write happened: nothing turns red, so
+      # the push that introduces it is the only moment anyone will look.
+      # Nothing else can report it either - `node --check` is syntax only
+      # and passed throughout, the five other gates that open this file
+      # each scan for one construct, and CodeQL has no undeclared-variable
+      # query for JavaScript at all (measured 25 Aug 2026: 352 queries,
+      # and the two near neighbours both need a WRITE, because they are
+      # about accidental globals). `--selftest` first, and it is the gate:
+      # this is a hand-written lexer over 20,000 lines of HTML, and one
+      # that quietly stops matching reports a clean page forever, which is
+      # what nav-regen's dead picker arm did for months.
+      - name: js scope gate
+        run: tools/js-scope-gate.py --selftest && tools/js-scope-gate.py
+  api-contract-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: api-contract-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # web/dashboard.html's api() answers EVERY failure as a resolved
+      # {status:false,error} object - right for its ~60 read callers, and
+      # the reason a bare `await api(...)` on a WRITE cannot tell a refusal
+      # from an acceptance. So a refused write runs on into its success
+      # toast and the user gets a green screen describing a change that
+      # never happened. Codex F-18 fixed 22 such sites and wrote the
+      # contract down as a COMMENT next to api(): a write goes through
+      # mustOk() or reportRefusal(). Nothing held anybody to it, and the
+      # measurement is the argument - the sweep that found the class named
+      # FIVE of the 22, missing forceJob's second call, cancelFinish and
+      # saveInterests. Here rather than in ci-private because the lane that
+      # adds the handler is the one lane that can be told. `--selftest`
+      # first, and it is the gate: it pins how many api() calls each
+      # fixture reached, so a scanner that has quietly stopped matching
+      # shows a zero instead of the clean tree it would report forever.
+      # A SECOND ARM since 25 Aug 2026 closes that gate's own first stated
+      # limit - an indirection one level up, through the setCfg wrapper.
+      # setCfg reports its own refusal, so dropping its boolean is fine and
+      # 160 of 170 calls do; what it reports is dropping it AND then telling
+      # the person it worked. Three such sites were live on main, and the
+      # hand measurement that commissioned the arm found two of the three.
+      - name: api contract gate
+        run: tools/api-contract-gate.py --selftest && tools/api-contract-gate.py
   one-process-roster:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1365,3 +1771,334 @@ jobs:
       # above, which is exactly the pair of files that can break it.
       - name: ci verdict roster
         run: python3 tools/ci-verdict.py --selftest
+  packaging-tests-roster:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: packaging-tests-roster-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The roster arm for the `packaging-gates` job at the foot of this
+      # file. That job was added because five of these scripts were steps
+      # in pr-check.yml and nowhere else - a public-repo pull-request gate,
+      # so on this repo they had never run, and two of them had been
+      # reporting a WRONG VERDICT since the day they landed - while seven
+      # more ran in no workflow at all. Nothing held that roster to
+      # anything, so the twentieth script added tomorrow would be unwired,
+      # silent, and read as covered. A list is a gate that cannot see the
+      # eleventh family, which is the same argument the roster arms in
+      # nav-regen.py, shot-version-gate.py and one-process-roster.py each
+      # make in their own directory.
+      #
+      # It RESOLVES a `run:` step rather than grepping for a mention: a
+      # grep finds these paths inside COMMENTS, which is a second way to
+      # read as covered while being uncovered and is how
+      # packaging/tests/linux-install.sh read as wired. And a step that
+      # cannot fire on this repository is not coverage either, which is
+      # what keeps pr-check.yml alone from satisfying a script.
+      #
+      # Here rather than only in ci-private because the lane that adds the
+      # script is the one lane that can be told. Build free, about a tenth
+      # of a second.
+      - name: packaging tests roster
+        run: |
+          tools/packaging-tests-roster.py --selftest
+          tools/packaging-tests-roster.py
+  # The build-free PACKAGING gates, and the first job in this file whose
+  # subject is not a python gate over the source tree.
+  #
+  # WHY THEY ARE HERE. Five of them are `- name:` steps in pr-check.yml
+  # and nowhere else, and pr-check.yml is `on: pull_request` with
+  # `if: github.repository == 'nzbfast/nzbfast'` - a PUBLIC-repo
+  # pull-request gate. This repo pushes straight to main, which is the
+  # flow documented throughout CLAUDE.md, so on this repo not one of
+  # those five steps has ever run. That is the same blind spot this whole
+  # workflow exists for, stated at the head of this file for the gates in
+  # ci-private's `check` job, one workflow over: a lane can break a
+  # packaging gate, pass every check it is shown, merge, and nothing says
+  # so until a release is being cut.
+  # It is not hypothetical. `packaging/tests/archive-identity.sh` step 6
+  # and `packaging/tests/linux-tarballs.sh` step 2 each reported a WRONG
+  # VERDICT from the day they landed, and both are steps in that
+  # workflow. They were fixed on 24 Aug 2026 (`8c8658e4e`, `6bd54cdd7`,
+  # `7f023886e`, `909050631`) after a human ran them by hand. The lane
+  # that fixed them left an open lead behind - why did nobody notice
+  # those two test steps were red? - and the trigger is the answer. This
+  # job is that answer made structural.
+  # The other seven ran in NO workflow at all. `grep -rn packaging/tests/
+  # .github/workflows/` finds them only inside COMMENTS, which is a
+  # second way to read as covered while being uncovered, and is how
+  # `packaging/tests/linux-install.sh` still reads as wired today.
+  #
+  # WHY NOT SIMPLY WIDEN pr-check.yml's TRIGGER, which is the one-line
+  # version of this change. Because it is a 60-minute job whose own
+  # header measures 40 of those minutes as two `cargo test` passes, plus
+  # a windows-latest leg that bills at 2x on a private repo, and
+  # CLAUDE.md's "CI build is CPU-bound" paragraph says the levers on that
+  # are spent. Firing all of that on every push to buy eleven seconds of
+  # shell gates would be the most expensive possible way to run them, and
+  # the private repo already covers the Rust half of pr-check far better,
+  # per-push, in ci-private.yml. So the CHEAP half moves here and the
+  # workflow's trigger is left exactly as it is: pr-check stays the
+  # public contributor gate it was written to be, this covers the flow
+  # development actually uses, and they are complements rather than
+  # duplicates. Same relationship this file already has with `check`.
+  #
+  # ONE JOB WITH TWELVE STEPS, which departs from the one-job-per-gate
+  # shape spelled out forty times above, and the departure is
+  # deliberate. Those gates are one python invocation each; these total
+  # about eleven seconds of work, of which one script is six, so twelve
+  # separate runners would be almost entirely checkout overhead - and
+  # six of these twelve are `#!/bin/zsh`, which is not on the ubuntu
+  # image, so each of those runners would also pay its own apt install.
+  # Steps still report their own verdict in the UI and a failing step
+  # names itself, which is the property the one-job-per-gate rule is
+  # really buying, and it is exactly how pr-check.yml already runs the
+  # five it has.
+  #
+  # THE ZSH INSTALL IS NOT CEREMONY. Six of these carry a `#!/bin/zsh`
+  # shebang, which on a Mac is invisible and on ubuntu is a missing
+  # interpreter. That shebang is itself the smell this job is for: these
+  # scripts are macOS-shaped and, until this job, had been run only on
+  # developer boxes. `linux-tarballs.sh` is the worked example and its own
+  # header tells the story - it hardcoded BSD tar's `--uid/--gid` spelling
+  # while `build-linux-tarballs.sh` picks between that and GNU's by
+  # sniffing `tar --version`, so it was "green on every developer box and
+  # red in CI from the day it was wired in". Green on this Mac is
+  # therefore not evidence about a Linux runner, which is the whole
+  # reason these are being made to actually run somewhere.
+  #
+  # WHAT IS DELIBERATELY LEFT OUT, so the next lane does not read this
+  # roster as the complete family. Three scripts need a docker daemon or
+  # minutes rather than seconds, and each would be a new failure surface
+  # verified nowhere:
+  #   - `docker-entrypoint-puid.sh` - needs a container to exercise the
+  #     root-only uid branch. It SKIPS cleanly with no daemon, so on this
+  #     Mac it proves nothing, and on a runner docker IS present, so it
+  #     would run for real for the first time here. It wants its own
+  #     change and its own verification cycle.
+  #   - `linux-install.sh` - installs the .deb and .rpm for real, needs
+  #     docker. This is the one that reads as wired because pr-check.yml
+  #     names it in a COMMENT.
+  #   - `leak-check-paths.sh` - over two minutes, and the last lane to
+  #     reach for it recorded that nobody has yet run it to completion.
+  # Do NOT add one of those to this job without pricing it first; adding
+  # them is a fine change, it is just not a free one.
+  packaging-gates:
+    # Private repo only, same rule as every job above - and here it is
+    # load-bearing rather than copied: `scan-release-assets-patterns.sh`
+    # exercises `packaging/scan-release-assets.sh`, which publish-public.sh
+    # strips from the public export because the scanner literally contains
+    # the private vocabulary it greps for. On the public repo that step
+    # would run against a file that is not there.
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: packaging-gates-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      # Steps 1 to 5: the five that today run on public pull requests
+      # only. Spelled as the bare script, exactly as pr-check.yml runs
+      # them, so the two can never disagree about what passes.
+      - name: linux packaging gate
+        run: packaging/tests/linux-packages.sh
+      - name: linux tarball gate
+        run: packaging/tests/linux-tarballs.sh
+      - name: archive identity gate
+        run: packaging/tests/archive-identity.sh
+      - name: qpkg junk gate
+        run: packaging/tests/qpkg-junk-gate.sh
+      - name: synology postinst gate
+        run: packaging/tests/synology-postinst.sh
+      # Steps 6 to 11: the ones that ran in no workflow at all.
+      # Its CALLER, scan-release-assets-patterns.sh below, drives this arm
+      # too, so the scanner's canary was already exercised here - but only
+      # inside a case that reports `bad` rather than as a step, so the
+      # selftest roster could not see it and neither could a reader. One
+      # line, 0.03 s, and it is in this job rather than `shell-selftests`
+      # because that one has no zsh and this one installs it.
+      - name: release-asset scanner selftest
+        run: packaging/scan-release-assets.sh --self-test
+      # The scanner's Windows link-mode arm is a hand-written PE import
+      # reader, and its silent failure - "I found no imports" - is
+      # indistinguishable from a clean binary, so the selftest is the
+      # load-bearing half. The scanner's own canary runs it too; as a
+      # step it is visible to the selftest roster and to a reader.
+      - name: PE import reader selftest
+        run: python3 packaging/pe-imports.py --selftest
+      - name: script modes gate
+        run: packaging/tests/script-modes.sh
+      - name: publish destination guard
+        run: packaging/tests/publish-dest-guard.sh
+      # The PORTABLE half of the publish-export check's wiring. That check runs
+      # the REAL export, which needs BSD sed and zsh, so it lives on a macOS
+      # runner in publish-export.yml behind a NARROW native path filter - it
+      # cannot ride this workflow's filter, a union covering `**/*.rs`,
+      # `**/*.py`, `**/*.sh` and `*.md`, because that would spin a macOS runner
+      # on very nearly every push. A narrow filter is a LIST, and a list is a
+      # gate that cannot see the sixth input. This arm derives the export's
+      # input set from publish-public.sh ITSELF and refuses an input no pattern
+      # there matches, so a new one reddens on the AUTHOR's push instead of
+      # leaving that job quietly un-triggered by the file it now reads.
+      # `--selftest` first for the reason every gate here runs its own: a
+      # matcher that has stopped matching reads as a clean tree forever.
+      - name: publish export trigger roster
+        run: |
+          packaging/tests/publish-export-completes.sh --selftest
+          packaging/tests/publish-export-completes.sh --paths
+      - name: release notes gate
+        run: packaging/tests/release-notes-gate.sh
+      - name: synology compose parity
+        run: packaging/tests/synology-compose-parity.sh
+      - name: docker entrypoint key gate
+        run: packaging/tests/docker-entrypoint-key.sh
+      - name: offline manual gate
+        run: packaging/tests/offline-manual.sh
+      # Private-only, and the reason this job carries the repository
+      # guard above. Six seconds, the slowest of the twelve.
+      - name: release asset pattern scanner
+        run: packaging/tests/scan-release-assets-patterns.sh
+  # THE LAST TWO JOBS IN THIS FILE, and they are one change: a roster over
+  # every `--selftest` arm in the repo, plus the job that runs the eleven
+  # arms that roster found nothing running.
+  #
+  # WHY A SELFTEST THAT NOTHING RUNS IS THE DEFECT. Every gate in this
+  # file carries a `--selftest` because of the one failure a gate cannot
+  # report about itself: a matcher that has quietly stopped matching,
+  # which reads as a clean tree forever. Two demonstrated instances are
+  # written up at the top of this file's siblings - nav-regen.py's picker
+  # arm sat dead for months while reporting every picker current, and
+  # site-crosslink.py printed OK on BOTH arms at exit 0 with its one regex
+  # broken to `hrefZZZ="`. So the selftest is the load-bearing half, and a
+  # selftest nobody runs is that same defect one level up.
+  #
+  # MEASURED 25 Aug 2026 at origin/main: 47 tracked `*.py` declare a
+  # `--selftest` arm and ELEVEN had nothing running one. `tools/claims.py`
+  # is the one with the most riding on it - it is the cross-machine LOCK
+  # that stops two boxes building the same thing, its resolver was
+  # rewritten that day in `5205dd2bf`, and its selftest went from 39 cases
+  # to 62 in that same commit, all of it run only when a human typed it.
+  #
+  # THE ROSTER RESOLVES COMMAND POSITION, which is a sharper rule than the
+  # `packaging-tests-roster` job above needs and is why it exists: every
+  # appearance of `tools/pollution-bisect.py` in any workflow here is
+  # inside an `echo "::error ...` advice string telling a human what to
+  # run. It is not commented out, it is QUOTED - so a scan that strips
+  # comments and then searches the text certifies it as wired. Being
+  # NAMED is not being run, and running the TOOL is not running its
+  # SELFTEST; both are asked separately.
+  selftest-roster:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: selftest-roster-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # This gate is in its OWN population - it declares a `--selftest` -
+      # so the step below is what keeps it honest, and its selftest pins
+      # that against the real tree rather than leaving it to be noticed.
+      - name: selftest roster
+        run: tools/selftest-roster.py --selftest && tools/selftest-roster.py
+  # The eleven arms the roster found nothing running. One job with eleven
+  # steps rather than eleven jobs, for exactly the reason `packaging-gates`
+  # gives at its own site: they total about twenty seconds between them
+  # (measured on a loaded dev box; the slowest single arm is six),
+  # and a step still reports its own verdict and names itself when it
+  # fails, which is the property one-job-per-gate is really buying.
+  #
+  # ONE OF THE ELEVEN IS WAIVED RATHER THAN WIRED, and it took a CI run
+  # to find out. One analysis script loads libSystem at MODULE level, so
+  # on ubuntu it dies at IMPORT before a single case runs (run
+  # 32909511848). Its selftest checks `rusage_info_v4` field offsets
+  # against the live `proc_pid_rusage` syscall, which has no Linux twin,
+  # so there is nothing portable for it to assert - it carries the one
+  # waiver on the tree, at its own site, and the runner above reports it
+  # rather than dropping it silently. The other ten passed on the runner
+  # unchanged. Green on a Mac is not green here; watch the run.
+  #
+  # EVERY ONE WAS MEASURED HERMETIC BEFORE IT WAS WIRED, not assumed.
+  # `claims.py` was run with `git` stubbed to fail (it calls `git ls-remote
+  # origin` on the claim path, which only WARNS, and its selftest never
+  # reaches it - 0.12 s that way). `bench-deploy-check.py` was run with
+  # `ssh` stubbed to a loud failure and never invoked it: its selftest
+  # drives a fake runner and builds throwaway git repos in a temp dir, so
+  # it needs no bench box, no key and no `~/bench-out`. The five
+  # five analysis report scripts parse fixture text and touch nothing.
+  # None of these tools' OTHER half can run here - a ledger command, an
+  # ssh comparison over three machines, and five readers of round logs
+  # that only exist on a bench box - and none is asked to. Only the
+  # selftest, which is the half that is hermetic by construction. The
+  # `ci-verdict` job above is the precedent and says so at its own site.
+  tool-selftests:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: tool-selftests-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The cross-machine work ledger. CLAUDE.md item 1a: git is the only
+      # channel that spans boxes, so this file is the LOCK, and a lane that
+      # cannot mint or fold a claim correctly starts work another machine
+      # already holds. 132 cases, 70 of them the `--src` guard that landed
+      # on 25 Aug 2026 after `stamp()` wrote markdown into a YAML workflow
+      # and a hostname into a file that ships. OFFLINE by construction: the
+      # selftest stubs `can_reach_origin`, so the five `git ls-remote
+      # origin` round trips `cmd_claim` used to make on every run are gone
+      # (verified with `git` itself stubbed to exit 127 - zero invocations,
+      # still passes), which is what makes the hermetic claim above true
+      # for this arm rather than nearly true.
+      - name: claims ledger
+        run: tools/claims.py --selftest
+      # Names the POLLUTER in a cross-test pollution failure. NOTE: its
+      # "real libtest" pin - that `--exact` takes many filters and that
+      # libtest sorts the filtered set by name - needs rustc, and this
+      # runner has no toolchain, so that one pin SKIPS here and says so in
+      # its output. It is not lost: ci-private's `check` job runs this same
+      # selftest with a toolchain present, added in the same commit as this
+      # job, which is where a pin on rustc's own behaviour belongs anyway.
+      - name: pollution bisect
+        run: tools/pollution-bisect.py --selftest
+      # `python3` here and bare above, matching each file's mode: this one
+      # carries a shebang but no executable bit, so a bare invocation is
+      # exit 126 on any box. ci-private spells several of its gates this
+      # way for the same reason. Verified by running every step in this
+      # job verbatim rather than through an interpreter of this gate's
+      # choosing - which is how the 126 was found at all.
+      - name: segment codec
+        run: python3 tools/segcodec.py --selftest
+      # Judges what is deployed on three bench boxes against the repo at a
+      # named commit. Six seconds, the slowest of the eleven.
+      - name: bench deploy check
+        run: tools/bench-deploy-check.py --selftest
+      # The ONLY write path to the memory index, and the only undo that
+      # directory has - it is not a git repo, so a lost line is lost. 55
+      # checks.
+      - name: memory write path
+        run: .claude/tools/memory-write.py --selftest
+      - name: bench accounts parse
+        run: .claude/tools/bench-accounts-parse.py --selftest
+      # The five analysis report selftests, through a RUNNER in tools/
+      # rather than as five steps naming their own directory. That is not
+      # tidiness: this file is in packaging/PUBLIC_MANIFEST and ships
+      # verbatim to the anonymous public repo, and the directory those
+      # scripts live in is private vocabulary that packaging/leak-check.sh
+      # refuses there - measured, the five-step version was refused by the
+      # pre-commit check before it could be committed. CLAUDE.md's TENTH
+      # gate reached for exactly this answer for exactly this reason, and
+      # says so at its own site. The runner holds its list to what is
+      # actually in that directory in BOTH directions, so it cannot go
+      # stale silently, and tools/selftest-roster.py follows the relation
+      # one hop so the five report as covered through it. Together they
+      # are under a second.
+      - name: analysis report selftests
+        run: tools/bench-report-selftests.py --selftest && tools/bench-report-selftests.py

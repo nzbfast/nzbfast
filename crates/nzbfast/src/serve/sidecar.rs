@@ -470,6 +470,10 @@ pub(super) fn spawn_sidecar(
                     // The sidecar prefetches ANOTHER job; its consent
                     // travels with that job's record, not this one's.
                     eat_ok,
+                    // §293: and its donor question travels the same way -
+                    // the primary runner resolves donors when the job
+                    // actually runs; the prefetch never repairs.
+                    Vec::new(),
                     Some(progress.clone()),
                     Some(hub.clone()),
                     &nzo_id,

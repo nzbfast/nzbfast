@@ -247,6 +247,9 @@ impl Read for OwnedRangeReader {
                     return Ok(0);
                 }
                 let read = file.read(&mut buf[..take])?;
+                if read == 0 {
+                    return Err(short_range());
+                }
                 *remaining -= read as u64;
                 Ok(read)
             }
@@ -259,11 +262,37 @@ impl Read for OwnedRangeReader {
                     .len()
                     .min(usize::try_from(remaining).unwrap_or(usize::MAX));
                 let read = source.read_at(*pos, &mut buf[..take])?;
+                if read == 0 {
+                    return Err(short_range());
+                }
                 *pos += read as u64;
                 Ok(read)
             }
         }
     }
+}
+
+/// A range that ended before the bytes it declared.
+///
+/// (nzbfast-local change, 26 Aug 2026 - re-apply on the next rars
+/// re-sync, see vendor/rars/VENDORING.md.) The sequential
+/// readers above report it as an ERROR rather than as EOF, and that
+/// distinction is the whole point of the helper: `Ok(0)` on a range with
+/// bytes still owed is indistinguishable from a clean end, so a
+/// sequential consumer treats it as one and walks on to the next
+/// fragment - `rar50::extract` and `rar15_40::extract` both do. A volume
+/// whose payload was cut short (a chase whose yEnc size fell short of the
+/// header's range, a file truncated after parse) then "extracted": later
+/// members were decoded from the following fragment's first bytes, and a
+/// member with no CRC of its own was written truncated with nothing
+/// saying so. The exact-range path has always failed closed here
+/// ([`stream_read_exact`] below); this is the sequential path agreeing
+/// with it.
+fn short_range() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "archive range ended before its declared length",
+    )
 }
 
 /// Fills `buf` from a blocking source, mapping a source that ends short of
@@ -303,6 +332,12 @@ impl Read for BlockingRangeReader {
             .len()
             .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         let read = self.source.read_at(self.pos, &mut buf[..take])?;
+        // A blocking source waits at the frontier, so a zero read here is
+        // not "not yet" - it is the source declaring it will never reach
+        // this offset. Same argument as `short_range` above.
+        if read == 0 {
+            return Err(short_range());
+        }
         self.pos += read as u64;
         Ok(read)
     }
@@ -452,7 +487,24 @@ mod tests {
             out
         });
 
-        std::thread::sleep(Duration::from_millis(20));
+        // Wait on the CONDITION, never on the clock. A fixed sleep here is
+        // standing in for "the reader has reached the point where it must
+        // wait", and thread start-up plus scheduling can outrun it on a
+        // loaded machine - the writer then appends first, the reader finds
+        // all six bytes on its first call, and `blocked_waits` is
+        // legitimately 0. That is a flake, not a bug, and it took main red
+        // on windows-unit on 25 Aug 2026 (shard 4/6 of six concurrent test
+        // shards). Blocking is what the test is named for, so wait for it.
+        // (nzbfast-local change, 25 Aug 2026 - re-apply on the next rars
+        // re-sync, see vendor/rars/VENDORING.md.)
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while buffer.blocked_waits() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader never blocked at the 3-byte frontier within 30s"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         buffer.append(b"def");
         assert_eq!(&handle.join().unwrap(), b"abcdef");
         assert!(buffer.blocked_waits() > 0);
@@ -507,5 +559,60 @@ mod tests {
         assert_eq!(out, b"2345678");
         assert_eq!(source.read_range(0..10).unwrap(), b"0123456789");
         assert!(source.read_range(0..11).is_err());
+    }
+
+    /// A range that ends short of its declared length is an ERROR on the
+    /// sequential readers, not a clean EOF.
+    ///
+    /// It used to answer `Ok(0)` with bytes still owed, which every
+    /// sequential consumer reads as "this fragment is finished" - the two
+    /// extract walks then move to the next fragment and decode a member
+    /// from the wrong bytes. A member with no CRC of its own is written
+    /// truncated with nothing anywhere saying so. The exact-range path
+    /// (`stream_read_exact`) has always failed closed on the same input.
+    /// (nzbfast-local change, 26 Aug 2026 - re-apply on the next rars
+    /// re-sync, see vendor/rars/VENDORING.md.)
+    #[test]
+    fn a_range_that_ends_early_fails_rather_than_reading_as_eof() {
+        // A blocking source that has DECLARED its total and stopped
+        // short: `read_at` past the end answers 0 forever.
+        let buffer = Arc::new(GrowableBuffer::with_total_len(4));
+        buffer.append(b"0123");
+        let source = ArchiveSource::Stream {
+            source: Arc::clone(&buffer) as Arc<dyn BlockingRangeSource>,
+            len: 8,
+        };
+
+        for mut reader in [
+            Box::new(source.range_reader(0..8).unwrap()) as Box<dyn Read>,
+            Box::new(source.owned_range_reader(0..8).unwrap()) as Box<dyn Read>,
+        ] {
+            let mut out = Vec::new();
+            let error = reader
+                .read_to_end(&mut out)
+                .expect_err("a short range must not read as a clean end");
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+            assert_eq!(out, b"0123", "the bytes that DID arrive are delivered");
+        }
+
+        // And the file-backed reader, whose range is taken on trust from
+        // the header rather than checked against the file's length.
+        let dir = std::env::temp_dir().join(format!(
+            "rars-short-range-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("short.rar");
+        std::fs::write(&path, b"0123").unwrap();
+        let file_source = ArchiveSource::File(path.clone().into());
+        let mut reader = file_source.owned_range_reader(0..8).unwrap();
+        let mut out = Vec::new();
+        let error = reader
+            .read_to_end(&mut out)
+            .expect_err("a truncated volume must not read as a clean end");
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(out, b"0123");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

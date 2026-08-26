@@ -100,3 +100,29 @@ Note either below.
   their first check - 14 edges between the four, all on the refusal
   path. The recipe in `../README.md` used to copy all six, which is how
   a seeding step can look done and be two-thirds inert.
+
+- `tar_parse/` - a SEED CORPUS, and there was no in-tree tar fixture of
+  any kind to copy (`nzbkit::tar` is a new parser, TODO 163 item 6). 15
+  files, 112 KB: `plain_ustar.tar`, `gnu_longname.tar`, `pax_longname.tar`
+  and `default_fmt.tar` are real `bsdtar 3.5.3` output (macOS's system
+  `tar`) over a small tree with a subdirectory, a symlink and a
+  path deep enough to force long-name framing - `--format=ustar`,
+  `--format=gnutar`, `--format=pax` and bsdtar's own default
+  respectively, so the corpus starts from all three magic/checksum
+  shapes a real writer produces rather than one. The rest are
+  `synth_*.tar`, built with the crate's own `tar::fixtures::tar_of` (the
+  hand-rolled writer the unit tests use) for shapes no unprivileged
+  `tar` invocation on this box reaches: `synth_gnu_longname.tar` /
+  `synth_pax_longname.tar` force the two long-name spellings the same
+  way `reads_long_names_both_ways` does, `synth_reference_*.tar` covers
+  all four reference typeflags (symlink, hard link, device node, FIFO -
+  a device node needs root to create for real), and
+  `synth_sparse_typeflag.tar` / `synth_sparse_pax.tar` are the sparse
+  refusal in both spellings (the GNU `S` typeflag, and the pax
+  `GNU.sparse.*` keyword hidden behind an ordinary file header) -
+  `parse_pax`'s byte-vs-char slicing the reader's own doc comment flags
+  as found by inspection rather than by a test, which is the argument
+  for fuzzing it at all. Every seed here was parsed with
+  `nzbkit::tar::Reader` before being committed (the four real ones read
+  clean end to end; the two sparse ones correctly return the
+  `Unsupported` refusal) so none of them is dead weight in the corpus.

@@ -46,10 +46,51 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// The dashboard's own end-of-job spike guard, carried across polls.
     private var lastGoodMbps: Double = 0
 
+    /// How long a run of ANSWERING polls may go before the listener is
+    /// made to prove itself again, keylessly.
+    ///
+    /// A poll that FAILS re-proves at once, and that arm is what notices
+    /// an engine dying: nothing of ours holds the port any more, so the
+    /// next keyed poll cannot answer. This interval covers the other
+    /// case, which that arm cannot see - a listener that answers a keyed
+    /// call convincingly and is not ours. It cannot answer the challenge,
+    /// so the cadence is the ceiling on how long that mistake lasts, and
+    /// 30 s buys the ceiling for one extra loopback GET per half minute.
+    ///
+    /// There is no second timer. This rides the poll that already runs
+    /// for the app's life whenever the daemon is up (see `syncPolling` -
+    /// the Dock badge keeps it running even with the menu bar item
+    /// switched off), which is also the only clock that already stops
+    /// itself on quit and on a dead engine.
+    private static let reproveInterval: TimeInterval = 30
+    /// Consecutive SILENT probes before the engine is called gone.
+    ///
+    /// One is not evidence. A healthy engine wedged in a long index
+    /// transaction (TODO 166 measured ~80 s) holds the port and answers
+    /// nothing, and this verdict blanks the user's dashboard and raises a
+    /// modal alert - doing that over one dropped probe would be worse
+    /// than the bug it is fixing. A probe that ANSWERS and is not ours
+    /// takes no count at all: that is positive evidence of a stranger,
+    /// which is the same split `Daemon.refuseListener` already makes.
+    ///
+    /// The KEY is dropped on the first silent probe regardless, inside
+    /// `Daemon.recheckListener`. That costs nothing and is undone by the
+    /// next probe that answers, so it does not wait on this count.
+    private static let silentProbesBeforeGone = 3
+    /// When the listener last answered the keyless challenge, or was
+    /// proved by `start()` - see `reproveInterval`.
+    private var lastProof = Date.distantPast
+    /// Consecutive silent probes, per `silentProbesBeforeGone`.
+    private var silentProbes = 0
+
     /// The actions AppDelegate already owns.
     var onOpenWindow: () -> Void = {}
     var onOpenBrowser: () -> Void = {}
     var onOpenDownloads: () -> Void = {}
+    /// The listener on our port has stopped being the engine we proved.
+    /// AppDelegate owns what the user is told and what happens next; this
+    /// controller only owns the detection, because it owns the only poll.
+    var onEngineGone: (Daemon.ProbeVerdict) -> Void = { _ in }
 
     private let stateItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let openItem = NSMenuItem(title: "Open nzbfast", action: nil, keyEquivalent: "")
@@ -70,6 +111,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// again with false if the engine dies under us.
     func setStackReady(_ ready: Bool) {
         stackReady = ready
+        silentProbes = 0
+        // A ready stack was just proved by `start()` or `restart()`, so
+        // the re-proof clock starts now rather than firing a redundant
+        // probe on the very first poll.
+        lastProof = ready ? Date() : .distantPast
         if !ready {
             last = nil
             everAnswered = false
@@ -82,6 +128,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// no request races it and no timer keeps a dying app alive.
     func suspend() {
         stackReady = false
+        silentProbes = 0
         timer?.invalidate()
         timer = nil
         NSApp.dockTile.badgeLabel = nil
@@ -239,7 +286,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         polling = true
         Task {
             let s = await daemon.queueStatus()
-            polling = false
             if let s {
                 everAnswered = true
                 // The dashboard's own guard, for the same reason it has
@@ -257,6 +303,43 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 last = nil
             }
             refresh()
+            // `polling` is still held: a probe takes up to its own
+            // timeout, and the next tick must skip rather than stack a
+            // second one behind it.
+            if s == nil || Date().timeIntervalSince(lastProof) >= Self.reproveInterval {
+                await reprove()
+            }
+            polling = false
+        }
+    }
+
+    /// One keyless challenge at the port we are polling, and what its
+    /// verdict is worth.
+    ///
+    /// `Daemon.recheckListener` has already dropped the API key by the
+    /// time this returns, on any verdict but a good one. All that is
+    /// decided here is when to stop calling the port ours at all, which
+    /// is a louder step: it stops the poll, blanks the dashboard page and
+    /// puts a modal alert up. See `silentProbesBeforeGone` for why the
+    /// two arms count differently.
+    private func reprove() async {
+        let verdict = await daemon.recheckListener()
+        lastProof = Date()
+        // Quit, or a child death handled elsewhere, can land inside the
+        // probe. Either way this controller is no longer polling that
+        // port and has nothing to report about it.
+        guard stackReady else { return }
+        switch verdict {
+        case .proven, .adopted:
+            silentProbes = 0
+        case .stranger:
+            silentProbes = 0
+            onEngineGone(verdict)
+        case .silent:
+            silentProbes += 1
+            guard silentProbes >= Self.silentProbesBeforeGone else { return }
+            silentProbes = 0
+            onEngineGone(verdict)
         }
     }
 

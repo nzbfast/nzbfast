@@ -497,6 +497,25 @@ impl Extractor {
         self.inner.lock_ok().verify_gate = Some(gate);
     }
 
+    /// This slot's verified-block watermark, as [`VerifyGate::engaged_mark`]
+    /// answers it: `None` when the verifier never ENGAGED the slot (no
+    /// set, unclaimed, gate off), and `u64::MAX` once every block of it
+    /// has been vouched in stream.
+    ///
+    /// The engaged form and not `watermark`, because the two answer
+    /// opposite things about an unclaimed slot - `watermark` reads it as
+    /// fully vouched, which is the safe reading for a DECODE that must
+    /// not park forever and the dangerous one for a caller asking "may I
+    /// publish this file". Its only such caller today is the daemon's
+    /// early per-file publish (§296), which treats anything but
+    /// `Some(u64::MAX)` as "not yet".
+    ///
+    /// [`VerifyGate::engaged_mark`]: crate::live::VerifyGate::engaged_mark
+    pub fn verify_mark(&self, slot: usize) -> Option<u64> {
+        let gate = self.inner.lock_ok().verify_gate.clone();
+        gate?.engaged_mark(slot)
+    }
+
     /// Whether chase decodes PARK on the verify gate (§94 B proper) or
     /// only consult its watermark (the dropping trim). See
     /// `Inner::verify_gate_waits`. Travels down the chain: a child that

@@ -216,3 +216,100 @@ fn a_password_shortlist_publishes_one_total_not_one_per_candidate() {
     assert_eq!(p.done(), p.total());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Write `.rev` recovery volumes covering `data`, in the shape
+/// `rarfix::try_rev_reconstruct` reads: it matches volumes to REV slots
+/// by size and CRC32 and never parses them, so the real RAR volumes
+/// below go in as opaque blobs.
+///
+/// A local copy of `rarfix_rev_recovery_tests::build_named_set`'s
+/// parity half rather than a share, on this tree's sibling-module rule
+/// - and because that one synthesises its own data volumes, where this
+/// has to cover a set that must really extract.
+fn rev_volumes_for(dir: &Path, release: &str, data: &[Vec<u8>]) {
+    use rars::recovery::rar5::encode_parity_shards;
+    let mut shard_len = data.iter().map(Vec::len).max().unwrap_or(0);
+    shard_len += shard_len & 1;
+    let padded: Vec<Vec<u8>> = data
+        .iter()
+        .map(|v| {
+            let mut shard = vec![0u8; shard_len];
+            shard[..v.len()].copy_from_slice(v);
+            shard
+        })
+        .collect();
+    let refs: Vec<&[u8]> = padded.iter().map(Vec::as_slice).collect();
+    let parity = encode_parity_shards(&refs, 1).unwrap();
+    let payload = &parity[0];
+    let mut body = vec![1u8];
+    body.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    body.extend_from_slice(&1u16.to_le_bytes());
+    body.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    body.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
+    for v in data {
+        body.extend_from_slice(&(v.len() as u64).to_le_bytes());
+        body.extend_from_slice(&crc32fast::hash(v).to_le_bytes());
+    }
+    let mut rev = Vec::new();
+    rev.extend_from_slice(b"Rar!\x1aRev");
+    rev.extend_from_slice(&[0u8; 4]);
+    rev.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    rev.extend_from_slice(&body);
+    let header_crc = crc32fast::hash(&rev[12..16 + body.len()]);
+    rev[8..12].copy_from_slice(&header_crc.to_le_bytes());
+    rev.extend_from_slice(payload);
+    std::fs::write(dir.join(format!("{release}.part01.rev")), &rev).unwrap();
+}
+
+/// A RETRY of one set must not be banked as a second set.
+///
+/// `unpack::unpack_named_rar` has three rungs and every one of them is
+/// another go at the SAME directory: the first extraction, the same
+/// extraction again once `.rev` reconstruction has rebuilt a missing
+/// volume, and the recovery-record repair under those. Each re-enters
+/// `try_unrar_outcome`, whose group loop banks a set per group - so
+/// before [`crate::unpackprog::mark`] the second rung added a whole
+/// extra copy of this set's header total, and a set that needed its
+/// `.rev` volumes reported twice the bytes it can ever produce with the
+/// lane under it parked at half.
+///
+/// The set really extracts and really needs the rung, so this is the
+/// defect end to end and not a stub of it.
+#[test]
+fn a_retried_rar_set_reports_its_own_total_and_not_two_of_them() {
+    let total: Vec<u8> = (0..300_000u32)
+        .map(|i| (i as u8).wrapping_mul(13).wrapping_add(5))
+        .collect();
+    let vols = rar_pair("film.mkv", &total);
+    let dir = dir_for("rar-retry");
+    let data = vec![vols[0].clone(), vols[1].clone()];
+    std::fs::write(dir.join("set.part01.rar"), &data[0]).unwrap();
+    std::fs::write(dir.join("set.part02.rar"), &data[1]).unwrap();
+    rev_volumes_for(&dir, "set", &data);
+    // The volume the first rung will fail for want of, and the second
+    // will rebuild from the `.rev` beside it.
+    std::fs::remove_file(dir.join("set.part02.rar")).unwrap();
+
+    let (_hub, _arm, p) = armed(2);
+    // One LEVEL, not the nested walk: the arm keeps the volumes it did
+    // not prove spent, so a second level extracts the same member again
+    // as a legitimately new set - which is a true accumulation and would
+    // hide the one this test is about. The level's own verdict is
+    // `Failed` either way, on the synthetic `.rev` beside the set (no
+    // arm owns it, so the pass reports "unsupported archive signature"),
+    // and that judgement is not what is under test here: the payload and
+    // the lane are.
+    crate::unpack::extract_one_level(&dir, None, 1).unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("film.mkv")).unwrap(),
+        total,
+        "the set must extract once its missing volume is rebuilt"
+    );
+    assert_eq!(
+        p.total(),
+        total.len() as u64,
+        "the failed first rung was banked as a set of its own"
+    );
+    assert_eq!(p.done(), p.total(), "the lane must reach its own total");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

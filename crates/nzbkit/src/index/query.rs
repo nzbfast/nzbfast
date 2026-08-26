@@ -280,6 +280,20 @@ impl Index {
                 }
             }
         };
+        // Rungs 2 and 3 read up to `FIND_SCAN_CAP` rows newest-first and
+        // then cut to `limit`, so the same defect the ORDER BY on rung 1
+        // closes lives in their truncate: the complete generation of a
+        // flood-bot family is routinely older than eight incomplete ones,
+        // and a caller that ranks complete-first cannot rank what the cut
+        // threw away. A STABLE sort on the same key, so rows the two
+        // rungs already ordered keep their relative order among equals.
+        let best_first = |out: &mut Vec<Release>| {
+            out.sort_by(|a, b| {
+                b.complete
+                    .cmp(&a.complete)
+                    .then_with(|| b.total_bytes.cmp(&a.total_bytes))
+            });
+        };
 
         // Every rung below stops the ladder the moment ANYTHING answers.
         // The gates used to be `out.len() >= limit` with the caller passing
@@ -293,8 +307,23 @@ impl Index {
         // equality alone); only a genuine miss pays for the scans.
         //
         // 1a. Exact stem, served from idx_rel_stem.
+        //
+        // ORDERED BEFORE THE LIMIT, and that is the whole point of the
+        // clause rather than presentation. A flood-bot family shares one
+        // stem across up to 16 kept generations, so `LIMIT 8` on an
+        // unordered scan can hand back eight INCOMPLETE rows and never
+        // the complete one - and the caller ranks only what it was given
+        // (`serve::indexers`, complete-first among the eight), so its
+        // last resort then queues a PARTIAL NZB for a header the index
+        // holds complete. Same key `browse` already orders these
+        // generations by, minus the group affinity the caller adds on
+        // top, which is not expressible here.
         let mut stmt = self.db.prepare(&format!(
-            "SELECT {REL_COLS} FROM releases WHERE stem = ?1 LIMIT ?2"
+            "SELECT {REL_COLS} FROM releases WHERE stem = ?1
+              ORDER BY complete DESC,
+                       CAST(have_parts AS REAL)/MAX(need_parts,1) DESC,
+                       total_bytes DESC, id
+              LIMIT ?2"
         ))?;
         let rows: Vec<Release> = stmt
             .query_map(rusqlite::params![header, limit], release_from_row)?
@@ -313,7 +342,11 @@ impl Index {
         //     the full scan ran on every hit. Now it runs only when 1a
         //     found nothing, which is the case the comment always claimed.
         let mut stmt = self.db.prepare(&format!(
-            "SELECT {REL_COLS} FROM releases WHERE stem = ?1 COLLATE NOCASE LIMIT ?2"
+            "SELECT {REL_COLS} FROM releases WHERE stem = ?1 COLLATE NOCASE
+              ORDER BY complete DESC,
+                       CAST(have_parts AS REAL)/MAX(need_parts,1) DESC,
+                       total_bytes DESC, id
+              LIMIT ?2"
         ))?;
         let rows: Vec<Release> = stmt
             .query_map(rusqlite::params![header, limit], release_from_row)?
@@ -359,6 +392,7 @@ impl Index {
         // is the bigger table, so it must run only when nothing at all has
         // answered - not merely when fewer than `limit` things have.
         if !out.is_empty() {
+            best_first(&mut out);
             out.truncate(limit as usize);
             return Ok(out);
         }
@@ -384,6 +418,7 @@ impl Index {
             .collect::<Result<_, _>>()?;
         note_filename_fallback(header, !rows.is_empty(), t0.elapsed());
         push(rows, &mut out);
+        best_first(&mut out);
         out.truncate(limit as usize);
         Ok(out)
     }
@@ -1282,6 +1317,63 @@ mod tests {
             ix.find_by_header("7f3", 10).unwrap().is_empty(),
             "too short to identify"
         );
+        teardown(&dir, ix);
+    }
+
+    /// The stem rung ORDERS before it cuts, so the complete generation of
+    /// a flood-bot family survives the `LIMIT`.
+    ///
+    /// These families share one stem across up to sixteen kept
+    /// generations, and the caller passes `limit = 8` and then ranks
+    /// complete-first among whatever it was handed - so an unordered scan
+    /// that returned eight incomplete rows made the complete one
+    /// invisible to the ranking, and the NZBLNK ladder's last resort
+    /// queued a partial NZB for a header the index holds whole.
+    #[test]
+    fn the_stem_rung_returns_the_complete_generation_not_the_first_eight() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-stemrank-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        // Twelve generations of one stem, one poster each - which is what
+        // the uniqueness key makes a generation, and what a flood bot
+        // actually produces. The COMPLETE one is inserted LAST, so a scan
+        // that stops at the first eight rows cannot see it however SQLite
+        // happens to walk the table.
+        for i in 0..12 {
+            let complete = i32::from(i == 11);
+            ix.db
+                .execute(
+                    "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                          first_seen, total_bytes, have_parts, need_parts)
+                     VALUES('flood.bot.family.2026.1080p', ?1, 'alt.binaries.misc',
+                            1, ?2, 50, 50, ?3, ?4, 10)",
+                    rusqlite::params![
+                        format!("bot{i}@x"),
+                        complete,
+                        1000 + i64::from(i),
+                        i64::from(complete) * 10
+                    ],
+                )
+                .unwrap();
+        }
+
+        let hits = ix.find_by_header("flood.bot.family.2026.1080p", 8).unwrap();
+        assert_eq!(hits.len(), 8, "the caller's cap still holds");
+        assert!(
+            hits[0].complete,
+            "the complete generation must be the one that survives the cut"
+        );
+        assert_eq!(
+            hits.iter().filter(|r| r.complete).count(),
+            1,
+            "and it is the only complete one in the family"
+        );
+
+        // The SHOUTED spelling takes the NOCASE twin, which orders too.
+        let hits = ix.find_by_header("FLOOD.BOT.FAMILY.2026.1080P", 8).unwrap();
+        assert_eq!(hits.len(), 8);
+        assert!(hits[0].complete, "the case-insensitive rung orders as well");
         teardown(&dir, ix);
     }
 

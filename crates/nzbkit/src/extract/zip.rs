@@ -113,7 +113,7 @@ impl io::Read for BlockingRangeReader<'_> {
         if left == 0 || buf.is_empty() {
             return Ok(0);
         }
-        let take = (left as usize).min(buf.len());
+        let take = crate::disk::chunk_len(left, buf.len());
         let n = self.src.set.read_blocking(self.pos, &mut buf[..take])?;
         if n == 0 {
             return Err(io::Error::new(

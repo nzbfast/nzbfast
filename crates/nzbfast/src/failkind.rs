@@ -17,6 +17,15 @@
 //!
 //! `serve::job` re-exports these names, so every caller inside `serve`
 //! still spells them the way it always did.
+//!
+//! TODO 307 item 1 added [`fail_kind_of`] beside [`fail_kind`]: where a
+//! caller holds `nzbkit`'s typed [`FailCode`], that decides and the
+//! sentence is never consulted. The string classifier stays under it
+//! because it is still the arm in use for a job's terminal failure -
+//! see [`fail_kind_of`] for exactly what does and does not carry a code
+//! today, and `failkind::tests` for the matrix that pins both.
+
+use nzbkit::fail::FailCode;
 
 /// Why a job failed, as far as the two policies that care are concerned:
 /// the auto-retry cooldown (`park`) and the dead-post report
@@ -233,6 +242,72 @@ pub(crate) fn fail_action(
     }
 }
 
+/// What one of the pool's typed failure codes means to the two policies
+/// [`FailKind`] serves.
+///
+/// TODO 307 item 1's typed half. The mapping lives HERE and not in
+/// `nzbkit` on purpose, and `nzbkit::fail`'s own header states the rule
+/// from the other side: the pool records what it observed - a session
+/// died, a read deadline expired, the fleet wound down - and knows
+/// nothing about indexers, retry budgets or the button a page draws.
+/// This function is the one place those observations become policy, so
+/// the incident history that justifies the policy stays beside the
+/// policy.
+///
+/// Every code maps to [`FailKind::Transport`] today, and that is a
+/// finding rather than a placeholder: `FetchOutcome::Failed` is the
+/// pool giving up on an article without a body, and NOT ONE of its four
+/// causes is evidence about the post. Two of them
+/// ([`FailCode::FleetExhausted`], [`FailCode::WorkerPanic`]) are not
+/// even failures of the link - they are this process winding down or
+/// falling over with the article still queued, and the 31 Jul 2026
+/// stall is what happens when such a loss is read as the post's fault:
+/// 94 files were reported short to the user AND to the indexer when
+/// almost none of those articles had been asked for. `Transport` is the
+/// kind that says "ours, not the post's", which is exactly right for
+/// all four.
+///
+/// A code that ever maps somewhere else will be one the pool learns to
+/// state about the POST rather than about itself, and it will arrive
+/// with its own evidence. Written as an exhaustive match so adding one
+/// is a decision made here rather than a default taken silently.
+pub(crate) fn kind_of_code(code: FailCode) -> FailKind {
+    match code {
+        FailCode::Transport
+        | FailCode::ReadStall
+        | FailCode::FleetExhausted
+        | FailCode::WorkerPanic => FailKind::Transport,
+    }
+}
+
+/// [`fail_kind`], with the pool's typed code consulted FIRST where a
+/// caller has one.
+///
+/// The point of the pairing, and the reason the string classifier is
+/// still under it. A typed code is the truth recorded where it
+/// happened; the sentence is the truth re-derived from prose several
+/// files away, and a rewording in any of them moves the answer. So when
+/// there is a code, it decides, and the sentence is not consulted at
+/// all.
+///
+/// WHAT STILL ARRIVES WITH `None`, stated rather than left to be found,
+/// because it is nearly everything today. A job's terminal failure
+/// reaches the daemon as an `anyhow` message and nothing else - `Job`
+/// has no code field, and giving it one means persisting it in
+/// `job_wire`, which is a durable wire change TODO 307 item 1 explicitly
+/// stops short of. So the pool's code is typed at the pool boundary and
+/// consumed there (see `get::workers`), and the JOB-level carry is the
+/// next claim rather than this one. Every production caller is on the
+/// string path meanwhile, which is why
+/// `failkind::tests::producers` is the load-bearing half of the test
+/// module: the fallback is not a legacy arm, it is the arm in use.
+pub(crate) fn fail_kind_of(code: Option<FailCode>, msg: &str) -> FailKind {
+    match code {
+        Some(c) => kind_of_code(c),
+        None => fail_kind(msg),
+    }
+}
+
 pub(crate) fn fail_kind(msg: &str) -> FailKind {
     if msg.starts_with("download incomplete") {
         FailKind::MissingArticles
@@ -252,3 +327,146 @@ pub(crate) fn fail_kind(msg: &str) -> FailKind {
         FailKind::Local
     }
 }
+
+/// The clause `diag::incomplete_reason` leads with when the RECOVERY set
+/// is what failed and the payload is all but whole (TODO 282 item 17),
+/// and the two clauses it appends when the repair ladder could not get
+/// the volumes or the post never carried enough of them.
+///
+/// These are the evidence [`another_copy_can_help`] reads out of a
+/// `MissingArticles` message. Kept as constants beside the predicate
+/// that uses them, the same way `fail_hint`'s clauses are: this module
+/// takes a `&str` and nothing else, so a message the producer rewrites
+/// must be caught by a round-trip TEST rather than by the type system -
+/// `diag::main_tests::the_recovery_evidence_reads_back` and
+/// `get::tail::a_shortfall_past_the_declared_recovery_reads_back` are
+/// those tests, and they are the reason a wording change here goes red
+/// where it is made instead of quietly emptying the predicate.
+const RECOVERY_CASUALTY_CLAUSE: &str = "the recovery data is what failed, not the payload";
+const RECOVERY_UNOBTAINABLE_CLAUSE: &str =
+    "recovery volumes this repair needed could not be fetched";
+const RECOVERY_SHORTFALL_CLAUSE: &str = "recovery block(s) needed but the NZB only carries";
+
+/// Does this failure message carry positive evidence that the RECOVERY
+/// half of the post is what ended the job?
+///
+/// Three spellings, one verdict, and each is a different producer:
+///
+/// * the casualty headline, when the payload arrived all but whole and
+///   the parity is what would not serve (TODO 282 item 17);
+/// * the unobtainable clause, which is the same repair-ladder verdict
+///   riding as an appended clause when the headline stood down because
+///   the payload lost more than its admitted twentieth;
+/// * the shortfall clause, which is the arithmetic - the post declares
+///   fewer recovery blocks than the damage needs, so no provider and no
+///   amount of asking again could ever have repaired it.
+fn recovery_is_what_failed(msg: &str) -> bool {
+    msg.contains(RECOVERY_CASUALTY_CLAUSE)
+        || msg.contains(RECOVERY_UNOBTAINABLE_CLAUSE)
+        || msg.contains(RECOVERY_SHORTFALL_CLAUSE)
+}
+
+/// Can ANOTHER COPY OF THIS RELEASE help - a spare that was held, or one
+/// a search could still find?
+///
+/// TODO 305. This is deliberately NOT [`fail_action`], and the two
+/// questions being different is the whole of why it exists:
+/// `fail_action` answers **what should this person press**, and
+/// this answers **can a different post of the same release finish what
+/// this one could not**. They agree on most failures and part company on
+/// exactly one family, which is the one TODO 282 was founded on.
+///
+/// THE MEASUREMENT. Round B (26 Aug 2026,
+/// `research/RECOVERY-LADDER-YIELD-2026-08-26.md`) scored twelve
+/// failures and found seven where another release is the only remedy the
+/// product has and the drawer said "retry". They are one shape: a
+/// payload that arrived all but whole over a recovery set that no server
+/// would serve. `incomplete_reason` opens that message "download
+/// incomplete" - which it MUST, because `fail_kind` keys on the opening
+/// and TODO 283 item 13 records that the age gate depends on it - so the
+/// kind is `MissingArticles` and the action is `retry`. TODO 284 built
+/// its whole parked surface FOR this shape (its item 2 names it) and
+/// then gated that surface on a predicate calling the death retryable.
+///
+/// WHY `fail_action` WAS NOT SIMPLY WIDENED, which TODO 305 rules on
+/// directly. That token is not ours alone: the dashboard draws its
+/// dimmed Retry and its `find another` button from it, and
+/// `history_json` derives SAB's `retry` BOOLEAN from `== "retry"` - so
+/// moving this family to `search` would tell every *arr, nzb360 and
+/// LunaSea client that a row a journal-resume retry can still shorten
+/// may not be asked for again. The remedy question is answerable on its
+/// own evidence, so it gets its own predicate rather than a loosened
+/// one.
+///
+/// WHAT IT IS NOT: an age. `parked_replaceable`'s own header states that
+/// every clause it holds is a mechanism, and freshness is already held
+/// by two mechanisms that are better placed for it - the parked offer is
+/// withheld while an automatic retry is still armed, and the clicked
+/// hunt applies TODO 282 section C's own age gate (`age_gate_open`) at
+/// the moment it would spend bytes. A fresh post is therefore not
+/// offered a replacement until it has actually retried and failed again.
+///
+/// THE COST OF THAT, STATED RATHER THAN LEFT TO BE FOUND: between the
+/// spent retry and the message growing its age clause, a recovery-set
+/// failure under a day old draws the offer while `age_gate_open` would
+/// refuse the search behind it - the reader gets "the post is under 2
+/// days old ... waiting is more likely to help" instead of a list. That
+/// is not new and is not this predicate's to fix: a fresh
+/// `Unrepairable` or `PreflightImpossible` row has drawn the offer over
+/// the same refusal since TODO 284 shipped, neither kind being
+/// age-gated, and the switch to a HELD spare works at any age on all of
+/// them. Moving it would mean giving `parked_replaceable` an age, which
+/// its own header rules out clause by clause.
+///
+/// SHAPE 6, THE `corrupt` HINT, WHICH TODO 305 ASKS TO BE SETTLED HERE
+/// RATHER THAN LEFT: it stays OUT, and not on a judgement about
+/// providers. "the articles did not decode" classifies [`FailKind::Local`],
+/// and `hunt::hunt_gates` refuses any failure whose kind is not
+/// `post_unavailable()` with `NoHunt::LocalFault` - "the failure was on
+/// this machine, not in the post". Admitting it here would draw a button
+/// the very next door refuses, which is the one thing TODO 282's *arr
+/// arm refuses to ship. If a re-fetch against a damaged copy should
+/// become a replaceable shape, the gate to move is that one, and the
+/// question is whether a decode fault is really Local at fleet 1 - a
+/// different change, with a different blast radius, on a different
+/// classifier.
+pub(crate) fn another_copy_can_help(
+    kind: FailKind,
+    hint: &str,
+    msg: &str,
+    password_required: bool,
+) -> bool {
+    // The same two overrides `fail_action` puts ahead of the kind, for
+    // the same reasons: a locked archive is a password away from
+    // finishing and a full disk is this machine's, and neither is
+    // answered by a second copy of the release.
+    if password_required || disk_full_failure(msg) {
+        return false;
+    }
+    match hint {
+        // The user's own configuration decided these. A second copy is
+        // excluded by the same setting and fails identically.
+        "servers" | "retention" => return false,
+        // No parity at all, or bytes the poster never posted: another
+        // release is the only answer either can have, which is what
+        // `fail_action` already says about both.
+        "nopar2" | "shortpost" => return true,
+        // See the header - Local, and the hunt refuses it one door later.
+        "corrupt" => return false,
+        _ => {}
+    }
+    match kind {
+        FailKind::Gone | FailKind::PreflightImpossible | FailKind::Unrepairable => true,
+        FailKind::Local | FailKind::Transport => false,
+        // The one arm that is not `fail_action` written twice, and the
+        // whole point of the function. A plain missing-articles failure
+        // is genuinely retryable - propagation fills gaps in all the
+        // time - so this asks for POSITIVE evidence in the message that
+        // the recovery half is what died, and admits nothing without it.
+        FailKind::MissingArticles => recovery_is_what_failed(msg),
+    }
+}
+
+#[cfg(test)]
+#[path = "failkind/tests.rs"]
+mod tests;

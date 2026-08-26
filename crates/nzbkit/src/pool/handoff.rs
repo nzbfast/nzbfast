@@ -270,13 +270,67 @@ impl super::Shared {
     /// the worker is not its server's last - one stays to pick up a
     /// requeue, exactly as the fleet always had at least one worker per
     /// server for that.
+    ///
+    /// A PEEK, and the only caller that may act on it is one that has
+    /// then taken [`Self::claim_handoff`]: this answer is the same for
+    /// every idle worker on the server at once, which is exactly how two
+    /// of them both concluded they were not the last. `next_work`'s use
+    /// is a peek by nature - it decides not to hand out a duplicate, and
+    /// hands nothing back that could be claimed - so it stays on this
+    /// one; the retiring arm in `idle_turn` takes the claim.
     pub(super) fn want_handoff(&self, idx: usize) -> bool {
+        self.handoff_wanted(idx) && self.handoff_room(idx)
+    }
+
+    /// The two conditions that are about the RUN rather than about this
+    /// server's fleet: a successor blocked on this host's lease, and this
+    /// run past queue-dry.
+    fn handoff_wanted(&self, idx: usize) -> bool {
         let Some(Some(lease)) = self.leases.get(idx) else {
             return false;
         };
-        lease.waiters() > 0
-            && self.alive[idx].load(Ordering::Acquire) > 1
-            && self.tail_started.lock_ok().is_some()
+        lease.waiters() > 0 && self.tail_started.lock_ok().is_some()
+    }
+
+    /// Is there room for ONE more worker to leave this server - i.e.
+    /// would someone still be here afterwards? A peek; [`Self::claim_handoff`]
+    /// is the version that may be acted on.
+    fn handoff_room(&self, idx: usize) -> bool {
+        self.alive[idx].load(Ordering::Acquire) > self.handoff_out[idx].load(Ordering::Acquire) + 1
+    }
+
+    /// [`Self::want_handoff`], CLAIMED: true only for a worker that may
+    /// act on it and leave.
+    ///
+    /// The bare `alive > 1` peek was a decision, not a claim, and every
+    /// idle worker on the server makes it against the same number. Two
+    /// idle workers on a two-worker server both read 2, both pass, and
+    /// both retire - so the server that "keeps one for requeues" keeps
+    /// nobody, `live_mask` stops counting it, and an article the other
+    /// servers have already 430'd is declared unservable without this
+    /// host ever being asked for it. Not a rare interleaving either: the
+    /// idle loop re-asks every 25 ms, so a fleet draining past queue-dry
+    /// walks itself down to exactly two and then loses both.
+    ///
+    /// `alive` counts the calling worker, and the caller's decrement
+    /// lands later (it unwinds to `life.retire()`), so `handoff_out`
+    /// holds the claims that have not shown up in `alive` yet. Counting
+    /// both is what makes this safe: at the last successful claim
+    /// `alive > handoff_out + 1`, and `handoff_out` bounds the workers
+    /// still to leave through this door, so at least one is left over.
+    /// It is also why the count is never given back - the same
+    /// conservative trade [`ServerState::claim_yield`] documents at
+    /// length, and the same shape of `fetch_update`. The cost is that a
+    /// large idle fleet hands over about half of itself per round rather
+    /// than all but one; the alternative is a window in which a server
+    /// goes dark mid-run, which is unrecoverable.
+    pub(super) fn claim_handoff(&self, idx: usize) -> bool {
+        self.handoff_wanted(idx)
+            && self.handoff_out[idx]
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| {
+                    (self.alive[idx].load(Ordering::SeqCst) > h + 1).then_some(h + 1)
+                })
+                .is_ok()
     }
 
     /// A primary worker found itself idle after queue-dry: latch the
@@ -300,6 +354,8 @@ impl super::Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::{ArticleReq, Shared, inline_tests::one_server};
+    use std::time::Instant;
 
     #[tokio::test]
     async fn a_lease_never_exceeds_its_cap_and_waiters_are_counted() {
@@ -374,6 +430,74 @@ mod tests {
         drop(held.pop());
         let _p = waiter.await.unwrap();
         assert_eq!(l.snapshot(), (1, 1));
+    }
+
+    /// The last worker on a server may not hand its socket away, and
+    /// TWO idle workers may not both conclude they are not the last.
+    ///
+    /// The old `want_handoff` answered from `alive > 1` with no claim, so
+    /// on a two-worker server both idle workers read 2, both passed, and
+    /// both retired - leaving the host with nobody to take a requeue,
+    /// `live_mask` no longer counting it, and an article every OTHER
+    /// server has 430'd declared unservable without this one ever being
+    /// asked. This drives the exact interleaving: the peek stays true for
+    /// both, and only one claim is granted.
+    #[tokio::test]
+    async fn only_one_of_two_idle_workers_may_hand_its_socket_over() {
+        let budget = ConnBudget::new();
+        let lease = budget.lease("s", 1);
+        let mut servers = one_server();
+        servers[0].1.lease = Some(lease.clone());
+        let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
+        let (shared, _) = Shared::new(reqs, &servers);
+
+        // A successor parked on this host's lease.
+        let held = lease.acquire().await;
+        let l2 = lease.clone();
+        let waiter = tokio::spawn(async move { l2.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(lease.waiters(), 1);
+
+        shared.alive[0].store(2, Ordering::Relaxed);
+        assert!(
+            !shared.want_handoff(0),
+            "before queue-dry the idleness is a gap, not the tail"
+        );
+        *shared.tail_started.lock_ok() = Some(Instant::now());
+
+        assert!(shared.want_handoff(0), "the peek is true for both workers");
+        assert!(shared.claim_handoff(0), "the first claim is granted");
+        assert!(
+            !shared.claim_handoff(0),
+            "the second must be refused - somebody has to stay"
+        );
+        assert!(
+            !shared.want_handoff(0),
+            "and the peek agrees, so the refused worker goes back to \
+             picking duplicates instead of idling on a door that is shut"
+        );
+
+        // A third worker joining re-opens exactly one more seat.
+        shared.alive[0].store(3, Ordering::Relaxed);
+        assert!(shared.claim_handoff(0));
+        assert!(!shared.claim_handoff(0));
+
+        drop(held);
+        drop(waiter.await.unwrap());
+    }
+
+    /// No lease and no tail: the door is shut whatever the fleet size,
+    /// which is what keeps the CLI and every test that does not opt in
+    /// on the old path verbatim.
+    #[tokio::test]
+    async fn a_run_with_no_successor_never_hands_anything_over() {
+        let servers = one_server();
+        let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
+        let (shared, _) = Shared::new(reqs, &servers);
+        shared.alive[0].store(8, Ordering::Relaxed);
+        *shared.tail_started.lock_ok() = Some(Instant::now());
+        assert!(!shared.want_handoff(0));
+        assert!(!shared.claim_handoff(0));
     }
 
     #[tokio::test]

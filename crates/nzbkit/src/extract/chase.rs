@@ -529,7 +529,7 @@ impl Extractor {
         if let Some((buf, base)) = trimmed
             && offset < base
         {
-            let n = ((base - offset) as usize).min(data.len());
+            let n = crate::disk::chunk_len(base - offset, data.len());
             buf.mark_conflict();
             self.plain_span(inner, slot, offset, &data[..n])?;
         }

@@ -782,12 +782,40 @@ mod smtp {
         } else {
             return Err("email url must be smtp://host:port or smtps://host:port".into());
         };
-        let (host, port) = match rest.rsplit_once(':') {
-            Some((h, p)) => (
-                h.to_string(),
-                p.parse::<u16>().map_err(|_| "bad smtp port".to_string())?,
-            ),
-            None => (rest.to_string(), if tls_first { 465 } else { 587 }),
+        // BRACKETS FIRST, because a literal IPv6 address is full of
+        // colons and `rsplit_once(':')` reads the last one as the port
+        // separator. `smtps://[2001:db8::1]` was answered "bad smtp
+        // port" for a URL that names no port at all, and
+        // `smtp://[::1]:587` got as far as the resolver and failed
+        // there: the TUPLE form of `ToSocketAddrs` - which is what this
+        // uses, and what `tls()` then hands to `ServerName::try_from` -
+        // does NOT accept a bracketed host, only a bare one. The only
+        // spelling that worked was the non-standard unbracketed
+        // `smtp://::1:587`, which nobody writes.
+        //
+        // Same shape, and the same de-bracketing, as
+        // `Daemon::predb_irc_config`, which is where this repo already
+        // wrote the rule down. The host comes back WITHOUT brackets,
+        // which is what both the resolver and rustls want.
+        let (host, port) = if let Some(inner) = rest.strip_prefix('[') {
+            match inner.split_once("]:") {
+                Some((h, p)) => (
+                    h.to_string(),
+                    p.parse::<u16>().map_err(|_| "bad smtp port".to_string())?,
+                ),
+                None => (
+                    inner.trim_end_matches(']').to_string(),
+                    if tls_first { 465 } else { 587 },
+                ),
+            }
+        } else {
+            match rest.rsplit_once(':') {
+                Some((h, p)) => (
+                    h.to_string(),
+                    p.parse::<u16>().map_err(|_| "bad smtp port".to_string())?,
+                ),
+                None => (rest.to_string(), if tls_first { 465 } else { 587 }),
+            }
         };
         let to = clean_addr(&t.email_to, "the To address")?;
         let from = if t.email_from.trim().is_empty() {
@@ -1063,6 +1091,43 @@ mod tests {
         // resolves into a connect attempt either.
         t.url = "smtp://0.0.0.0:587".into();
         assert!(send(&t, &cx()).unwrap_err().contains("internal address"));
+    }
+
+    /// A bracketed IPv6 authority is the STANDARD spelling of a literal
+    /// address in a URL, and it is the one that used to fail.
+    ///
+    /// `rsplit_once(':')` reads the last colon of `[2001:db8::1]` as the
+    /// port separator, so a URL naming no port at all was refused with
+    /// "bad smtp port"; and with a port, the host reached the resolver
+    /// still wearing its brackets, which the `(&str, u16)` tuple form of
+    /// `ToSocketAddrs` does not accept. Both are checked here by the
+    /// ERROR the request gets: a loopback literal is allowed by the SSRF
+    /// rule, so `[::1]` must fail on the CONNECTION rather than on the
+    /// parse or the resolver, while a link-local one must reach the
+    /// address check and be refused there - neither is possible unless
+    /// the brackets came off.
+    #[test]
+    fn a_bracketed_ipv6_smtp_url_parses() {
+        let mut t = target(Kind::Email);
+        t.email_to = "me@example.com".into();
+
+        // Link-local, bracketed, with a port: the host must resolve for
+        // the SSRF rule to be the thing that refuses it.
+        t.url = "smtp://[fe80::1]:587".into();
+        let e = send(&t, &cx()).unwrap_err();
+        assert!(e.contains("internal address"), "{e}");
+
+        // ...and with the port OMITTED, which the old parser turned into
+        // "bad smtp port" by splitting inside the address.
+        t.url = "smtps://[fe80::1]".into();
+        let e = send(&t, &cx()).unwrap_err();
+        assert!(!e.contains("bad smtp port"), "{e}");
+        assert!(e.contains("internal address"), "{e}");
+
+        // A name still works exactly as before, bracket-free.
+        t.url = "smtp://mail.example.invalid:587".into();
+        let e = send(&t, &cx()).unwrap_err();
+        assert!(!e.contains("bad smtp port"), "{e}");
     }
 
     #[test]

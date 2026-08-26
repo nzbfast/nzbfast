@@ -1,0 +1,166 @@
+# `:app:lintDebug` for the Compose Android app, which until now ran on no
+# runner anywhere.
+#
+# WHY THIS EXISTS. Android lint is NOT part of `assembleDebug`, and no
+# workflow asked for it by name, so `grep -rn lintDebug .github/workflows/`
+# returned nothing at all. It went red on 6 Aug 2026 in `0324c3c3` -
+# a `MissingSuperCall` in `MainActivity.onUserLeaveHint` that entered PiP
+# without chaining, plus five `UnsafeOptInUsageError` in `PlayerScreen` -
+# and stayed red for SEVENTEEN DAYS with nobody told. It was found by hand
+# on 13 Aug and fixed on 23 Aug in `df83cd5a0`. Fixing the six errors did
+# not fix the hole: the next media3 call or missed `super` reopens it in
+# exactly the same silence. This is what closes it.
+#
+# THE STATED BLOCKER WAS WRONG, and that is worth writing down because it
+# is why this waited two days after the errors were fixed.
+# The lane that fixed the errors wrote down, in its own notes, the
+# reason it did not also wire the job: no CI runner here has the Android
+# SDK, so wiring it up is a job-shaped change - an SDK setup step plus a
+# cache - rather than a line in an existing job. The first half is false. The GitHub-hosted ubuntu image ships
+# the Android SDK at `/usr/local/lib/android/sdk` and exports ANDROID_HOME
+# and ANDROID_SDK_ROOT pointing at it - nightly.yml has been DELETING that
+# directory since long before this workflow existed, in its `sudo rm -rf
+# /usr/share/dotnet /usr/local/lib/android ...` disk-reclaim step, which is
+# direct evidence in this repo that it is there. Only `platforms;android-36`
+# has to be added, because compileSdk is 36 and the image tracks a release
+# or two behind; the step below does that and nothing else.
+#
+# IT NEEDS NO RUST AND NO NDK, which is the fact that makes it cheap.
+# `fetch-engine.sh` stages `libnzbfast.so` into `app/engine/arm64-v8a/`
+# and that directory is gitignored and absent from a fresh checkout, so
+# the obvious fear is that lint cannot run without a cargo-ndk build of
+# the engine first. Measured 25 Aug 2026 on the dev Mac against a tree
+# with NO engine directory at all: `:app:lintDebug` is BUILD SUCCESSFUL in
+# 38 seconds. `jniLibs.srcDir("engine")` naming a directory that does not
+# exist is not an error to AGP, and lint analyses Kotlin and the manifest,
+# neither of which the engine binary participates in. So this job is a
+# JDK, a gradle distribution and the SDK, and never a cross-compiler.
+#
+# WHY ITS OWN WORKFLOW RATHER THAN A JOB IN size-gate.yml. That file's
+# every-branch placement is earned by being BUILD-FREE - checkout plus a
+# python script, seconds of runner time - and its `paths:` union already
+# fires on nearly every push (`**/*.sh`, `**/*.py`, `*.md`). A gradle
+# build hung off that union would spin a compile on pushes that touch no
+# Android source at all. macapp.yml settled this exact question the same
+# way on 24 Aug 2026 and for the same two reasons; this is that
+# precedent applied one platform over.
+#
+# WHY NOT pr-check.yml, which is where the other packaging gates live.
+# That workflow is `on: pull_request` AND gated to the public repo, so on
+# this repo's push-to-main flow it does not run at all - putting a gate
+# there is putting it where development is not. See the note at the head
+# of the `packaging-gates` job in size-gate.yml.
+#
+# WARNINGS ARE TOLERATED, ERRORS ARE NOT. `abortOnError` is AGP's default
+# and lint's error tier is what this gate is for. The tree carries 14
+# warnings today, deliberately left by the lane that fixed the errors, and
+# two of them are worth a session's attention rather than a `-Werror`
+# flag that would redden this job on day one: `PictureInPictureIssue`, in
+# the very method `df83cd5a0` repaired, and `OldTargetApi` for
+# `targetSdk = 34` against `compileSdk = 36`, which is a Play Store
+# shipping deadline rather than a style note. Both are item 2 of the
+# handoff named above. Same judgement macapp.yml made about its two
+# tolerated Swift warnings, and for the same reason: a gate that is red
+# the day it lands is a gate somebody switches off.
+name: android-lint
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'packaging/android/compose-app/**'
+      - '.github/workflows/android-lint.yml'
+  pull_request:
+    paths:
+      - 'packaging/android/compose-app/**'
+      - '.github/workflows/android-lint.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    # No `github.repository` guard, on macapp.yml's reasoning: this needs
+    # no private tooling, `packaging/android/` ships in PUBLIC_MANIFEST,
+    # and a lint error is exactly as real on the public repo - where
+    # standard runners are free - as it is here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: android-lint-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    defaults:
+      run:
+        working-directory: packaging/android/compose-app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No setup-java action. The image exports JAVA_HOME_17_X64 for the
+      # JDK it already ships, so taking it costs nothing and adds no
+      # third-party action to pin and audit. 17 is not a free choice:
+      # gradle 8.13 cannot run on the JDK 26 that is first on PATH on the
+      # dev Mac either, which is the same trap the compose-app README
+      # documents for local runs.
+      - name: java 17
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"
+      # compileSdk is 36 (app/build.gradle.kts). The runner image ships a
+      # platform or two behind, so this adds the one package that may be
+      # missing and is a no-op when it is not. `yes |` answers the licence
+      # prompt, which sdkmanager asks even for an already-accepted SDK.
+      - name: android platform 36
+        run: |
+          set -eu
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          # sdkmanager is NOT on PATH on this image even though the SDK
+          # itself is - measured 25 Aug 2026, the first run of this
+          # workflow died `sdkmanager: command not found` with
+          # ANDROID_HOME correctly set to /usr/local/lib/android/sdk. It
+          # ships under cmdline-tools; resolve it rather than assuming
+          # either the PATH or one fixed version directory.
+          SDKM=""
+          for c in "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager \
+                   "$ANDROID_HOME"/tools/bin/sdkmanager; do
+            [ -x "$c" ] && SDKM="$c" && break
+          done
+          [ -n "$SDKM" ] || { echo "no sdkmanager under $ANDROID_HOME"; exit 1; }
+          echo "sdkmanager: $SDKM"
+          "$SDKM" --list_installed || true
+          yes | "$SDKM" "platforms;android-36" "build-tools;35.0.0" >/dev/null
+      # The gradle distribution (~130 MB) plus the AGP, Kotlin and Compose
+      # artifact graph. Keyed on the files that decide what is downloaded,
+      # so a dependency bump moves the key and everything else hits.
+      # restore + save as SEPARATE steps for the reason pr-check.yml gives
+      # at its own cache: the combined actions/cache does NOT save when the
+      # job failed, so one red run leaves the next run cold too, which is
+      # worst exactly while somebody iterates on a lint fix.
+      - name: cache gradle
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-gradle-v1-${{ runner.os }}-${{ hashFiles('packaging/android/compose-app/gradle/wrapper/gradle-wrapper.properties', 'packaging/android/compose-app/**/*.gradle.kts') }}
+      # `--no-daemon`: a gradle daemon outlives the step and buys nothing
+      # on a runner that is destroyed after one build.
+      - name: lint
+        run: ./gradlew :app:lintDebug --no-daemon --console=plain --stacktrace
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ always() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-gradle-v1-${{ runner.os }}-${{ hashFiles('packaging/android/compose-app/gradle/wrapper/gradle-wrapper.properties', 'packaging/android/compose-app/**/*.gradle.kts') }}
+      # The HTML/XML report, so a red run is readable without reproducing
+      # the whole toolchain locally. `always()` because the interesting
+      # case is the failing one.
+      - name: lint report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-lint-report
+          path: packaging/android/compose-app/app/build/reports/lint-results-debug.*
+          if-no-files-found: ignore

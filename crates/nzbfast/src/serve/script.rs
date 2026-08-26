@@ -152,6 +152,13 @@ fn run_capped_inner(
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
             #[cfg(unix)]
+            // SAFETY: kill(2) touches no memory of ours - it takes two
+            // integers - so soundness is only that we are entitled to
+            // name this pid. `child` is still borrowed here and has not
+            // been reaped (`try_wait` above returned `None`), so its pid
+            // cannot yet have been recycled onto an unrelated process,
+            // and the group id is that same pid because `run_capped`
+            // put the child in its own group.
             unsafe {
                 // Negative pid = the whole group. The direct child is
                 // killed by the same signal, so no separate kill needed;
@@ -286,6 +293,9 @@ fn drain(mut r: impl PipeRead, stop: &AtomicBool, mut sink: impl FnMut(&[u8])) {
     // Non-blocking, so the loop always comes back to the flag: a read
     // that finds nothing returns WouldBlock instead of parking in the
     // kernel until a descendant we no longer own decides to speak.
+    // SAFETY: these two fcntl commands take an fd and an int and touch
+    // no memory. `fd` is borrowed from `r`, which outlives this call, so
+    // the descriptor is live and owned by us for the whole block.
     let pollable = unsafe {
         let fl = libc::fcntl(fd, libc::F_GETFL);
         fl >= 0 && libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK) >= 0
@@ -323,6 +333,10 @@ fn drain(mut r: impl PipeRead, stop: &AtomicBool, mut sink: impl FnMut(&[u8])) {
         };
         // A failed poll needs no handling: the next iteration re-checks
         // the flag and re-reads, which is all a successful one buys.
+        // SAFETY: `&mut pfd` is a live, exclusively borrowed `pollfd`
+        // and the count passed is exactly the 1 element it points at.
+        // `fd` inside it is still open - `r` is borrowed for the whole
+        // function - and poll only writes `revents`.
         unsafe { libc::poll(&mut pfd, 1, DRAIN_POLL_MS) };
     }
 }

@@ -166,7 +166,376 @@ fn card_aired_sql() -> String {
     )
 }
 
+/// How long a card `total` that was expensive to compute may be served
+/// from [`Index::cards_total`]'s per-connection memo. One wall poll
+/// apart, so an open tab pays for the count once rather than on every
+/// refresh; the number itself is a headline and a scroll gate, and the
+/// index it counts moves by a few thousand rows a minute at most.
+const CARDS_TOTAL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// A count faster than this is answered exactly, every time, and never
+/// written to the memo - see [`Index::cards_total`].
+const CARDS_TOTAL_MEMO_MIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Rows [`Index::wall_page_keys`] walks per title_key the page still
+/// needs, plus a floor so page one never walks a trivial window.
+///
+/// Measured 26 Aug 2026 on the live 37.97M-release index: the newest
+/// 1,000 releases carry 134 distinct title_keys, the newest 10,000 carry
+/// 371 and the newest 100,000 carry 3,613 - roughly 3.6% once past the
+/// tip, because an obfuscated multi-part post lands as tens of releases
+/// under one key. So page one's window of 2,480 rows finds 161 keys
+/// where 60 are wanted, in 3.4 ms. These are not tuning knobs for a
+/// particular index: the ladder below re-asks with a bigger window when
+/// the density is worse than this, and gives up rather than guess.
+const WALL_WINDOW_PER_KEY: i64 = 8;
+const WALL_WINDOW_FLOOR: i64 = 2_000;
+/// What a window that could not prove the page is multiplied by before
+/// the next attempt.
+const WALL_WINDOW_GROWTH: i64 = 8;
+/// The largest window the walk will pay for before handing the request
+/// back to the exact query. 4M rows is ~0.5 s of walk on the measured
+/// index and ~144,000 keys at its density - some 2,400 pages deep, far
+/// past anything a person scrolls to.
+const WALL_WINDOW_MAX: i64 = 4_000_000;
+
+/// Whether [`Index::wall_page_keys`]'s walk can prove this request's
+/// page. Its own function, and named by a test, because the failure it
+/// guards against is silent in BOTH directions: too wide and the wall
+/// answers a request with the wrong cards, too narrow and the fast path
+/// quietly stops firing while every test still passes.
+///
+/// * `Latest` only - see `wall_page_keys` for why the other sorts,
+///   which have release-level indexes of their own, still cannot use
+///   this shape.
+/// * No category grouping: `catgroup=1` puts a kind rank AHEAD of the
+///   sort key, so the newest sixty groups are not the page.
+/// * No title-level predicate. Matched-only, the genre chip and the
+///   decade range are all tests on the JOINED row, which the walk
+///   cannot apply as it goes - it would skip past key after key with no
+///   bound on how far. (Those requests are also the ones that are
+///   already cheap: matched-only drives from `titles`, which is
+///   thousands of rows against the index's millions.)
+/// * No search text and no `key=` fetch: both put a different, already
+///   narrow, driving index under the query.
+fn wall_window_eligible(
+    q: &BrowseQuery,
+    sort: CardSort,
+    group_by_kind: bool,
+    no_title_predicate: bool,
+) -> bool {
+    sort == CardSort::Latest
+        && !group_by_kind
+        && no_title_predicate
+        && q.title_keys.is_empty()
+        && q.q.trim().is_empty()
+}
+
+/// The card page's SELECT, shared by the exact query and the window fast
+/// path. `tail` is the LIMIT/OFFSET clause, which is the only thing that
+/// differs between them: the fast path has already chosen the keys, so
+/// it pages by an `IN` list folded into `where_clause` and takes them
+/// all.
+fn card_page_sql(
+    where_clause: &str,
+    rep_where: &str,
+    group_prefix: &str,
+    key: &str,
+    dir: &str,
+    tail: &str,
+) -> String {
+    format!(
+        "SELECT r.title_key, MAX(r.kind), COUNT(*) AS n,
+                MAX(r.first_posted) AS latest, MAX(r.complete),
+                MAX(r.total_bytes) AS max_bytes,
+                MAX(CASE r.res WHEN '2160p' THEN 4 WHEN '1080p' THEN 3
+                               WHEN '720p' THEN 2 WHEN '' THEN 0 ELSE 1 END),
+                -- The fed name when the pre feed supplied one: the
+                -- representative is what drives the card's parse and
+                -- the enrichment seed, and seeding those from a
+                -- random stem when we hold the real title would
+                -- throw the answer away at the last step.
+                (SELECT COALESCE(NULLIF(s.pre_title,''), s.stem) FROM releases s
+                  WHERE s.title_key = r.title_key AND {rep_where}
+                  ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
+                (SELECT s.grp FROM releases s
+                  WHERE s.title_key = r.title_key AND {rep_where}
+                  ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
+                COALESCE(t.title,''), COALESCE(t.year,0), COALESCE(t.rating,0),
+                COALESCE(t.genres,''), COALESCE(t.overview,''),
+                COALESCE(t.poster,''), COALESCE(t.backdrop,''),
+                COALESCE(t.checked,0), COALESCE(t.actors,''),
+                COALESCE(t.air_date,'')
+         FROM releases r LEFT JOIN titles t ON t.key = r.title_key
+         WHERE {where_clause}
+         GROUP BY r.title_key
+         ORDER BY {group_prefix}{key} {dir}, latest DESC, r.title_key ASC
+         {tail}"
+    )
+}
+
+/// One row of [`card_page_sql`] as a [`Card`]. A free function rather than
+/// a closure at the call site because both the exact page and the window
+/// fast path project the same columns in the same order, and two copies
+/// of an eighteen-column positional mapping is exactly the shape that
+/// drifts.
+fn card_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
+    Ok(Card {
+        title_key: r.get(0)?,
+        kind: r.get(1)?,
+        n_releases: r.get(2)?,
+        latest_posted: r.get(3)?,
+        any_complete: r.get(4)?,
+        max_bytes: r.get::<_, i64>(5)? as u64,
+        best_res: match r.get::<_, i64>(6)? {
+            4 => "2160p",
+            3 => "1080p",
+            2 => "720p",
+            _ => "",
+        }
+        .to_string(),
+        rep_stem: r.get(7)?,
+        rep_grp: r.get(8)?,
+        title: r.get(9)?,
+        year: r.get::<_, i64>(10)? as u32,
+        rating: r.get(11)?,
+        genres: r.get(12)?,
+        overview: r.get(13)?,
+        poster_art: r.get(14)?,
+        backdrop_art: r.get(15)?,
+        checked: r.get(16)?,
+        actors: r.get(17)?,
+        air_date: r.get(18)?,
+    })
+}
+
 impl Index {
+    /// The card wall's `total`, through a per-connection TTL memo when
+    /// it was expensive enough to be worth one.
+    ///
+    /// TODO 300: with the page itself answered by the window walk, this
+    /// count IS the show-all request. It cannot be made cheap, and that
+    /// is measured rather than assumed - on the live 37.97M-release
+    /// index, 26 Aug 2026:
+    ///
+    /// * The join it used to carry cost 102 s; without it the identical
+    ///   answer is 12.6 s (see `key_wheres` in `browse_cards_once`).
+    /// * The floor under THAT is the distinct-key walk itself: counting
+    ///   the keys with no predicate at all, straight off
+    ///   `idx_rel_title_key` with no table access, is 3.75 s for
+    ///   2,099,163 keys. Nothing indexable gets below it, because the
+    ///   answer is a property of every release in the index.
+    /// * A covering `releases(title_key, adult)` index - which is what
+    ///   the remaining table access is for, and the shape TODO 300
+    ///   named as a candidate - was BUILT on a clone of that index and
+    ///   measured: 72 s to build, ~1.4 GB, and the count went 8.04 s to
+    ///   7.52 s. Six percent. It removes the I/O and leaves the index
+    ///   walk, which is the actual cost. Rejected on the measurement.
+    ///
+    /// So the count is bounded rather than beaten, the way
+    /// [`Index::stats_cached`] bounds its own full scan: a wall poll
+    /// tolerates a `total` a minute old (it is a headline number and
+    /// the infinite-scroll gate, not an invariant), and paying seconds
+    /// for it on every poll of every open tab is what pins the read
+    /// pool.
+    ///
+    /// Three rules keep it honest:
+    ///
+    /// * A count that was CHEAP is never memoized. Below `memo_min` the
+    ///   memo is not written at all, so an ordinary index - where this
+    ///   whole query is milliseconds - always gets the exact live
+    ///   answer, and only the shape that hurts pays with staleness.
+    /// * Only a PARAMETERLESS count is memoized. The key is the
+    ///   statement text, which spells out every predicate structurally
+    ///   but says nothing about a bound value, so a request carrying
+    ///   one (a kind chip, a size floor, a search) is excluded rather
+    ///   than risked. That is exactly the show-all shape and no other:
+    ///   the request this exists for binds nothing.
+    /// * `memo_min` is an argument and not a constant read in here,
+    ///   because a memo that only arms itself on a slow query is
+    ///   otherwise untestable on any database a test can build.
+    fn cards_total(
+        &self,
+        sql: &str,
+        params: &[Box<dyn rusqlite::ToSql>],
+        memo_min: std::time::Duration,
+    ) -> rusqlite::Result<u64> {
+        let memoizable = params.is_empty();
+        if memoizable
+            && let Some((at, key, n)) = self.cards_total_memo.borrow().as_ref()
+            && key == sql
+            && at.elapsed() < CARDS_TOTAL_TTL
+        {
+            return Ok(*n);
+        }
+        let start = std::time::Instant::now();
+        let total = self
+            .db
+            .query_row(
+                sql,
+                rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u64)?;
+        if memoizable && start.elapsed() >= memo_min {
+            *self.cards_total_memo.borrow_mut() =
+                Some((std::time::Instant::now(), sql.to_string(), total));
+        }
+        Ok(total)
+    }
+
+    /// TODO 300: the wall page's title_keys, picked by a bounded walk
+    /// instead of by aggregating the whole index.
+    ///
+    /// **What was wrong.** `mode=wall2&matched=0&all=1` - the empty
+    /// state's "Show unmatched" button, and the one-row probe the wall
+    /// fires behind it on every poll of an empty grid - drops the
+    /// `junk < 50` predicate that `idx_rel_visible_posted` is a PARTIAL
+    /// index on, so nothing narrows the population at all and the card
+    /// query groups EVERY release to hand back sixty cards. Measured
+    /// 26 Aug 2026 on the live 37,973,154-release / 98 GB index: one
+    /// page at `LIMIT 60 OFFSET 0` is **6 minutes 2 seconds**, and the
+    /// plan is `SCAN r USING INDEX idx_rel_title_key` - 38.0M index
+    /// entries, each one a random table row read for `kind`,
+    /// `first_posted`, `complete`, `total_bytes`, `res` and `adult`.
+    ///
+    /// **Why the obvious fixes are not it,** all measured on that index
+    /// the same day (`research/WALL-SHOWALL-QUERY-COST-2026-08-26.md`):
+    ///
+    /// * The OFFSET is not the cost - the aggregate has to be built in
+    ///   full before the sort can be, so offset 0 costs what offset 120
+    ///   costs. TODO 300 settled that on 25 Aug and this lane did not
+    ///   re-derive it.
+    /// * A covering index over the aggregate's columns does not rescue
+    ///   it either. The index-only floor for this shape is real but it
+    ///   is still O(index): counting the distinct keys through
+    ///   `idx_rel_title_key` with no table access at all is 2.4 s, and
+    ///   a wider index carrying the six aggregate columns is several
+    ///   times that. Minutes become seconds; nothing becomes a page.
+    ///
+    /// **What this does.** For the wall's default Latest order the page
+    /// is the sixty groups with the largest `MAX(first_posted)`. Walk
+    /// `idx_rel_posted` newest-first and the FIRST time a key appears
+    /// is its `MAX(first_posted)` over the qualifying rows, because
+    /// every row that could beat it has already gone past. So the walk
+    /// hands back the page order directly, and only the keys it names
+    /// have to be aggregated. Measured on the same index and request:
+    /// 3.4 ms for the walk (2,480 rows, 161 distinct keys) and 22.5 ms
+    /// for the sixty-key aggregate, against 362 s - and the page is
+    /// row-for-row the one the exact query returns.
+    ///
+    /// **What makes it exact rather than nearly right.** The walk is
+    /// capped, so it sees a PREFIX of the population and cannot speak
+    /// for a key it never reached. Two conditions settle that:
+    ///
+    /// * If the window returned fewer rows than its cap it IS the whole
+    ///   qualifying population, and every key and every `latest` in it
+    ///   is exact.
+    /// * Otherwise let `cut` be the oldest `first_posted` in the
+    ///   window. A key absent from the window has all of its rows below
+    ///   `cut`, so its `MAX` is at most `cut`; a key present in it has
+    ///   its maximum row inside the window, because the walk is ordered.
+    ///   So the keys with `latest` strictly beyond `cut` are EXACTLY
+    ///   the global set with that property, with exact `latest` values,
+    ///   and the first `offset + limit` of them in
+    ///   `latest DESC, title_key ASC` order are exactly the global
+    ///   first `offset + limit`. Keys sitting ON `cut` are dropped,
+    ///   because `LIMIT` cuts a tie band wherever it likes.
+    ///
+    /// A window that cannot fill the page under that rule is grown and
+    /// retried; past [`WALL_WINDOW_MAX`] rows it gives up and returns
+    /// `None`, which puts the request back on the exact query -
+    /// slow, still bounded by `index::deadline`, and still correct.
+    /// `None` never means "no cards".
+    ///
+    /// **Latest only, and that is a scope decision rather than a
+    /// shortcut.** The walk key has to BE the sort key, and it has to
+    /// settle the tiebreak too. Under `CardSort::Latest` the ORDER BY
+    /// is `latest {dir}, latest DESC, title_key ASC`, so the walk
+    /// column decides everything except the `title_key` settlement,
+    /// which the window's own ORDER BY spells identically. `Arrived`
+    /// and `Size` have release-level indexes of their own
+    /// (`idx_rel_seen`, `idx_rel_size`) and would walk just as
+    /// cheaply - but their tiebreak is `latest`, which is a DIFFERENT
+    /// column, and a key's `MAX(first_posted)` over a window ordered by
+    /// something else is not its `MAX(first_posted)`. Extending to them
+    /// means ranking the whole surviving candidate set after the
+    /// aggregate, which is a different piece of work; they keep the
+    /// exact query.
+    fn wall_page_keys(
+        &self,
+        rel_where: &str,
+        params: &[Box<dyn rusqlite::ToSql>],
+        desc: bool,
+        limit: u32,
+        offset: u32,
+    ) -> rusqlite::Result<Option<Vec<String>>> {
+        // Newest-first takes the MAX of each key and cuts at the MIN of
+        // the window; oldest-first is the mirror image, and the wall
+        // offers that direction too (`dir=asc`).
+        let (grp, cut_agg, cmp, ord) = if desc {
+            ("MAX", "MIN", ">", "DESC")
+        } else {
+            ("MIN", "MAX", "<", "ASC")
+        };
+        let want = i64::from(offset) + i64::from(limit);
+        let mut cap = (want * WALL_WINDOW_PER_KEY + WALL_WINDOW_FLOOR).min(WALL_WINDOW_MAX);
+        let n = params.len();
+        loop {
+            let win = format!(
+                "SELECT r.title_key AS tk, r.first_posted AS sk
+                   FROM releases r WHERE {rel_where}
+                  ORDER BY r.first_posted {ord} LIMIT ?{}",
+                n + 1
+            );
+            let (rows, cut): (i64, Option<i64>) = self.db.query_row(
+                &format!("SELECT COUNT(*), {cut_agg}(sk) FROM ({win})"),
+                rusqlite::params_from_iter(
+                    params
+                        .iter()
+                        .map(|b| b.as_ref() as &dyn rusqlite::ToSql)
+                        .chain(std::iter::once(&cap as &dyn rusqlite::ToSql)),
+                ),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            // The window is the whole population: nothing was cut, so
+            // no key can be missing and no `latest` can be short.
+            let whole = rows < cap;
+            let cut = cut.unwrap_or(0);
+            let keys: Vec<String> = {
+                let sql = format!(
+                    "SELECT tk FROM (SELECT tk, {grp}(sk) AS latest FROM ({win}) GROUP BY tk)
+                      WHERE ?{} OR latest {cmp} ?{}
+                      ORDER BY latest {ord}, tk ASC LIMIT ?{} OFFSET ?{}",
+                    n + 2,
+                    n + 3,
+                    n + 4,
+                    n + 5
+                );
+                let mut stmt = self.db.prepare(&sql)?;
+                let tail: [&dyn rusqlite::ToSql; 5] = [&cap, &whole, &cut, &limit, &offset];
+                let it = stmt.query_map(
+                    rusqlite::params_from_iter(
+                        params
+                            .iter()
+                            .map(|b| b.as_ref() as &dyn rusqlite::ToSql)
+                            .chain(tail),
+                    ),
+                    |r| r.get(0),
+                )?;
+                it.collect::<rusqlite::Result<_>>()?
+            };
+            // A short page off a whole-population window is the honest
+            // end of the wall, not a window that was too small.
+            if whole || keys.len() as u32 == limit {
+                return Ok(Some(keys));
+            }
+            if cap >= WALL_WINDOW_MAX {
+                return Ok(None);
+            }
+            cap = (cap * WALL_WINDOW_GROWTH).min(WALL_WINDOW_MAX);
+        }
+    }
+
     /// M28: the poster grid's data, paged in SQL. Groups releases by
     /// their stored parse key, joins each group to its cached metadata,
     /// and returns (cards, total groups) - the wall no longer
@@ -218,6 +587,27 @@ impl Index {
         // title_key, so repeating them inside the per-title subquery would
         // buy nothing. They stay out of the aliased list.
         let mut title_wheres: Vec<String> = Vec::new();
+        // Title-level predicates that DO NOT need the join, in the same
+        // `{}`-alias form as `wheres`: a test on the title_key itself,
+        // answered by a subquery over `titles` rather than by a column
+        // of a joined row.
+        //
+        // Why the distinction earns its own list, measured 26 Aug 2026
+        // on the live 37.97M-release index (TODO 300, and
+        // `research/WALL-SHOWALL-QUERY-COST-2026-08-26.md`): the COUNT
+        // below is `COUNT(DISTINCT r.title_key)` over a scan of
+        // `idx_rel_title_key`, and SQLite answers that shape by SEEKING
+        // to the next distinct key instead of walking every entry -
+        // 2.1M seeks rather than 38.0M. A `LEFT JOIN titles` in the
+        // FROM defeats that outright, because the join has to be
+        // evaluated for every release row: the identical count is
+        // 14.4 s without the join and 102 s with it, for a predicate
+        // that is constant across every release sharing a key. So a
+        // title-level test that can be spelled as a key-level subquery
+        // belongs here, and only a test that genuinely reads a joined
+        // column (matched-only, the genre chip, the decade range) may
+        // keep the join.
+        let mut key_wheres: Vec<String> = Vec::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         let bind = |params: &mut Vec<Box<dyn rusqlite::ToSql>>, v: Box<dyn rusqlite::ToSql>| {
             params.push(v);
@@ -344,7 +734,18 @@ impl Index {
         // the user owns is a bug they will report, wrongly showing one
         // is a chip away.
         if q.hide_adult {
-            title_wheres.push(ADULT_GENRE_SQL.to_string());
+            // Spelled as the key-level exclusion list rather than as a
+            // predicate on the joined row - the identical test
+            // `browse()` has always used (`browse.rs`, the `hide_adult`
+            // arm), reaching `idx_titles_adult`, which is a PARTIAL
+            // index on exactly this match. Two things come of that:
+            // the count keeps its distinct-key seek (see `key_wheres`),
+            // and the two halves of the setting are now one spelling
+            // instead of two - the thing `ADULT_GENRE_MATCH_SQL`'s own
+            // comment says they have to be.
+            key_wheres.push(format!(
+                "{{}}title_key NOT IN (SELECT t.key FROM titles t WHERE {ADULT_GENRE_MATCH_SQL})"
+            ));
             // The spot-born marker (TODO 131), which is a RELEASE-level
             // fact rather than a title-level one: the poster of this
             // post filed it as adult, and the card may have no enriched
@@ -382,8 +783,21 @@ impl Index {
         // empty (it is seeded with the title_key test), so the AND always
         // has a left side.
         let rep_where = alias(&wheres, "s.");
-        let where_clause = {
+        // The release- and key-level half, which names no `t.` column
+        // and is therefore the whole predicate list when nothing needs
+        // the join. The window fast path below and the joinless COUNT
+        // both take this rendering; the exact page takes it with the
+        // title-level list appended.
+        let rel_where = {
             let mut all = alias(&wheres, "r.");
+            for w in &key_wheres {
+                all.push_str(" AND ");
+                all.push_str(&w.replace("{}", "r."));
+            }
+            all
+        };
+        let where_clause = {
+            let mut all = rel_where.clone();
             for w in &title_wheres {
                 all.push_str(" AND ");
                 all.push_str(w);
@@ -393,18 +807,23 @@ impl Index {
         // The COUNT runs on the WHERE params ALONE, so it must happen
         // before the Affinity ORDER BY binds any of its own params (those
         // belong to the paged query only).
-        let total: u64 = self
-            .db
-            .query_row(
-                &format!(
-                    "SELECT COUNT(DISTINCT r.title_key)
-                     FROM releases r LEFT JOIN titles t ON t.key = r.title_key
-                     WHERE {where_clause}"
-                ),
-                rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
-                |r| r.get::<_, i64>(0),
+        //
+        // The join is dropped outright when no predicate reads a joined
+        // column, which is the ordinary case and the expensive one: see
+        // `key_wheres` above for the measurement (14.4 s against 102 s
+        // for the identical answer on the live index). `title_wheres`
+        // empty is exactly the condition that makes `where_clause` name
+        // no `t.` column, so the two cannot come apart.
+        let count_sql = if title_wheres.is_empty() {
+            format!("SELECT COUNT(DISTINCT r.title_key) FROM releases r WHERE {rel_where}")
+        } else {
+            format!(
+                "SELECT COUNT(DISTINCT r.title_key)
+                 FROM releases r LEFT JOIN titles t ON t.key = r.title_key
+                 WHERE {where_clause}"
             )
-            .map(|n| n as u64)?;
+        };
+        let total = self.cards_total(&count_sql, &params, CARDS_TOTAL_MEMO_MIN)?;
         // Fixed vocabulary - never user text. Direction is the caller's
         // call (the API defaults title→asc, everything else→desc).
         let key: String = match sort {
@@ -496,70 +915,94 @@ impl Index {
         // list and an identical, fully deterministic ORDER BY (the id
         // tiebreak settles same-second posts), so rep_stem and rep_grp
         // can never come from two different rows.
-        let sql = format!(
-            "SELECT r.title_key, MAX(r.kind), COUNT(*) AS n,
-                    MAX(r.first_posted) AS latest, MAX(r.complete),
-                    MAX(r.total_bytes) AS max_bytes,
-                    MAX(CASE r.res WHEN '2160p' THEN 4 WHEN '1080p' THEN 3
-                                   WHEN '720p' THEN 2 WHEN '' THEN 0 ELSE 1 END),
-                    -- The fed name when the pre feed supplied one: the
-                    -- representative is what drives the card's parse and
-                    -- the enrichment seed, and seeding those from a
-                    -- random stem when we hold the real title would
-                    -- throw the answer away at the last step.
-                    (SELECT COALESCE(NULLIF(s.pre_title,''), s.stem) FROM releases s
-                      WHERE s.title_key = r.title_key AND {rep_where}
-                      ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
-                    (SELECT s.grp FROM releases s
-                      WHERE s.title_key = r.title_key AND {rep_where}
-                      ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
-                    COALESCE(t.title,''), COALESCE(t.year,0), COALESCE(t.rating,0),
-                    COALESCE(t.genres,''), COALESCE(t.overview,''),
-                    COALESCE(t.poster,''), COALESCE(t.backdrop,''),
-                    COALESCE(t.checked,0), COALESCE(t.actors,''),
-                    COALESCE(t.air_date,'')
-             FROM releases r LEFT JOIN titles t ON t.key = r.title_key
-             WHERE {where_clause}
-             GROUP BY r.title_key
-             ORDER BY {group_prefix}{key} {dir}, latest DESC
-             LIMIT ?{} OFFSET ?{}",
-            params.len() + 1,
-            params.len() + 2
-        );
-        params.push(Box::new(q.limit.min(500)));
-        params.push(Box::new(q.offset));
+        //
+        // The PAGE order needs the same treatment and did not have it
+        // until 25 Aug 2026. `latest DESC` was the only tiebreak, and
+        // under the wall's default `CardSort::Latest` the key IS
+        // `latest` - so the clause read `latest DESC, latest DESC` and
+        // two cards whose newest release shares a `first_posted` SECOND
+        // had no defined order at all. Cosmetic in one query and not
+        // cosmetic at all under `LIMIT ? OFFSET ?`: an order SQLite is
+        // free to vary between two statements is an order that can hand
+        // page 2 a card page 1 already showed, or skip one entirely.
+        // `title_key` is the GROUP BY key, so appending it makes the
+        // sort total by construction; ASC rather than `{dir}` because
+        // what is wanted is a stable arbitrary settlement, and the
+        // summary path (`summaries.rs`) has to spell the SAME one - the
+        // differential tests hold the two paths to one answer, so a
+        // tiebreak on one side only is a disagreement the moment two
+        // posts share a second.
+        //
+        // Two measurements from the day it landed, and the second is the
+        // one that keeps this honest. The plan is unchanged either way
+        // on the live 33.4M-release index (`SCAN t` + `SEARCH r USING
+        // INDEX idx_rel_title_key` matched-only, `SCAN r USING INDEX
+        // idx_rel_title_key` for show-all, one temp b-tree for the ORDER
+        // BY in both), and an interleaved A/B of the matched-only page
+        // is inside the noise - it is free because the sorter was
+        // already there. And NO duplicate was ever observed: the
+        // pre-fix clause passes
+        // `summaries::tests::paging_over_tied_cards_repeats_nothing_and_skips_nothing`
+        // as well, on both paths. This is a wart made impossible rather
+        // than a live bug fixed, and that test's comment says so at
+        // length.
+        // TODO 300: the window fast path. When the request adds no
+        // title-level predicate and no search, and asks for the wall's
+        // default Latest order, the page's title_keys are picked by a
+        // bounded walk down `idx_rel_posted` instead of by aggregating
+        // the whole index - see `wall_page_keys`. `None` means "not
+        // eligible, or the walk could not prove the page", never "no
+        // cards", exactly like the C3 summary probe above.
+        let page_keys = (self.wall_window
+            && wall_window_eligible(q, sort, group_by_kind, title_wheres.is_empty()))
+        .then(|| self.wall_page_keys(&rel_where, &params, q.desc, q.limit.min(500), q.offset))
+        .transpose()?
+        .flatten();
+        let sql = match &page_keys {
+            // The page's keys are already known, so the aggregate runs
+            // as `?` seeks on `idx_rel_title_key` over sixty groups
+            // rather than as a scan of all of them. Everything else -
+            // projection, representative picks, ORDER BY - is the
+            // clause below, byte for byte, so the two paths cannot
+            // order or project differently.
+            Some(keys) => {
+                let ph: Vec<String> = keys
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("?{}", params.len() + 1 + i))
+                    .collect();
+                let filter = format!(" AND r.title_key IN ({})", ph.join(","));
+                let n = keys.len();
+                for k in keys {
+                    params.push(Box::new(k.clone()));
+                }
+                card_page_sql(
+                    &format!("{where_clause}{filter}"),
+                    &rep_where,
+                    group_prefix,
+                    &key,
+                    dir,
+                    &format!("LIMIT {n} OFFSET 0"),
+                )
+            }
+            None => {
+                let sql = card_page_sql(
+                    &where_clause,
+                    &rep_where,
+                    group_prefix,
+                    &key,
+                    dir,
+                    &format!("LIMIT ?{} OFFSET ?{}", params.len() + 1, params.len() + 2),
+                );
+                params.push(Box::new(q.limit.min(500)));
+                params.push(Box::new(q.offset));
+                sql
+            }
+        };
         let mut stmt = self.db.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
-            |r| {
-                Ok(Card {
-                    title_key: r.get(0)?,
-                    kind: r.get(1)?,
-                    n_releases: r.get(2)?,
-                    latest_posted: r.get(3)?,
-                    any_complete: r.get(4)?,
-                    max_bytes: r.get::<_, i64>(5)? as u64,
-                    best_res: match r.get::<_, i64>(6)? {
-                        4 => "2160p",
-                        3 => "1080p",
-                        2 => "720p",
-                        _ => "",
-                    }
-                    .to_string(),
-                    rep_stem: r.get(7)?,
-                    rep_grp: r.get(8)?,
-                    title: r.get(9)?,
-                    year: r.get::<_, i64>(10)? as u32,
-                    rating: r.get(11)?,
-                    genres: r.get(12)?,
-                    overview: r.get(13)?,
-                    poster_art: r.get(14)?,
-                    backdrop_art: r.get(15)?,
-                    checked: r.get(16)?,
-                    actors: r.get(17)?,
-                    air_date: r.get(18)?,
-                })
-            },
+            card_from_row,
         )?;
         Ok((rows.collect::<rusqlite::Result<_>>()?, total))
     }
@@ -655,6 +1098,319 @@ impl Index {
 mod tests {
     use super::*;
     use crate::index::testutil::{dated_entry, entry, teardown};
+
+    // ===== TODO 300: the show-all window fast path =====================
+
+    /// Seed `n` releases under `keys` distinct title_keys, newest first,
+    /// straight into `releases`. Direct INSERT rather than `ingest`
+    /// because what these tests need is a population big enough to CAP
+    /// the window (over `WALL_WINDOW_FLOOR`) with control over which
+    /// keys share a `first_posted` second - the tie band is the part of
+    /// the walk that is easy to get wrong - and driving that through the
+    /// parser would be both slower and less precise.
+    fn seed_wall(ix: &Index, n: i64, keys: i64) {
+        seed_wall_tagged(ix, n, keys, "a");
+    }
+
+    fn seed_wall_tagged(ix: &Index, n: i64, keys: i64, tag: &str) {
+        let tx = ix.db.unchecked_transaction().unwrap();
+        for i in 0..n {
+            let k = i % keys;
+            // Three consecutive keys share a posted second, so the
+            // ORDER BY's `title_key ASC` settlement is exercised at
+            // every page boundary rather than by luck.
+            let posted = 900_000 - k / 3;
+            tx.execute(
+                "INSERT INTO releases(stem, poster, grp, total_bytes, files, complete,
+                                      first_posted, first_seen, kind, res, title_key, junk, adult)
+                 VALUES(?1, 'p@p', 'alt.test', ?2, 1, 0, ?3, ?3, 'other', '', ?4, 60, 0)",
+                rusqlite::params![
+                    format!("stem-{tag}-{i}"),
+                    1_000 + i,
+                    posted,
+                    format!("o:k{k:04}"),
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    /// One extra release under a brand new key, for the tests that need
+    /// the population to MOVE under a memo.
+    fn add_one(ix: &Index, tag: &str, key: &str) {
+        ix.db
+            .execute(
+                "INSERT INTO releases(stem, poster, grp, total_bytes, files, complete,
+                                      first_posted, first_seen, kind, res, title_key, junk, adult)
+                 VALUES(?1, 'p@p', 'alt.test', 1, 1, 0, 900000, 900000, 'other', '', ?2, 60, 0)",
+                rusqlite::params![format!("stem-{tag}"), key],
+            )
+            .unwrap();
+    }
+
+    fn show_all(offset: u32, desc: bool) -> BrowseQuery {
+        // Exactly what `m_wall2` builds for `matched=0&all=1`: junk
+        // uncapped, curation on, the adult marker applied.
+        BrowseQuery {
+            max_junk: None,
+            curated: true,
+            hide_adult: true,
+            limit: 60,
+            offset,
+            desc,
+            ..Default::default()
+        }
+    }
+
+    /// The whole contract: same cards, same order, same total, whether
+    /// the page came off the walk or off the full aggregate. Run over a
+    /// population big enough that the first window CAPS, so the `cut`
+    /// rule - not the "the window is everything" shortcut - is what
+    /// makes the answer exact.
+    #[test]
+    fn the_window_fast_path_answers_the_show_all_page_exactly_like_the_scan() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-wallwin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        // 6,000 rows over 400 keys: well past WALL_WINDOW_FLOOR + a
+        // page's worth, so the first window is a strict prefix.
+        seed_wall(&ix, 6_000, 400);
+        for (desc, offset) in [
+            (true, 0),
+            (true, 60),
+            (true, 120),
+            (true, 360),
+            (false, 0),
+            (false, 60),
+        ] {
+            let q = show_all(offset, desc);
+            ix.wall_window = true;
+            let (fast, fast_total) = ix
+                .browse_cards(&q, CardSort::Latest, false, false, None)
+                .unwrap();
+            ix.wall_window = false;
+            let (slow, slow_total) = ix
+                .browse_cards(&q, CardSort::Latest, false, false, None)
+                .unwrap();
+            assert_eq!(
+                fast_total, slow_total,
+                "total at desc={desc} offset={offset}"
+            );
+            let f: Vec<(&str, i64, u32)> = fast
+                .iter()
+                .map(|c| (c.title_key.as_str(), c.latest_posted, c.n_releases))
+                .collect();
+            let sl: Vec<(&str, i64, u32)> = slow
+                .iter()
+                .map(|c| (c.title_key.as_str(), c.latest_posted, c.n_releases))
+                .collect();
+            assert_eq!(f, sl, "page at desc={desc} offset={offset}");
+            assert!(
+                !f.is_empty(),
+                "desc={desc} offset={offset} returned nothing"
+            );
+        }
+        ix.wall_window = true;
+        // Past the end of the wall both paths agree on emptiness rather
+        // than one of them inventing a page.
+        let q = show_all(10_000, true);
+        let (fast, _) = ix
+            .browse_cards(&q, CardSort::Latest, false, false, None)
+            .unwrap();
+        assert!(fast.is_empty(), "{fast:?}");
+        teardown(&dir, ix);
+    }
+
+    /// The window that could not prove the page is GROWN, not given up
+    /// on. A population of one key is the worst possible density: the
+    /// first window is 2,480 rows and finds a single key where sixty
+    /// were asked for, so the answer is only right if the ladder
+    /// re-asks and reaches the whole population.
+    #[test]
+    fn the_window_grows_until_it_can_prove_the_page() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-wallgrow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        seed_wall(&ix, 5_000, 1);
+        let q = show_all(0, true);
+        let (fast, total) = ix
+            .browse_cards(&q, CardSort::Latest, false, false, None)
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(fast.len(), 1, "{fast:?}");
+        assert_eq!(
+            fast[0].n_releases, 5_000,
+            "the one card counts every release"
+        );
+        ix.wall_window = false;
+        let (slow, slow_total) = ix
+            .browse_cards(&q, CardSort::Latest, false, false, None)
+            .unwrap();
+        assert_eq!((slow.len(), slow_total), (1, 1));
+        assert_eq!(slow[0].n_releases, fast[0].n_releases);
+        teardown(&dir, ix);
+    }
+
+    /// The `total` memo: what it serves, what it refuses to memoize,
+    /// and the rule that keeps an ordinary index on exact answers.
+    #[test]
+    fn an_expensive_card_total_is_memoized_and_a_cheap_one_never_is() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-walltot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        seed_wall(&ix, 30, 10);
+        let sql = "SELECT COUNT(DISTINCT r.title_key) FROM releases r WHERE r.title_key <> ''";
+        let long = std::time::Duration::from_secs(3600);
+        // Cheap: answered exactly, and nothing is written down - so the
+        // next call sees the row that just landed.
+        assert_eq!(ix.cards_total(sql, &[], long).unwrap(), 10);
+        assert!(ix.cards_total_memo.borrow().is_none());
+        add_one(&ix, "b", "o:knew1");
+        assert_eq!(
+            ix.cards_total(sql, &[], long).unwrap(),
+            11,
+            "no memo, live answer"
+        );
+        // Expensive (forced): memoized, and served past a change.
+        let zero = std::time::Duration::ZERO;
+        assert_eq!(ix.cards_total(sql, &[], zero).unwrap(), 11);
+        add_one(&ix, "c", "o:knew2");
+        assert_eq!(
+            ix.cards_total(sql, &[], zero).unwrap(),
+            11,
+            "the memo answers within its TTL"
+        );
+        // A different statement is a different question, memo or not.
+        let other = "SELECT COUNT(DISTINCT r.title_key) FROM releases r WHERE r.junk < 50";
+        assert_eq!(ix.cards_total(other, &[], long).unwrap(), 0);
+        // A count carrying a bound value is never memoized: the key is
+        // the statement text, which cannot see the value.
+        let bound = "SELECT COUNT(DISTINCT r.title_key) FROM releases r WHERE r.junk < ?1";
+        let p: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(100i64)];
+        assert_eq!(ix.cards_total(bound, &p, zero).unwrap(), 12);
+        assert_ne!(
+            ix.cards_total_memo.borrow().as_ref().map(|m| m.1.clone()),
+            Some(bound.to_string())
+        );
+        teardown(&dir, ix);
+    }
+
+    /// Eligibility, named rather than inferred. Too wide is a wrong
+    /// page; too narrow is a fast path that silently stops firing while
+    /// every other test still passes.
+    #[test]
+    fn wall_window_eligible_names_exactly_the_requests_the_walk_can_prove() {
+        let q = show_all(0, true);
+        assert!(
+            wall_window_eligible(&q, CardSort::Latest, false, true),
+            "the show-all page IS the request this exists for"
+        );
+        for sort in [
+            CardSort::Arrived,
+            CardSort::Size,
+            CardSort::Releases,
+            CardSort::Rating,
+            CardSort::Title,
+            CardSort::Year,
+            CardSort::Aired,
+            CardSort::Affinity,
+        ] {
+            assert!(
+                !wall_window_eligible(&q, sort, false, true),
+                "{sort:?} does not walk its own sort key"
+            );
+        }
+        assert!(
+            !wall_window_eligible(&q, CardSort::Latest, true, true),
+            "catgroup ranks kind ahead of the sort key"
+        );
+        assert!(
+            !wall_window_eligible(&q, CardSort::Latest, false, false),
+            "a title-level predicate cannot be applied as the walk goes"
+        );
+        let searched = BrowseQuery {
+            q: "matrix".into(),
+            ..show_all(0, true)
+        };
+        assert!(!wall_window_eligible(
+            &searched,
+            CardSort::Latest,
+            false,
+            true
+        ));
+        let keyed = BrowseQuery {
+            title_keys: vec!["m:the matrix:1999".into()],
+            ..show_all(0, true)
+        };
+        assert!(!wall_window_eligible(&keyed, CardSort::Latest, false, true));
+    }
+
+    /// The count drops the `titles` join when nothing reads a joined
+    /// column, and the adult-genre exclusion it used to carry there is
+    /// now the same key-level list `browse()` has always used. Both
+    /// halves have to be checked at once: the whole point is that the
+    /// cheaper shape is the SAME answer.
+    #[test]
+    fn the_joinless_count_excludes_adult_titles_exactly_as_the_join_did() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-wallcnt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        seed_wall(&ix, 30, 10);
+        // Two enriched titles over seeded keys: one adult, one not.
+        for (key, genres) in [("o:k0000", "Hentai, Comedy"), ("o:k0001", "Drama")] {
+            ix.title_seed(key, "other", "Something", 2020).unwrap();
+            ix.title_fill(
+                key,
+                &TitleFill {
+                    genres,
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        }
+        let q = show_all(0, true);
+        let (cards, total) = ix
+            .browse_cards(&q, CardSort::Latest, false, false, None)
+            .unwrap();
+        assert_eq!(total, 9, "the Hentai-genre title is off the wall");
+        assert!(!cards.iter().any(|c| c.title_key == "o:k0000"), "{cards:?}");
+        assert!(cards.iter().any(|c| c.title_key == "o:k0001"), "{cards:?}");
+        // The shape it replaced, spelled out here so a rewrite that
+        // silently changes the ANSWER cannot pass: the LEFT JOIN with
+        // the predicate on the joined row.
+        let joined: i64 = ix
+            .db
+            .query_row(
+                &format!(
+                    "SELECT COUNT(DISTINCT r.title_key)
+                       FROM releases r LEFT JOIN titles t ON t.key = r.title_key
+                      WHERE r.title_key <> '' AND r.adult = 0
+                        AND r.title_key NOT IN (SELECT key FROM wall_hidden)
+                        AND {}",
+                    crate::index::ADULT_GENRE_SQL
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(joined as u64, total, "the two spellings are one answer");
+        // And with the setting off, the adult title is back.
+        let seen = BrowseQuery {
+            hide_adult: false,
+            ..show_all(0, true)
+        };
+        let (_, all) = ix
+            .browse_cards(&seen, CardSort::Latest, false, false, None)
+            .unwrap();
+        assert_eq!(all, 10);
+        teardown(&dir, ix);
+    }
 
     /// The to-the-day release-date sort: dated cards order by their full
     /// date, and a card with only a year sits below every dated card in

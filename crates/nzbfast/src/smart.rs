@@ -1022,11 +1022,24 @@ fn ext_of(p: &Path) -> String {
 ///
 /// `zip_parts` is the directory's zip membership from [`zip_part_set`],
 /// because some parts cannot answer for themselves: see there.
-fn is_packed_archive(p: &Path, zip_parts: &std::collections::HashSet<PathBuf>) -> bool {
+///
+/// `split_parts` is that same move for the RAR and 7z twins of that
+/// shape - a numbered byte split whose head sits in part 1 alone - from
+/// [`crate::container_part_set`], which reads them with the extractor's
+/// own grammar: see there.
+/// It carries the PLAIN reading too, unioned in at both call sites from
+/// [`crate::split_part_set`]: no part there has a head, so there is no
+/// member to spare and the sweep took the whole set (§301).
+fn is_packed_archive(
+    p: &Path,
+    zip_parts: &std::collections::HashSet<PathBuf>,
+    split_parts: &std::collections::HashSet<PathBuf>,
+) -> bool {
     crate::looks_like_named_rar(p)
         || (p.extension().is_none() && crate::rar_magic(p))
         || crate::sevenz_archive_part(p)
         || zip_parts.contains(p)
+        || split_parts.contains(p)
         || nzbkit::zip::is_container(p)
 }
 
@@ -1553,6 +1566,9 @@ fn trash_roots(path: &Path) -> Vec<std::path::PathBuf> {
         let vol: std::path::PathBuf = comps[..3].iter().collect();
         roots.push(
             vol.join(".Trashes")
+                // SAFETY: getuid(2) takes no arguments, touches no
+                // memory and cannot fail; it is unsafe only because it
+                // is an extern "C" call.
                 .join(unsafe { libc::getuid() }.to_string()),
         );
     }
@@ -2160,106 +2176,9 @@ pub(crate) fn remove_swept_file(
 }
 
 /// One background worker owns every conversation with the Trash, so no
-/// job's finalize ever waits on Finder.
-///
-/// A file is handed over by RENAME into a staging folder first - that is
-/// the synchronous part, and the reason a directory move immediately
-/// after a sweep cannot race the delete: by the time the sweep returns,
-/// the file is already out of the tree. The worker then does the real
-/// recoverable delete at its leisure, inheriting the bounded call and the
-/// unresponsive latch from `remove_user_file`.
-mod deferred_trash {
-    use crate::MutexExt;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Mutex, OnceLock, mpsc};
-    use tracing::warn;
-
-    static SENDER: OnceLock<mpsc::Sender<PathBuf>> = OnceLock::new();
-    /// Staging roots this process has already drained of leftovers.
-    static SEEN: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
-    /// Disambiguates same-named files from different jobs (every job has
-    /// a `.par2`, most have an `.nfo`).
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    fn sender() -> &'static mpsc::Sender<PathBuf> {
-        SENDER.get_or_init(|| {
-            let (tx, rx) = mpsc::channel::<PathBuf>();
-            std::thread::Builder::new()
-                .name("trash-worker".into())
-                .spawn(move || {
-                    for p in rx {
-                        // The setting is re-read at disposal time, not
-                        // frozen at park time: the file already left the
-                        // user's tree when the sweep decided to delete it,
-                        // so only its disposition (Trash vs gone) is at
-                        // stake here - and under cfg(test) the default-off
-                        // global keeps the suite out of the developer's
-                        // real Trash, exactly like every sweep. Read
-                        // through cleanup_recoverable: everything staged
-                        // here came from a GARBAGE sweep, so its
-                        // disposition follows the garbage setting, not
-                        // the download-delete one.
-                        // NotFound is Ok here (a double-enqueue after a
-                        // leftover drain, or Finder finishing behind us).
-                        //
-                        // A REFUSED delete leaves the file staged, which is
-                        // the one place this differs from an inline sweep:
-                        // the file has already left the user's tree, so the
-                        // log has to name where it is now or it is simply
-                        // missing. Staged is still recoverable - a visible
-                        // file on the same volume - and the next drain of
-                        // this root retries it.
-                        if let Err(e) = super::remove_user_file(&p, super::cleanup_recoverable()) {
-                            warn!(target: "cleanup", "deferred trash {}: {e}", p.display());
-                        }
-                        // Leave nothing behind when the queue drains: an
-                        // empty staging folder is clutter beside the
-                        // user's downloads. Non-empty simply refuses.
-                        if let Some(root) = p.parent() {
-                            let _ = std::fs::remove_dir(root);
-                        }
-                    }
-                })
-                .expect("spawn trash worker");
-            tx
-        })
-    }
-
-    /// Move `path` into `root` and queue it for the worker. The caller
-    /// treats any Err as "park unavailable" and deletes inline instead.
-    pub(super) fn stage(path: &Path, root: &Path) -> std::io::Result<()> {
-        let name = path
-            .file_name()
-            .ok_or_else(|| std::io::Error::other("no file name"))?;
-        std::fs::create_dir_all(root)?;
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let mut staged_name = std::ffi::OsString::from(format!("{}-{n}-", std::process::id()));
-        staged_name.push(name);
-        let dest = root.join(staged_name);
-        std::fs::rename(path, &dest)?;
-        // First touch of a root this process: sweep up leftovers a
-        // crashed predecessor parked and never got to. The listing
-        // includes `dest`, so nothing extra to send; later touches send
-        // just their own file. A racing second stager double-sends at
-        // worst, and the worker tolerates NotFound.
-        let fresh = SEEN
-            .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
-            .lock_ok()
-            .insert(root.to_path_buf());
-        let tx = sender();
-        if fresh {
-            if let Ok(rd) = std::fs::read_dir(root) {
-                for e in rd.flatten() {
-                    let _ = tx.send(e.path());
-                }
-            }
-        } else {
-            let _ = tx.send(dest);
-        }
-        Ok(())
-    }
-}
+/// job's finalize ever waits on Finder. See the module for the whole
+/// rationale; it lives in its own file under the §91 rule.
+mod deferred_trash;
 
 /// Is the Trash somewhere the user can actually find and empty?
 ///
@@ -2567,6 +2486,8 @@ pub fn keep_media_only(dir: &Path) -> usize {
         // Once per directory, not once per file: split sets are only
         // recognisable as sets.
         let zip_parts = zip_part_set(d);
+        let mut split_parts = crate::container_part_set(d);
+        split_parts.extend(crate::split_part_set(d)); // both readings, see `is_packed_archive`
         let Ok(rd) = std::fs::read_dir(d) else { return };
         for entry in rd.flatten() {
             let path = entry.path();
@@ -2587,7 +2508,7 @@ pub fn keep_media_only(dir: &Path) -> usize {
             // just unpacked - see `looks_like_video_bytes`.
             if is_media
                 || is_companion
-                || is_packed_archive(&path, &zip_parts)
+                || is_packed_archive(&path, &zip_parts, &split_parts)
                 || looks_like_video_bytes(&path)
             {
                 continue;
@@ -2695,6 +2616,10 @@ impl BackgroundIo {
             } else {
                 iopol::IOPOL_UTILITY
             };
+            // SAFETY: both calls take three ints and touch no memory of
+            // ours. They act on the CALLING thread's own I/O policy,
+            // which is what makes the paired restore in `Drop` correct -
+            // see this type's doc comment.
             unsafe {
                 let prev = iopol::getiopolicy_np(iopol::IOPOL_TYPE_DISK, iopol::IOPOL_SCOPE_THREAD);
                 if iopol::setiopolicy_np(iopol::IOPOL_TYPE_DISK, iopol::IOPOL_SCOPE_THREAD, policy)
@@ -2714,6 +2639,12 @@ impl BackgroundIo {
             let _ = which;
             const IOPRIO_WHO_PROCESS: libc::c_long = 1;
             const IOPRIO_CLASS_IDLE: libc::c_long = 3;
+            // SAFETY: `syscall` is variadic, so the argument types have
+            // to match the kernel's ABI by hand: both ioprio calls take
+            // `long` arguments and return an int, which is what is
+            // passed. Neither reads or writes user memory, and `who = 0`
+            // means the calling thread, so this changes nothing outside
+            // this process.
             unsafe {
                 let prev =
                     libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, 0 as libc::c_long);
@@ -2740,11 +2671,19 @@ impl BackgroundIo {
 impl Drop for BackgroundIo {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
+        // SAFETY: three ints, no memory touched, and it acts on the
+        // calling thread - the same thread `engage` demoted, since this
+        // guard is neither Send nor Sync by construction (it is held
+        // across no await and moved to no other thread).
         unsafe {
             let _ =
                 iopol::setiopolicy_np(iopol::IOPOL_TYPE_DISK, iopol::IOPOL_SCOPE_THREAD, self.prev);
         }
         #[cfg(target_os = "linux")]
+        // SAFETY: as the macos arm above - a raw syscall taking only
+        // integer arguments, touching no memory, and acting on the
+        // calling thread, which is the same thread `engage` demoted
+        // because this guard is neither Send nor Sync by construction.
         unsafe {
             const IOPRIO_WHO_PROCESS: libc::c_long = 1;
             let _ = libc::syscall(

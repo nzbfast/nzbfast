@@ -70,7 +70,12 @@ pub(super) fn local_minute_of_week() -> u32 {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as libc::time_t;
+        // SAFETY: `libc::tm` is a plain C struct of integers and a
+        // pointer; all-zero is a valid bit pattern, and localtime_r
+        // overwrites it before anything is read.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        // SAFETY: both pointers are live locals of the expected types,
+        // and the exclusive borrow rules out overlap.
         if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
             let day = (tm.tm_wday as u32 + 6) % 7; // tm_wday: 0 = Sunday
             return day * 1440 + tm.tm_hour as u32 * 60 + tm.tm_min as u32;

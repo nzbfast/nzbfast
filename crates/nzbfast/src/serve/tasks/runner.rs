@@ -227,6 +227,11 @@ pub(super) async fn download_guards(
             // too - the same transition-only edge as the marker.
             d.notify_event("disk", &msg);
             // §129 4a: the schema's disk.low, same edge.
+            // event-arm-gate: a STATE, not a moment - the #qspace
+            // banner draws it from the queue payload's own hold
+            // (`hold.kind === 'disk'`), with the live free/minimum
+            // figures and a button onto the setting that decided it.
+            // §129 1b finding (b) is the rule.
             d.life_emit(
                 "disk.low",
                 json!({
@@ -410,6 +415,10 @@ pub(super) async fn download_guards(
             // §129 2e: same transition-only edge as the marker.
             d.notify_event("quota", &msg);
             // §129 4a: the schema's quota.reached, same edge.
+            // event-arm-gate: a STATE, not a moment - the same #qspace
+            // banner draws it from the queue payload's hold
+            // (`hold.kind === 'quota'`), with the live spent/cap figures
+            // and the note that Force still runs. §129 1b finding (b).
             d.life_emit(
                 "quota.reached",
                 json!({

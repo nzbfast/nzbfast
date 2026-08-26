@@ -133,6 +133,189 @@ fn a_still_packed_set_is_never_renamed() {
     );
 }
 
+/// The obfuscated twin of `a_still_packed_set_is_never_renamed`: a
+/// numbered BYTE SPLIT of a container, where only part 1 carries the
+/// head. Every per-path question `is_furniture` asks answers "ordinary
+/// payload" for parts 2..=n, so the biggest of them was eligible to take
+/// the release name - which breaks the set exactly the way renaming one
+/// volume of a multi-volume set does, and for the same reason. The
+/// directory's own membership is what settles it: see
+/// `crate::container_part_set`.
+#[test]
+fn an_obfuscated_container_split_is_never_renamed() {
+    let root = scratch("nzb-csplit");
+    let out = root.join("blob");
+    std::fs::create_dir_all(&out).unwrap();
+    let base = "301c0186f3bbdc58ac03a8739f989391c4";
+    // Part 1 opens with the container's head; the rest are the bytes
+    // that follow it, and the LAST is the largest thing in the job.
+    std::fs::write(out.join(format!("{base}.001")), b"Rar!\x1a\x07\x01\x00").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(out.join(format!("{base}.001")))
+        .unwrap()
+        .set_len(500_000)
+        .unwrap();
+    file(&out, &format!("{base}.002"), 500_000);
+    file(&out, &format!("{base}.003"), 400_000);
+    file(&out, "blob.nfo", 1);
+
+    let dest = rename_from_nzb(&root, &out, "Whatever This Is").unwrap();
+    assert_eq!(
+        names(&dest),
+        vec![
+            format!("{base}.001"),
+            format!("{base}.002"),
+            format!("{base}.003"),
+            "blob.nfo".to_string(),
+        ],
+        "every part keeps its name; only the folder moved"
+    );
+}
+
+/// The PLAIN reading of the same shape, and the more destructive of the
+/// two: a numbered byte split with NO archive head on any part. The
+/// container twin above at least has a part 1 that answers for itself, so
+/// what it lost was the payload behind a stub it kept. Here there is
+/// nothing to answer with on ANY member - carrying a head is what
+/// disqualifies a set from this reading - so `is_furniture` reads every
+/// part as ordinary payload and the largest one takes the release name.
+/// Settled by the directory's own membership: see `crate::split_part_set`,
+/// which also records how a job reaches this pass with the set unjoined.
+#[test]
+fn a_plain_numbered_split_is_never_renamed() {
+    let root = scratch("nzb-psplit");
+    let out = root.join("blob");
+    std::fs::create_dir_all(&out).unwrap();
+    // No head on any part, uniform sizes, gapless from 1 - and the LAST
+    // part is not the largest, so the winner would be part 2.
+    file(&out, "Bonus.mkv.001", 500_000);
+    file(&out, "Bonus.mkv.002", 500_000);
+    file(&out, "Bonus.mkv.003", 400_000);
+    file(&out, "blob.nfo", 1);
+
+    let dest = rename_from_nzb(&root, &out, "Whatever This Is").unwrap();
+    assert_eq!(
+        names(&dest),
+        vec![
+            "Bonus.mkv.001",
+            "Bonus.mkv.002",
+            "Bonus.mkv.003",
+            "blob.nfo",
+        ],
+        "every part keeps its name; only the folder moved"
+    );
+}
+
+/// The subfolder twin of the two split cases above, and the shape TODO
+/// 301 recorded as the reachable one: the split sits one directory down.
+///
+/// `main_payload` reaches the top level PLUS one directory down, and it
+/// used to build its three membership sets once, from the top - so a
+/// part in `Extras/` was judged against the PARENT's sets, which never
+/// contain it. Every set-based arm of `is_furniture` then answered
+/// "ordinary payload" and the largest part took the release name:
+/// observed 25 Aug 2026 as `Bonus.mkv.001` -> `Whatever This Is.001`,
+/// breaking a set the user still needs. `keep_media_only` has always
+/// recomputed per directory; this is that asymmetry closed.
+#[test]
+fn a_plain_split_in_a_subfolder_is_never_renamed() {
+    let root = scratch("nzb-psplit-sub");
+    let out = root.join("blob");
+    let extras = out.join("Extras");
+    std::fs::create_dir_all(&extras).unwrap();
+    // The top-level payload is the SMALLEST thing here, so the winner
+    // under the old reading was a split part one level down.
+    file(&out, "Movie.mkv", 100_000);
+    file(&extras, "Bonus.mkv.001", 500_000);
+    file(&extras, "Bonus.mkv.002", 500_000);
+    file(&extras, "Bonus.mkv.003", 400_000);
+
+    let dest = rename_from_nzb(&root, &out, "Whatever This Is").unwrap();
+    assert_eq!(
+        names(&dest),
+        vec!["Extras", "Whatever This Is.mkv"],
+        "the top-level payload takes the name"
+    );
+    assert_eq!(
+        names(&dest.join("Extras")),
+        vec!["Bonus.mkv.001", "Bonus.mkv.002", "Bonus.mkv.003"],
+        "every part keeps its name - the subfolder's own membership answers"
+    );
+}
+
+/// The CONTAINER reading of the same subfolder shape. Same defect and
+/// the same edit covers it: `container_part_set` has been asked of the
+/// top directory since TODO 299, so a headed split one level down was
+/// never in the set it was judged against.
+#[test]
+fn a_container_split_in_a_subfolder_is_never_renamed() {
+    let root = scratch("nzb-csplit-sub");
+    let out = root.join("blob");
+    let extras = out.join("Extras");
+    std::fs::create_dir_all(&extras).unwrap();
+    file(&out, "Movie.mkv", 100_000);
+    let base = "301c0186f3bbdc58ac03a8739f989391c4";
+    // Part 1 opens with the container's head; the rest are the bytes
+    // that follow it.
+    std::fs::write(extras.join(format!("{base}.001")), b"Rar!\x1a\x07\x01\x00").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(extras.join(format!("{base}.001")))
+        .unwrap()
+        .set_len(500_000)
+        .unwrap();
+    file(&extras, &format!("{base}.002"), 500_000);
+    file(&extras, &format!("{base}.003"), 400_000);
+
+    let dest = rename_from_nzb(&root, &out, "Whatever This Is").unwrap();
+    assert_eq!(names(&dest), vec!["Extras", "Whatever This Is.mkv"]);
+    assert_eq!(
+        names(&dest.join("Extras")),
+        vec![
+            format!("{base}.001"),
+            format!("{base}.002"),
+            format!("{base}.003"),
+        ],
+        "every part keeps its name"
+    );
+}
+
+/// And the ZIP arm, the third set - deliberately in the one shape only
+/// `zip_part_set` can answer. A `.z01` spanned segment or a `.zip.001`
+/// split part is recognised BY NAME through `nzbkit::zip::is_container`,
+/// so neither needs a set at all; a BARE numeric group whose part 1
+/// carries zip magic does, because parts 2..=n carry nothing in the name
+/// or the head. The sizes here are uneven on purpose, which is what
+/// keeps the two splitjoin readings out of it (their rule 4 wants every
+/// part but the last the same size) and leaves `zip_part_set` as the
+/// only thing standing between part 3 and the release name.
+#[test]
+fn a_bare_numeric_zip_set_in_a_subfolder_is_never_renamed() {
+    let root = scratch("nzb-zipnum-sub");
+    let out = root.join("blob");
+    let extras = out.join("Extras");
+    std::fs::create_dir_all(&extras).unwrap();
+    file(&out, "Movie.mkv", 100_000);
+    std::fs::write(extras.join("pack.001"), b"PK\x03\x04").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(extras.join("pack.001"))
+        .unwrap()
+        .set_len(500_000)
+        .unwrap();
+    file(&extras, "pack.002", 300_000);
+    file(&extras, "pack.003", 400_000);
+
+    let dest = rename_from_nzb(&root, &out, "Whatever This Is").unwrap();
+    assert_eq!(names(&dest), vec!["Extras", "Whatever This Is.mkv"]);
+    assert_eq!(
+        names(&dest.join("Extras")),
+        vec!["pack.001", "pack.002", "pack.003"],
+        "every part keeps its name; renaming one breaks the set"
+    );
+}
+
 /// Our own state files are hidden on macOS and Linux and NOTHING on
 /// Windows. A failed job keeps its journal so a retry fetches only what
 /// is missing, so "it will not be there" is not a defence either.

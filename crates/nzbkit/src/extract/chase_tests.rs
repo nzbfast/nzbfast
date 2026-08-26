@@ -406,7 +406,7 @@ pub(in crate::extract) fn eat_budget_to(
 ///
 /// The member has to clear 4 MiB - `should_stream_decode`'s bar, and
 /// therefore the incremental split path's - and encoding it is slow
-/// enough (tens of seconds in a debug build) that the eleven cases
+/// enough (tens of seconds in a debug build) that the sixteen cases
 /// build it once between them, through `chase_volume_set_cases`.
 pub(in crate::extract) fn chase_volume_set() -> &'static (Vec<u8>, Vec<Vec<u8>>, Vec<String>) {
     static SET: std::sync::OnceLock<(Vec<u8>, Vec<Vec<u8>>, Vec<String>)> =
@@ -425,14 +425,14 @@ pub(in crate::extract) fn chase_volume_set() -> &'static (Vec<u8>, Vec<Vec<u8>>,
     })
 }
 
-/// The eleven cases that share `chase_volume_set`, run as ONE test.
+/// The sixteen cases that share `chase_volume_set`, run as ONE test.
 ///
 /// nextest gives every `#[test]` its own process, which puts the
 /// `OnceLock` above out of reach: each case built the 5 MiB compressed
 /// set again. Measured 17 Aug 2026, when the list was seven cases: 19
 /// CPU-seconds apiece - 132 of the chase module's 186 - and about 52 s
 /// apiece on a CI Windows runner. Built once, the same seven cost
-/// about 20. The list has grown since (eleven as of 22 Aug 2026, the
+/// about 20. The list has grown since (sixteen as of 25 Aug 2026, the
 /// last addition being TODO 220's nested-chase case) and the per-case
 /// figures were not re-taken; the merged test is the suite's one SLOW
 /// case, 74.8 s wall on this machine on 22 Aug 2026.
@@ -1369,7 +1369,7 @@ fn chase_patch_below_the_trim_point_forfeits_and_materializes_repaired() {
 
     // A repair rewriting a range the chase consumed AND released:
     // different bytes, wholly below the trim point.
-    let mut stale = vols[0][..(base as usize).min(vols[0].len())].to_vec();
+    let mut stale = vols[0][..crate::disk::chunk_len(base, vols[0].len())].to_vec();
     for b in stale.iter_mut() {
         *b ^= 0xff;
     }

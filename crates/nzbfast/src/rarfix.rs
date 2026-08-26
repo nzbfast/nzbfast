@@ -1171,9 +1171,7 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
             // instead of copying it, which is most of an undamaged-tail
             // repair. The create_new claim above still owns the name.
             drop(tmp_file);
-            archive
-                .repair_recovery_to_path(&tmp, password.map(str::as_bytes), budget)
-                .map(|_| ())
+            archive.repair_recovery_to_path(&tmp, password.map(str::as_bytes), budget)
         }
         Err(_) => {
             // Headers too damaged to parse: raw RAR5 recovery-chunk scan,
@@ -1185,7 +1183,7 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
             // away a repair that had actually worked.
             drop(tmp_file);
             match rars::rar50::repair_inline_recovery_path(path, &tmp, options, budget) {
-                Ok(_) => Ok(()),
+                Ok(rebuilt) => Ok(rebuilt),
                 Err(rars::Error::UnsupportedSignature) => {
                     cleanup(&tmp);
                     anyhow::bail!("unparseable and not a RAR5 volume");
@@ -1195,7 +1193,25 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
         }
     };
     match repair_result {
-        Ok(()) => {
+        Ok(rebuilt) => {
+            // KEEP the shard list rather than `map(|_| ())`. An empty one
+            // is the library saying the protected prefix was already
+            // intact - the destination is then a byte-for-byte copy and
+            // the rename publishes nothing. That used to be
+            // indistinguishable in the log from a volume genuinely rebuilt
+            // from its record, which is how a repair that did not happen
+            // read as one that did. It is now only ever the intact case:
+            // a damaged group with no usable record is an error inside the
+            // walk rather than a silently skipped group (see
+            // `recovery::stream::repair_prefix_streaming`).
+            if rebuilt.is_empty() {
+                info!(
+                    target: "repair",
+                    "{} - its recovery record reports the protected prefix already intact; \
+                     any damage is outside it",
+                    path.display()
+                );
+            }
             std::fs::rename(&tmp, path)?;
             Ok(true)
         }

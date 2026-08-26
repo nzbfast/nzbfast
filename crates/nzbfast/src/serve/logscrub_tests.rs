@@ -28,6 +28,8 @@ fn seeded(dir: &std::path::Path) -> std::sync::Arc<Daemon> {
     )
     .unwrap();
     *d.indexers.lock_ok() = vec![crate::newznab::IndexerConfig {
+        kind: Default::default(),
+        nzbindex: Default::default(),
         name: "idx".into(),
         url: "https://indexer.example/api".into(),
         // A made-up key, only ever compared against a made-up log line.

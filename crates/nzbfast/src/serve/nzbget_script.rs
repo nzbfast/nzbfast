@@ -534,7 +534,15 @@ impl Daemon {
         if parked {
             // A history record persists through its own store, and it
             // is already filed - so this is the seam that has to see it.
-            let _ = self.history_upsert(std::slice::from_ref(&job));
+            // `history_publish_change` rather than a `let _ =` upsert:
+            // the answer was dropped, so a store that refused the append
+            // left the script's pp/script override live in memory and
+            // absent from disk, and the hook's whole contract is that its
+            // answer OUTRANKS the request's params. The rescue files it
+            // anyway on the commonest refusal there is, and where it
+            // cannot the loss is exactly what this helper's sentence
+            // says: the change goes back at the next start.
+            self.history_publish_change(&job, "the post-processing script's request");
         } else {
             self.save_queue();
         }

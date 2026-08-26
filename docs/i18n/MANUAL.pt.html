@@ -321,6 +321,17 @@ imediata: a transferência ativa para em segundos e retoma depois a partir do
 diário, sem perder nada. (Trabalhos com prioridade Forçar continuam baixando, ao estilo SABnzbd.)</li>
 <li>Um <b>banner de atualização</b> aparece aqui quando uma nova versão está disponível
 (veja <a href="#updates">Atualizações</a>).</li>
+<li>Cada <b>chip de trabalho em segundo plano</b> mostra o que o nzbfast está a
+fazer neste momento - indexação, procura de metadados, feed de lançamentos,
+medição de ligações, lista de acompanhamento, sincronização de listas, mover
+ficheiros terminados, manutenção da base de dados. Clique num deles para ver o
+que pode fazer: pausar ou desligar as tarefas que têm um interruptor, ou ir
+diretamente para a lista de acompanhamento, as origens de listas ou a fila.
+Mover, manutenção e sincronização de listas terminam sozinhos e dizem isso, em
+vez de oferecer um interruptor.</li>
+<li>O <b>indicador de estado da fila</b> abre-se da mesma forma, com
+<b>Pausar</b> (deixa terminar os artigos já em curso), <b>Pausar já</b>
+(descarta-os e liberta a linha de imediato) e <b>Retomar</b>.</li>
 </ul>
 <h3>Vazão</h3>
 <p>MB/s ao vivo com um gráfico deslizante; as marcas d'água tracejadas indicam os pontos
@@ -354,7 +365,7 @@ Um botão <b>Transferir o .nzb</b> salva o arquivo <code>.nzb</code> do trabalho
 mantém sua própria cópia, então isso funciona para todo trabalho, mesmo quando o arquivo
 original já desapareceu.</li>
 <li><b>"Porque está lento?"</b> Enquanto um trabalho descarrega, a linha por baixo da barra de progresso traz um veredicto sobre <em>esse</em> trabalho, não sobre a máquina: <i>os seus fornecedores são o limite</i>, <i>esta máquina está no limite do CPU</i>, <i>o armazenamento não está a acompanhar</i>, e assim por diante. Clique nela e a linha abre nas provas: o que a sua linha consegue, o que os fornecedores entregaram, o que está a chegar agora, e uma tabela por servidor onde um fornecedor limitado se vê à primeira vista. Um trabalho à velocidade máxima não diz nada aqui, nem um cujo veredicto ainda se está a formar.</li>
-<li>Emblemas mostram estados especiais: <i>adiado (lento)</i>, <i>pré-carregando</i>,
+<li>Emblemas mostram estados especiais: <i>tentado, posto de lado</i>, <i>pré-carregando</i>,
 <i>pausado</i> (veja <a href="#performance">Ferramentas de desempenho</a>).</li>
 <li>Um gráfico de contagem regressiva acompanha o total de GB restantes em toda a fila.</li>
 </ul>
@@ -776,14 +787,6 @@ comportamento depois de cada atualização são ruins. E uma fatia grande das in
 é Docker, servidores sem tela e NAS, onde chaveiro nenhum existe, o que deixaria dois
 caminhos de armazenamento diferentes para manter corretos. Um único formato bem
 compreendido que se comporta igual em toda parte é, por ora, o melhor negócio.</p>
-<p>Outras duas opções por servidor ainda não têm controlo no painel: acrescente-as à
-mão na entrada desse servidor em <code>config.local.json</code>
-(ver <a href="#files">§17</a>) e reinicie.</p>
-<div class="tblwrap"><table>
-<tr><th>Chave</th><th>Notas</th></tr>
-<tr><td><code>bind_ip</code></td><td>Liga as ligações de saída deste servidor a um endereço local específico, para máquinas com várias saídas e túneis VPN divididos. A família de endereços escolhe também a família de destino: uma ligação v4 conecta ao endereço v4 do servidor.</td></tr>
-<tr><td><code>socks5</code></td><td>Envia o tráfego NNTP deste servidor por um proxy SOCKS5: <code>host:port</code>, ou <code>user:pass@host:port</code>. O nome do host é resolvido <em>pelo proxy</em>, logo não há fuga de DNS local.</td></tr>
-</table></div>
 <ul>
 <li>A <b>marca</b> ao lado de cada servidor é o seu interruptor: marcada, o servidor
 está no pool de download; desmarcada, está desativado. Um servidor desativado mantém as
@@ -998,6 +1001,7 @@ trabalhar com essas contas.</div>
 <tr><td>Filtros de ingestão</td><td>Regras JSON filtrando o que entra no índice: tipos (lixo ofuscado é descartado por padrão), ano/resolução/idioma, limites de tamanho.</td></tr>
 <tr><td>Varrer agora / revarredura profunda</td><td>Executa uma passagem imediatamente; com uma profundidade, revarre essa quantidade de cabeçalhos recentes.</td></tr>
 <tr><td>Chave OMDb / atualização de metadados / apagar</td><td>Controles de enriquecimento do mural (<a href="#wall">§6</a>). Apagar reconstrói o banco de dados do zero - o caminho de recuperação se ele for corrompido.</td></tr>
+<tr><td>Pausar os metadados</td><td>Deixa de ir buscar títulos, cartazes e elenco aos sites de metadados (<a href="#wall">§6</a>), enquanto a análise continua por conta própria. Nada do que já foi obtido se perde; o que for encontrado durante a pausa mantém simplesmente o nome com que foi publicado até voltar a ligar isto. A única definição deste cartão que não toca em nenhum fornecedor de usenet.</td></tr>
 <tr><td>Fluxo de pres</td><td><b>Desligado até o ligares.</b> Muitos envios são publicados sem o nome, e uma análise não tem nada para ler. Canais de retransmissão públicos anunciam o nome verdadeiro, a única via aberta para associar esses envios. Ligar mantém uma ligação aberta a uma rede IRC e escuta: nunca é enviado nada nem é criada qualquer conta. Precisa do indexador ligado, porque um fluxo sem onde guardar o que ouve é um socket aberto para nada.</td></tr>
 <tr><td>Servidor de retransmissão, Canais</td><td>A rede IRC que transporta os anúncios (anfitrião ou anfitrião:porta) e os canais a escutar, separados por vírgulas. Uma alteração faz efeito na ligação seguinte: desliga e volta a ligar o fluxo para a aplicar já.</td></tr>
 <tr><td>Nomear por correlação</td><td>As retransmissões públicas em direto não levam nomes de ficheiro, por isso a maioria dos envios ofuscados não pode ser associada diretamente. O que um anúncio fixa é quando uma publicação apareceu e o seu tamanho. Isto compara a hora e o tamanho anunciados com os envios sem nome e, quando encaixam, sugere o nome verdadeiro em Navegar. Uma sugestão é assinalada como tal, exige o teu clique e nunca renomeia ficheiros no disco.</td></tr>
@@ -1099,15 +1103,16 @@ a adição segue intocada e o log diz por quê.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (uma repetição automática recolocou na fila um download que falhou),
-<code>job.switched</code> (uma tarefa que não conseguiu terminar foi substituída
+<code>job.requeued</code> (um download saiu do histórico e voltou para a fila - uma repetição, ou uma entrada da biblioteca reproduzida), <code>job.switched</code> (uma tarefa que não conseguiu terminar foi substituída
 por uma cópia alternativa guardada para ela), <code>job.replaced</code> (o mesmo resultado, exceto que nenhuma cópia
 estava guardada, por isso uma substituta foi procurada e baixada) e
 <code>job.delete_kept</code> (uma exclusão removeu o registro mas não conseguiu
 remover os arquivos dele), mais <code>watch.picked</code> (um .nzb foi retirado
 da pasta vigiada), <code>nzb.refeed</code> (o próprio arquivo NZB de um download concluído foi acrescentado à fila, em pausa), <code>watchlist.upgraded</code> (uma melhoria da lista de
 acompanhamento chegou e a cópia substituída foi removida),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> e <code>quota.reached</code>. Cada um carrega
+<code>queue.idle</code>, <code>queue.paused</code> e <code>queue.resumed</code> (a fila parou ou voltou a andar, seja quem ou o que for que o tenha feito), <code>queue.finished_action</code>
+(a ação de fim de fila foi armada, executada ou cancelada), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> e <code>update.available</code> (foi encontrada uma versão mais recente do nzbfast). Cada um carrega
 <code>schema_version</code> (atualmente 1; chaves novas podem aparecer sem incremento -
 ignore o que você não conhece), um <code>seq</code> monotônico e um
 carimbo de tempo <code>at</code> em milissegundos.</p>
@@ -1450,7 +1455,7 @@ a <b>chave de API</b> (controle total) e a <b>chave NZB</b> (apenas adição:
 <tr><td>Automação</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnóstico</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>JSON-RPC do NZBGet</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (autenticação Basic: qualquer usuário, chave de API como senha)</td></tr>
-<tr><td>Pré-visualização / reprodução</td><td><code>/stream/&lt;nzo_id&gt;</code> (intervalos HTTP; iniciar um trabalho de biblioteca estacionado precisa de token <code>?t=</code> ou chave), <code>/m3u/&lt;id&gt;</code> (precisa da chave; gera o token), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Pré-visualização / reprodução</td><td><code>/stream/&lt;nzo_id&gt;</code> (intervalos HTTP; iniciar um trabalho de biblioteca estacionado precisa de token <code>?t=</code> ou chave), <code>/m3u/&lt;id&gt;</code> (precisa da chave ou do token da própria tarefa; gera o token), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Arquivos e locais</h2>

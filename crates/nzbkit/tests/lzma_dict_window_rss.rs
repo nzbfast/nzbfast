@@ -36,8 +36,18 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 static BIG: AtomicUsize = AtomicUsize::new(0);
 
+// SAFETY: `GlobalAlloc`'s contract is that the implementation behaves as
+// an allocator: every pointer it returns is either null or a fresh block
+// fitting the requested `Layout`, and `dealloc`/`realloc` are given back
+// exactly the (pointer, layout) pairs it handed out. This one delegates
+// all three to `System`, which upholds all of that, and adds only
+// relaxed atomic counter arithmetic - no allocation of its own, so it
+// cannot re-enter, and no pointer is derived or altered here.
 unsafe impl GlobalAlloc for Track {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        // SAFETY: `l` is forwarded untouched to the system allocator,
+        // and this function's own caller already owes it the validity
+        // `GlobalAlloc::alloc` requires (a non-zero-size layout).
         let p = unsafe { System.alloc(l) };
         if !p.is_null() {
             let cur = LIVE.fetch_add(l.size(), Relaxed) + l.size();
@@ -47,10 +57,17 @@ unsafe impl GlobalAlloc for Track {
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        // SAFETY: `alloc`/`realloc` above return `System`'s own
+        // pointers unchanged, so the (p, l) pair the caller hands back
+        // is one `System` itself issued under the same layout.
         unsafe { System.dealloc(p, l) };
         LIVE.fetch_sub(l.size(), Relaxed);
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+        // SAFETY: same argument as `dealloc` - `p` came from `System`
+        // under layout `l` - and `new` is passed through unchanged, so
+        // the caller's guarantee that it is a valid size for `l`'s
+        // alignment carries straight over.
         let np = unsafe { System.realloc(p, l, new) };
         if !np.is_null() {
             if new >= l.size() {

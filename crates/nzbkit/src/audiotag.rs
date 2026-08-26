@@ -198,7 +198,7 @@ pub fn probe<R: Read + Seek>(r: &mut R) -> Option<(&'static str, AudioTags)> {
         // ID3v2 sits at the front; a file carrying only the 128-byte
         // ID3v1 trailer is still common enough on old rips to be worth
         // the one extra seek.
-        "mp3" => id3v2_tags(&head).or_else(|| id3v1_tags(r)),
+        "mp3" => mp3_tags(&head, r),
         "m4a" | "m4b" => mp4_tags(r),
         _ => None,
     }?;
@@ -359,6 +359,41 @@ fn synchsafe(b: &[u8]) -> Option<u32> {
         return None;
     }
     Some(s.iter().fold(0u32, |a, &x| a << 7 | x as u32))
+}
+
+/// Both ID3 tags, merged, with v2 winning field by field.
+///
+/// Parsing a v2 tag is not the same as reading anything out of it:
+/// [`id3v2_tags`] answers `Some` for any structurally valid tag, and one
+/// whose frames are all unrecognized - cover art alone, or a genre - is
+/// an empty answer rather than no answer. Treating that as "tagged"
+/// hid the trailer entirely, and a v2 tag naming only the title hid the
+/// trailer's artist and album the same way. [`AudioTags::set`] writes
+/// only a field that is still empty, so filling the gaps from v1 leaves
+/// every v2 value in place.
+fn mp3_tags<R: Read + Seek>(head: &[u8], r: &mut R) -> Option<AudioTags> {
+    let mut tags = id3v2_tags(head).unwrap_or_default();
+    let full = tags.title.is_some()
+        && tags.artist.is_some()
+        && tags.album.is_some()
+        && tags.track.is_some();
+    // The trailer is at the end of the file, so reading it is a seek
+    // past everything: skipped when v2 already said all four things.
+    if !full && let Some(v1) = id3v1_tags(r) {
+        if let Some(v) = v1.title {
+            tags.set(Key::Title, &v);
+        }
+        if let Some(v) = v1.artist {
+            tags.set(Key::Artist, &v);
+        }
+        if let Some(v) = v1.album {
+            tags.set(Key::Album, &v);
+        }
+        if tags.track.is_none() {
+            tags.track = v1.track;
+        }
+    }
+    Some(tags)
 }
 
 fn id3v2_tags(head: &[u8]) -> Option<AudioTags> {
@@ -688,6 +723,14 @@ pub mod testtag {
             frames.extend_from_slice(&[0, 0]);
             frames.extend_from_slice(&body);
         }
+        let mut v = id3v2_head(&frames);
+        v.extend_from_slice(&MPEG_FRAME);
+        v.extend_from_slice(&[0u8; 512]);
+        v
+    }
+
+    /// An ID3v2.3 header wrapping an already-built run of frames.
+    fn id3v2_head(frames: &[u8]) -> Vec<u8> {
         let mut v = b"ID3".to_vec();
         v.extend_from_slice(&[3, 0, 0]);
         let n = frames.len() as u32;
@@ -697,16 +740,23 @@ pub mod testtag {
             (n >> 7 & 0x7F) as u8,
             (n & 0x7F) as u8,
         ]);
-        v.extend_from_slice(&frames);
-        v.extend_from_slice(&MPEG_FRAME);
-        v.extend_from_slice(&[0u8; 512]);
+        v.extend_from_slice(frames);
         v
     }
 
-    /// An MP3 whose only tag is the 128-byte ID3v1 trailer.
-    pub fn mp3_id3v1(title: &str, artist: &str, album: &str, track: u8) -> Vec<u8> {
-        let mut v = MPEG_FRAME.to_vec();
-        v.extend_from_slice(&[0u8; 1024]);
+    /// One ID3v2.3 frame: a 4-byte id, a plain 32-bit size and two flag
+    /// bytes. The body is written verbatim, so a frame that is not text
+    /// at all is expressible.
+    pub fn id3v2_frame(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = id.to_vec();
+        v.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        v.extend_from_slice(&[0, 0]);
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// The 128-byte ID3v1 trailer on its own.
+    fn id3v1_trailer(title: &str, artist: &str, album: &str, track: u8) -> Vec<u8> {
         let mut tag = b"TAG".to_vec();
         let mut field = |s: &str, n: usize| {
             let mut f = s.as_bytes().to_vec();
@@ -721,7 +771,32 @@ pub mod testtag {
         comment[29] = track; // v1.1: track in the last byte, 28 left NUL
         tag.extend_from_slice(&comment);
         tag.push(0); // genre
-        v.extend_from_slice(&tag);
+        tag
+    }
+
+    /// An MP3 whose only tag is the 128-byte ID3v1 trailer.
+    pub fn mp3_id3v1(title: &str, artist: &str, album: &str, track: u8) -> Vec<u8> {
+        let mut v = MPEG_FRAME.to_vec();
+        v.extend_from_slice(&[0u8; 1024]);
+        v.extend_from_slice(&id3v1_trailer(title, artist, album, track));
+        v
+    }
+
+    /// An MP3 carrying BOTH tags: the given v2.3 frames in front, and
+    /// the v1 trailer at the end. The frames are written verbatim, so a
+    /// tag with nothing this module reads - cover art alone - and a tag
+    /// naming only some of the four fields are both expressible.
+    pub fn mp3_id3v2_frames_and_id3v1(
+        frames: &[u8],
+        title: &str,
+        artist: &str,
+        album: &str,
+        track: u8,
+    ) -> Vec<u8> {
+        let mut v = id3v2_head(frames);
+        v.extend_from_slice(&MPEG_FRAME);
+        v.extend_from_slice(&[0u8; 1024]);
+        v.extend_from_slice(&id3v1_trailer(title, artist, album, track));
         v
     }
 
@@ -819,6 +894,37 @@ mod tests {
         assert_eq!(sniff_ext(&mp3), Some("mp3"));
         let t = tags(&mp3).expect("v1 trailer read");
         assert_eq!(t.title.as_deref(), Some("Old Rip"));
+        assert_eq!(t.track, Some(4));
+    }
+
+    /// A v2 tag that PARSED is not a v2 tag that SAID anything: an
+    /// APIC-only tag reads as empty, and one naming just the title
+    /// leaves three fields open. Neither may hide the v1 trailer.
+    #[test]
+    fn an_id3v2_tag_with_nothing_readable_does_not_hide_the_trailer() {
+        let apic = testtag::id3v2_frame(b"APIC", &[0, b'i', b'm', b'a', b'g', b'e', 0, 0, 0xFF]);
+        let art =
+            testtag::mp3_id3v2_frames_and_id3v1(&apic, "Old Rip", "Some Artist", "The Album", 4);
+        assert_eq!(sniff_ext(&art), Some("mp3"));
+        let t = tags(&art).expect("cover art alone must not hide the v1 trailer");
+        assert_eq!(t.title.as_deref(), Some("Old Rip"));
+        assert_eq!(t.artist.as_deref(), Some("Some Artist"));
+        assert_eq!(t.album.as_deref(), Some("The Album"));
+        assert_eq!(t.track, Some(4));
+
+        // A partial v2 tag wins its own field and fills the rest from v1.
+        let mut tit2 = vec![3u8]; // UTF-8
+        tit2.extend_from_slice(b"The Real Title");
+        let part = testtag::mp3_id3v2_frames_and_id3v1(
+            &testtag::id3v2_frame(b"TIT2", &tit2),
+            "Old Rip",
+            "Some Artist",
+            "The Album",
+            4,
+        );
+        let t = tags(&part).expect("a partial v2 tag must not hide the v1 trailer");
+        assert_eq!(t.title.as_deref(), Some("The Real Title"));
+        assert_eq!(t.artist.as_deref(), Some("Some Artist"));
         assert_eq!(t.track, Some(4));
     }
 

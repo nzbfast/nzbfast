@@ -216,11 +216,14 @@ fn speculative_prefetch_side_pool_is_one_connection_per_server() {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     };
     let live = nzbkit::pool::LiveStats::for_servers(&[
         (server("a.example"), nzbkit::pool::PoolConfig::default()),
         (server("b.example"), nzbkit::pool::PoolConfig::default()),
     ]);
+    let target = nzbkit::pool::ConnTarget::new(5);
     let main: Vec<_> = ["a.example", "b.example"]
         .iter()
         .map(|h| {
@@ -230,6 +233,10 @@ fn speculative_prefetch_side_pool_is_one_connection_per_server() {
                     connections: 50,
                     window: 8,
                     live: Some(live.clone()),
+                    live_target: Some(target.clone()),
+                    line_cap_fleet: 25,
+                    line_cap_auto: true,
+                    line_anchor_bps: 12_500_000,
                     ..Default::default()
                 },
             )
@@ -251,12 +258,31 @@ fn speculative_prefetch_side_pool_is_one_connection_per_server() {
             "{}: side pool feeds the dashboard",
             sc.host
         );
-        // Everything else about the fleet is preserved.
+        // Nor may they hold the line cap's steering wheel: live_target
+        // is the MAIN fleet's shared ConnTarget, and LineCap would pair
+        // it with the SIDE pool's one-wide `connections` as its ceiling,
+        // so the first shed writes 1 into the whole download's target.
+        assert!(
+            pc.live_target.is_none(),
+            "{}: side pool steers the main fleet",
+            sc.host
+        );
+        assert_eq!(pc.line_cap_fleet, 0, "{}: side pool caps a line", sc.host);
+        assert!(!pc.line_cap_auto, "{}: side pool governs a fleet", sc.host);
+        // Everything else about the fleet is preserved, the anchor
+        // included: the stall bound sizes an article's share from it,
+        // and it moves nothing with no targets left to move.
         assert_eq!(pc.window, 8, "{}: unrelated pool settings dropped", sc.host);
+        assert_eq!(pc.line_anchor_bps, 12_500_000, "{}: anchor lost", sc.host);
     }
     // The download's own fleet is untouched.
     assert_eq!(main[0].1.connections, 50, "main pool shrunk");
     assert_eq!(main[0].0.connections, 50, "main server config shrunk");
+    assert_eq!(
+        target.get(),
+        5,
+        "the download's own connection target moved"
+    );
 }
 
 #[test]

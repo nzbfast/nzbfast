@@ -40,6 +40,22 @@
 //! (the database had never been ANALYZEd) and the `INDEXED BY` hint in
 //! `wall_tip` - but the ceiling is what makes the NEXT slow query a slow
 //! query rather than an outage.
+//!
+//! 25 Aug 2026, TODO 300: the ceiling turned out to bound the QUEUE and
+//! not the query already inside a connection, and the next slow query
+//! duly arrived. `mode=wall2&matched=0&all=1` - the empty state's "Show
+//! unmatched" button, so a fresh install reaches it - measured 57.8 s
+//! warm and over 120 s cold on the live 50 GB index, because show-all
+//! drops the `junk < 50` predicate that `idx_rel_visible_posted` covers
+//! and the aggregate grows from 1,450 groups to 1,251,672. Four polls of
+//! it hold every connection, and an abandoned tab does not shorten one
+//! of them. Pooled reads now carry a per-query BUDGET that abandons the
+//! query and reports it (`nzbkit::index::deadline`,
+//! `serve::daemon::index_read_budget`);
+//! `a_query_that_outruns_its_budget_is_abandoned_and_the_pool_recovers`
+//! pins both halves, via the third hook mode=debug_slow_index_read -
+//! which runs real SQL rather than sleeping, because a sleep is the one
+//! thing a progress callback cannot interrupt.
 
 mod harness;
 mod scratch;
@@ -207,7 +223,7 @@ fn seed_index(dir: &Path, n: usize) {
 }
 
 fn serve(dir: &Path) -> Daemon {
-    serve_with_hooks(dir, true)
+    serve_with_hooks(dir, true, None)
 }
 
 /// `hooks` gates NZBFAST_DEBUG_HOOKS. Every daemon in this file goes
@@ -217,13 +233,22 @@ fn serve(dir: &Path) -> Daemon {
 /// loaded box - it waited 30s for a banner that a daemon which had
 /// already lost :port and exited was never going to print, then talked
 /// to nothing.
-fn serve_with_hooks(dir: &Path, hooks: bool) -> Daemon {
+///
+/// `budget_secs` overrides TODO 300's per-query read budget, whose
+/// default is 20 s. `None` leaves the default alone, which is what every
+/// test here but one wants: the point of the other legs is a connection
+/// that is OCCUPIED (a sleep inside the borrow), and a sleep is not
+/// something a budget can interrupt.
+fn serve_with_hooks(dir: &Path, hooks: bool, budget_secs: Option<u64>) -> Daemon {
     harness::serve_blocking(dir, |port| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
         if hooks {
             cmd.env("NZBFAST_DEBUG_HOOKS", "1");
         } else {
             cmd.env_remove("NZBFAST_DEBUG_HOOKS");
+        }
+        if let Some(secs) = budget_secs {
+            cmd.env("NZBFAST_INDEX_READ_BUDGET_SECS", secs.to_string());
         }
         cmd.env("NZBFAST_NO_ENRICH", "1")
             .env_remove("NZBFAST_OPEN")
@@ -555,6 +580,113 @@ fn a_slow_index_read_cannot_starve_the_http_pool() {
     );
 }
 
+/// The FOURTH shape, and the hole the three above leave (TODO 300).
+///
+/// `INDEX_READ_CONNS` caps how many workers slow query work can occupy;
+/// `INDEX_READ_WAIT` caps how long a caller queues for a connection.
+/// Neither says anything about the query already INSIDE one, and until
+/// 25 Aug 2026 nothing did - so a borrowed connection was held for
+/// exactly as long as `sqlite3_step` took, however long that was, and an
+/// abandoned browser tab did not shorten it by a millisecond. Measured
+/// on the live 50 GB index that day: `mode=wall2&matched=0&all=1` is
+/// 57.8 s warm and over 120 s cold, because show-all drops the
+/// `junk < 50` predicate a partial index covers and the aggregate goes
+/// from 1,450 groups to 1,251,672. Four of those and the pool is gone -
+/// the 2 Aug wedge again, reached through the wall rather than a lock.
+///
+/// The budget is what makes that a slow page rather than an outage. Two
+/// halves, and both matter: the query is ABANDONED (so the connection
+/// comes back), and the caller is TOLD (so a wall that could not be
+/// built does not read as a wall with nothing on it).
+///
+/// One second here rather than the 20 s default - the mechanism is the
+/// subject, not the number - and the query is a real endless one rather
+/// than a sleep, because a progress callback fires between VM
+/// instructions and has no opinion about a sleeping handler.
+#[test]
+fn a_query_that_outruns_its_budget_is_abandoned_and_the_pool_recovers() {
+    let dir = scratch("readbudget");
+    seed_index(&dir, 8);
+    let d = serve_with_hooks(&dir, true, Some(1));
+    let port = d.port;
+
+    // Prime, so `index_migrated` is set and the pool is what answers -
+    // the pre-migration fallback runs on the write mutex and carries no
+    // budget.
+    let s = api(port, "mode=index_search&q=wedge");
+    assert_eq!(
+        s["results"].as_array().map(Vec::len),
+        Some(8),
+        "seed visible before the budget legs: {s}"
+    );
+
+    // Eight endless queries: twice INDEX_READ_CONNS, and one per HTTP
+    // worker. Pre-fix this is terminal - none of them ever returns, so
+    // the four that got a connection keep it for the life of the process
+    // and every query endpoint answers busy forever.
+    //
+    // Collected through a channel with a DEADLINE rather than by joining
+    // the threads, and that is not fussiness: pre-fix these requests
+    // never return at all, so a join is a test that HANGS where it means
+    // to fail. A hung test burns a CI slot until somebody notices;
+    // nextest's default profile carries no `terminate-after`, on purpose
+    // (see .config/nextest.toml), so nothing would end it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    for _ in 0..8 {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(api(port, "mode=debug_slow_index_read"));
+        });
+    }
+    drop(tx);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut answers: Vec<serde_json::Value> = Vec::new();
+    while answers.len() < 8 {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(a) => answers.push(a),
+            Err(_) => panic!(
+                "only {} of 8 endless queries came back inside 30s - a query with no \
+                 budget never comes back, which is the wedge this bounds",
+                answers.len()
+            ),
+        }
+    }
+
+    // Every one got a verdict, and each is one of the two honest ones:
+    // it held a connection and was abandoned, or it never got one.
+    for a in &answers {
+        assert_eq!(a["busy"], true, "an endless query is never a success: {a}");
+    }
+    let abandoned = answers
+        .iter()
+        .filter(|a| {
+            a["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("too much of the index to search at once"))
+        })
+        .count();
+    assert!(
+        abandoned >= 1,
+        "at least the connections that were LENT OUT report the budget \
+         rather than a busy pool: {answers:?}"
+    );
+
+    // The half that is the whole point: the connections came BACK. A
+    // budget that reported without releasing would pass every assertion
+    // above and still be the wedge.
+    let after = api(port, "mode=index_search&q=wedge");
+    assert_eq!(
+        after["results"].as_array().map(Vec::len),
+        Some(8),
+        "the pool is whole again once the budgets expire: {after}"
+    );
+    let w = api(port, "mode=wall2");
+    assert!(
+        w.get("cards").is_some(),
+        "and the wall draws again rather than reporting busy: {w}"
+    );
+}
+
 /// The third wedge shape, found by the 2 Aug bug sweep before it fired
 /// live: `index_migrated` is sticky, so once the index database file
 /// vanishes (index_wipe deletes it; here the test deletes it directly)
@@ -638,7 +770,7 @@ fn a_missing_index_db_plus_a_held_write_mutex_cannot_park_queries() {
 #[test]
 fn debug_hook_absent_without_env() {
     let dir = scratch("nohook");
-    let d = serve_with_hooks(&dir, false);
+    let d = serve_with_hooks(&dir, false, None);
     let port = d.port;
     let t = Instant::now();
     let r = api(port, "mode=debug_hold_index&value=30");

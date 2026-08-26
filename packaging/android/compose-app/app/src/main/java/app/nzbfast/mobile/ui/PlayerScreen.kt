@@ -18,6 +18,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
@@ -58,6 +60,11 @@ fun PlayerScreen(
     job: () -> PlaybackJob?,
     telemetry: () -> StreamTelemetry?,
     inPip: () -> Boolean = { false },
+    // The video's on-screen bounds, reported whenever they change, so the
+    // caller can keep PictureInPictureParams.setSourceRectHint current -
+    // that is what lets Android 12+ animate the transition into PiP from
+    // the actual video position instead of a plain fade (PictureInPictureIssue).
+    onVideoRectChanged: (android.graphics.Rect) -> Unit = {},
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -108,7 +115,21 @@ fun PlayerScreen(
                         androidx.media3.ui.R.id.exo_progress
                     )?.isEnabled = seekAllowed
                 },
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().onGloballyPositioned { coords ->
+                    // Skip while already in the PiP window itself - those
+                    // bounds are the shrunk window, not a rect a future
+                    // transition into PiP should aim for.
+                    if (pip) return@onGloballyPositioned
+                    val bounds = coords.boundsInWindow()
+                    onVideoRectChanged(
+                        android.graphics.Rect(
+                            bounds.left.toInt(),
+                            bounds.top.toInt(),
+                            bounds.right.toInt(),
+                            bounds.bottom.toInt(),
+                        )
+                    )
+                },
             )
             if (!pip) {
                 Text(

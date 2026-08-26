@@ -178,6 +178,15 @@ pub(crate) fn reextract_dir_outcome(
     // there first; a failure still falls through, and the guard below
     // catches the case where falling through is impossible because the
     // volumes have been spent.
+    //
+    // TODO 205 follow-up: the native shortcut below and the plain feed
+    // under it are two ways at ONE set, and a native failure falls
+    // through from the first to the second - so without a rewind the
+    // failed shortcut's totals were banked into the queue row's unpack
+    // lane as a set of their own, and every header-encrypted set that
+    // fell through reported twice the bytes it produces. See
+    // [`crate::unpackprog::mark`].
+    let mark = crate::unpackprog::mark();
     if one_set && (header_encrypted || crate::eatvol::armed()) {
         info!(
             target: "extract",
@@ -268,6 +277,7 @@ pub(crate) fn reextract_dir_outcome(
     // demote rather than materializing it, so no slot writer can join
     // the snapshot either), so the credit is 0.
     let unpacked = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    mark.rewind();
     crate::unpackprog::watch(&unpacked, &[], 0);
     let sample = |ex: &Extractor| {
         let (done, total) = ex
@@ -518,6 +528,81 @@ fn plain_patch_keeps_sniff(bad_blocks: &[usize], block_size: usize) -> bool {
     !bad_blocks.iter().any(|&b| b.saturating_mul(block_size) < 8)
 }
 
+/// Test-only (`NZBFAST_TEST_WAIT_CHASE_CONSUMED_MS`): hold a mapped
+/// repair until every chased slot it is about to patch has DECODED past
+/// its damage, so the row-26 conflict tripwire is exercised by
+/// construction instead of by winning a race.
+///
+/// The tripwire only fires when a rewrite lands below the buffer's
+/// `served` line - the decode has to have consumed the stale bytes for
+/// correcting them to be a conflict at all. Which side of that line the
+/// repair lands on is pure timing: the download and the decode run
+/// concurrently, so on a box where the decode keeps up it has read the
+/// last volume by settle, and on one where it lags the repair patches
+/// bytes nothing has read and takes the in-place route, correctly.
+/// **Both endings are correct and the extracted bytes are byte-exact in
+/// each** - only the ROUTE differs. But the two `e2e_chaserepair` legs
+/// that pin the DECLINE need the first ending, and from 24 Aug 2026 the
+/// ubuntu CI runner produced the second one deterministically (six
+/// leg-attempts over three nights, every one the same way) while every
+/// box on this fleet produced the first one just as deterministically,
+/// starved to `--cpus 0.5` included. That is TODO 278, and it kept
+/// nightly red for three nights over a race nobody could reproduce.
+///
+/// A CONDITION-WAIT and deliberately not a sleep: a sleep is the same
+/// race with better odds, and better odds are what this was already
+/// running on. The timeout is a floor under a hung decode, not the
+/// mechanism - it expires into the OLD behaviour (patch anyway), so the
+/// leg then fails with the message it would have failed with before,
+/// naming which route it saw.
+///
+/// Nothing production reads the variable, and an unparseable value is
+/// the same no-op as an absent one: a debug knob must not be able to
+/// change what a real repair does.
+async fn wait_for_the_decode_to_reach_the_damage(
+    extractor: &nzbkit::extract::Extractor,
+    chased_damage: &[(usize, u64)],
+) {
+    let Some(ms) = std::env::var("NZBFAST_TEST_WAIT_CHASE_CONSUMED_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return;
+    };
+    if chased_damage.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + std::time::Duration::from_millis(ms);
+    for &(slot, end) in chased_damage {
+        // The `while let` is the loop condition doing real work rather
+        // than a shape clippy asked for: a slot whose chase is GONE has
+        // forfeited, which is the conflict in its strongest form
+        // (`chase_repair_conflicted` reads an absent chase as true), so
+        // there is nothing left to wait for and the loop is over.
+        while let Some(served) = extractor.chase_served(slot) {
+            if served >= end {
+                break;
+            }
+            if Instant::now() >= deadline {
+                info!(
+                    target: "repair",
+                    "test hook: slot {slot} decode reached {served} of {end} before the \
+                     wait expired - this repair will patch bytes the decode has not read",
+                );
+                return;
+            }
+            // `tokio::time::sleep` and not `thread::sleep`: this runs
+            // on a runtime worker, and the wait is the one place in
+            // this function that is not instantaneous. Parking the
+            // worker for up to the whole timeout would hold every other
+            // task on it - and a hook that can wedge a job is worse
+            // than the race it replaces.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+    info!(target: "repair", "test hook: the chase decode is past every damaged block");
+}
+
 /// M2c.1 - repair INTO the extracted output. When every damaged file is
 /// a mapped store-mode slot, skip volume materialization entirely: read
 /// present blocks through the extractor's volume view (header stash +
@@ -621,6 +706,13 @@ pub(crate) async fn try_mapped_repair(
     // Chased slots this call intends to patch in place - re-read for
     // the conflict verdict once every rebuilt block has landed.
     let mut chased: Vec<usize> = Vec::new();
+    // The same slots with the END of their damage, for the TODO 278
+    // ordering hook below. A repair only trips the conflict when it
+    // rewrites a byte the decode has already READ, so the hook needs to
+    // know which byte to wait for, and this is the only place that
+    // knows: `r.bad_blocks` and the set's block size are both in scope
+    // here and neither survives into the patch.
+    let mut chased_damage: Vec<(usize, u64)> = Vec::new();
     // EVERY slot this call intends to patch in place, chased or not.
     // Each was Rar / Plain / RarChase when the gate below passed it -
     // `is_mapped`, `is_plain_patchable` and `is_chase_patchable` match
@@ -682,6 +774,14 @@ pub(crate) async fn try_mapped_repair(
                         }
                         if chase_ok {
                             chased.push(*sidx);
+                            // Past the LAST bad block, clipped to the
+                            // file: a decode that has read that far has
+                            // read every byte this repair will rewrite,
+                            // so the conflict is settled rather than
+                            // still in flight.
+                            let last = r.bad_blocks.iter().copied().max().unwrap_or(0);
+                            let end = ((last as u64 + 1) * set.block_size).min(f.length);
+                            chased_damage.push((*sidx, end));
                         }
                     }
                     if !r.bad_blocks.is_empty() {
@@ -906,6 +1006,10 @@ pub(crate) async fn try_mapped_repair(
     // patch is caught by the `demoted_to_disk` sweep below, which reads
     // every in-place slot and so covers the chased ones this feed shares
     // a group with.
+    // TODO 278's ordering hook, and it must run BEFORE the pause below -
+    // the pause is what stops the decode, so a wait taken under it can
+    // never be satisfied. Unset (the only production state) is a no-op.
+    wait_for_the_decode_to_reach_the_damage(extractor, &chased_damage).await;
     let pause = extractor.pause_chase_reads();
     match repair_mapped_catalog(&files, bs, &mut cat, &set.recovery_set_id, &io, full_verify) {
         Ok(n) => {
@@ -1224,6 +1328,40 @@ enum NativeVerdict {
     Backstop,
 }
 
+/// §293: the donor directories' files as par2cmdline extra-file
+/// arguments - the fallback engine's version of the native scan's
+/// donor candidates, so both engines see the same donors. ABSOLUTE
+/// paths, unlike the `./`-prefixed in-dir names beside them: a donor
+/// dir is outside par2's cwd, and the directory half of the path is
+/// ours (the daemon built it from a job record), not subject-derived,
+/// so the leading-dash switch trap does not apply to it; the file
+/// names inside can still be hostile, which joining under the
+/// absolute donor dir already defuses. Same skip rules as the native
+/// scan: no .par2, no .nzbfast bookkeeping, same 1000-file bound.
+fn donor_extra_args(donor_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for donor in donor_dirs {
+        out.extend(
+            std::fs::read_dir(donor)
+                .into_iter()
+                .flatten()
+                .filter_map(|e| {
+                    let e = e.ok()?;
+                    let p = e.path();
+                    let name = p.file_name()?.to_string_lossy().into_owned();
+                    (e.file_type().ok()?.is_file()
+                        && !name.starts_with(".nzbfast")
+                        && !p
+                            .extension()
+                            .is_some_and(|x| x.eq_ignore_ascii_case("par2")))
+                    .then_some(p)
+                })
+                .take(1000),
+        );
+    }
+    out
+}
+
 /// Damaged path: fetch the cheapest set of recovery volumes covering
 /// `needed` blocks (exact-fit by declared slice counts), then hand the
 /// directory to par2cmdline for Reed-Solomon repair.
@@ -1264,6 +1402,9 @@ pub(crate) async fn fetch_and_repair(
     // The caller's heavy-CPU permit, handed back for the duration of
     // both recovery fetches below - see [`crate::lanegate::HeavyCpu`].
     cpu: &mut crate::lanegate::HeavyCpu,
+    // §293 donor directories - see [`donor_extra_args`] for the whole
+    // story; both repair engines below read them.
+    donor_dirs: &[PathBuf],
 ) -> Result<bool> {
     // §282 item 4: the most recent measurement of whether this source
     // will serve this recovery set at all. Seeded from the declined
@@ -1293,12 +1434,27 @@ pub(crate) async fn fetch_and_repair(
         let vols = recovery_candidates(nzb, set, already_fetched, sniffed_vols);
         let have: usize = vols.iter().map(|v| v.1).sum();
         if have < needed {
-            warn!(
+            // §293: with a donor available this is no longer a
+            // foregone conclusion - the adoption scan can stand in for
+            // recovery blocks the NZB never declared, and only
+            // `repair_dir` can say how many it finds. Fall through to
+            // the repair with whatever recovery DOES exist; if the
+            // donor comes up short the native verdict below reports
+            // the (post-adoption) shortfall exactly as before. Without
+            // a donor the arithmetic is final, as it always was.
+            if donor_dirs.is_empty() {
+                warn!(
+                    target: "repair",
+                    "unrepairable: {needed} blocks needed, only {have} recovery blocks in the NZB"
+                );
+                *shortfall = Some(RepairShortfall::Blocks { needed, have });
+                return Ok(false);
+            }
+            info!(
                 target: "repair",
-                "unrepairable: {needed} blocks needed, only {have} recovery blocks in the NZB"
+                "recovery short ({needed} blocks needed, {have} in the NZB) - \
+                 trying the failed predecessor's files as donors before giving up"
             );
-            *shortfall = Some(RepairShortfall::Blocks { needed, have });
-            return Ok(false);
         }
 
         // Min-bytes subset with slice sum ≥ needed - plus ~10% margin:
@@ -1383,8 +1539,8 @@ pub(crate) async fn fetch_and_repair(
             return NativeVerdict::Backstop;
         }
         let t0 = Instant::now();
-        use nzbkit::par2repair::{RepairStatus, repair_dir};
-        match repair_dir(out_dir) {
+        use nzbkit::par2repair::{RepairStatus, repair_dir_with_donors};
+        match repair_dir_with_donors(out_dir, donor_dirs) {
             Ok(RepairStatus::NoDamage) => {
                 info!(
                     target: "repair",
@@ -1529,7 +1685,9 @@ pub(crate) async fn fetch_and_repair(
         // cwd is out_dir) so they can only ever be read as paths.
         let dot = std::path::Path::new(".");
         let par2_arg = dot.join(&par2_name);
-        let extra_args: Vec<std::path::PathBuf> = extra_files.iter().map(|f| dot.join(f)).collect();
+        let mut extra_args: Vec<std::path::PathBuf> =
+            extra_files.iter().map(|f| dot.join(f)).collect();
+        extra_args.extend(donor_extra_args(donor_dirs));
         (par2_bin, par2_arg, extra_args)
     });
     if external.is_none() {
@@ -1611,6 +1769,9 @@ pub(crate) async fn fetch_and_repair(
         .filter(|fi| !fetched_files.contains(fi))
         .collect();
     if remaining.is_empty() {
+        if shortfall.is_none() {
+            *shortfall = blocks_shortfall(native, &wire);
+        }
         return Ok(false);
     }
     // §282 item 4: the escalation's premise is that par2's own damage
@@ -1650,7 +1811,11 @@ pub(crate) async fn fetch_and_repair(
             servers, nzb, out_dir, &buf_pool, &remaining, cancel,
         ))
         .await?;
-    if native_repair() == NativeVerdict::Done {
+    // Shadows the pre-escalation verdict on purpose: this pass ran with
+    // every volume on disk, so its needed/have supersede the first
+    // pass's for the [`blocks_shortfall`] verdict at the bottom.
+    let native = native_repair();
+    if native == NativeVerdict::Done {
         return Ok(true);
     }
     if let Some((bin, arg, extras)) = external
@@ -1702,8 +1867,26 @@ pub(crate) async fn fetch_and_repair(
             wire.describe()
         );
         *shortfall = Some(RepairShortfall::Unservable(wire));
+    } else if let Some(s) = blocks_shortfall(native, &wire) {
+        *shortfall = Some(s);
     }
     Ok(false)
+}
+
+/// Sweep S13: the donor road skips the early `Blocks` shortfall (its
+/// arithmetic is not final until the adoption scan has run), so when
+/// the native pass has measured the post-adoption shortfall, that
+/// arithmetic still belongs in the job's fail message - not only in
+/// the console. Guarded off a provider that will not serve, where "the
+/// NZB only carries {have}" would blame the poster for the provider's
+/// refusal - the `Unservable` arms own that story.
+fn blocks_shortfall(native: NativeVerdict, wire: &VolumeYield) -> Option<RepairShortfall> {
+    match native {
+        NativeVerdict::NoRecovery { needed, have } if !wire.source_will_not_serve() => {
+            Some(RepairShortfall::Blocks { needed, have })
+        }
+        _ => None,
+    }
 }
 
 /// Indexes into `vols` = (file, slices, bytes) minimizing downloaded bytes

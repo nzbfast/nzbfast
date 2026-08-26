@@ -320,6 +320,17 @@ imediată: transferul activ se oprește în câteva secunde și se reia mai târ
 jurnal, fără a pierde nimic. (Joburile cu prioritate Forțată continuă să descarce, în stil SABnzbd.)</li>
 <li>Un <b>banner de actualizare</b> apare aici când e disponibilă o versiune nouă
 (vezi <a href="#updates">Actualizări</a>).</li>
+<li>Fiecare <b>cip de activitate în fundal</b> arată ce face nzbfast chiar
+acum - indexare, căutare de metadate, flux de lansări, măsurarea
+conexiunilor, watchlist, sincronizarea listelor, mutarea fișierelor
+terminate, întreținerea bazei de date. Dă clic pe unul ca să vezi ce poți
+face: pune pe pauză sau dezactivează activitățile care au un comutator, sau
+sari direct la watchlist, la sursele de listă sau la coadă. Mutarea,
+întreținerea și sincronizarea listelor se termină singure și spun asta, în
+loc să ofere un comutator.</li>
+<li><b>Indicatorul de stare al cozii</b> se deschide la fel, cu <b>Pauză</b>
+(lasă articolele deja în curs să se termine), <b>Pauză acum</b> (le
+abandonează și eliberează linia imediat) și <b>Reia</b>.</li>
 </ul>
 <h3>Debit</h3>
 <p>MB/s în timp real cu un grafic derulant; filigranele punctate marchează maximul/minimul acestei
@@ -353,7 +364,7 @@ conectată, API-ul…). Un buton <b>Descarcă fișierul .nzb</b> îți salvează
 <code>.nzb</code> al jobului - nzbfast păstrează propria copie, așa că funcționează
 pentru fiecare job, chiar și când fișierul original a dispărut demult.</li>
 <li><b>"De ce merge încet?"</b> Cât timp o descărcare rulează, linia de sub bara ei de progres poartă un verdict despre <em>acea</em> descărcare, nu despre mașină: <i>furnizorii tăi sunt limita</i>, <i>această mașină este la limita procesorului</i>, <i>stocarea nu ține pasul</i>, și așa mai departe. Dă clic pe el și rândul se deschide pe dovezi: ce poate linia ta, ce au livrat furnizorii, ce sosește acum și un tabel pe server unde un furnizor limitat se vede dintr-o privire. O descărcare la viteză maximă nu spune nimic aici, și nici una al cărei verdict încă se formează.</li>
-<li>Insignele arată stări speciale: <i>amânat (lent)</i>, <i>preîncărcare</i>,
+<li>Insignele arată stări speciale: <i>încercat, pus deoparte</i>, <i>preîncărcare</i>,
 <i>în pauză</i> (vezi <a href="#performance">Instrumente de performanță</a>).</li>
 <li>Un grafic burn-down urmărește totalul de GB rămași în toată coada.</li>
 </ul>
@@ -773,14 +784,6 @@ comportamentul după fiecare actualizare sunt proaste. Și o parte mare a instal
 sunt Docker, servere fără ecran și cutii NAS unde nu există niciun inel de chei, ceea
 ce ar lăsa două căi diferite de stocare de ținut corecte. Un singur format bine
 înțeles, care se poartă la fel peste tot, este deocamdată târgul mai bun.</p>
-<p>Alte două opțiuni per server nu au încă un control în panou: adaugă-le manual în
-intrarea acelui server din <code>config.local.json</code>
-(vezi <a href="#files">§17</a>) și repornește.</p>
-<div class="tblwrap"><table>
-<tr><th>Cheie</th><th>Note</th></tr>
-<tr><td><code>bind_ip</code></td><td>Leagă conexiunile de ieșire ale acestui server de o adresă locală anume, pentru mașini cu mai multe ieșiri și tuneluri VPN divizate. Familia de adrese alege și familia țintă: o legare v4 se conectează la adresa v4 a serverului.</td></tr>
-<tr><td><code>socks5</code></td><td>Trimite traficul NNTP al acestui server printr-un proxy SOCKS5: <code>host:port</code> sau <code>user:pass@host:port</code>. Numele gazdei este rezolvat <em>de proxy</em>, deci nu există scurgere DNS locală.</td></tr>
-</table></div>
 <ul>
 <li><b>Bifa</b> de lângă fiecare server este comutatorul lui: bifat înseamnă că serverul
 este în pool-ul de descărcare, nebifat înseamnă dezactivat. Un server dezactivat își
@@ -998,6 +1001,7 @@ conturi.</div>
 <tr><td>Filtre de preluare</td><td>Reguli JSON care filtrează ce intră în index: tipuri (gunoiul obfuscat este eliminat implicit), an/rezoluție/limbă, limite de dimensiune.</td></tr>
 <tr><td>Scanează acum / rescanare profundă</td><td>Rulează imediat o trecere; cu o adâncime, rescanează acel număr de antete recente.</td></tr>
 <tr><td>Cheie OMDb / reîmprospătare metadate / golire</td><td>Controale de îmbogățire a peretelui (<a href="#wall">§6</a>). Golirea reconstruiește baza de date de la zero - soluția de recuperare dacă e vreodată coruptă.</td></tr>
+<tr><td>Pune metadatele pe pauză</td><td>Nu mai aduce titluri, afișe și distribuție de pe siturile de metadate (<a href="#wall">§6</a>), cât timp scanarea în sine continuă. Nimic din ce s-a adus deja nu se pierde; rândurile găsite în timpul pauzei păstrează pur și simplu numele sub care au fost postate până când o dezactivezi la loc. Singura setare de pe acest card care nu atinge niciun furnizor usenet.</td></tr>
 <tr><td>Flux de pre-uri</td><td><b>Oprit până îl pornești.</b> Multe încărcări sunt publicate fără nume, iar o scanare nu are ce citi. Canalele publice de retransmisie anunță numele adevărat, singura cale deschisă de a lega astfel de postări. Pornirea ține deschisă o conexiune la o rețea IRC și ascultă: nu se trimite niciodată nimic și nu se creează niciun cont. Cere indexatorul pornit, fiindcă un flux fără unde să pună ce aude e doar un socket ținut deschis degeaba.</td></tr>
 <tr><td>Server de retransmisie, Canale</td><td>Rețeaua IRC care poartă anunțurile (gazdă sau gazdă:port) și canalele de ascultat, separate prin virgulă. O schimbare are efect la următoarea conectare: oprește și repornește fluxul ca s-o aplici imediat.</td></tr>
 <tr><td>Denumire prin corelare</td><td>Retransmisiile publice în direct nu poartă nume de fișiere, așa că majoritatea postărilor ofuscate nu pot fi legate direct. Ce fixează totuși un anunț este momentul apariției unei lansări și cât de mare este. Aceasta compară ora și dimensiunea anunțate cu postările fără nume și, când se potrivesc, sugerează numele adevărat în Răsfoire. O sugestie este marcată ca atare, cere clicul tău și nu redenumește niciodată fișiere pe disc.</td></tr>
@@ -1101,15 +1105,16 @@ spune de ce.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (o reîncercare automată a repus în coadă o descărcare eșuată),
-<code>job.switched</code> (o sarcină care nu s-a putut finaliza a fost înlocuită
+<code>job.requeued</code> (o descărcare a ieșit din istoric și a reintrat în coadă - o reîncercare sau o intrare din bibliotecă redată), <code>job.switched</code> (o sarcină care nu s-a putut finaliza a fost înlocuită
 cu o copie alternativă păstrată pentru ea), <code>job.replaced</code> (același rezultat, doar că nicio copie nu
 era păstrată, așa că un înlocuitor a fost căutat și descărcat) și
 <code>job.delete_kept</code> (o ștergere a înlăturat înregistrarea, dar nu i-a
 putut înlătura fișierele), plus <code>watch.picked</code> (un .nzb a fost luat din
 folderul urmărit), <code>nzb.refeed</code> (fișierul NZB al unei descărcări încheiate a fost adăugat în coadă, în pauză), <code>watchlist.upgraded</code> (o îmbunătățire din lista de
 urmărire a reușit, iar copia înlocuită a fost ștearsă),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> și <code>quota.reached</code>. Fiecare poartă
+<code>queue.idle</code>, <code>queue.paused</code> și <code>queue.resumed</code> (coada s-a oprit sau a pornit din nou, oricine sau orice ar fi făcut-o), <code>queue.finished_action</code>
+(acțiunea de la sfârșitul cozii a fost armată, a rulat sau a fost anulată), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> și <code>update.available</code> (a fost găsită o versiune nzbfast mai nouă). Fiecare poartă
 <code>schema_version</code> (acum 1; chei noi pot apărea fără o incrementare -
 ignoră ce nu cunoști), un <code>seq</code> monoton și un marcaj de timp
 <code>at</code> în milisecunde.</p>
@@ -1458,7 +1463,7 @@ compatibil SABnzbd, așa că integrările SAB existente funcționează neschimba
 <tr><td>Automatizare</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostice</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (autentificare Basic: orice utilizator, cheia API drept parolă)</td></tr>
-<tr><td>Previzualizare / redare</td><td><code>/stream/&lt;nzo_id&gt;</code> (intervale HTTP; pornirea unui job de bibliotecă parcat necesită token <code>?t=</code> sau cheie), <code>/m3u/&lt;id&gt;</code> (necesită cheie; generează tokenul), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Previzualizare / redare</td><td><code>/stream/&lt;nzo_id&gt;</code> (intervale HTTP; pornirea unui job de bibliotecă parcat necesită token <code>?t=</code> sau cheie), <code>/m3u/&lt;id&gt;</code> (necesită cheie sau tokenul propriu al jobului; generează tokenul), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Fișiere și locații</h2>

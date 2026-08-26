@@ -7,6 +7,38 @@
 
 use super::*;
 
+/// What a Retry of this history row needs FREE on the output volume.
+///
+/// Almost always the extraction peak alone: a job that reached history
+/// has its archive parts on the disk already, so the room owed is the
+/// payload they unpack into (see [`unpack_space_needed`], and the
+/// failure message this pairs with, which says "nothing is re-downloaded
+/// and only the unpack re-runs").
+///
+/// The one row where that is false is the MID-DOWNLOAD full disk. Its
+/// bytes are NOT all down - that is why it stopped - so the retry has to
+/// fetch the remainder before it can unpack anything, and passing
+/// `to_fetch = 0` named a figure a whole unfetched remainder too small.
+/// The drawer gates its Retry button on this number, so under-reporting
+/// lights the button up early and the user frees exactly what we asked
+/// for and fails a second time - which is the defect the encrypted arm
+/// of `unpack_space_needed` was added for, one row over. `postproc`
+/// already draws this exact line: it appends the "nothing is
+/// re-downloaded" clause to every disk-full message EXCEPT this one.
+///
+/// The remainder comes from `downloaded_bytes` (this run's fetch, so a
+/// resumed job that failed again counts a little high - the safe
+/// direction, since the whole point is not to name a figure the user can
+/// free and still fail at).
+pub(super) fn retry_space_needed(j: &Job) -> u64 {
+    let to_fetch = if crate::serve::disk_full_mid_download(&j.fail_message) {
+        j.total_bytes.saturating_sub(j.downloaded_bytes)
+    } else {
+        0
+    };
+    unpack_space_needed(to_fetch, j.total_bytes, &j.archive_shape)
+}
+
 /// Change the category of a job that already finished: relabel the
 /// history entry and, when the payload sits in a folder of its own, move
 /// that folder to where the new category would have put it - the
@@ -578,15 +610,36 @@ const STORAGE_DELETED_MSG: &str = "the downloaded files are no longer on disk; \
 /// renders and nothing else - the drawer fetches the full row on demand
 /// via `mode=history&nzo_ids=`. Keys are a subset of the facade row's,
 /// under the same names, so the client renders both with one template.
+/// The SAB status word for a history row. `Moving` while the
+/// completed-folder move is still owed (issue #59): the mover runs
+/// post-park, so a job with an absolute category folder sat in history
+/// as `Completed` with `storage` still naming the pre-move path for the
+/// whole copy - and Sonarr/Radarr import on `Completed`, so they were
+/// handed the wrong final folder whenever they polled inside that
+/// window. Real SAB shows its post-processing stages in HISTORY
+/// (`Verifying`, `Extracting`, `Moving`, `Running`), which is why every
+/// SAB client already parses `Moving` as "busy, keep waiting"; once the
+/// attempt settles, `move_pending` drops (success and failure both -
+/// the retry ladder runs on `move_failed` + the auto-retry stamp), so
+/// this can never park an *arr forever. A FAILED move therefore reads
+/// `Completed` again, with `storage` truthfully naming the source the
+/// files still sit in.
+fn sab_history_status(j: &Job) -> &'static str {
+    match j.state {
+        JobState::Completed if j.move_pending => "Moving",
+        JobState::Completed => "Completed",
+        JobState::Failed => "Failed",
+        _ => "Queued",
+    }
+}
+
 fn history_summary(d: &Daemon, j: &Job) -> Value {
     let deleted = storage_deleted(j);
     json!({
         "nzo_id": j.nzo_id,
         "name": j.name,
         "category": if j.category.is_empty() { "*" } else { &j.category },
-        "status": if deleted { "Failed" } else {
-            match j.state { JobState::Completed => "Completed", JobState::Failed => "Failed", _ => "Queued" }
-        },
+        "status": if deleted { "Failed" } else { sab_history_status(j) },
         "bytes": j.total_bytes,
         "size": format!("{}B", sab_units(j.total_bytes as f64)),
         "completed": j.finished_unix.unwrap_or(0),
@@ -635,7 +688,7 @@ fn history_summary(d: &Daemon, j: &Job) -> Value {
         // retry actually needs free (see the full-record twins for why
         // space_needed is not the set size).
         "disk_full": j.state == JobState::Failed && disk_full_failure(&j.fail_message),
-        "space_needed": unpack_space_needed(0, j.total_bytes, &j.archive_shape),
+        "space_needed": retry_space_needed(j),
         "media": j.media,
         "archive_shape": j.archive_shape,
         "identity_name": j.identity_name,
@@ -796,9 +849,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
             "origin": j.origin,
             "nzb_path": j.nzb_path.to_string_lossy(),
             "category": if j.category.is_empty() { "*" } else { &j.category },
-            "status": if deleted { "Failed" } else {
-                match j.state { JobState::Completed => "Completed", JobState::Failed => "Failed", _ => "Queued" }
-            },
+            "status": if deleted { "Failed" } else { sab_history_status(j) },
             // §282 item 14: what this row replaced, why, and what replaced
             // it. Empty on every job that did neither, which is almost all
             // of them - the row renders the clause only when there is one.
@@ -841,7 +892,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
             // on `bytes` alone and would have lit it up one whole
             // payload too early on exactly the shape that hit this
             // (RAR5 encrypted, a tester, 2 Aug).
-            "space_needed": unpack_space_needed(0, j.total_bytes, &j.archive_shape),
+            "space_needed": retry_space_needed(j),
             // The failure classifier as a token, so the drawer can
             // say what to DO per kind - and suppress Retry for the
             // two kinds the daemon itself knows retrying cannot fix

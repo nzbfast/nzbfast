@@ -311,6 +311,144 @@ fn a_recovery_verdict_short_of_the_bar_offers_nothing() {
     }
 }
 
+/// §294 x §295: a HELD row never carries the offer, however doomed its
+/// probed health reads. Unreachable before §295 (held rows were never
+/// probed, so they had no health for `terminal_reason` to read) and
+/// live the day the prober started visiting them: without this guard a
+/// held spare of a dead post sprouts "cannot finish" with a search
+/// button on a row that is not downloading anything, and hunting a
+/// replacement FOR A SPARE is the junk-queue class §282 forbids. The
+/// dead-ness still shows where §295 put it - the health badge, and the
+/// promotion band that ranks the spare last.
+#[test]
+fn a_held_row_with_doomed_health_still_offers_nothing() {
+    let doomed = serde_json::json!({
+        "bucket": "red", "reason": "gone",
+        "per_server": [{"host": "news.example", "have": 0, "missing": 8}],
+        "sampled": 8, "present": 0, "absent": 8,
+        "answered": 1, "servers": 1, "age_days": 400,
+        "checked_at": 1, "probes": 1, "waived": false,
+    });
+    let held_row = jv(
+        "heldspare",
+        "Show.S09E01.2160p-B",
+        serde_json::json!({
+            "paused": true, "priority": DUPE_PRIORITY,
+            "held_for": "someprimary", "dupe_key": "show/s9e1",
+            "health": doomed.clone(),
+        }),
+    );
+    assert!(
+        altcand::offer_json(&held_row.lock_ok(), &[], false).is_none(),
+        "a held row must never offer, whatever its health says"
+    );
+    // The same health on an UNHELD row is the ordinary offer - which
+    // proves the guard above is the held_for field and not the verdict.
+    let live_row = jv(
+        "liveprimary",
+        "Show.S09E01.1080p-A",
+        serde_json::json!({"health": doomed}),
+    );
+    assert!(
+        altcand::offer_json(&live_row.lock_ok(), &[], false).is_some(),
+        "the identical verdict on a live row still offers"
+    );
+}
+
+/// The THIRD arm (§294): partial loss past what the recovery set can
+/// fund. Neither older arm can see this shape - the payload is not
+/// wholly gone (`no_server_can_supply` is false at 20 of 64) and the
+/// recovery set answers fine; what is doomed is the ARITHMETIC, and
+/// only the joint verdict carries it. `doubtful` deliberately offers
+/// nothing: an offer is a claim the job cannot finish, and the
+/// interval saying "cannot tell" is not that claim.
+#[test]
+fn a_completable_no_verdict_offers_the_switch_on_partial_loss() {
+    let health = |completable: &str| {
+        serde_json::json!({
+            "bucket": "red", "reason": "sampled loss",
+            "per_server": [{"host": "news.example", "have": 44, "missing": 20}],
+            "sampled": 64, "present": 44, "absent": 20,
+            "answered": 1, "servers": 1, "age_days": 400,
+            "checked_at": 1, "probes": 1, "waived": false,
+            "completable": completable,
+        })
+    };
+    let j = jv(
+        "short",
+        "Show.S01E01-A",
+        serde_json::json!({"health": health("no")}),
+    );
+    let (token, why, lead) = altcand::terminal_reason(&j.lock_ok()).expect("the short arm fires");
+    assert_eq!(token, "short");
+    assert!(
+        why.contains("20 of 64"),
+        "the sentence carries the sample it rests on: {why}"
+    );
+    assert_eq!(
+        crate::failkind::fail_kind_token(crate::failkind::fail_kind(lead)),
+        "preflight",
+        "{lead}"
+    );
+    let j = jv(
+        "unsure",
+        "Show.S01E01-B",
+        serde_json::json!({"health": health("doubtful")}),
+    );
+    assert!(
+        altcand::terminal_reason(&j.lock_ok()).is_none(),
+        "doubtful is the interval saying it cannot tell - never an offer"
+    );
+}
+
+/// The third arm's age gate (release-eve sweep S4). Both sibling arms
+/// only fire through Red, which requires the post to be past
+/// `GONE_MIN_AGE_DAYS` - but `score_completable` never reads the age,
+/// so a post sampled minutes after upload can carry `completable: "no"`
+/// on evidence the module's own Amber sentence calls "a warning and
+/// nothing more". The VERDICT may stand (it is an honest projection of
+/// the sample); the OFFER, whose copy says the articles "are gone" and
+/// whose class says no retry can help, must wait out propagation
+/// exactly as its siblings do.
+#[test]
+fn a_young_completable_no_verdict_offers_nothing() {
+    // Identical loss shape to the test above, aged AT and BELOW the
+    // propagation gate. Amber is what `health::score` builds for
+    // absent > 0 at this age, so the fixture is the shape the prober
+    // actually lands.
+    let health = |age_days: u32, bucket: &str| {
+        serde_json::json!({
+            "bucket": bucket, "reason": "sampled loss",
+            "per_server": [{"host": "news.example", "have": 44, "missing": 20}],
+            "sampled": 64, "present": 44, "absent": 20,
+            "answered": 1, "servers": 1, "age_days": age_days,
+            "checked_at": 1, "probes": 1, "waived": false,
+            "completable": "no",
+        })
+    };
+    for age in [0u32, crate::diag::GONE_MIN_AGE_DAYS - 1] {
+        let j = jv(
+            "young",
+            "Show.S01E01-A",
+            serde_json::json!({"health": health(age, "amber")}),
+        );
+        assert!(
+            altcand::terminal_reason(&j.lock_ok()).is_none(),
+            "at {age} day(s) the post may still be propagating - no offer"
+        );
+    }
+    // The boundary itself fires: at GONE_MIN_AGE_DAYS the same evidence
+    // is past the propagation window, exactly as Red's own gate reads it.
+    let j = jv(
+        "aged",
+        "Show.S01E01-A",
+        serde_json::json!({"health": health(crate::diag::GONE_MIN_AGE_DAYS, "red")}),
+    );
+    let (token, _, _) =
+        altcand::terminal_reason(&j.lock_ok()).expect("past the gate the arm fires");
+    assert_eq!(token, "short");
+}
+
 // -- §284: the same surface on a row that has ALREADY failed ---------------
 
 /// A real spooled `.nzb` for a parked row.
@@ -575,6 +713,60 @@ fn switching_a_parked_row_promotes_the_spare_and_leaves_the_record_alone() {
 }
 
 #[test]
+fn a_switched_away_record_does_not_come_back_on_a_stamp_that_never_fired() {
+    with_daemon("altcand-switch-disarms", |d| {
+        let spool = spooled();
+        // A stamp in the PAST, which is the state the offer is drawn in:
+        // `parked_replaceable` admits a lapsed one deliberately, and a
+        // busy or held daemon is exactly what leaves it unconsumed.
+        let dead = parked(
+            "dead",
+            "Show.S01E01-A",
+            &spool,
+            serde_json::json!({
+                "dupe_key": "show/s1e1",
+                "auto_retry_at": 1, "auto_retry_why": "transient",
+            }),
+        );
+        d.history.lock_ok().push(dead);
+        {
+            let mut q = d.queue.lock_ok();
+            q.push_back(jv(
+                "spare",
+                "Show.S01E01-B",
+                serde_json::json!({
+                    "paused": true, "priority": DUPE_PRIORITY,
+                    "held_for": "dead", "dupe_key": "show/s1e1",
+                }),
+            ));
+        }
+        assert_eq!(d.alt_switch("dead", "spare"), None, "the switch is taken");
+        {
+            let h = d.history.lock_ok();
+            let g = h[0].lock_ok();
+            assert_eq!(g.auto_retry_at, None, "the switch disarmed the stamp");
+            assert_eq!(g.auto_retry_why, None);
+        }
+        // The scheduler's own pass, which is where the double download
+        // came from: it filters on Failed + due and nothing else.
+        d.run_due_auto_retries();
+
+        let h = d.history.lock_ok();
+        assert_eq!(h.len(), 1, "the record is still filed");
+        let g = h[0].lock_ok();
+        assert_eq!(g.nzo_id, "dead");
+        assert_eq!(g.alt_to_name, "Show.S01E01-B", "item 14's row survives");
+        assert_eq!(g.state, JobState::Failed);
+        drop(g);
+        drop(h);
+        let q = d.queue.lock_ok();
+        let ids: Vec<String> = q.iter().map(|j| j.lock_ok().nzo_id.clone()).collect();
+        assert_eq!(q.len(), 1, "only the replacement runs: {ids:?}");
+        assert_eq!(q[0].lock_ok().nzo_id, "spare");
+    });
+}
+
+#[test]
 fn a_parked_switch_is_refused_on_every_record_it_would_be_wrong_for() {
     with_daemon("altcand-parked-refuse", |d| {
         let spool = spooled();
@@ -728,6 +920,64 @@ fn a_clicked_switch_on_a_failed_row_repoints_the_spares_it_did_not_pick() {
         assert_eq!(
             runner.held_for, "spare-a",
             "the runner-up still names a record that will never be offered again"
+        );
+    });
+}
+
+/// The same switch, on a `history.jsonl` this daemon cannot append to -
+/// left 0444, or owned by a uid it no longer runs as after one
+/// `sudo nzbfast`. `queue.json` goes through `persist::write_atomic` and
+/// needs only the DIRECTORY, so it keeps landing while every history
+/// append is refused.
+///
+/// This is the QUEUE -> history road, so there is no `park_prewrite`
+/// behind it and no second write after it: the one upsert here is the
+/// only thing that will ever put the original on disk, and its answer
+/// was dropped by a semicolon. The switch had already been reported
+/// taken, the queue row was already gone, and the record came back at
+/// the next start as a QUEUED job beside the alternative that replaced
+/// it - the user's release downloaded twice.
+#[test]
+fn a_switch_files_the_original_through_a_store_that_refuses_the_append() {
+    use crate::serve::storecut::{Store, arm_store_cut, disarm};
+
+    with_daemon("altcand-switch-refused", |d| {
+        {
+            let mut q = d.queue.lock_ok();
+            q.push_back(jv(
+                "doomed",
+                "Show.S01E01.2160p-A",
+                serde_json::json!({"health": gone_health(), "dupe_key": "show/s1e1"}),
+            ));
+            q.push_back(jv(
+                "spare",
+                "Show.S01E01.2160p-B",
+                serde_json::json!({
+                    "paused": true, "priority": DUPE_PRIORITY,
+                    "held_for": "doomed", "dupe_key": "show/s1e1",
+                }),
+            ));
+        }
+
+        arm_store_cut(&[Store::HistoryAppend]);
+        assert_eq!(d.alt_switch("doomed", "spare"), None, "the switch is taken");
+        disarm();
+
+        let d2 = restart(d);
+        assert!(
+            d2.history
+                .lock_ok()
+                .iter()
+                .any(|j| j.lock_ok().nzo_id == "doomed"),
+            "the replaced record was lost from BOTH stores - the append was \
+             refused and nothing stood the rewrite in for it"
+        );
+        assert!(
+            d2.queue
+                .lock_ok()
+                .iter()
+                .all(|j| j.lock_ok().nzo_id != "doomed"),
+            "and it must not come back as a queued job beside its replacement"
         );
     });
 }

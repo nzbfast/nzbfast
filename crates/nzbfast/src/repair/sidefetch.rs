@@ -112,7 +112,40 @@ pub(crate) struct VolumeYield {
     /// Of those, the ones that produced no bytes. Counted the same way,
     /// so an omitted duplicate is a failure here exactly as it is for
     /// the "did this volume land whole" question - see [`volume_reqs`].
+    ///
+    /// COMPLETENESS, not evidence: `failed == 0` is still the only
+    /// value that means every chosen volume landed whole, whoever lost
+    /// the articles. The verdict about the SOURCE reads [`Self::ours`]
+    /// out of this first - see [`Self::source_asked`].
     pub(crate) failed: u32,
+    /// Of [`Self::failed`], the ones that are evidence about US rather
+    /// than about the source. TODO 307 item 1's residue, 26 Aug 2026.
+    ///
+    /// Until this field existed a `FetchOutcome::Failed` was charged
+    /// identically to a `Missing`, so two opposite facts arrived in one
+    /// number. A `Missing` is every live server having been asked and
+    /// having answered 430/423, which is exactly what this type is for.
+    /// A `Failed` is the pool giving up without a body, and NOT ONE of
+    /// `FailCode`'s four variants is the source refusing: two of them
+    /// (`FleetExhausted`, `WorkerPanic`) mean nobody ever asked at all,
+    /// and the other two (`Transport`, `ReadStall`) are the link
+    /// between us and the provider, which `FailKind::Transport` exists
+    /// one layer up to keep out of verdicts about a post. Our own disk
+    /// refusing a volume writer is the same class again, and so is an
+    /// omitted duplicate: no request goes out for one, so no provider
+    /// declined anything.
+    ///
+    /// What that cost, and it is the whole reason for the field:
+    /// [`Self::source_will_not_serve`] drives
+    /// `RepairShortfall::Unservable`, whose clause tells the user "the
+    /// payload is not the problem here, so a different source for the
+    /// same release is what would fix it". A fleet that wound down mid
+    /// recovery-fetch could reach that sentence, sending the reader
+    /// after another release for a failure that was ours.
+    ///
+    /// Always a subset of `failed`; every derived number clamps it so a
+    /// miscount cannot invent delivered articles.
+    pub(crate) ours: u32,
 }
 
 /// §282 item 4: the share of a recovery fetch's articles that must
@@ -141,14 +174,45 @@ impl VolumeYield {
         self.asked.saturating_sub(self.failed)
     }
 
-    /// Delivered over asked, or 1.0 for a fetch that asked for nothing
-    /// (an empty ask has demonstrated nothing about the source, and the
-    /// safe reading of "nothing demonstrated" is "carry on").
+    /// [`Self::ours`], held to its contract: never more than
+    /// [`Self::failed`]. Clamped rather than trusted because every
+    /// number below is derived by subtracting it, and an `ours` past
+    /// `failed` would report MORE articles delivered than were asked
+    /// for - a yield over 100% and a verdict that can never fire.
+    fn ours_capped(&self) -> u32 {
+        self.ours.min(self.failed)
+    }
+
+    /// The articles this fetch actually put a question to the source
+    /// about: [`Self::asked`] minus the ones that failed on our side.
+    ///
+    /// This is the denominator, and taking OURS out of it is as
+    /// deliberate as taking them out of the numerator. The two go
+    /// together: a fetch of 1000 articles that lost 900 to a fleet
+    /// wind-down asked the source about 100, and the honest sample is
+    /// 100 - not 1000, which would read as a 10% yield and condemn the
+    /// provider, and not 1000-with-900-forgiven either, which would
+    /// read as 100% and forgive a source that really did refuse the
+    /// hundred it was asked. Shrinking the sample also puts
+    /// [`MIN_RECOVERY_YIELD_SAMPLE`] back in charge: a fetch that only
+    /// ever reached the source with four articles is refused as a
+    /// verdict, which is the same floor and the same reason as a fetch
+    /// that only ASKED for four.
+    pub(crate) fn source_asked(&self) -> u32 {
+        self.asked.saturating_sub(self.ours_capped())
+    }
+
+    /// Delivered over what the source was actually asked, or 1.0 when
+    /// the source was asked nothing (an empty ask has demonstrated
+    /// nothing about the source, and the safe reading of "nothing
+    /// demonstrated" is "carry on" - which is also the right answer for
+    /// a fetch whose every loss was ours).
     pub(crate) fn fraction(&self) -> f64 {
-        if self.asked == 0 {
+        let asked = self.source_asked();
+        if asked == 0 {
             return 1.0;
         }
-        f64::from(self.delivered()) / f64::from(self.asked)
+        f64::from(self.delivered()) / f64::from(asked)
     }
 
     /// §282 item 4: has this source demonstrated it will not serve this
@@ -159,19 +223,39 @@ impl VolumeYield {
     /// "this is taking too long" and reasons about it with a 2x parity
     /// margin; conflating the two would let a slow-but-serving provider
     /// be declared dead, which is the §275 mistake wearing a new hat.
-    /// This fires only on what the wire actually returned.
+    /// This fires only on what the wire actually returned, which since
+    /// 26 Aug 2026 is a claim the arithmetic can keep: OUR OWN losses
+    /// are held out of both halves of the ratio (see [`Self::ours`]),
+    /// so a fleet that wound down mid-fetch cannot be read as a
+    /// provider that refused.
     pub(crate) fn source_will_not_serve(&self) -> bool {
-        self.asked >= MIN_RECOVERY_YIELD_SAMPLE && self.fraction() < MIN_RECOVERY_YIELD
+        self.source_asked() >= MIN_RECOVERY_YIELD_SAMPLE && self.fraction() < MIN_RECOVERY_YIELD
     }
 
     /// The clause a log line or a job verdict states this in.
+    ///
+    /// Over the SOURCE sample, so the numbers a user reads are the
+    /// numbers the verdict was reached on. Our own losses are named
+    /// separately rather than dropped: a console line that said "12 of
+    /// 200 arrived" about a fetch of 1000 would leave the other 788
+    /// unaccounted for, and the point of the split is to be able to say
+    /// which half of it was whose. With no losses of ours - every shape
+    /// the e2e suite pins, and the §282 incident itself - this is the
+    /// sentence it always was, character for character.
     pub(crate) fn describe(&self) -> String {
-        format!(
+        let ours = self.ours_capped();
+        let mut s = format!(
             "{} of {} recovery article(s) arrived ({:.1}%)",
             self.delivered(),
-            self.asked,
+            self.source_asked(),
             self.fraction() * 100.0
-        )
+        );
+        if ours > 0 {
+            s.push_str(&format!(
+                ", plus {ours} that failed on our side rather than the provider's"
+            ));
+        }
+        s
     }
 }
 
@@ -203,8 +287,16 @@ pub(crate) async fn fetch_volumes(
     }
     // The omitted duplicates never reach the wire, so they are in the
     // ask (this fetch was responsible for them) and in the failures
-    // (nothing here will produce their bytes) alike - which leaves the
-    // ratio exactly where it would be without them.
+    // (nothing here will produce their bytes) alike. They are OURS as
+    // well, and that third counting is what finally makes the sentence
+    // above true: no request goes out for an omitted duplicate, so no
+    // provider ever declined it, and a source verdict that counted them
+    // would read a repeated message-id in the POSTER's own recovery set
+    // as a provider refusing to serve it. Charged to both halves of the
+    // source ratio, they cancel, which is what "leaves the ratio
+    // exactly where it would be without them" has to mean - charged to
+    // the denominator alone, as they were until 26 Aug 2026, they drag
+    // it down.
     let asked = (ids.len() as u32).saturating_add(omitted);
     fetch_volume_articles(
         servers,
@@ -219,6 +311,7 @@ pub(crate) async fn fetch_volumes(
     .map(|(failures, _paths)| VolumeYield {
         asked,
         failed: failures.total().saturating_add(omitted),
+        ours: failures.ours().saturating_add(omitted),
     })
 }
 
@@ -236,6 +329,18 @@ pub(crate) async fn fetch_volumes(
 /// the only trace such a segment leaves anywhere, so a caller that
 /// judges a volume complete has to add it to the article failures the
 /// fetch reports (Codex F-02).
+///
+/// `#[must_use]`, and that attribute is the regression (sweep 9,
+/// finding 7): F-02 converted `fetch_volumes` and left the speculative
+/// prefetch reading `f.total() == 0` over a discarded count, so a
+/// volume that repeated a message-id inside itself was recorded
+/// complete and struck off the post-settle fetch list with slices it
+/// never held. Nothing about that omission was visible - no request
+/// goes out, so no `Missing`/`Failed` comes back. A third caller
+/// written the same way is now a compile error rather than a false
+/// completeness, which is the only place this class can be caught
+/// cheaply.
+#[must_use = "add the omitted-duplicate count to the article failures before judging a volume complete"]
 pub(crate) fn volume_reqs(
     nzb: &Nzb,
     fi: usize,
@@ -325,26 +430,54 @@ pub(crate) fn side_pool_servers(
             // of the download, so they must not move the dashboard's
             // per-server gauges either.
             pc.live = None;
-            // And they must not charge the fetch->decode channel gauge:
-            // this consumer never releases it, so a cloned Some would
-            // leak the gauge upward for every side-fetched article.
-            pc.channel_gauge = None;
-            // TODO 114: the steer seam defers each Done's completion
-            // until the consumer's note_decoded verdict - and the
-            // side-fetch consumer (consume_volume_articles) never
-            // gives one (it has no QueueControl at all), so a cloned
-            // crc_steer would park every delivery forever and hang
-            // the volume fetch. fetch_volume_articles now strips the
-            // ack seams itself (the 7 Aug 2026 wedge came in through
-            // a caller that bypassed this helper); cleared here too
-            // so the side pool's config states its own contract.
-            // Damaged side-fetched volumes already have their own
-            // answer: incomplete volumes stay fetchable and repair
-            // proves the bytes.
-            pc.crc_steer = false;
+            // fetch_volume_articles strips the rest itself (the 7 Aug
+            // 2026 wedge came in through a caller that bypassed this
+            // helper); applied here too so the side pool's config
+            // states its own contract.
+            strip_side_pool_seams(&mut pc);
             (sc, pc)
         })
         .collect()
+}
+
+/// Everything a cloned MAIN-fleet config must give up before a side
+/// pool may run on it. Called from the one driver every side-fetch goes
+/// through, so no caller can reintroduce one of these by cloning the
+/// download's configs and skipping [`side_pool_servers`].
+fn strip_side_pool_seams(pc: &mut nzbkit::pool::PoolConfig) {
+    // TODO 114: the steer seam defers each Done's completion until the
+    // consumer's note_decoded verdict - and the side-fetch consumer
+    // (consume_volume_articles) never gives one (it has no QueueControl
+    // at all), so a cloned crc_steer would park every delivery forever
+    // and hang the volume fetch. arrival_ack is the same seam one step
+    // further on: note_settled never comes either. Damaged side-fetched
+    // volumes already have their own answer - incomplete volumes stay
+    // fetchable and repair proves the bytes.
+    pc.crc_steer = false;
+    pc.arrival_ack = false;
+    // This consumer never releases the fetch->decode channel gauge, so
+    // it must not charge it: a cloned Some leaks the gauge upward for
+    // every side-fetched article.
+    pc.channel_gauge = None;
+    // And the side pool must not hold the line cap's steering wheel.
+    // `live_target` is the MAIN fleet's shared ConnTarget (these configs
+    // are a clone of the download's), while `connections` here is the
+    // side pool's own tiny width - 1 for the speculative prefetch, up to
+    // 8 for the §146 demand rung. LineCap::new pairs the two as
+    // (target, ceiling), so the first line_cap_tick a delivered body
+    // drives computes `want = share.min(ceiling)` = the SIDE pool's
+    // width and, with the cloned anchor permitting the shed, writes it
+    // into the main fleet's targets: every main worker then parks down
+    // to one connection for the rest of the job, and the main pool's own
+    // tick cannot raise it back (the target no longer holds the value
+    // that tick set). Clearing the targets is enough on its own -
+    // line_cap_tick returns at its all-None guard - but the knobs go too
+    // so the config states its own contract. `line_anchor_bps` stays:
+    // the stall bound sizes an article's share from it, and it moves
+    // nothing once there are no targets left to move.
+    pc.live_target = None;
+    pc.line_cap_fleet = 0;
+    pc.line_cap_auto = false;
 }
 
 /// Inner driver for recovery-volume side-fetches: downloads the given
@@ -429,19 +562,17 @@ pub(crate) async fn fetch_volume_articles_with(
     // completion behind an ack that can never come: the volume lands
     // fully on disk while the pool never drains, and the job hangs in
     // "Repairing" with the whole finalize chain wedged behind it (the
-    // 7 Aug 2026 daemon wedge). side_pool_servers already strips these
+    // 7 Aug 2026 daemon wedge). The same clone also carries the line
+    // cap's live targets, which a 1-connection side pool would shed the
+    // whole main fleet down to. side_pool_servers already strips both
     // for the speculative prefetch, but the strip belongs HERE, at the
     // single driver every side-fetch goes through, so no caller can
-    // reintroduce the hang.
+    // reintroduce either. See [`strip_side_pool_seams`].
     let servers: Vec<(ServerConfig, nzbkit::pool::PoolConfig)> = servers
         .iter()
         .map(|(sc, pc)| {
             let mut pc = pc.clone();
-            pc.crc_steer = false;
-            pc.arrival_ack = false;
-            // Same contract as the seam strips above: this consumer
-            // never releases the channel gauge, so it must not charge it.
-            pc.channel_gauge = None;
+            strip_side_pool_seams(&mut pc);
             (sc.clone(), pc)
         })
         .collect();
@@ -504,22 +635,71 @@ pub(crate) async fn fetch_volume_articles_with(
 /// counted apart and taints EVERY file: nothing here can say which
 /// volume lost it, and calling a whole volume short costs a refetch
 /// while calling a short one whole destroys good bytes.
+///
+/// Since 26 Aug 2026 every charge also carries a [`Blame`], and the two
+/// axes answer DIFFERENT questions - see [`Self::ours`]. The
+/// attribution axis (`total` / `for_file`) is unchanged and still
+/// counts every failure whoever lost it, because "is this volume
+/// complete" does not care whose fault a hole is.
 #[derive(Debug, Default)]
 pub(crate) struct VolumeFailures {
     per_file: std::collections::HashMap<usize, u32>,
     unattributed: u32,
+    ours: u32,
+}
+
+/// Whether one failed recovery article is evidence about the SOURCE or
+/// about US. The second axis of [`VolumeFailures`], and the whole of
+/// what [`VolumeYield::source_will_not_serve`] may reason about.
+///
+/// Not a shade of the attribution axis and not a replacement for it: a
+/// volume that lost an article to our own wound-down fleet is just as
+/// PARTIAL as one the provider refused, and `fetch_volumes`' contract
+/// that only a complete volume may enter a whole-file exclusion list
+/// rests on that. Two questions, two counters.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Blame {
+    /// A provider was asked and did not produce the bytes. Evidence
+    /// about this source's willingness to serve this recovery set.
+    Source,
+    /// Nobody asked, or our own side lost it. Evidence about us.
+    Ours,
 }
 
 impl VolumeFailures {
     /// One failure that belongs to file index `fi`.
-    fn charge(&mut self, fi: usize) {
+    fn charge(&mut self, fi: usize, blame: Blame) {
         let n = self.per_file.entry(fi).or_insert(0);
         *n = n.saturating_add(1);
+        self.charge_blame(blame);
     }
 
     /// One failure no file index could be found for.
-    fn charge_unattributed(&mut self) {
+    fn charge_unattributed(&mut self, blame: Blame) {
         self.unattributed = self.unattributed.saturating_add(1);
+        self.charge_blame(blame);
+    }
+
+    /// One failure charged to whichever file owns `id`, or to nobody
+    /// when the id resolves to none - the lookup both terminal outcomes
+    /// do, in one place so a new outcome arm cannot spell it a third
+    /// way.
+    fn charge_id(
+        &mut self,
+        id_to_file: &std::collections::HashMap<Arc<str>, usize>,
+        id: &str,
+        blame: Blame,
+    ) {
+        match id_to_file.get(id) {
+            Some(&fi) => self.charge(fi, blame),
+            None => self.charge_unattributed(blame),
+        }
+    }
+
+    fn charge_blame(&mut self, blame: Blame) {
+        if blame == Blame::Ours {
+            self.ours = self.ours.saturating_add(1);
+        }
     }
 
     /// Every failure in the fetch, however it was attributed - what a
@@ -530,6 +710,13 @@ impl VolumeFailures {
             .copied()
             .sum::<u32>()
             .saturating_add(self.unattributed)
+    }
+
+    /// Of [`Self::total`], the ones that demonstrated nothing about the
+    /// source. Always a subset. See [`VolumeYield::ours`] for what
+    /// reading them as a provider's refusal used to cost.
+    pub(crate) fn ours(&self) -> u32 {
+        self.ours
     }
 
     /// Failures that may have cost `fi` bytes: its own, plus every
@@ -578,12 +765,27 @@ pub(crate) async fn consume_volume_articles(
     while let Some(outcome) = rx.recv().await {
         match outcome {
             FetchOutcome::Done { id, raw } => {
+                // Guarded the moment it leaves the channel, so every arm
+                // below returns it without having to remember to.
+                let raw = buf_pool.adopt(raw);
                 let Some(&fi) = id_to_file.get(&*id) else {
-                    buf_pool.give(raw);
                     continue;
                 };
                 match nzbkit::yenc_simd::decode(&raw) {
-                    Ok(dec) if !unwritable.contains(&fi) => {
+                    // The wire produced bytes and they would not decode
+                    // - a truncated body, a broken yEnc frame, a pcrc32
+                    // that does not check out. That IS a fact about
+                    // what this source served, and it is the reading
+                    // the main run already takes (a `DecodeReport::Bad`
+                    // sends the article to another server). So it
+                    // charges the source, exactly as it did before the
+                    // blame axis existed.
+                    Err(_) => failures.charge(fi, Blame::Source),
+                    // A volume this consumer already failed to open.
+                    // The provider served the article; our disk, or the
+                    // name it sanitised to, is what lost it.
+                    Ok(_) if unwritable.contains(&fi) => failures.charge(fi, Blame::Ours),
+                    Ok(dec) => {
                         let w = match writers.entry(fi) {
                             Entry::Occupied(e) => Some(&e.into_mut().1),
                             Entry::Vacant(slot) => {
@@ -621,27 +823,110 @@ pub(crate) async fn consume_volume_articles(
                         };
                         match w {
                             Some(w) if w.write_at(dec.offset(), &dec.data).is_ok() => {}
-                            _ => failures.charge(fi),
+                            // The writer could not be created (full,
+                            // read-only, unopenable name) or the write
+                            // failed. Both are this end, so neither is
+                            // evidence about the source.
+                            _ => failures.charge(fi, Blame::Ours),
                         }
                     }
-                    _ => failures.charge(fi),
                 }
-                buf_pool.give(raw);
             }
             // Both remaining variants carry the id, so a terminal
             // article failure lands on its own volume. Matched by name
             // rather than `_` so a new outcome variant has to be
             // attributed here by hand instead of silently tainting the
             // whole fetch.
-            FetchOutcome::Missing { id, .. } | FetchOutcome::Failed { id, .. } => {
-                match id_to_file.get(&*id) {
-                    Some(&fi) => failures.charge(fi),
-                    None => failures.charge_unattributed(),
-                }
+            //
+            // They are charged to the same file and to OPPOSITE sides
+            // of the blame axis, which is the 26 Aug 2026 fix: until
+            // then one arm covered both and `VolumeYield::failed` mixed
+            // "every live server refused this" with "our fleet wound
+            // down before anyone asked". See [`VolumeYield::ours`].
+            FetchOutcome::Missing { id, .. } => {
+                // Every server still live was asked and answered
+                // 430/423, or the article is past every configured
+                // server's retention so this source's coverage of the
+                // set says the same thing without a round trip. Either
+                // way asking this source for MORE of the set is what
+                // the gate exists to refuse, and either way an
+                // alternate source is the remedy the clause names.
+                failures.charge_id(&id_to_file, &id, Blame::Source);
+            }
+            FetchOutcome::Failed { id, code, .. } => {
+                // NOT ONE of these is the source refusing, and the
+                // match is spelled out variant by variant rather than
+                // collapsed so a FIFTH `FailCode` has to be classified
+                // here by hand. The identical right-hand sides are the
+                // finding, not a redundancy to tidy away.
+                let blame = match code {
+                    // Nobody ever asked: the fleet wound down with work
+                    // still queued, or a worker panicked holding it.
+                    // `FleetExhausted` is the shape that reached the
+                    // user as "a different source would fix it".
+                    nzbkit::fail::FailCode::FleetExhausted
+                    | nzbkit::fail::FailCode::WorkerPanic => Blame::Ours,
+                    // The link between us and the provider failed, or
+                    // OUR read deadline ended the session. Says nothing
+                    // about whether the article is there, which is why
+                    // `FailKind::Transport` is kept out of dead-post
+                    // reporting one layer up for the same reason.
+                    nzbkit::fail::FailCode::Transport | nzbkit::fail::FailCode::ReadStall => {
+                        Blame::Ours
+                    }
+                };
+                failures.charge_id(&id_to_file, &id, blame);
             }
         }
     }
     (failures, writers.into_values().map(|(p, _)| p).collect())
+}
+
+/// What a side pool may NOT inherit from the download's configs. Every
+/// side-fetch runs on a clone of the MAIN fleet's configs, so each of
+/// these is a seam the download owns and the side pool would drive.
+#[cfg(test)]
+mod side_pool_strip_tests {
+    use super::*;
+
+    /// A main-fleet config as `get::fleet` builds it for a daemon job:
+    /// five connections, the line cap armed, and a live target the whole
+    /// download's workers read.
+    fn main_fleet_config(target: &Arc<nzbkit::pool::ConnTarget>) -> nzbkit::pool::PoolConfig {
+        nzbkit::pool::PoolConfig {
+            connections: 5,
+            crc_steer: true,
+            arrival_ack: true,
+            live_target: Some(target.clone()),
+            line_cap_fleet: 25,
+            line_cap_auto: true,
+            line_anchor_bps: 12_500_000,
+            ..Default::default()
+        }
+    }
+
+    /// The bug: the side pool's clone kept `live_target`, so LineCap
+    /// paired the MAIN fleet's shared ConnTarget with the SIDE pool's
+    /// own width as its ceiling. One second of volume delivery later the
+    /// shed wrote that width into the download's target and every main
+    /// worker parked, for the rest of the job, with no raise arm able to
+    /// undo it. The anchor stays - the stall bound sizes an article's
+    /// share from it and it moves nothing once the targets are gone.
+    #[test]
+    fn a_side_pool_never_holds_the_main_fleets_conn_target() {
+        let target = nzbkit::pool::ConnTarget::new(5);
+        let mut pc = main_fleet_config(&target);
+        strip_side_pool_seams(&mut pc);
+        assert!(pc.live_target.is_none(), "side pool kept the main target");
+        assert_eq!(pc.line_cap_fleet, 0);
+        assert!(!pc.line_cap_auto);
+        assert_eq!(pc.line_anchor_bps, 12_500_000, "the stall bound wants it");
+        // And the seams the 7 Aug 2026 wedge came in through.
+        assert!(!pc.crc_steer);
+        assert!(!pc.arrival_ack);
+        assert!(pc.channel_gauge.is_none());
+        assert_eq!(target.get(), 5, "the download's own target moved");
+    }
 }
 
 /// §282 item 4's gate, on its own. Arithmetic only - the wire shapes
@@ -659,6 +944,7 @@ mod volume_yield_tests {
         let y = VolumeYield {
             asked: 1293,
             failed: 1206,
+            ours: 0,
         };
         assert!(y.source_will_not_serve());
         assert!(y.fraction() < 0.07, "{}", y.fraction());
@@ -674,6 +960,7 @@ mod volume_yield_tests {
         let y = VolumeYield {
             asked: 180,
             failed: 1,
+            ours: 0,
         };
         assert!(!y.source_will_not_serve());
     }
@@ -688,6 +975,7 @@ mod volume_yield_tests {
             let y = VolumeYield {
                 asked,
                 failed: asked,
+                ours: 0,
             };
             assert!(
                 !y.source_will_not_serve(),
@@ -698,6 +986,7 @@ mod volume_yield_tests {
         let y = VolumeYield {
             asked: MIN_RECOVERY_YIELD_SAMPLE,
             failed: MIN_RECOVERY_YIELD_SAMPLE,
+            ours: 0,
         };
         assert!(y.source_will_not_serve());
     }
@@ -712,6 +1001,152 @@ mod volume_yield_tests {
         assert!(!y.source_will_not_serve());
     }
 
+    /// TODO 307 item 1's residue, and the case that was missing: a
+    /// fetch whose every loss was OURS says nothing whatsoever about
+    /// the provider, and must not reach `RepairShortfall::Unservable`.
+    ///
+    /// Before 26 Aug 2026 this was the §282 incident's own arithmetic -
+    /// 1293 asked, 1206 failed, 6.7% - and it fired, because a
+    /// `FetchOutcome::Failed` was charged exactly like a `Missing`. The
+    /// user was then told the payload was fine and a different source
+    /// for the same release would fix it, for a fleet that wound down
+    /// with the articles still queued.
+    #[test]
+    fn a_fetch_whose_losses_are_all_ours_is_not_a_verdict_about_the_source() {
+        let y = VolumeYield {
+            asked: 1293,
+            failed: 1206,
+            ours: 1206,
+        };
+        assert!(
+            !y.source_will_not_serve(),
+            "our own fleet winding down was read as a provider refusing: {}",
+            y.describe()
+        );
+        // The source was asked about 87 articles and served all 87.
+        assert_eq!(y.source_asked(), 87);
+        assert_eq!(y.fraction(), 1.0);
+        // ...and the volume is still PARTIAL, which is the other
+        // question and must not have moved: only a COMPLETE volume may
+        // enter a whole-file exclusion list, whoever lost the articles.
+        assert_ne!(y.failed, 0);
+        assert_eq!(y.delivered(), 87);
+    }
+
+    /// The same `asked` and `failed`, three readings of who lost them,
+    /// three different verdicts. The middle one is the point: a fetch
+    /// that reads 40% when our own losses are counted reads 57% when
+    /// they are not, and 57% is the honest number to price the
+    /// escalation against.
+    #[test]
+    fn a_mixed_fetch_is_judged_on_the_source_half_alone() {
+        let all_theirs = VolumeYield {
+            asked: 100,
+            failed: 60,
+            ours: 0,
+        };
+        assert!(all_theirs.source_will_not_serve());
+
+        let half_ours = VolumeYield {
+            asked: 100,
+            failed: 60,
+            ours: 30,
+        };
+        assert!(!half_ours.source_will_not_serve());
+        assert!(
+            (half_ours.fraction() - 40.0 / 70.0).abs() < 1e-9,
+            "{}",
+            half_ours.fraction()
+        );
+
+        let all_ours = VolumeYield {
+            asked: 100,
+            failed: 60,
+            ours: 60,
+        };
+        assert!(!all_ours.source_will_not_serve());
+        assert_eq!(all_ours.fraction(), 1.0);
+    }
+
+    /// The sample floor moved onto the SOURCE half with the ratio, and
+    /// that pairing is deliberate: a fetch of a thousand articles that
+    /// only ever reached the provider with fifteen of them has taken a
+    /// fifteen-article sample, and fifteen is exactly what
+    /// [`MIN_RECOVERY_YIELD_SAMPLE`] exists to refuse to judge on.
+    #[test]
+    fn the_sample_floor_applies_to_the_source_half() {
+        let under = VolumeYield {
+            asked: 1000,
+            failed: 999,
+            ours: 985,
+        };
+        assert_eq!(under.source_asked(), MIN_RECOVERY_YIELD_SAMPLE - 1);
+        assert!(
+            under.fraction() < MIN_RECOVERY_YIELD,
+            "{}",
+            under.fraction()
+        );
+        assert!(
+            !under.source_will_not_serve(),
+            "a fifteen-article sample is not a verdict about a provider"
+        );
+        // One more article that the source itself refused, and the same
+        // refusal IS a verdict.
+        let over = VolumeYield {
+            asked: 1000,
+            failed: 999,
+            ours: 984,
+        };
+        assert_eq!(over.source_asked(), MIN_RECOVERY_YIELD_SAMPLE);
+        assert!(over.source_will_not_serve());
+    }
+
+    /// Our own losses are NAMED, never silently dropped: the clause
+    /// states the sample the verdict was reached on, and then says what
+    /// happened to the rest of the fetch. A reader who saw "1 of 200"
+    /// about a thousand-article fetch and nothing else would have no
+    /// way to account for the other 800.
+    #[test]
+    fn our_own_losses_are_named_in_the_clause() {
+        let y = VolumeYield {
+            asked: 1000,
+            failed: 999,
+            ours: 800,
+        };
+        let d = y.describe();
+        assert!(d.starts_with("1 of 200 recovery article(s) arrived"), "{d}");
+        assert!(d.contains("plus 800 that failed on our side"), "{d}");
+        // And with nothing of ours in it - every shape the e2e suite
+        // pins, and the §282 incident - the sentence is the one it
+        // always was, character for character.
+        let clean = VolumeYield {
+            asked: 1293,
+            failed: 1206,
+            ours: 0,
+        };
+        assert_eq!(
+            clean.describe(),
+            "87 of 1293 recovery article(s) arrived (6.7%)"
+        );
+    }
+
+    /// `ours` is a SUBSET of `failed` and the arithmetic holds it to
+    /// that rather than trusting a caller: an `ours` past `failed`
+    /// would subtract more from the denominator than from the
+    /// numerator, report over 100% of the articles delivered, and leave
+    /// a verdict that can never fire whatever the provider does.
+    #[test]
+    fn ours_can_never_exceed_failed() {
+        let y = VolumeYield {
+            asked: 10,
+            failed: 2,
+            ours: 7,
+        };
+        assert_eq!(y.source_asked(), 8);
+        assert_eq!(y.fraction(), 1.0);
+        assert!(y.describe().starts_with("8 of 8"), "{}", y.describe());
+    }
+
     /// Exactly at the threshold is not under it: the gate refuses the
     /// escalation only once the source has served LESS than half.
     #[test]
@@ -719,11 +1154,13 @@ mod volume_yield_tests {
         let half = VolumeYield {
             asked: 100,
             failed: 50,
+            ours: 0,
         };
         assert!(!half.source_will_not_serve());
         let under = VolumeYield {
             asked: 100,
             failed: 51,
+            ours: 0,
         };
         assert!(under.source_will_not_serve());
     }
@@ -916,6 +1353,152 @@ mod recovery_volume_tests {
         }
     }
 
+    /// Drive the real consumer over a list of terminal outcomes,
+    /// returning what it charged. The `Done` path has its own helper
+    /// above; this one is for the two failure variants, which is where
+    /// the blame axis lives.
+    async fn consume_outcomes(
+        dir: &Path,
+        outs: Vec<(usize, FetchOutcome)>,
+    ) -> (VolumeFailures, Vec<PathBuf>) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(256);
+        let mut id_to_file = HashMap::new();
+        for (fi, out) in outs {
+            let id: Arc<str> = match &out {
+                FetchOutcome::Done { id, .. }
+                | FetchOutcome::Missing { id, .. }
+                | FetchOutcome::Failed { id, .. } => id.clone(),
+            };
+            id_to_file.insert(id, fi);
+            tx.send(out).await.unwrap();
+        }
+        drop(tx);
+        consume_volume_articles(
+            rx,
+            id_to_file,
+            dir.to_path_buf(),
+            BufPool::new(4),
+            u64::MAX,
+            VolumeOpen::Fresh,
+        )
+        .await
+    }
+
+    fn refused(n: usize) -> FetchOutcome {
+        FetchOutcome::Missing {
+            id: format!("<t{n}@test>").into(),
+            cause: nzbkit::pool::MissingCause::Gone { takedown: false },
+        }
+    }
+
+    fn gave_up(n: usize, code: nzbkit::fail::FailCode) -> FetchOutcome {
+        FetchOutcome::Failed {
+            id: format!("<o{n}@test>").into(),
+            code,
+            error: code.reason().to_string(),
+        }
+    }
+
+    /// TODO 307 item 1's residue, at the wire: the consumer's two axes
+    /// answer different questions and must stay independent.
+    ///
+    /// `FetchOutcome::Missing` is every live server having been asked
+    /// and having answered 430/423 - evidence about the source.
+    /// `FetchOutcome::Failed` is the pool giving up without a body, and
+    /// not one of `FailCode`'s four variants is the source refusing;
+    /// until 26 Aug 2026 ONE match arm charged both of them, so the
+    /// two arrived in the caller as one number.
+    ///
+    /// The completeness half is asserted here too, because the fix must
+    /// not buy the blame axis with it: both volumes are still PARTIAL,
+    /// and `fetch_volumes`' contract that only a COMPLETE volume may
+    /// enter a whole-file exclusion list rests on that count including
+    /// the articles nobody ever asked for.
+    #[tokio::test]
+    async fn the_consumer_keeps_completeness_and_blame_apart() {
+        let dir = temp_dir("blame-mixed");
+        let mut outs: Vec<(usize, FetchOutcome)> = Vec::new();
+        // Volume 0: 40 articles the wound-down fleet never asked for.
+        for i in 0..40 {
+            outs.push((0, gave_up(i, nzbkit::fail::FailCode::FleetExhausted)));
+        }
+        // Volume 1: 20 the provider was asked for and refused.
+        for i in 0..20 {
+            outs.push((1, refused(i)));
+        }
+        let (failures, _paths) = consume_outcomes(&dir, outs).await;
+
+        // COMPLETENESS, unmoved: 60 articles produced no bytes and both
+        // volumes are short. `get/dropped.rs` and the speculative
+        // prefetch read exactly these two numbers.
+        assert_eq!(failures.total(), 60);
+        assert_eq!(failures.for_file(0), 40);
+        assert_eq!(failures.for_file(1), 20);
+        // BLAME, the new axis.
+        assert_eq!(failures.ours(), 40);
+
+        // The yield a caller builds off it, exactly as `fetch_volumes`
+        // does. The provider was asked about 20 and served none, so the
+        // verdict still fires - on the twenty it was actually asked,
+        // not on sixty it mostly never heard about.
+        let y = VolumeYield {
+            asked: 60,
+            failed: failures.total(),
+            ours: failures.ours(),
+        };
+        assert_eq!(y.source_asked(), 20);
+        assert!(y.source_will_not_serve(), "{}", y.describe());
+        assert!(y.describe().starts_with("0 of 20"), "{}", y.describe());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The flip, at the wire: a fetch the provider was never asked
+    /// about must not report the provider.
+    ///
+    /// This is the shape that reached the user. `source_will_not_serve`
+    /// drives `RepairShortfall::Unservable`, whose clause says "the
+    /// payload is not the problem here, so a different source for the
+    /// same release is what would fix it" - so before this fix a fleet
+    /// that wound down mid recovery-fetch, or a link that failed, sent
+    /// the reader after another release for a failure that was ours.
+    ///
+    /// Both blame families are driven: `FleetExhausted` (nobody asked)
+    /// and `Transport` (the link between us and the provider). All four
+    /// `FailCode` variants are Ours, and the classification is spelled
+    /// out variant by variant in the consumer so a fifth has to be
+    /// judged by hand.
+    #[tokio::test]
+    async fn a_wound_down_fleet_is_not_a_provider_refusing() {
+        let dir = temp_dir("blame-ours");
+        let outs: Vec<(usize, FetchOutcome)> = (0..40)
+            .map(|i| {
+                let code = if i % 2 == 0 {
+                    nzbkit::fail::FailCode::FleetExhausted
+                } else {
+                    nzbkit::fail::FailCode::Transport
+                };
+                (0usize, gave_up(i, code))
+            })
+            .collect();
+        let (failures, _paths) = consume_outcomes(&dir, outs).await;
+        assert_eq!(failures.total(), 40, "the volume is still short 40");
+        assert_eq!(failures.ours(), 40, "not one of them reached a provider");
+        let y = VolumeYield {
+            asked: 40,
+            failed: failures.total(),
+            ours: failures.ours(),
+        };
+        // Sixteen or more articles and 0% delivered: everything the
+        // gate needs, except that none of it is about the provider.
+        assert!(y.asked >= MIN_RECOVERY_YIELD_SAMPLE);
+        assert!(
+            !y.source_will_not_serve(),
+            "our own pool giving up was reported as a provider refusing: {}",
+            y.describe()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Codex H3: the posted `bytes=` total is as poster-controlled as
     /// the yEnc `size=`, so "min(size, posted)" was the attacker picking
     /// both sides - one tiny article declaring two 100 GB numbers became
@@ -1094,6 +1677,7 @@ mod recovery_volume_tests {
         .unwrap();
         tx.send(FetchOutcome::Failed {
             id: "<a-bad@test>".into(),
+            code: nzbkit::fail::FailCode::Transport,
             error: "transport gave up".into(),
         })
         .await

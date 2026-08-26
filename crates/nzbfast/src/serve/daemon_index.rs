@@ -8,8 +8,16 @@
 //! for interactive handlers, and the era stamp that makes a wipe safe.
 //!
 //! A second `impl Daemon` in a child module of `daemon`, so `Daemon`'s
-//! private fields and daemon.rs's private types (`Reader`, `IndexReader`,
-//! `LadderPermit`, `OpenedLog`) stay in scope exactly as they were inline.
+//! private fields and daemon.rs's private types (`LadderPermit`,
+//! `OpenedLog`) stay in scope exactly as they were inline.
+//!
+//! The pool's own types - `IndexReadPool`, `IndexReadState`,
+//! `IndexReader` and the `Reader` verdict - are declared HERE rather
+//! than in daemon.rs (25 Aug 2026). `index_read_acquire` below is the
+//! only code in the tree that constructs any of them, so keeping them
+//! next to it makes them module-private instead of daemon-private.
+//! `IndexReadPool` alone is re-exported from daemon.rs, because
+//! `Daemon`'s field is typed on it.
 
 use super::*;
 
@@ -31,20 +39,197 @@ pub(in crate::serve) enum IndexBusy {
     /// which is exactly why it must not be flattened into "no rows" -
     /// see `nzbkit::index::Index::schema_faults`.
     SchemaChanged,
+    /// The query outran the read budget and was abandoned so the
+    /// connection could go back to the pool (TODO 300). Unlike the two
+    /// above, this one is a property of the REQUEST rather than of the
+    /// moment: asking again runs the same plan over the same rows and
+    /// takes the same time, so the message must not say "try again".
+    /// See `serve::daemon::index_read_budget`.
+    TooSlow,
 }
 
 #[cfg(feature = "indexer")]
 impl IndexBusy {
-    /// What to tell the user. Both are transient and both ask for the
-    /// same thing, so they differ only in naming the cause - which is
-    /// what makes a schema fault greppable in a support report rather
-    /// than indistinguishable from a busy pool.
+    /// What to tell the user. The first two are transient and ask for
+    /// the same thing, so they differ only in naming the cause - which
+    /// is what makes a schema fault greppable in a support report rather
+    /// than indistinguishable from a busy pool. The third is not
+    /// transient and says something else entirely.
     pub(in crate::serve) fn message(self) -> &'static str {
         match self {
             Self::Saturated => "the index is busy - try again in a moment",
             Self::SchemaChanged => "the index schema changed mid-query - try again in a moment",
+            // Deliberately says nothing about the wall's own controls,
+            // though the wall is what provoked it: this seam also
+            // answers search, browse and the *arr-facing newznab
+            // facade, and "leave the matched-only toggle on" is not
+            // advice Sonarr can take. What is true everywhere is that
+            // the ask was too wide.
+            Self::TooSlow => {
+                "that is too much of the index to search at once - \
+                 narrow it with a filter or a search term"
+            }
         }
     }
+}
+
+/// How long a query may run on a borrowed read connection before it is
+/// abandoned and the caller told so (TODO 300).
+///
+/// It sits beside `INDEX_READ_CONNS` and `INDEX_READ_WAIT` below, which
+/// is where a reader looks for it first. It did not always: this went
+/// to the module that USES it because `daemon.rs` is size-gate
+/// baselined and two lanes' growth landed that file 11 lines over on
+/// 25 Aug 2026, and the pool followed it here the same day. Nothing
+/// about the three is a daemon.rs subject - they are the read path's
+/// own dimensions, and the only code that reads any of them is
+/// `index_read_acquire`, forty lines further down.
+///
+/// `INDEX_READ_WAIT` bounds the QUEUE for a connection; this bounds the
+/// query already inside. Nothing did, and that is the hole
+/// `matched=0&all=1` on the wall falls through: measured 25 Aug 2026 on
+/// the live 50 GB index, the default wall answers a card page in
+/// 0.7-1.2 s and show-all takes 57.8 s warm and over 120 s cold, because
+/// dropping `junk < 50` takes the plan off a partial index over 65k visible
+/// releases and onto all 33.4M. Four of those pin every connection and
+/// the daemon stops answering - which is the 2 Aug wedge, arriving
+/// through the wall rather than through a lock. `nzbkit::index::deadline`
+/// carries the measurement and the mechanism.
+///
+/// 20 s, which is ~20x the slowest healthy page and far under every
+/// measured broken one. It is not a latency target: nobody watches a
+/// wall for twenty seconds, and a request that reaches this has already
+/// disappointed whoever made it. It is the promise that the connection
+/// comes BACK. `NZBFAST_INDEX_READ_BUDGET_SECS` overrides it for a box
+/// where cold reads are genuinely slower (a NAS, a spinning volume), and
+/// 0 restores the old unbounded behaviour.
+#[cfg(feature = "indexer")]
+pub(super) fn index_read_budget() -> Option<std::time::Duration> {
+    static BUDGET: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let secs = std::env::var("NZBFAST_INDEX_READ_BUDGET_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(20);
+        (secs > 0).then(|| std::time::Duration::from_secs(secs))
+    })
+}
+
+/// How many index reads may be in flight at once.
+///
+/// The point is the gap between this and the HTTP worker count (8): a
+/// query surface that has gone slow can occupy at most this many
+/// workers, so `/`, `mode=version`, the queue and the *arr endpoints
+/// keep answering out of the remainder no matter what the index is
+/// doing. WAL readers run concurrently, so these are real parallelism
+/// as well as a ceiling - the single shared read connection they
+/// replace serialized every query handler behind whichever one was
+/// slowest.
+#[cfg(feature = "indexer")]
+pub(super) const INDEX_READ_CONNS: usize = 4;
+
+/// How long a request may wait for a free read connection before it is
+/// told the index is busy.
+///
+/// A healthy read against this database is sub-millisecond, so this is
+/// two orders of magnitude of headroom for an ordinary burst - and a
+/// hard promise that a saturated index costs an HTTP worker a tenth of
+/// a second rather than however long the slowest query runs.
+#[cfg(feature = "indexer")]
+pub(super) const INDEX_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The read-only connection pool behind [`Daemon::with_index_read`].
+///
+/// Deliberately hand-rolled rather than a channel: `drop_index_read`
+/// has to invalidate connections that are LENT OUT right now (index_wipe
+/// deletes the file under them), which the generation stamp does without
+/// waiting for their queries to end.
+#[cfg(feature = "indexer")]
+#[derive(Default)]
+pub struct IndexReadPool {
+    // `pub(super)`, not private, and only because this module is no
+    // longer the file the pool was declared in: a handback test in
+    // `daemon_tests` reads the generation stamp directly to prove a
+    // schema-changing batch retires the warm readers. That reach is
+    // what these had inline in daemon.rs, so this restores it rather
+    // than widening it - `super` here is `daemon`, and every daemon
+    // child could always see them.
+    pub(super) inner: Mutex<IndexReadState>,
+    /// Signalled every time a connection is handed back.
+    handed_back: std::sync::Condvar,
+}
+
+#[cfg(feature = "indexer")]
+#[derive(Default)]
+pub(super) struct IndexReadState {
+    /// Open connections nobody is using.
+    idle: Vec<nzbkit::index::Index>,
+    /// How many exist at all - idle plus lent out. The ceiling is
+    /// [`INDEX_READ_CONNS`].
+    live: usize,
+    /// Bumped by `drop_index_read`. A connection handed back carrying an
+    /// older stamp is closed instead of pooled, so a handle opened
+    /// against a since-deleted database can never be served from again.
+    pub(super) generation: u64,
+}
+
+/// A borrowed read-only connection, returned to the pool on drop - including
+/// on the unwind out of a panicking handler, which is why this is a guard and
+/// not a matched pair of calls. A leaked connection would shrink the pool by
+/// one permanently, and four panics would close the read path for good.
+#[cfg(feature = "indexer")]
+pub(super) struct IndexReader<'a> {
+    pool: &'a IndexReadPool,
+    /// `Some` until dropped.
+    conn: Option<nzbkit::index::Index>,
+    generation: u64,
+}
+
+#[cfg(feature = "indexer")]
+impl std::ops::Deref for IndexReader<'_> {
+    type Target = nzbkit::index::Index;
+    fn deref(&self) -> &Self::Target {
+        // Some until Drop runs, and Drop is the only thing that takes it.
+        self.conn.as_ref().expect("reader used after drop")
+    }
+}
+
+#[cfg(feature = "indexer")]
+impl Drop for IndexReader<'_> {
+    fn drop(&mut self) {
+        let Some(conn) = self.conn.take() else { return };
+        // Here rather than beside the arm, for the reason this is a
+        // guard at all: a stamp left on a pooled connection is measured
+        // against the NEXT borrower's query, and it is already in the
+        // past, so that query would be abandoned before it did anything.
+        // The unwind out of a panicking handler must clear it too.
+        conn.set_query_deadline(None);
+        let mut st = self.pool.inner.lock_ok();
+        if self.generation == st.generation {
+            st.idle.push(conn);
+        } else {
+            // Retired mid-query. Closing it here is what keeps `live`
+            // honest; the drop happens under the lock, which is a
+            // sqlite3_close on an idle connection.
+            st.live = st.live.saturating_sub(1);
+            drop(conn);
+        }
+        drop(st);
+        self.pool.handed_back.notify_one();
+    }
+}
+
+/// What [`Daemon::index_read_acquire`] could do for the caller.
+#[cfg(feature = "indexer")]
+enum Reader<'a> {
+    Got(IndexReader<'a>),
+    /// Every connection is in use and none came free in time. The caller
+    /// must NOT fall back to the read-write handle: parking on that mutex
+    /// is the exact failure this path exists to prevent.
+    Busy,
+    /// No read-only connection could be opened at all (no database file
+    /// yet). Startup-shaped, and the caller falls back to `with_index`.
+    Unavailable,
 }
 
 /// The bound on `index_read_checked`'s pre-migration fallback to the
@@ -1022,12 +1207,24 @@ impl Daemon {
             // this connection to nobody else while `f` runs, so a move in
             // the counter is this closure's own.
             Reader::Got(ix) => {
-                let before = ix.schema_faults();
+                let before = (ix.schema_faults(), ix.deadline_trips());
+                // TODO 300. Read the same way and for the same reason as
+                // the fault stamp above: the closure's `.ok()` has
+                // already turned SQLITE_INTERRUPT into `None`, and "the
+                // wall is empty" is the wrong answer to "that view is
+                // too big to build". Disarming is `IndexReader::drop`'s
+                // job, which is what covers a panicking handler too.
+                ix.set_query_deadline(index_read_budget());
                 let out = f(&ix);
-                if ix.schema_faults() == before {
-                    Ok(out)
-                } else {
+                if ix.deadline_trips() != before.1 {
+                    // Checked first: an abandoned query names its own
+                    // cause, and a statement cut off mid-step is not
+                    // evidence about the schema.
+                    Err(IndexBusy::TooSlow)
+                } else if ix.schema_faults() != before.0 {
                     Err(IndexBusy::SchemaChanged)
+                } else {
+                    Ok(out)
                 }
             }
             Reader::Busy => Err(IndexBusy::Saturated),
@@ -1520,20 +1717,30 @@ impl Daemon {
         true
     }
 
-    /// Park a worker thread while the indexer is off. Returns true when
-    /// it slept, so callers read as `if d.park_if_off(30) { continue }`.
-    /// A poll rather than a condvar: switching the indexer on is a
-    /// once-in-an-install event, and up to `secs` of extra latency
-    /// before the metadata lanes wake is invisible next to the scan pass
-    /// that has to run first anyway.
+    /// Park a metadata lane while it has no business running: the
+    /// indexer is off, or the user has paused metadata lookups. Returns
+    /// true when it slept, so callers read as
+    /// `if d.park_metadata_lanes(30) { continue }`.
+    ///
+    /// A poll rather than a condvar. Switching the indexer on is a
+    /// once-in-an-install event, and even the pause - which someone may
+    /// well flip twice in a minute from the header chip - costs at most
+    /// `secs` before the lanes notice, which is invisible next to the
+    /// provider round-trips that follow. A condvar here would buy that
+    /// latency at the price of a wake path on every setting write.
     ///
     /// The park does wake on a stop request, though. The caller's own
     /// `RunStop` decides what that means; this only makes sure a lane
     /// parked for ten minutes is not still parked long after the
     /// embedded host has reported stopped.
+    ///
+    /// Named for the lanes rather than for the condition because there
+    /// are now two conditions and there may be a third: every caller is
+    /// a metadata lane, and none of them wants to enumerate the reasons
+    /// it should be idle.
     #[cfg(feature = "indexer")]
-    pub(in crate::serve) fn park_if_off(&self, secs: u64) -> bool {
-        if self.indexer_off() {
+    pub(in crate::serve) fn park_metadata_lanes(&self, secs: u64) -> bool {
+        if self.indexer_off() || self.enrich_paused.load(Ordering::Relaxed) {
             crate::serve::sleep_until_stop_bump(std::time::Duration::from_secs(secs));
             return true;
         }

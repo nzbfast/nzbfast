@@ -1381,7 +1381,7 @@ impl Extractor {
                 let len = ge - gs;
                 let covered = match &j.dest {
                     Dest::Writer(w) => w.covered(j.base + gs, len),
-                    Dest::Child(c, cs) => c.covered(*cs, j.base + gs, len as usize),
+                    Dest::Child(c, cs) => c.covered(*cs, j.base + gs, len),
                 };
                 if !covered {
                     continue;
@@ -1389,11 +1389,11 @@ impl Extractor {
                 // Bounded chunks: a gap can span most of a large file
                 // (one coalesced run covered it all before the repair).
                 let mut h = crc32fast::Hasher::new();
-                let mut buf = vec![0u8; (len as usize).min(4 << 20)];
+                let mut buf = vec![0u8; crate::disk::chunk_len(len, 4 << 20)];
                 let mut pos = gs;
                 let mut ok = true;
                 while pos < ge {
-                    let n = ((ge - pos) as usize).min(buf.len());
+                    let n = crate::disk::chunk_len(ge - pos, buf.len());
                     let read = match &j.dest {
                         Dest::Writer(w) => w.read_at(&mut buf[..n], j.base + pos).is_ok(),
                         Dest::Child(c, cs) => c.read_at(*cs, j.base + pos, &mut buf[..n]).is_ok(),
@@ -1631,7 +1631,7 @@ mod tests {
         let (ms, me) = (miss * art, ((miss + 1) * art).min(vol.len()));
         // The missing article's range must NOT be claimed as written.
         assert!(
-            !ex.covered(0, ms as u64, me - ms),
+            !ex.covered(0, ms as u64, (me - ms) as u64),
             "hole was stamped into the volume as zeros"
         );
         // Late arrival writes through and completes the volume.

@@ -170,6 +170,9 @@ fn the_backbone_cache_follows_the_config_file() {
 fn a_missing_config_is_not_cached() {
     with_daemon("oraclemissing", |d| {
         let absent = d.spool.join("no-such-config.json");
+        // host-config-gate: the missing-file fallback IS this test's
+        // subject - the path must not exist, which is what makes
+        // `enabled_backbones` uncacheable here.
         let _ = d.enabled_backbones(&absent);
         assert!(
             d.oracle_bb_cache.lock_ok().is_none(),

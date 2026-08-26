@@ -1,6 +1,13 @@
 #!/bin/sh
 # Guard tests for how docker-entrypoint.sh decides which uid:gid to run as.
 #
+# packaging-tests-roster: needs a container to exercise the root-only uid
+# branch. It SKIPS cleanly with no daemon, so a developer Mac proves
+# nothing, and on a runner docker IS present, so wiring it would run it for
+# real for the first time. That wants its own change and its own
+# verification cycle, priced rather than waved through. See the roster of
+# deliberate exclusions in size-gate.yml's `packaging-gates` job.
+#
 # This only matters on NAS bind mounts, and it is invisible when wrong: the
 # daemon starts fine, downloads just land owned by a uid the NAS does not
 # recognise, so File Station shows files the owner cannot manage and the

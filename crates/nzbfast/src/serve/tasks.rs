@@ -282,6 +282,11 @@ pub(super) fn spawn_memory_trim(daemon: &Arc<Daemon>) {
                 // on Linux mimalloc owns the heap so glibc malloc_trim
                 // below no longer sees the pipeline arenas.
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
+                // SAFETY: `mi_collect` takes a bool and touches only
+                // mimalloc's own heap bookkeeping - it frees no live
+                // allocation, so no pointer this process holds is
+                // invalidated. It is documented as callable from any
+                // thread at any time.
                 unsafe {
                     libmimalloc_sys::mi_collect(true)
                 };
@@ -656,6 +661,9 @@ pub(super) fn spawn_index_scan(
             // stay inside the 10s busy timeout. The per-scan NNTP
             // connection budget divides the account limit by the
             // parallelism (`share`), so N groups never exceed it.
+            // chunk-narrow-gate: a parallelism count, not a byte span, and it
+            // is clamped to 8 on the very next line - `groups.len()` bounds a
+            // task fan-out, not a buffer.
             let par = (daemon2.index_scan_par.load(Ordering::Relaxed) as usize)
                 .clamp(1, 8)
                 .min(groups.len().max(1));
@@ -1166,7 +1174,7 @@ pub(super) fn spawn_rss_poller(
                                 // origin to its hostname; the API never
                                 // got the same treatment.
                                 &format!("rss:{}", redact_url_creds(&feed.url)),
-                                false,
+                                DupeExempt::Nobody,
                             ) {
                                 // Enqueue failures are content errors
                                 // (bad NZB) - retrying can't help.

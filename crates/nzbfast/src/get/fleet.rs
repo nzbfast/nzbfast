@@ -332,7 +332,45 @@ pub(super) async fn build_fleet(
                     if t.get() > base {
                         t.set(base);
                     }
-                    (base, Some(t))
+                    // TODO 277's spawn headroom belongs on THIS arm too
+                    // (sweep 9, finding 6). It was only ever written on
+                    // the `_` arm below, on the reading that live_tune
+                    // is off by default - but the setting ships, and
+                    // when it is on the WALKER is the in-run governor
+                    // that raises this same target. Its clamp is
+                    // `desired.min(ceiling).min(line_share)`
+                    // (`serve/tasks/tuner.rs`), and `line_share` is
+                    // sized from the CURRENT link anchor: it grows
+                    // mid-job when the learner reads a faster line, or
+                    // when a server drops and the per-server share of
+                    // the fleet cap widens. A `ConnTarget` above the
+                    // spawned fleet wakes nothing, so those raises used
+                    // to buy exactly zero sockets while the dashboard's
+                    // "using M of N" - which reads the target - said
+                    // the fleet had grown.
+                    //
+                    // Seeded at `base` all the same: the headroom is
+                    // slots PARKED in `wait_for_slot`, never dialled,
+                    // and `workers_dialling` subtracts them.
+                    //
+                    // `None` for the knee, unlike the `_` arm: this arm
+                    // deliberately runs `base` rather than `applied`
+                    // because a live-tune seed is not a knee cap (see
+                    // `seed_store` above), and the walker's own clamp
+                    // never reads the knee either. Holding the SPAWN to
+                    // it would leave a knee'd account with the very
+                    // gap this closes - a raise the walker may ask for
+                    // and no slot to land it in. Capacity pressure is
+                    // what teaches the walker its real limit here.
+                    let spawn = crate::conntune::line_cap_spawn_slots(
+                        base,
+                        headroom_share,
+                        uncapped,
+                        s.pin_connections,
+                        None,
+                        now,
+                    );
+                    (spawn, Some(t))
                 }
                 // The in-run shed needs a target to move. A pinned
                 // server gets none (its number is a statement), and a
@@ -747,6 +785,41 @@ mod line_cap_seed {
                 *spawned == 10 && *target == Some(10)
             }),
             "{got:?}"
+        );
+    }
+
+    /// Sweep 9, finding 6: the SETTING's arm gets the same headroom.
+    ///
+    /// `live_tune` on takes an arm of its own in this builder - it
+    /// seeds a hub-shared `ConnTarget` from the time-of-day store
+    /// rather than minting one per job - and TODO 277's spawn headroom
+    /// was only ever written on the other arm, on the reading that the
+    /// setting is off by default. It ships, though, and when it is on
+    /// the in-run governor is the epoch WALKER, whose clamp
+    /// (`serve/tasks/tuner.rs`) is sized from the CURRENT link anchor:
+    /// it grows mid-job when the learner reads a faster line or a
+    /// server drops out of the fleet. Every one of those raises landed
+    /// on a target above the spawned fleet and woke nothing.
+    ///
+    /// Same numbers as `the_curves_floor_dials_five_per_server_and_a_pin_wins`
+    /// deliberately: the two arms must seed and spawn alike, and the
+    /// pinned server must still escape both.
+    #[tokio::test]
+    async fn the_live_tune_arm_spawns_the_ceiling_too() {
+        let hub = Arc::new(StreamHub {
+            line_anchor_bps: std::sync::atomic::AtomicU64::new(12_500_000),
+            live_tune: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        });
+        let got = build(&five(), &Some(hub)).await;
+        let want: Vec<(String, usize, Option<usize>)> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|h| (format!("{h}.example"), 10, Some(5)))
+            .chain(std::iter::once(("e.example".to_string(), 100, None)))
+            .collect();
+        assert_eq!(
+            got, want,
+            "the live_tune arm must spawn the ceiling's share and dial the curve's"
         );
     }
 

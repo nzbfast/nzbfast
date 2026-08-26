@@ -160,6 +160,7 @@ pub(super) fn apply_setting_tail(
         "predb_channels" => set_predb_channels(d, name, v)?,
         "predb_nick" => set_predb_nick(d, name, v)?,
         "index_paused" => set_index_paused(d, name, v)?,
+        "enrich_paused" => set_enrich_paused(d, name, v)?,
         #[cfg(feature = "indexer")]
         "index_enabled" => set_index_enabled(d, name, v)?,
         #[cfg(feature = "indexer")]
@@ -266,6 +267,24 @@ pub(super) fn apply_setting_tail(
         "watchlist_external" => set_watchlist_external(d, name, v)?,
         "watchlist_instant" => set_watchlist_instant(d, name, v)?,
         "watchlist_instant_max" => set_watchlist_instant_max(d, name, v)?,
+        // Retention insurance: fetch deferred rows' payload now, extract
+        // at promotion. The cap is the master switch (0 = off); no
+        // ceiling clamp, because the real bound is the disk itself and
+        // the min-free guard already refuses a fetch a full disk cannot
+        // take.
+        "insurance_cap_gb" => {
+            let n = uint()?;
+            d.insurance_cap_gb.store(n, Ordering::Relaxed);
+            (true, json!(n))
+        }
+        // Grab-deferred watchlist mode: matches are enqueued paused
+        // (insurance candidates when the cap above is on). Read each
+        // pass, nothing to arm or disarm.
+        "watchlist_deferred" => {
+            let on = flag();
+            d.watchlist_deferred.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
         "watchlist" => set_watchlist(d, name, v)?,
         "smart_folders" => set_smart_folders(d, name, v)?,
         "cleanup_exts" => {

@@ -320,6 +320,17 @@ anlıktır: etkin aktarım saniyeler içinde durur ve sonra günlükten devam ed
 kaybetmeden. (Zorla öncelikli işler SABnzbd tarzı indirmeyi sürdürür.)</li>
 <li>Yeni bir sürüm mevcut olduğunda burada bir <b>güncelleme bandı</b> belirir
 (bkz. <a href="#updates">Güncellemeler</a>).</li>
+<li>Her <b>arka plan işi çipi</b> nzbfast'ın şu anda ne yaptığını gösterir -
+dizinleme, meta veri arama, sürüm akışı, bağlantı ölçümü, izleme listesi,
+liste eşitleme, biten dosyaları taşıma, veritabanı bakımı. Ne
+yapabileceğinizi görmek için birine tıklayın: anahtarı olan işleri
+duraklatın ya da kapatın, ya da doğrudan izleme listesine, liste
+kaynaklarına veya kuyruğa gidin. Taşıma, bakım ve liste eşitleme
+kendiliğinden biter ve bir anahtar sunmak yerine bunu söyler.</li>
+<li><b>Kuyruğun durum göstergesi</b> aynı şekilde açılır; <b>Duraklat</b>
+(halihazırda devam eden makalelerin tamamlanmasına izin verir), <b>Şimdi
+duraklat</b> (onları bırakır ve hattı hemen serbest bırakır) ve
+<b>Sürdür</b> seçenekleriyle.</li>
 </ul>
 <h3>Verim</h3>
 <p>Kayan bir grafikle canlı MB/s; kesikli su işaretleri bu oturumun en yükseğini/en
@@ -353,7 +364,7 @@ Bir <b>.nzb dosyasını indir</b> düğmesi işin <code>.nzb</code> dosyasını 
 kendi kopyasını sakladığından bu her iş için çalışır, orijinal dosya çoktan
 kaybolmuş olsa bile.</li>
 <li><b>"Bu neden yavaş?"</b> Bir iş inerken, ilerleme çubuğunun altındaki satır makine için değil <em>o</em> iş için bir karar taşır: <i>sınır sağlayıcılarınız</i>, <i>bu makine işlemci sınırında</i>, <i>depolama yetişemiyor</i> gibi. Üzerine tıkla, satır kanıtlarla açılır: hattının neyi kaldırdığı, sağlayıcıların ne teslim ettiği, şu anda ne geldiği ve kısıtlanmış bir sağlayıcının bakar bakmaz görüldüğü sunucu başına tablo. Tam hızda giden bir iş burada hiçbir şey söylemez, kararı hâlâ oluşan bir iş de söylemez.</li>
-<li>Rozetler özel durumları gösterir: <i>ertelendi (yavaş)</i>, <i>ön yükleniyor</i>,
+<li>Rozetler özel durumları gösterir: <i>denendi, bir kenara alındı</i>, <i>ön yükleniyor</i>,
 <i>duraklatıldı</i> (bkz. <a href="#performance">Performans araçları</a>).</li>
 <li>Bir iniş grafiği kuyruk boyunca kalan toplam GB'ı izler.</li>
 </ul>
@@ -763,14 +774,6 @@ kötü oluyor. Ayrıca kurulumların büyük bir bölümü Docker, ekransız sun
 kutuları; oralarda anahtar zinciri diye bir şey yok, bu da doğru tutulması gereken iki
 ayrı saklama yolu bırakırdı. Her yerde aynı davranan tek ve iyi anlaşılmış bir biçim
 şimdilik daha iyi bir takas.</p>
-<p>Sunucu başına iki seçeneğin panoda henüz bir denetimi yok: bunları o sunucunun
-<code>config.local.json</code> içindeki girdisine elle ekleyin
-(bkz. <a href="#files">§17</a>) ve yeniden başlatın.</p>
-<div class="tblwrap"><table>
-<tr><th>Anahtar</th><th>Notlar</th></tr>
-<tr><td><code>bind_ip</code></td><td>Bu sunucunun giden bağlantılarını belirli bir yerel adrese bağlar; çok çıkışlı makineler ve VPN bölünmüş tünelleri için. Adres ailesi hedef aileyi de seçer: v4 bağlaması sunucunun v4 adresine bağlanır.</td></tr>
-<tr><td><code>socks5</code></td><td>Bu sunucunun NNTP trafiğini bir SOCKS5 vekili üzerinden gönderir: <code>host:port</code> ya da <code>user:pass@host:port</code>. Ana bilgisayar adını <em>vekil</em> çözer, dolayısıyla yerel DNS sızıntısı olmaz.</td></tr>
-</table></div>
 <ul>
 <li>Her sunucunun yanındaki <b>onay işareti</b> onun aç/kapa anahtarıdır: işaretliyse
 sunucu indirme havuzundadır, işaretli değilse devre dışıdır. Devre dışı bir sunucu kimlik
@@ -987,6 +990,7 @@ sayfasına döner, izleme listesi de onun yerine o hesaplarla çalışır.</div>
 <tr><td>Alım geçitleri</td><td>Dizine neyin gireceğini süzen JSON kuralları: türler (gizlenmiş çöp varsayılan olarak atılır), yıl/çözünürlük/dil, boyut sınırları.</td></tr>
 <tr><td>Şimdi tara / derin yeniden tarama</td><td>Hemen bir geçiş çalıştır; bir derinlikle, o kadar güncel başlığı yeniden tara.</td></tr>
 <tr><td>OMDb anahtarı / meta veri yenileme / silme</td><td>Duvar zenginleştirme denetimleri (<a href="#wall">§6</a>). Silme veritabanını sıfırdan yeniden inşa eder - bozulursa kurtarma yolu.</td></tr>
+<tr><td>Meta veri aramalarını duraklat</td><td>Tarama kendi başına sürerken meta veri sitelerinden (<a href="#wall">§6</a>) başlık, afiş ve oyuncu kadrosu çekmeyi durdurur. Hâlihazırda çekilmiş olan hiçbir şey kaybolmaz; duraklatma sırasında bulunan satırlar, siz bunu yeniden açana kadar yalnızca gönderildikleri adı korur. Bu kartta hiçbir usenet sağlayıcısına dokunmayan tek ayar.</td></tr>
 <tr><td>Pre akışı</td><td><b>Siz açana kadar kapalı.</b> Pek çok yükleme adı çıkarılarak gönderilir ve taramanın okuyacağı bir şey kalmaz. Herkese açık aktarım kanalları gerçek adı duyurur; bu tür gönderileri eşleştirmenin tek açık yolu budur. Açmak bir IRC ağına bağlantıyı açık tutar ve dinler: hiçbir zaman bir şey gönderilmez, hesap açılmaz. Dizinleyicinin açık olmasını gerektirir, çünkü duyduğunu koyacak yeri olmayan bir akış boşuna açık duran bir sokettir.</td></tr>
 <tr><td>Aktarım sunucusu, Aktarım kanalları</td><td>Duyuruları taşıyan IRC ağı (konak ya da konak:port) ve dinlenecek kanallar, virgülle ayrılmış. Bir değişiklik bir sonraki bağlantıda geçerli olur: hemen uygulamak için akışı kapatıp açın.</td></tr>
 <tr><td>İlintiyle adlandır</td><td>Canlı genel aktarımlar dosya adı taşımaz, bu yüzden gizlenmiş gönderilerin çoğu doğrudan eşleştirilemez. Bir duyurunun kesinleştirdiği şey, bir sürümün ne zaman ortaya çıktığı ve ne kadar büyük olduğudur. Bu, duyurulan zaman ve boyutu adsız gönderilerle karşılaştırır ve uyduklarında Göz at bölümünde gerçek adı önerir. Bir öneri açıkça öneri olarak işaretlenir, uygulanması tıklamanızı ister ve diskteki dosyaları asla yeniden adlandırmaz.</td></tr>
@@ -1087,15 +1091,16 @@ söyler.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (otomatik bir yeniden deneme başarısız bir indirmeyi yeniden kuyruğa aldı),
-<code>job.switched</code> (tamamlanamayan bir iş, onun için tutulan alternatif
+<code>job.requeued</code> (bir indirme geçmişten çıkıp yeniden kuyruğa girdi - bir yeniden deneme ya da oynatılan bir kitaplık kaydı), <code>job.switched</code> (tamamlanamayan bir iş, onun için tutulan alternatif
 bir kopyayla değiştirildi), <code>job.replaced</code> (aynı sonuç, ancak tutulan bir kopya yoktu,
 bu yüzden bir yedek arandı ve indirildi) ve
 <code>job.delete_kept</code> (bir silme kaydı kaldırdı ama dosyalarını
 kaldıramadı), artı <code>watch.picked</code> (izlenen klasörden bir .nzb alındı),
 <code>nzb.refeed</code> (biten bir indirmenin kendi NZB dosyası duraklatılmış olarak kuyruğa eklendi), <code>watchlist.upgraded</code> (izleme listesi yükseltmesi tamamlandı ve yerini
 bıraktığı kopya kaldırıldı),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> ve <code>quota.reached</code>. Her biri bir
+<code>queue.idle</code>, <code>queue.paused</code> ve <code>queue.resumed</code> (kuyruk durdu ya da yeniden başladı, bunu kim veya ne yaptıysa), <code>queue.finished_action</code>
+(kuyruk bitince çalışacak eylem kuruldu, çalıştı ya da iptal edildi), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> ve <code>update.available</code> (daha yeni bir nzbfast sürümü bulundu). Her biri bir
 <code>schema_version</code> (şu an 1; yeni anahtarlar sürüm artmadan gelebilir -
 bilmediğini yok say), tekdüze artan bir <code>seq</code> ve milisaniye cinsinden
 bir <code>at</code> zaman damgası taşır.</p>
@@ -1435,7 +1440,7 @@ SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır
 <tr><td>Otomasyon</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Tanılama</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: herhangi bir kullanıcı, parola olarak API anahtarı)</td></tr>
-<tr><td>Önizleme / oynatma</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP aralıkları; park edilmiş bir kitaplık işini başlatmak <code>?t=</code> belirteci ya da anahtar gerektirir), <code>/m3u/&lt;id&gt;</code> (anahtar gerektirir; belirteci üretir), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Önizleme / oynatma</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP aralıkları; park edilmiş bir kitaplık işini başlatmak <code>?t=</code> belirteci ya da anahtar gerektirir), <code>/m3u/&lt;id&gt;</code> (anahtar veya işin kendi belirtecini gerektirir; belirteci üretir), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Dosyalar &amp; konumlar</h2>

@@ -473,3 +473,252 @@ async fn preflight_scores_a_dead_recovery_set_apart_from_a_live_payload() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// §294 in vivo: the corpus test proves the ARITHMETIC; this proves the
+/// live prober actually walks the path - first burst red, escalation to
+/// the loss-rate sample (the health record's `sampled` says 64, which
+/// only the second burst can produce), the joint verdict landing as
+/// `completable: "no"`, and the §282 offer rendering on the row with
+/// the sharper "gone" sentence (a TOTAL loss must never read as the
+/// third arm's partial-loss "short" - the arm ordering is the claim).
+/// And the do-not-hinder half: a verdict is a badge and an offer, never
+/// an action - the row is still sitting in the queue, unfailed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_prober_escalates_and_lands_the_joint_verdict_in_vivo() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-healthesc-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    // A wholly dead post: 100 declared articles, none of them served.
+    // Deterministic on purpose - a partial loss rate makes the FIRST
+    // burst's verdict a coin flip and the test flaky; total loss makes
+    // burst one red every run, which is what arms the escalation.
+    let srv = MockServer::start(HashMap::new(), Chaos::default()).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let date = now - 30 * 86_400;
+    let mut xml = format!(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  \
+         <file poster=\"x\" date=\"{date}\" subject=\"&quot;gone.bin&quot; yEnc (1/100)\">\n    \
+         <groups><group>g</group></groups>\n    <segments>\n"
+    );
+    for n in 1..=100 {
+        xml.push_str(&format!(
+            "      <segment bytes=\"40000\" number=\"{n}\">escghost{n}@x</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .env("NZBFAST_HEALTH_TICK_SECS", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        // Paused: the prober needs its idle window, and the job must
+        // not race off and fail before the verdict lands.
+        http(port, "/api?mode=pause&output=json", None);
+        let id = upload_nzb(port, &xml, "Esc.Show.S01E01.1080p.nzb");
+
+        let slot = || -> serde_json::Value {
+            let q = http(port, "/api?mode=queue&output=json", None);
+            let v: serde_json::Value = serde_json::from_str(&q).unwrap_or_default();
+            v["queue"]["slots"]
+                .as_array()
+                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
+                .unwrap_or(serde_json::Value::Null)
+        };
+        let mut s = serde_json::Value::Null;
+        for _ in 0..300 {
+            s = slot();
+            if !s["health"].is_null() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let h = &s["health"];
+        assert!(!h.is_null(), "the prober never landed a verdict: {s}");
+
+        // The escalation ran: only the SECOND burst samples 64.
+        assert_eq!(
+            h["sampled"], 64,
+            "a red first burst must escalate to the loss-rate sample: {h}"
+        );
+        assert_eq!(h["absent"], 64, "every sampled article is a ghost: {h}");
+        assert_eq!(
+            h["completable"], "no",
+            "total loss with zero declared recovery is the joint verdict's floor: {h}"
+        );
+
+        // The offer renders in vivo, and with the SHARPER sentence:
+        // a wholly gone post is "gone", never the third arm's "short".
+        assert_eq!(
+            s["alt_offer"]["reason"], "gone",
+            "arm ordering: total loss keeps its own sentence: {}",
+            s["alt_offer"]
+        );
+
+        // Advisory end to end: the row is badged and offered, not acted
+        // on - still Queued, nothing failed, nothing reordered it away.
+        assert_eq!(s["status"], "Queued", "a verdict is never an action: {s}");
+        let hist = http(port, "/api?mode=history&output=json", None);
+        assert!(
+            !history_has(&hist, &id),
+            "the verdict must not have failed the job: {hist}"
+        );
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Release-eve sweep S4: the SAME total loss on a post uploaded minutes
+/// ago must render NO offer. The test above proves the third arm fires;
+/// this proves its age gate holds, because the two differ only in the
+/// posting date. Below `GONE_MIN_AGE_DAYS` the bucket is Amber - the
+/// module's own sentence calls the evidence "a warning and nothing
+/// more" - and the joint verdict may still read `no` (it is an honest
+/// projection of the sample, and the drawer may show it), but the
+/// "cannot finish, find another release" offer whose click fails the
+/// job must wait out propagation exactly as the gone and recovery arms
+/// do. Before the gate this exact fixture rendered `alt_offer` with
+/// copy asserting the articles "are gone" - on a post an *arr may have
+/// grabbed before propagation finished.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_young_post_with_a_no_verdict_is_badged_but_never_offered() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-healthyoung-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    // The escalation test's post, dated NOW instead of thirty days ago:
+    // 100 declared articles, none served, so every burst reads total
+    // loss on a post whose age says propagation still explains it.
+    let srv = MockServer::start(HashMap::new(), Chaos::default()).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mut xml = format!(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  \
+         <file poster=\"x\" date=\"{now}\" subject=\"&quot;young.bin&quot; yEnc (1/100)\">\n    \
+         <groups><group>g</group></groups>\n    <segments>\n"
+    );
+    for n in 1..=100 {
+        xml.push_str(&format!(
+            "      <segment bytes=\"40000\" number=\"{n}\">youngghost{n}@x</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .env("NZBFAST_HEALTH_TICK_SECS", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        http(port, "/api?mode=pause&output=json", None);
+        let id = upload_nzb(port, &xml, "Young.Show.S01E01.1080p.nzb");
+
+        let slot = || -> serde_json::Value {
+            let q = http(port, "/api?mode=queue&output=json", None);
+            let v: serde_json::Value = serde_json::from_str(&q).unwrap_or_default();
+            v["queue"]["slots"]
+                .as_array()
+                .and_then(|a| a.iter().find(|s| s["nzo_id"] == id).cloned())
+                .unwrap_or(serde_json::Value::Null)
+        };
+        let mut s = serde_json::Value::Null;
+        for _ in 0..300 {
+            s = slot();
+            if !s["health"].is_null() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let h = &s["health"];
+        assert!(!h.is_null(), "the prober never landed a verdict: {s}");
+
+        // The evidence is total loss, and the age keeps it a WARNING:
+        // amber, never red, on a post younger than the propagation gate.
+        assert_eq!(h["absent"], h["sampled"], "every article is a ghost: {h}");
+        assert_eq!(
+            h["bucket"], "amber",
+            "total loss on a fresh post is propagation until proven otherwise: {h}"
+        );
+        // The joint verdict itself may still say `no` - it is a pure
+        // projection of the sample and the badge may render it. What is
+        // pinned here is the ARM, not the arithmetic.
+        assert_eq!(
+            h["completable"], "no",
+            "the fixture must reach the third arm's trigger, or this test pins nothing: {h}"
+        );
+
+        // The whole point: no offer. Before the S4 gate this slot
+        // carried `alt_offer.reason == "short"` with copy asserting the
+        // articles are gone, and a click would have failed the job.
+        assert!(
+            s["alt_offer"].is_null(),
+            "a still-propagating post must never be offered a replacement: {}",
+            s["alt_offer"]
+        );
+
+        // And still advisory end to end: queued, unfailed.
+        assert_eq!(s["status"], "Queued", "a verdict is never an action: {s}");
+        let hist = http(port, "/api?mode=history&output=json", None);
+        assert!(
+            !history_has(&hist, &id),
+            "the verdict must not have failed the job: {hist}"
+        );
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}

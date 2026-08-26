@@ -135,7 +135,11 @@ rem ---- Step 4: pick a port and start -------------------------------------
 echo [4 of 4]  Starting the dashboard...
 rem Default web port is 6789. If it's already in use (usually nzbfast
 rem already running) step to the next free port so THIS copy still starts.
-set PORT=6789
+rem EMPTY sentinel, not 6789: seeded with 6789 this reported "web port
+rem 6789 is free" when every candidate was in use, and then started a
+rem daemon that failed to bind - the one message the user got was the
+rem opposite of what happened.
+set "PORT="
 for %%p in (6789 6790 6791 6792 6793 6794) do (
     netstat -a -n -p TCP | findstr /R /C:":%%p .*LISTENING" >nul 2>&1
     if errorlevel 1 (
@@ -144,6 +148,14 @@ for %%p in (6789 6790 6791 6792 6793 6794) do (
     )
 )
 :gotport
+if not defined PORT (
+    echo       [X] web ports 6789-6794 are all in use, so nzbfast has
+    echo           nowhere to listen. Close whatever is using them
+    echo           ^(another nzbfast window?^) and run this again.
+    echo.
+    pause
+    exit /b 1
+)
 if "%PORT%"=="6789" (
     echo       [ok] web port 6789 is free
 ) else (
@@ -169,7 +181,13 @@ echo.
 
 rem Control returns here when the daemon stops, so we can say what
 rem happened and keep the window open. --open pops the browser.
-nzbfast.exe --config "%DATA%\config.local.json" serve --watch "%WATCH%" --out "%OUT%" --port %PORT% --open
+rem --index-db is ABSOLUTE and under %DATA%. The flag defaults to the
+rem relative `index.db`, which for a portable copy is beside the exe: on
+rem read-only media the daemon cannot create it at all, and on a normal
+rem unzip the index is lost the moment the extracted folder is replaced
+rem by the next release. Everything else here is already under %DATA%.
+if exist "%~dp0index.db" if not exist "%DATA%\index.db" move /Y "%~dp0index.db*" "%DATA%\" >nul 2>&1
+nzbfast.exe --config "%DATA%\config.local.json" serve --watch "%WATCH%" --out "%OUT%" --index-db "%DATA%\index.db" --port %PORT% --open
 set CODE=%errorlevel%
 
 echo.

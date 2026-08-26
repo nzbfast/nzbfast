@@ -3,10 +3,20 @@
 //! and `mode=queue&name=promote_file` moves one file's still-pending
 //! articles to the front of the queue.
 //!
-//! Reporting and one queue reorder. Nothing here teaches the engine a
+//! Reporting and one queue reorder. Nothing here teaches the ENGINE a
 //! new state: the listing reads counters `FileSlot` already keeps, and
 //! the promote rides the same `QueueControl::promote_opts` the
 //! extractor's offset-0 probe and the player's span promotes ride.
+//!
+//! One word in the listing is not a counter, and it is the exception
+//! that proves the rest: §296's "published", which says this file is
+//! already AT the destination and usable while the job downloads. It
+//! comes off the job RECORD (`Job::early_published`) rather than off a
+//! slot, because no counter can know it - the copy is a daemon action,
+//! not something the engine did. It is joined by §274's opaque handle
+//! and never by the filename; see `earlyfile::EarlyFile::nzf_id` for
+//! why a name join silently fails on exactly the obfuscated posts whose
+//! drawer is worth reading.
 //! Exclusion - declining a file's remaining articles - is deliberately
 //! NOT here: absent articles are damage to the census, settle and
 //! repair passes, so a naive skip sends repair off to rebuild the very
@@ -22,8 +32,41 @@
 
 use super::*;
 
+/// The handles of the files §296 has already put at the destination for
+/// `nzo_id`, and the job's spool path if it has a queue row.
+///
+/// One walk of the queue for both answers, because the alternative is
+/// two locks of it per poll of a drawer that is open on one job. The
+/// published set is normally EMPTY - the feature is off by default, and
+/// even on it is empty outside the window between a job's first early
+/// copy and its move - so the common cost is a comparison against
+/// nothing.
+fn queue_facts(
+    d: &Arc<Daemon>,
+    nzo_id: &str,
+) -> (std::collections::HashSet<String>, Option<PathBuf>) {
+    d.queue
+        .lock_ok()
+        .iter()
+        .find_map(|j| {
+            let g = j.lock_ok();
+            (g.nzo_id == nzo_id).then(|| {
+                (
+                    g.early_published
+                        .iter()
+                        .filter(|e| !e.nzf_id.is_empty())
+                        .map(|e| e.nzf_id.clone())
+                        .collect(),
+                    Some(g.nzb_path.clone()),
+                )
+            })
+        })
+        .unwrap_or_default()
+}
+
 /// The listing rows for `nzo_id`, or None when no queue row has that id.
 fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
+    let (published, path) = queue_facts(d, nzo_id);
     // The ACTIVE job first: its table is already built, so nothing is
     // parsed on a poll. The owner tag inside `job_files_for` is what
     // makes this safe to consult before the record lookup - a stale
@@ -37,14 +80,11 @@ fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
         return Some(
             t.rows
                 .iter()
-                .map(|r| live_row(r, counts(r).as_ref()))
+                .map(|r| live_row(r, counts(r).as_ref(), &published))
                 .collect(),
         );
     }
-    let path = d.queue.lock_ok().iter().find_map(|j| {
-        let g = j.lock_ok();
-        (g.nzo_id == nzo_id).then(|| g.nzb_path.clone())
-    })?;
+    let path = path?;
     // TODO 274 (e): a job PAST its network phase, whose table the next
     // job's start retired into `hub.tail_files`. Its rows are the run's
     // own counters, so the tail says which files arrived whole, which
@@ -67,7 +107,7 @@ fn listing(d: &Arc<Daemon>, nzo_id: &str) -> Option<Vec<Value>> {
             t.rows
                 .iter()
                 .zip(t.counts.iter())
-                .map(|(r, c)| live_row(r, c.as_ref()))
+                .map(|(r, c)| live_row(r, c.as_ref(), &published))
                 .collect(),
         );
     }
@@ -157,6 +197,7 @@ fn queued_row(r: &crate::streamhub::JobFileRow, recovery: bool) -> Value {
 fn live_row(
     r: &crate::streamhub::JobFileRow,
     c: Option<&crate::streamhub::FileSlotCounts>,
+    published: &std::collections::HashSet<String>,
 ) -> Value {
     let mut o = base_row(r);
     let Some(s) = c else {
@@ -203,18 +244,34 @@ fn live_row(
     // identified as recovery data in-stream - and it is the distinction
     // SAB has no room for, so it gets its own token here rather than
     // being flattened into "finished".
+    let state = if remaining > 0 && arrived > 0 {
+        "active"
+    } else if remaining > 0 {
+        "queued"
+    } else if arrived == 0 && deferred > 0 && abandoned == 0 {
+        "deferred"
+    } else if missing > 0 || abandoned > 0 {
+        "damaged"
+    } else {
+        "complete"
+    };
+    // §296: this file is not merely finished, it is already AT the
+    // destination and usable while the rest of the job downloads - which
+    // is the question a user watching a slow pack actually has, and
+    // nothing else in this payload could answer it.
+    //
+    // It only ever refines "complete", never any other word. A published
+    // file was PAR2-vouched before the copy was taken so it cannot
+    // honestly read as damaged - but the RECORD outlives the verdict:
+    // settle can find at read-back what the in-stream check did not, and
+    // between that moment and the reconcile the row is both published and
+    // damaged. Damage is the sharper fact and keeps the row.
     o.insert(
         "state".into(),
-        json!(if remaining > 0 && arrived > 0 {
-            "active"
-        } else if remaining > 0 {
-            "queued"
-        } else if arrived == 0 && (deferred > 0 || abandoned > 0) {
-            "deferred"
-        } else if missing > 0 || abandoned > 0 {
-            "damaged"
+        json!(if state == "complete" && published.contains(&r.id) {
+            "published"
         } else {
-            "complete"
+            state
         }),
     );
     o.insert("segments_remaining".into(), json!(remaining));

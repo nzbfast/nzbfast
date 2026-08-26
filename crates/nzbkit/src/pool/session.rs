@@ -1010,7 +1010,7 @@ pub(super) async fn handle_body(
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
     inflight: &mut VecDeque<Work>,
-    buf: Vec<u8>,
+    buf: PooledBuf<'_>,
     race_losses: &mut u32,
     session_bytes: &mut u64,
     session_start: Instant,
@@ -1084,29 +1084,39 @@ pub(super) async fn handle_body(
         // fetch->decode channel. Charged by capacity here, released by
         // capacity in the consumer's drain - capacity cannot change while
         // the buffer sits in the channel, so the pair is exact.
-        let chan_charge = cfg.channel_gauge.map_or(0, |g| {
-            let n = buf.capacity() as u64;
-            crate::memgauge::add(g, n);
-            n
-        });
-        let done = FetchOutcome::Done { id: w.id, raw: buf };
+        //
+        // Held as a `Charge`, so the two ways this send can fail need no
+        // release of their own: the charge simply drops with the outcome
+        // it was made for. Only the DELIVERED path acts, handing the
+        // charge on to the consumer that will release it.
+        let chan_charge = cfg
+            .channel_gauge
+            .map(|g| crate::memgauge::Charge::new(g, buf.capacity() as u64));
+        // The buffer now outlives this borrow: disarm the guard and let
+        // the consumer's `adopt` own the release at the far end.
+        let done = FetchOutcome::Done {
+            id: w.id,
+            raw: buf.into_vec(),
+        };
         use tokio::sync::mpsc::error::TrySendError;
         let mut delivered = true;
         match out.try_send(done) {
-            Ok(()) => {}
+            Ok(()) => {
+                // In the channel: the consumer's drain owns the release.
+                if let Some(c) = chan_charge {
+                    c.hand_off();
+                }
+            }
             Err(TrySendError::Closed(_)) => {
                 // Never entered the channel; the outcome (and its
-                // buffer) drops here at teardown.
-                if let Some(g) = cfg.channel_gauge {
-                    crate::memgauge::sub(g, chan_charge);
-                }
+                // buffer) drops here at teardown, and so does the charge.
                 delivered = false;
             }
             Err(TrySendError::Full(done)) => {
                 let waited = std::time::Instant::now();
                 delivered = out.send(done).await.is_ok();
-                if !delivered && let Some(g) = cfg.channel_gauge {
-                    crate::memgauge::sub(g, chan_charge);
+                if delivered && let Some(c) = chan_charge {
+                    c.hand_off();
                 }
                 let ms = waited.elapsed().as_millis() as u64;
                 if let Some(c) = shared.blocked_ms.get(ctx.idx) {
@@ -1147,9 +1157,7 @@ pub(super) async fn handle_body(
         // this one, dup or original - its bytes are racing spend,
         // charged against the hygiene cap (design 5.2).
         shared.charge_dup_loss(buf.len() as u64);
-        if let Some(p) = &cfg.buf_pool {
-            p.give(buf);
-        }
+        drop(buf); // returned to the pool here, not at scope end
         // Recycle experiment: losing races back to back
         // means THIS session is the slow one - a fresh
         // dial to the same host routinely beats a
@@ -1232,17 +1240,14 @@ pub(super) async fn handle_body(
 /// entry, where `pick_dup` reads it and stops asking a question whose
 /// answer cannot be "missing everywhere" any more.
 pub(super) fn handle_probe_hit(
-    cfg: &PoolConfig,
     ctx: ServerCtx,
     shared: &Arc<Shared>,
     inflight: &mut VecDeque<Work>,
-    buf: Vec<u8>,
+    buf: PooledBuf<'_>,
 ) {
     let w = inflight.pop_front().expect("response without command");
     shared.release_wire(1);
-    if let Some(p) = &cfg.buf_pool {
-        p.give(buf);
-    }
+    drop(buf); // returned to the pool here, not at scope end
     shared.note_found(&w.id, ctx.group_bits);
     if std::env::var_os("NZBFAST_POOL_DEBUG").is_some() {
         info!(target: "stat-probe", "{} present on server {}", w.id, ctx.idx);
@@ -1258,16 +1263,14 @@ pub(super) async fn handle_missing(
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
     inflight: &mut VecDeque<Work>,
-    buf: Vec<u8>,
+    buf: PooledBuf<'_>,
     echoed: bool,
     takedown: bool,
     bare_refused: &mut VecDeque<Arc<str>>,
 ) {
     let mut w = inflight.pop_front().expect("response without command");
     shared.release_wire(1);
-    if let Some(p) = &cfg.buf_pool {
-        p.give(buf);
-    }
+    drop(buf); // returned to the pool here, not at scope end
     // Reliability: this server said "no such article" -
     // charged even for dups (the response is authoritative
     // for this server regardless of who owns the outcome).
@@ -1555,9 +1558,11 @@ pub(super) async fn claim_flap_keeper(
 }
 
 /// The two "this worker is finished before it dials" exits at the top of
-/// `session_loop`: every article is terminal, or the user aborted. They
-/// differ only in what becomes of a connection claimed before the ramp
-/// and never used, and that difference is load-bearing.
+/// `session_loop`: every article is terminal, or the user aborted. Both
+/// hand a connection claimed before the ramp and never used back to the
+/// warm pool, because in both the session is DRAINED - which is the only
+/// question the pool asks. They used to differ, and the abort arm below
+/// records what that cost.
 ///
 /// Returns true when the caller must return.
 pub(super) async fn done_before_dial(
@@ -1584,10 +1589,17 @@ pub(super) async fn done_before_dial(
         return true; // every article is terminal
     }
     if shared.aborted.load(Ordering::Acquire) {
-        // Aborts close, per the module rule every other abort exit
-        // follows - the user is done with this server, not pausing.
+        // The same session as the arm above, reached one flag later, so
+        // it gets the same answer: `take` sent its DATE and read the
+        // answer, nothing has been written since, and a DRAINED session
+        // is reusable whatever ended the run. Closing it here was the
+        // erosion that arm names, charged to the seam that hits it most
+        // - a defer or a job switch is an abort, and the whole point of
+        // claiming before the ramp is that this worker never dials.
+        // [`stand_down`] is the same decision at the session loop's own
+        // abort exit, and carries the incident it comes from.
         if let Some(c) = preclaimed.take() {
-            c.quit().await;
+            park_or_quit(cfg, server, c).await;
         }
         return true; // user abort
     }
@@ -1626,10 +1638,20 @@ pub(super) async fn pre_dial_gates(
     // TODO 112 live target: a worker without an admission parks here,
     // holding no connection, until the target rises or another worker
     // returns its admission (F-22: admission is a count, so a retiring
-    // worker's place is re-filled), or the run ends. The quit that
-    // routed us here has already returned the session, so a parked
-    // worker costs the provider nothing - and unlike the capacity yield
-    // it has NOT retired, so it can come back.
+    // worker's place is re-filled), or the run ends. The exit that
+    // routed us here has already handed its session on - and unlike the
+    // capacity yield it has NOT retired, so it can come back.
+    //
+    // "Handed on" and not "quit", since 26 Aug 2026: a shed for a
+    // lowered live target now PARKS its drained session in the warm pool
+    // rather than quitting it, precisely so that the raise this worker
+    // is waiting for lands on a socket instead of a dial. So a worker
+    // parked here costs the provider a warm-pool session for the
+    // target's downswing, bounded by `max_idle` like every other park;
+    // a shed for a spent prepaid block still quits, because nothing is
+    // coming back for that one. The reasoning, and the live-daemon
+    // measurement behind the split, are at the shed itself in
+    // `session_loop`.
     if let Some(t) = &cfg.live_target
         && admit.is_none()
     {
@@ -1697,15 +1719,13 @@ async fn session_died_mid_read(
     out: &mpsc::Sender<FetchOutcome>,
     conn: Connection,
     inflight: &mut VecDeque<Work>,
-    buf: Vec<u8>,
+    buf: PooledBuf<'_>,
     e: &crate::nntp::NntpError,
     bare_refused: &VecDeque<Arc<str>>,
     session_bytes: u64,
     session_responses: u32,
 ) -> usize {
-    if let Some(p) = &cfg.buf_pool {
-        p.give(buf);
-    }
+    drop(buf); // returned to the pool here, not at scope end
     // WHO hung up (TODO 121 diagnostics): an I/O-flavoured
     // error OR a clean EOF (`Closed` - read_status maps
     // n==0 to it, and a between-responses FIN is the
@@ -1754,6 +1774,9 @@ async fn session_died_mid_read(
         cfg,
         ctx,
         inflight,
+        // The peer ended it, and the OS's own words for how ride in the
+        // string beside the code.
+        FailCode::Transport,
         &e.to_string(),
         session_responses == 0,
     )
@@ -1773,7 +1796,7 @@ async fn session_stalled_mid_read(
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
     inflight: &mut VecDeque<Work>,
-    buf: Vec<u8>,
+    buf: PooledBuf<'_>,
     prebyte_expired: bool,
     bare_refused: &VecDeque<Arc<str>>,
     session_bytes: u64,
@@ -1786,9 +1809,7 @@ async fn session_stalled_mid_read(
     // read as zero-work and never entered the keeper
     // clamp, however often it did it.
     let partial_bytes = buf.len() as u64;
-    if let Some(p) = &cfg.buf_pool {
-        p.give(buf);
-    }
+    drop(buf); // returned to the pool here, not at scope end
     // OUR deadline ended this session, not the peer. Split
     // pre-byte from mid-flow: giving up before the first
     // byte is our budget choice, a mid-flow stop is a wedge.
@@ -1822,30 +1843,147 @@ async fn session_stalled_mid_read(
     // response budget expired - so the charge stays
     // unconditional: a mute-on-one-article server must
     // still walk that article to a terminal verdict.
-    requeue_or_fail(shared, out, cfg, ctx, inflight, "read stall", true).await;
+    requeue_or_fail(
+        shared,
+        out,
+        cfg,
+        ctx,
+        inflight,
+        // OUR deadline, not the peer's - its own code, for the reason
+        // `FailCode::ReadStall` gives.
+        FailCode::ReadStall,
+        FailCode::ReadStall.reason(),
+        true,
+    )
+    .await;
     cause
 }
 
+/// The abort exit: hand this worker's connection back the way the
+/// SOCKET allows, whatever ended the run.
+///
+/// `drained` is the whole test, and it is the pool's own: a connection
+/// with unread pipelined responses on it is reusable by nobody, so that
+/// one closes. An abort with an empty pipeline does not have that
+/// problem, and it used to close anyway - on the reasoning that "the
+/// user is done with this server", which is what going OFFLINE means and
+/// not what stopping a job means. Offline and shutdown shut the pool
+/// itself (`set_accepting(false)` plus `clear`), so `give` closes for
+/// them and no exit here has to guess which kind of abort it is looking
+/// at.
+///
+/// What the guess cost, measured on the live daemon 25-26 Aug 2026: this
+/// flag is also the defer watchdog's teeth and the job-switch seam, and
+/// the workers those find on a server that has nothing fetchable are
+/// idle BY DEFINITION - the population [`idle_turn`]'s keepalive probe
+/// was written for. So every defer quit 9-13 authenticated sessions to
+/// one provider and the next job dialled them again seconds later.
+/// Against a per-account 40-session cap whose server holds torn-down
+/// sessions for minutes before reaping them, that is a dial storm into a
+/// wall the storm itself keeps up: "502 connection limit (40) reached"
+/// for hours, across a daemon restart, with nothing else holding the
+/// credentials.
+///
+/// It is also what the two neighbouring exits already do. A job that
+/// ENDS parks and a graceful pause parks (both in [`idle_turn`]); only
+/// the abort threw the fleet away, so completing a job and stopping one
+/// left the account in different states for no stated reason.
+///
+/// PROVIDER-BLIND, deliberately. The pool does learn which providers cap
+/// sessions - a capacity refusal whose text is a CONNECTION limit
+/// records the count held at the bounce as the observed ceiling - but
+/// making the seam wait for that evidence is a rule that only fires
+/// after the damage, and the first job after a restart would storm
+/// anyway - and the 25 Aug wall outlived a daemon restart. Keeping a
+/// drained session is right for an uncapped provider too, for the reason
+/// the warm pool exists at all, so there is nothing for the distinction
+/// to buy.
+///
+/// It adds no holding mechanism and could not: what it changes is which
+/// SOCKETS reach the pool, never how long the pool keeps one. A session
+/// parked here ages out on `max_idle` and is trimmed by its server's
+/// release policy exactly as one parked by a finished job is.
+pub(super) async fn stand_down(
+    cfg: &PoolConfig,
+    server: &ServerConfig,
+    conn: Connection,
+    drained: bool,
+) {
+    if drained {
+        park_or_quit(cfg, server, conn).await;
+    } else {
+        conn.quit().await;
+    }
+}
+
+/// What an idle turn decided.
+enum IdleTurn {
+    /// Still wanted: look again shortly.
+    Keep(Connection),
+    /// The worker is done with this connection and must return (it has
+    /// been parked or quit).
+    Retire,
+    /// The keepalive probe found the peer gone (FIN'd, reset, or
+    /// black-holed past the validate bound). The session end is already
+    /// tallied as `peer`; the connection is dropped, and the caller
+    /// redials through the same failure path as a read-side death.
+    Dead,
+}
+
 /// An idle turn at the reuse point: the pipeline is empty and the
-/// queue had nothing for this worker. `None` = the worker is done with
-/// this connection and must return (it has been parked or quit);
-/// `Some(conn)` hands it back to look again shortly. Hoisted out of
-/// `session_loop` whole (size gate) when the hand-over arm joined the
-/// two that were there.
+/// queue had nothing for this worker. Hoisted out of `session_loop`
+/// whole (size gate) when the hand-over arm joined the two that were
+/// there; see [`IdleTurn`] for what each verdict means to the caller.
+///
+/// `quiet_since` is the last moment the socket was known alive - the
+/// caller resets it on every pass that reaches the wire, and the probe
+/// below resets it on success. Without the probe, a worker whose server
+/// has nothing fetchable for the job (every remaining article missing
+/// there) spins in the 25 ms arm for the life of the job and never
+/// touches the socket, so the provider's idle timeout FINs it and
+/// nobody notices: the socket sits in CLOSE_WAIT, the conn gauge still
+/// reports it as a live connection, and the death only surfaces when
+/// work finally arrives and the first write fails - which for a server
+/// with 0% of the job never happens. Measured live, 25 Aug 2026: nine
+/// CLOSE_WAIT sockets to a backbone with 100% of the job's articles
+/// missing, stable for minutes, whyslow reporting conns 9 / reconnects
+/// 0. The warm pool has pinged its parked connections on this exact
+/// cadence all along ([`crate::warmpool::KEEPALIVE_EVERY`]); this is
+/// the same discipline for the sockets workers hold.
 async fn idle_turn(
     cfg: &PoolConfig,
     server: &ServerConfig,
     ctx: ServerCtx,
     shared: &Arc<Shared>,
-    conn: Connection,
-) -> Option<Connection> {
+    mut conn: Connection,
+    quiet_since: &mut Instant,
+) -> IdleTurn {
     if shared.pending.load(Ordering::Acquire) == 0 {
         park_or_quit(cfg, server, conn).await;
-        return None; // truly drained
+        return IdleTurn::Retire; // truly drained
     }
     if shared.draining.load(Ordering::Acquire) {
         park_or_quit(cfg, server, conn).await;
-        return None; // graceful pause: in-flight done, queue left for resume
+        return IdleTurn::Retire; // graceful pause: in-flight done, queue left for resume
+    }
+    // Keepalive probe, ahead of the throttle arm below on purpose: a
+    // hold-parked fleet is "wanted back the moment the holds drain",
+    // and a socket the provider idle-reaped during a long hold is not
+    // coming back for anyone. DATE both proves the socket and resets
+    // the provider's idle clock, so a healthy idle session stays held
+    // instead of being torn down and redialled - which against a
+    // per-account connection cap is a dial storm (the "502 connection
+    // limit reached" wall behind the 25 Aug 2026 incident).
+    if quiet_since.elapsed() >= crate::warmpool::KEEPALIVE_EVERY {
+        let alive = matches!(
+            tokio::time::timeout(crate::warmpool::VALIDATE_TIMEOUT, conn.date()).await,
+            Ok(Ok(_))
+        );
+        if !alive {
+            shared.note_session_end(ctx.idx, 0);
+            return IdleTurn::Dead;
+        }
+        *quiet_since = Instant::now();
     }
     // Held-bytes backpressure (TODO 94 item E): the queue is not dry,
     // it is PARKED behind a chased group's engine, for seconds at a
@@ -1853,7 +1991,7 @@ async fn idle_turn(
     // the connections are wanted back the moment the holds drain.
     if shared.park.is_throttling() {
         tokio::time::sleep(Duration::from_millis(25)).await;
-        return Some(conn);
+        return IdleTurn::Keep(conn);
     }
     // Cross-job hand-over (`handoff`): idle past queue-dry with nothing
     // to fetch. Say so once per run, and if the next job's workers are
@@ -1862,10 +2000,13 @@ async fn idle_turn(
     // job earlier. The permit goes with this worker's return (see
     // `worker`).
     shared.note_idle_after_dry(ctx.idx);
-    if shared.want_handoff(ctx.idx) {
+    // CLAIMED, not peeked: this arm is the one that acts on the answer,
+    // and `want_handoff` alone let every idle worker on a server reach
+    // the same conclusion at once. See `claim_handoff`.
+    if shared.claim_handoff(ctx.idx) {
         shared.note_session_end(ctx.idx, 4);
         park_or_quit(cfg, server, conn).await;
-        return None;
+        return IdleTurn::Retire;
     }
     // Idle but articles are still in flight elsewhere and may requeue
     // (or become dup candidates) - re-check shortly.
@@ -1873,7 +2014,7 @@ async fn idle_turn(
         shared.debug_dump_idle();
     }
     tokio::time::sleep(Duration::from_millis(25)).await;
-    Some(conn)
+    IdleTurn::Keep(conn)
 }
 
 /// What one window top-up decided.
@@ -1991,6 +2132,7 @@ async fn top_up_window(
                 cfg,
                 ctx,
                 inflight,
+                FailCode::Transport,
                 "send failed",
                 session_responses == 0,
             )
@@ -2028,8 +2170,76 @@ pub(super) fn surplus_here(
         })
 }
 
+/// Where a SHED connection goes: parked for the target's next upswing,
+/// or quit for good because the block that paid for it is spent.
+///
+/// The shed's `inflight.is_empty()` guard is the reuse point's own safety
+/// argument, so the session arriving here is drained and parkable - and it
+/// was quit outright until 26 Aug 2026, which made the shed the last exit
+/// in this pool that threw a provably reusable session away. Whether it
+/// should is the one question [`stand_down`]'s rule does not settle,
+/// because a shed carries a judgement a stop does not: the live target is
+/// what this RUN may hold, so parking keeps an account slot occupied at
+/// the moment somebody asked for fewer of them. The two reasons
+/// [`surplus_here`] folds together get OPPOSITE answers, and both were
+/// measured rather than reasoned about.
+///
+/// **A live-target reduction PARKS.** Nothing that lowers a `ConnTarget`
+/// is evidence about the ACCOUNT: an observed session cap goes to
+/// `Shared::note_cap_bounce` and moves the flap breaker's keeper count,
+/// never this. What lowers it is the line-cap governor fitting a byte
+/// budget and the TODO 112 walker finding a throughput knee - and the
+/// raise that follows either is exactly what TODO 277 spawns parked slots
+/// for. A `ConnTarget` above the SPAWNED fleet wakes nothing, so the seed
+/// spawns the curve's ceiling and parks the surplus WORKERS in
+/// [`pre_dial_gates`] precisely so a raise lands without a dial; a shed
+/// that quit its socket made the same shed/raise cycle cost a dial, a TLS
+/// handshake and an AUTHINFO every time, which is the churn that design
+/// exists to avoid.
+///
+/// Measured 26 Aug 2026 on a long-lived daemon install running a
+/// multi-provider account set: 13 runs across its two daemon logs, one of
+/// 31,528 s and one of 8,192 s, every `[pool]` summary reporting `line cap
+/// 25 (0 sheds)`, and not one in-run "using N of M" line in either
+/// direction. That is not a quiet sample - `fleet_step`
+/// returns early on `want <= fleet`, so the governor is monotone UP within
+/// a run, and the TODO 112 walker ships off. So the population this arm
+/// can reach in a default install is empty, and where it does fire it
+/// fires once and holds one socket.
+///
+/// **A spent prepaid block QUITS**, and that is not symmetry for its own
+/// sake. `Shared::over_budget` latches for the run, and the daemon's
+/// runner rules a host whose block spend has reached its size out of the
+/// NEXT job's pool outright, so a session parked here is a provider slot
+/// held for a job that will never take it - pure cost until the warm
+/// pool's idle bound reaps it. §96.5's own bow-out at the top of
+/// `'session` already says as much: that worker leaves "before it can dial
+/// (or keep) a session the account can no longer pay for". This only makes
+/// the shed agree with it.
+///
+/// Pinned by `a_shed_for_a_lowered_target_parks_its_session_rather_than_quitting_it`
+/// and `a_shed_for_a_spent_prepaid_block_quits_its_session`.
+async fn release_shed_conn(
+    cfg: &PoolConfig,
+    server: &ServerConfig,
+    shared: &Shared,
+    idx: usize,
+    conn: Connection,
+) {
+    // Re-read rather than taken from `surplus_here`: the budget latch only
+    // ever goes one way, so a spent block seen there is spent here too,
+    // and reading it at the decision keeps the two reasons from drifting.
+    if shared.over_budget(idx) {
+        conn.quit().await;
+    } else {
+        park_or_quit(cfg, server, conn).await;
+    }
+}
+
 /// The consuming half of [`surplus_here`]: the caller has drained its
-/// pipeline and asks whether it is the one to quit.
+/// pipeline and asks whether it is the one to bow out. What it then does
+/// with the CONNECTION is [`release_shed_conn`] - since 26 Aug 2026 that
+/// is a park on one of the two arms, so this no longer always means quit.
 pub(super) fn shed_surplus(
     cfg: &PoolConfig,
     idx: usize,
@@ -2302,10 +2512,16 @@ pub(super) async fn session_loop(
         // In-flight commands, oldest first (responses arrive in order).
         let mut inflight: VecDeque<Work> = VecDeque::with_capacity(cfg.window);
 
+        // Last moment this session's socket was known alive: dial time,
+        // then every pass that reaches the wire, then each successful
+        // idle probe (see `idle_turn`). Per-session on purpose - a
+        // redial starts a fresh clock.
+        let mut quiet_since = Instant::now();
+
         loop {
             if shared.aborted.load(Ordering::Acquire) {
                 shared.release_wire(inflight.len());
-                conn.quit().await;
+                stand_down(cfg, server, conn, inflight.is_empty()).await;
                 return; // user abort
             }
             // M11 stream mode: while a player is attached, run shallow
@@ -2327,6 +2543,10 @@ pub(super) async fn session_loop(
             // admitting work; once the pipeline drains, return the
             // connection and re-park (`shed_surplus`). A drain takes
             // precedence: a pause must finish what is in flight first.
+            //
+            // Where the connection GOES is `release_shed_conn` - the two
+            // reasons `surplus_here` folds together get opposite answers,
+            // and the measurement behind the split is on that function.
             let over_target = surplus_here(cfg, ctx.idx, &shared, &admit);
             if over_target
                 && inflight.is_empty()
@@ -2335,7 +2555,7 @@ pub(super) async fn session_loop(
             {
                 shared.note_session_end(ctx.idx, 4);
                 last_end = Some(4);
-                conn.quit().await;
+                release_shed_conn(cfg, server, &shared, ctx.idx, conn).await;
                 continue 'session;
             }
             // A pipeline deeper than the live cap (stream mode engaged
@@ -2393,12 +2613,23 @@ pub(super) async fn session_loop(
                 // no unread responses queued on this socket and the next
                 // job can pick it up mid-conversation. Every other exit
                 // from this loop abandons in-flight responses and closes.
-                match idle_turn(cfg, server, ctx, &shared, conn).await {
-                    Some(c) => conn = c,
-                    None => return,
+                match idle_turn(cfg, server, ctx, &shared, conn, &mut quiet_since).await {
+                    IdleTurn::Keep(c) => conn = c,
+                    IdleTurn::Retire => return,
+                    IdleTurn::Dead => {
+                        // Nothing to requeue (in-flight is empty) and the
+                        // end is already tallied; redial with the standard
+                        // backoff so an idle-reaping provider is not dial
+                        // stormed.
+                        last_end = Some(0);
+                        session_failures += 1;
+                        pending_backoff = Some(session_backoff_delay(cfg, session_failures));
+                        continue 'session;
+                    }
                 }
                 continue;
             }
+            quiet_since = Instant::now();
             if conn.flush().await.is_err() {
                 // Write-side peer death, same as the failed send above.
                 shared.note_session_end(ctx.idx, 0);
@@ -2416,6 +2647,7 @@ pub(super) async fn session_loop(
                     cfg,
                     ctx,
                     &mut inflight,
+                    FailCode::Transport,
                     "flush failed",
                     session_responses == 0,
                 )
@@ -2425,10 +2657,7 @@ pub(super) async fn session_loop(
                 continue 'session;
             }
 
-            let mut buf = match &cfg.buf_pool {
-                Some(p) => p.take(),
-                None => Vec::with_capacity(crate::pool::bufpool::body_buf_bytes()),
-            };
+            let mut buf = crate::pool::PooledBuf::from_pool(cfg.buf_pool.as_deref());
             // TODO 96.4: which command the answer below belongs to. A
             // 223 and a 222 are both `Ok(Ok(true))`, and only this says
             // which one arrived.
@@ -2446,9 +2675,7 @@ pub(super) async fn session_loop(
             )
             .await;
             let Some(read) = step.read else {
-                if let Some(p) = &cfg.buf_pool {
-                    p.give(buf);
-                }
+                drop(buf); // back to the pool here, before the awaits below
                 if step.shed_for_promote {
                     shared.note_session_end(ctx.idx, 4);
                     last_end = Some(4);
@@ -2486,7 +2713,7 @@ pub(super) async fn session_loop(
             }
             match read {
                 Ok(Ok(true)) if probe_front => {
-                    handle_probe_hit(cfg, ctx, &shared, &mut inflight, buf);
+                    handle_probe_hit(ctx, &shared, &mut inflight, buf);
                 }
                 Ok(Ok(true)) => {
                     match handle_body(

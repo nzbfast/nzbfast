@@ -162,6 +162,11 @@ pub(super) fn run(d: &Arc<Daemon>) -> Result<String, String> {
         name: "scoreboard".to_string(),
         url: ref_url,
         apikey: ref_key,
+        // Newznab, and `scoreboard_reference` refuses any other kind
+        // before we get here: this lane samples by CATEGORY with an
+        // empty query, which nzbindex has no answer for (TODO 297).
+        kind: crate::newznab::SourceKind::Newznab,
+        nzbindex: Default::default(),
         enabled: true,
         priority: 0,
         hits_per_day: 0,

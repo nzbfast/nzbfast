@@ -12,8 +12,9 @@ jobs:
   build-and-test:
     if: github.repository == 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
-    # 60, raised from 45 on 24 Aug 2026, and it is a STOPGAP with a
-    # measured replacement already identified - see below.
+    # 60, raised from 45 on 24 Aug 2026 as a stopgap, and DELIBERATELY
+    # left at 60 by the nextest conversion below even though that
+    # conversion is what the raise was standing in for.
     #
     # This job had never once finished inside 45 minutes. It only looked
     # like it did because it FAILED FAST: linux-tarballs.sh has been red
@@ -22,23 +23,21 @@ jobs:
     # stopped before the expensive tail. Fix that gate and the job runs
     # to completion, reaches clippy, and is cancelled at 45.3 minutes.
     #
-    # WHERE THE TIME GOES, measured on run 32768611010: `test (nzbfast,
+    # WHERE THE TIME WENT, measured on run 32768611010 while the suite
+    # was still two `cargo test` passes: `test (nzbfast,
     # single-threaded)` 30.1 min, `test (workspace minus nzbfast)`
     # 9.7 min, build 2.1, clippy 2.0, cache restore 0.4. So 40 of the 45
-    # are the two test steps and the cache is HITTING - this is not a
+    # were the two test steps and the cache was HITTING - never a
     # cold-build problem.
     #
-    # THE REAL FIX, and why it is not in this commit. The serial step is
-    # `--test-threads=1` over the whole package, which is a blanket
-    # answer to a narrow problem: a plain parallel `cargo test` flakes
-    # (see the note on that step). `.config/nextest.toml` already solves
-    # it properly with per-binary `max-threads = 1` test groups, and the
-    # private CI runs THE SAME TESTS in four sharded jobs at ~2.5-3.6
-    # min each off one archive. That config is NOT in PUBLIC_MANIFEST,
-    # so the public gate cannot use it and blanket serialisation is the
-    # only safe option here today. Shipping it and switching this job to
-    # nextest is the ~25-minute saving; it wants its own change and its
-    # own verification cycle, because each cycle here costs 45 minutes.
+    # WHY 60 STAYS. The test steps are nextest now and the projection is
+    # ~25 minutes for the whole job, which would make 45 comfortable
+    # again. That projection is a projection: the 3.03x behind it was
+    # measured on a developer box, not on this runner, and lowering a
+    # timeout on the strength of it would kill contributor PRs if it is
+    # optimistic. Lower it once one green public run has reported the
+    # real step timings - that is a one-line change with the numbers in
+    # front of you, and there is no cost to waiting.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,18 +94,81 @@ jobs:
             ~/.cargo/git
             target
           key: pr-cargo-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
-      # The suite runs as TWO passes, split on the nzbfast package. The
-      # daemon suite is single-threaded by invariant (CLAUDE.md invariant
-      # 4), and under a plain parallel `cargo test --workspace` it flaked
-      # about 1 run in 3 on an unmodified tree
-      # (cancelling_a_download_leaves_its_duplicate_held), measured the
-      # same way against a clean checkout - so it is the invocation, not
-      # a regression in any change under review.
-      # cargo cannot exclude one test TARGET from a workspace pass, so the
-      # whole nzbfast package gets its own pass with --test-threads=1 -
-      # which is also how nightly.yml already runs daemon and e2e (e2e
-      # carries timing-sensitive stall/watchdog tests, so serialising it
-      # is a feature, not a cost).
+      # Prebuilt binary pinned by version and checked by SHA256 rather
+      # than trusted - the same pattern the private CI uses, and the
+      # reason it is a pinned download rather than `cargo install` is
+      # that installing it from source on this runner costs more than
+      # the whole saving below.
+      #
+      # --retry-all-errors, not bare --retry: a mid-transfer drop is not
+      # one of the "transient" conditions plain --retry covers, and a
+      # truncated tarball is what actually happens. The sha256 is still
+      # the correctness gate - retrying only removes the
+      # single-packet-drop failure mode, it never accepts a bad file.
+      - name: install cargo-nextest
+        env:
+          NT_VERSION: "0.9.140"
+          NT_SHA_LINUX: "4ee9aaa0d0171a985a5d0eb735b87355894c1c455972e9674fb9fdbd1387c9a3"
+        run: |
+          curl -sSfL --retry 5 --retry-delay 3 --retry-all-errors \
+            --connect-timeout 20 -o cargo-nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NT_VERSION}/cargo-nextest-${NT_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${NT_SHA_LINUX}  cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz
+          sudo mv cargo-nextest /usr/local/bin/
+          rm cargo-nextest.tar.gz
+      # The suite runs as TWO passes, split on the nzbfast package, and
+      # the reason for the SPLIT is no longer the reason it was written.
+      #
+      # It used to be serialisation. The daemon suite is single-threaded
+      # by invariant (CLAUDE.md invariant 4), and under a plain parallel
+      # `cargo test --workspace` it flaked about 1 run in 3 on an
+      # unmodified tree (cancelling_a_download_leaves_its_duplicate_held),
+      # measured against a clean checkout - so it was the invocation, not
+      # a regression in any change under review. cargo cannot exclude one
+      # test TARGET from a workspace pass, so the whole nzbfast package
+      # got its own pass with --test-threads=1: a blanket answer to a
+      # narrow problem, and it cost 30.1 of this job's 45 minutes.
+      #
+      # `.config/nextest.toml` answers it narrowly instead, with
+      # per-binary `max-threads = 1` test groups (daemon-serial,
+      # e2e-serial, fault-contract-serial), so daemon and e2e run
+      # concurrently with each other while everything else runs fully
+      # parallel. Measured like for like on one developer box, 24 Aug
+      # 2026: 1989 s for `cargo test -- --test-threads=1` against 656 s
+      # for nextest over the same tree, 2377/2377 passing under the
+      # groups. That config now ships (packaging/PUBLIC_MANIFEST), which
+      # is the one thing that had kept this job on the slow path.
+      #
+      # SO WHAT THE SPLIT IS FOR NOW is the ENV, and only the env: the
+      # second pass sets NZBFAST_REQUIRE_UNRAR and NZBFAST_LAN_TESTS that
+      # the first must not have. Both passes therefore build the SAME
+      # thing - identical flags, identical features, no package selection
+      # - and select what to RUN with `-E`, so the second pass compiles
+      # nothing and the whole job pays for one build.
+      #
+      # NO `--workspace`, and that is not a translation of the old
+      # `--workspace --exclude nzbfast`: it is dropping it. That flag
+      # OVERRIDES default-members (see the comment in the root
+      # Cargo.toml), which exists to hold nzbfast-ffi out, and that crate
+      # turns nzbfast's `ffi` feature on so feature unification compiles
+      # the whole module tree a second time as the lib target. Excluding
+      # nzbfast did not exclude nzbfast-ffi, so the old first pass was
+      # paying that duplicate. clippy below still reaches nzbfast-ffi by
+      # NAME, which is the cheap way to cover that crate root.
+      #
+      # NO `--profile ci` EITHER, and it is worth knowing why the obvious
+      # flag is absent. That profile pairs a per-test ceiling with
+      # `retries = 1`, so a wedged test is killed, retried, and reported
+      # "N passed (1 flaky)" at exit 0 - the hidden-wedge class. It is
+      # safe in the private CI only because a companion step reads the
+      # junit report the profile writes and reddens the run, and that
+      # reader is not part of the public tree. Taking the ceiling without
+      # the reader would be strictly worse than taking neither: with no
+      # ceiling a wedge simply runs on to this job's own timeout, which
+      # is loud. The default profile carries the same test groups (they
+      # are declared under `profile.default.overrides`), so none of the
+      # speed above depends on the profile.
       #
       # The heavy-tests features (TODO 116b): the seven heavy targets
       # carry required-features in their Cargo.toml so the private
@@ -115,21 +177,25 @@ jobs:
       # the extra minutes buy real coverage - so both passes here (and
       # the Windows twins below) pass the feature to keep that exactly
       # as it was. Forget it and cargo builds a suite short SILENTLY
-      # here (nothing names the targets), which is why the flag rides in
-      # the same commit as the gate.
-      - name: test (workspace minus nzbfast)
+      # here (nothing names the targets), which is why the flag stays.
+      # leak_soak is `#[ignore]`d at the test and is not run by either
+      # runner, exactly as before.
+      - name: test (everything but nzbfast)
         env:
           NZBFAST_NO_ENRICH: "1"
           # par2 is installed above, so a PAR2 test that cannot find it is a
           # broken job. Without this they SKIP, and a broken install reads as
           # a green run with silently reduced coverage.
           NZBFAST_REQUIRE_PAR2: "1"
-        # --no-fail-fast is not tidiness: cargo stops at the first failing
-        # TARGET, so a single red test in the nzbfast bin used to mean
-        # nzbkit's suites - yEnc, PAR2, RAR - never ran at all, and the run
-        # reported one binary's result as if it had covered the workspace.
-        run: cargo test --workspace --exclude nzbfast --locked --features nzbkit/heavy-tests --no-fail-fast
-      - name: test (nzbfast, single-threaded)
+        # --no-fail-fast is not tidiness: a runner that stops at the first
+        # failing binary reports one binary's result as if it had covered
+        # the workspace - a single red test in the nzbfast bin used to
+        # mean nzbkit's suites (yEnc, PAR2, RAR) never ran at all. The
+        # shipped config sets `fail-fast = false` too; the flag stays on
+        # the line so this job keeps the guarantee whatever that file
+        # says next.
+        run: cargo nextest run --locked --features nzbkit/heavy-tests,nzbfast/heavy-tests --no-fail-fast -E 'not package(nzbfast)'
+      - name: test (nzbfast)
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
@@ -145,7 +211,9 @@ jobs:
           # firewall prompt on every rebuild; a Linux runner has no such
           # prompt, so CI is where this belongs.
           NZBFAST_LAN_TESTS: "1"
-        run: cargo test -p nzbfast --locked --features heavy-tests --no-fail-fast -- --test-threads=1
+        # Same flags as the pass above on purpose - only the filter and
+        # the env differ - so this step compiles nothing.
+        run: cargo nextest run --locked --features nzbkit/heavy-tests,nzbfast/heavy-tests --no-fail-fast -E 'package(nzbfast)'
       - name: fmt
         run: cargo fmt -p nzbkit -p nzbfast -p nzbtray --check
       # Parity with ci-private.yml; see TODO 102b for why this is a script
@@ -297,10 +365,24 @@ jobs:
             ~/.cargo/git
             target
           key: pr-cargo-v2-${{ runner.os }}-${{ steps.depkey.outputs.hash }}
-      # Same two-pass split as the Linux leg, for the same reason: the
-      # daemon suite is single-threaded by invariant (CLAUDE.md invariant
-      # 4) and flakes under a parallel workspace pass, and cargo cannot
-      # exclude one test target from --workspace.
+      # Same two-pass split as the Linux leg, for the reason that leg
+      # USED to have: the daemon suite is single-threaded by invariant
+      # (CLAUDE.md invariant 4) and flakes under a parallel workspace
+      # pass, and cargo cannot exclude one test target from --workspace.
+      #
+      # STILL `cargo test`, deliberately, and this is the one asymmetry
+      # in this file worth explaining. The Linux leg moved to nextest on
+      # 26 Aug 2026 for a MEASURED 3.03x; that measurement is a Linux
+      # measurement on a developer box, and nothing has measured this
+      # runner. Converting both legs in one commit would also make the
+      # next red public run ambiguous between them, on a gate whose
+      # verification cycle costs ~45 minutes and which is the gate
+      # external contributors hit. The conversion here is mechanical
+      # once the Linux one has a green run behind it - the same install
+      # step in its pwsh spelling (ci-private.yml has one), the same two
+      # `-E` filters, and `--skip ladder_finds_the_knee_and_soaks_the_line`
+      # below becomes `and not test(ladder_finds_the_knee_and_soaks_the_line)`
+      # inside the first pass's filter.
       - name: test (workspace minus nzbfast)
         env:
           NZBFAST_NO_ENRICH: "1"

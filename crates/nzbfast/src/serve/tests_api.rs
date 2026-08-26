@@ -427,7 +427,14 @@ fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
     fn open_pipes() -> usize {
         (0..1024)
             .filter(|&fd| {
+                // SAFETY: `libc::stat` is a C struct of integers and
+                // timespecs, so all-zero is a valid bit pattern, and
+                // `st_mode` is only read on the success path below.
                 let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: `&mut st` is a live, exclusively borrowed
+                // struct of exactly the type fstat(2) writes. A closed
+                // or never-opened `fd` is not unsound - fstat answers
+                // EBADF, which is precisely what this probe counts.
                 let ok = unsafe { libc::fstat(fd, &mut st) } == 0;
                 ok && st.st_mode & libc::S_IFMT == libc::S_IFIFO
             })
@@ -435,6 +442,9 @@ fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
     }
 
     fn alive(pid: i32) -> bool {
+        // SAFETY: kill(2) takes two integers and touches no memory;
+        // signal 0 delivers nothing and only reports whether the pid is
+        // addressable.
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
@@ -517,6 +527,10 @@ fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
 
     // Leave nothing behind - the whole point of the exercise.
     for pid in pids {
+        // SAFETY: two integers, no memory touched. These pids were
+        // recorded by the scripts this test started and are killed once
+        // each, so the worst a recycled pid could cost is a stray signal
+        // - not unsoundness.
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -604,6 +618,53 @@ fn apikey_never_rides_an_error_string() {
         "a apikey=***&b apikey=***&c"
     );
     assert_eq!(redact_apikey("plain error"), "plain error");
+}
+
+/// TODO 297: nzbindex spells its credential `key=`, not `apikey=`, and
+/// it rides in the query string of every request this source makes -
+/// including the DOWNLOAD url, which is the one that reaches a job's
+/// error row.
+///
+/// The scrubber matches the shorter literal, which covers both
+/// spellings because one is a suffix of the other. This pins that the
+/// widening did not change a single byte of the Newznab output: the
+/// `api` is copied through ahead of the match, so `apikey=SECRET`
+/// redacts to `apikey=***` exactly as it did when the pass looked for
+/// the longer literal.
+#[test]
+fn the_nzbindex_key_is_scrubbed_too_and_the_newznab_output_is_unchanged() {
+    let got = redact_apikey("https://nzbindex.com/api/search?q=x&key=SECRET123: Dns Failed");
+    assert!(!got.contains("SECRET123"), "{got}");
+    // The key is LAST in the query, so its value runs to the next
+    // whitespace and takes the trailing ':' with it - the same
+    // over-consumption the Newznab case above documents for
+    // `apikey=abc def`. Over-matching is the safe direction: a reader
+    // loses one punctuation mark, and the credential does not survive.
+    assert_eq!(
+        got,
+        "https://nzbindex.com/api/search?q=x&key=*** Dns Failed"
+    );
+    // With something after it, the value stops at the '&' as usual.
+    assert_eq!(
+        redact_apikey("https://nzbindex.com/api/search?key=SECRET123&q=x: Dns Failed"),
+        "https://nzbindex.com/api/search?key=***&q=x: Dns Failed"
+    );
+    // The download URL, where the id sits in the PATH and the key is
+    // last in the query, so the value runs to the end of the URL.
+    let dl = redact_apikey("https://nzbindex.com/api/download/abc-123.nzb?key=SECRET123");
+    assert_eq!(dl, "https://nzbindex.com/api/download/abc-123.nzb?key=***");
+    // The Newznab spelling is byte-identical to what the narrower pass
+    // produced - `apikey=` still redacts as `apikey=`, never `api***`.
+    assert_eq!(
+        redact_apikey("?t=search&apikey=SECRET123&q=x"),
+        "?t=search&apikey=***&q=x"
+    );
+    // Both spellings in one message, which is what a merged search note
+    // across two source kinds looks like.
+    assert_eq!(
+        redact_apikey("a apikey=1&b key=2&c"),
+        "a apikey=***&b key=***&c"
+    );
 }
 
 /// The third surface: text the INDEXER wrote. Newznab reports protocol
@@ -2036,10 +2097,14 @@ fn a_completed_row_with_a_deleted_folder_presents_failed_unless_the_volume_is_do
     assert_eq!(s["status"], "Failed", "{s}");
     assert_eq!(s["fail_action"], "retry", "{s}");
 
-    // Mid-move the directory is legitimately absent: no flip.
+    // Mid-move the directory is legitimately absent: no Failed flip.
+    // (`Moving` is the stage word an owed move reports - issue #59 -
+    // and the point here is only that the deleted-folder verdict
+    // stands down for it.)
     job.lock_ok().move_pending = true;
     let r = facade_row(&d);
-    assert_eq!(r["status"], "Completed", "{r}");
+    assert_eq!(r["status"], "Moving", "{r}");
+    assert_eq!(r["fail_message"], "", "{r}");
     job.lock_ok().move_pending = false;
 
     // Volume down (the parent is gone too, the unmounted-NAS shape):
@@ -2048,6 +2113,81 @@ fn a_completed_row_with_a_deleted_folder_presents_failed_unless_the_volume_is_do
     let r = facade_row(&d);
     assert_eq!(r["status"], "Completed", "{r}");
     assert_eq!(r["fail_message"], "", "{r}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Issue #59: a history row whose completed-folder move is still owed
+/// reports the SAB stage word `Moving`, not `Completed`. The mover runs
+/// post-park, so until the attempt settles the row's `storage` still
+/// names the pre-move path - and Sonarr/Radarr import the moment they
+/// see `Completed`, which handed them the wrong final folder whenever
+/// they polled inside a long cross-drive copy. Real SAB shows its
+/// post-processing stages in history, so every SAB client already reads
+/// `Moving` as "busy, keep waiting". Once the attempt settles (either
+/// way - a FAILED move drops `move_pending` and hands retries to the
+/// auto-retry stamp), the row is `Completed` again with `storage`
+/// naming wherever the files actually are.
+#[test]
+fn a_row_with_an_owed_move_reports_moving_until_the_attempt_settles() {
+    use crate::serve::job::job_from_json;
+    use crate::serve::testutil::test_daemon;
+    let dir = std::env::temp_dir().join(format!("nzbfast-histmoving-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = test_daemon(&dir);
+    let out = dir.join("downloads").join("Some.Job");
+    std::fs::create_dir_all(&out).unwrap();
+    let job = Arc::new(Mutex::new(
+        job_from_json(&json!({
+            "nzo_id": "SABnzbd_nzo_histmoving",
+            "name": "Some.Job",
+            "nzb_path": dir.join("some.nzb").to_string_lossy(),
+            "out_dir": out.to_string_lossy(),
+            "state": "Completed",
+            "origin": "arr:radarr",
+        }))
+        .unwrap(),
+    ));
+    d.history.lock_ok().push(job.clone());
+    let facade_row = |d: &Daemon| {
+        history_json(d, &std::collections::HashMap::new())["history"]["slots"][0].clone()
+    };
+    let summary_row = |d: &Daemon| {
+        let q = HistQuery {
+            failed_only: false,
+            category: None,
+            ids: None,
+            search: None,
+            bucket: None,
+            start: 0,
+            limit: 0,
+        };
+        history_page(d, &q, true).0[0].clone()
+    };
+
+    // Move owed: both row shapes say Moving, and storage still truthfully
+    // names the source the files sit in.
+    job.lock_ok().move_pending = true;
+    let r = facade_row(&d);
+    assert_eq!(r["status"], "Moving", "{r}");
+    assert_eq!(r["storage"].as_str().unwrap(), out.to_string_lossy(), "{r}");
+    assert_eq!(r["fail_message"], "", "{r}");
+    let s = summary_row(&d);
+    assert_eq!(s["status"], "Moving", "{s}");
+
+    // ...but the facet chips count it as done throughout - the bucket is
+    // about the DOWNLOAD's verdict, and that verdict is in.
+    let counts = history_json(&d, &std::collections::HashMap::new())["history"]["counts"].clone();
+    assert_eq!(counts["done"], 1, "{counts}");
+    assert_eq!(counts["failed"], 0, "{counts}");
+
+    // Attempt settled (success or failure both drop the flag): Completed.
+    job.lock_ok().move_pending = false;
+    let r = facade_row(&d);
+    assert_eq!(r["status"], "Completed", "{r}");
+    let s = summary_row(&d);
+    assert_eq!(s["status"], "Completed", "{s}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -439,6 +439,7 @@ fn job_round_trip_preserves_fields() {
         "finalizing": true,
         "deferred": true,
         "defer_reason": "disk",
+        "defer_at": 1_700_000_123u64,
         "defer_count": 3,
         "password": "pw",
         "bad_blocks": 4u64,
@@ -498,6 +499,7 @@ fn job_round_trip_preserves_fields() {
     assert!(j.finalizing);
     assert!(j.deferred);
     assert_eq!(j.defer_reason, "disk");
+    assert_eq!(j.defer_at, 1_700_000_123);
     assert_eq!(j.defer_count, 3);
     assert_eq!(j.password.as_deref(), Some("pw"));
     assert_eq!(j.bad_blocks, Some(4));

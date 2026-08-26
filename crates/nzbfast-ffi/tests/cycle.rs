@@ -33,18 +33,38 @@ fn start_stop_cycles_release_the_port() {
         .port();
     let dir = std::env::temp_dir().join(format!("nzbfast-ffi-cycle-{port}"));
     std::fs::create_dir_all(&dir).expect("config dir");
+    // Seed the config the engine loads. A MISSING one is not "no
+    // config": it falls back to a SABnzbd install's ini found through
+    // `$HOME`, so an unseeded run tests the BOX - the developer's real
+    // server list on this fleet, nothing at all on a CI runner. See
+    // `CONFIG_FILE`'s note in the crate root for why that is not
+    // cosmetic. Flat-rate and unreachable on purpose: nothing here
+    // queues a job, so the list only has to be ours.
+    std::fs::write(
+        dir.join(nzbfast_ffi::CONFIG_FILE),
+        r#"{"servers":[{"host":"flat.example","enabled":true}]}"#,
+    )
+    .expect("seed config");
     let dir_c = CString::new(dir.to_str().expect("utf8 dir")).unwrap();
     let key = "testkey";
     let key_c = CString::new(key).unwrap();
 
     for cycle in 0..3 {
         assert_eq!(
+            // SAFETY: both pointers come from `CString`s that live for
+            // the whole test, so each is a valid NUL-terminated UTF-8
+            // string for the duration of the call - the whole of
+            // `nzbfast_start`'s safety contract.
             unsafe { nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), port, key_c.as_ptr()) },
             0,
             "start (cycle {cycle})"
         );
         // Double start must refuse, not wedge.
         assert_eq!(
+            // SAFETY: both pointers come from `CString`s that live for
+            // the whole test, so each is a valid NUL-terminated UTF-8
+            // string for the duration of the call - the whole of
+            // `nzbfast_start`'s safety contract.
             unsafe { nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), port, key_c.as_ptr()) },
             -1,
             "second start refused (cycle {cycle})"

@@ -329,6 +329,17 @@ vanuit het journal, zonder iets te verliezen. (Taken met prioriteit Geforceerd b
 downloaden, SABnzbd-stijl.)</li>
 <li>Hier verschijnt een <b>update-banner</b> zodra er een nieuwe versie beschikbaar is
 (zie <a href="#updates">Updates</a>).</li>
+<li>Elke <b>achtergrondwerk-chip</b> laat zien wat nzbfast op dit moment doet -
+indexeren, metadata ophalen, releasefeed, verbindingen meten, volglijst, lijsten
+synchroniseren, klare bestanden verplaatsen, database-onderhoud. Klik op een chip
+om te zien wat je kunt doen: pauzeer of zet de onderdelen met een schakelaar uit,
+of spring meteen naar de volglijst, de lijstbronnen of de wachtrij. Verplaatsen,
+onderhoud en lijstsynchronisatie lopen vanzelf af en zeggen dat, in plaats van
+een schakelaar aan te bieden.</li>
+<li>De <b>statusindicator van de wachtrij</b> werkt hetzelfde, met
+<b>Pauzeren</b> (laat artikelen die al onderweg zijn afronden), <b>Nu
+pauzeren</b> (laat ze vallen en maakt de lijn meteen vrij) en
+<b>Hervatten</b>.</li>
 </ul>
 <h3>Doorvoer</h3>
 <p>Live MB/s met een scrollende grafiek; de gestippelde watermerken markeren het
@@ -364,7 +375,7 @@ app, de API…). Een knop <b>Download de .nzb</b> slaat het <code>.nzb</code>-be
 van de taak voor je op - nzbfast bewaart een eigen kopie, dus dit werkt voor elke
 taak, ook als het originele bestand allang weg is.</li>
 <li><b>"Waarom is dit traag?"</b> Terwijl een taak downloadt, draagt de regel onder de voortgangsbalk een oordeel over <em>die</em> taak, niet over de machine: <i>je providers zijn de grens</i>, <i>deze machine zit aan zijn CPU-grens</i>, <i>de opslag kan het niet bijhouden</i>, enzovoort. Klik erop en de rij opent op het bewijs: wat je lijn kan, wat de providers geleverd hebben, wat er nu binnenkomt, en een tabel per server waarin een geknepen provider meteen te zien is. Een taak op volle snelheid zegt hier niets, en een taak waarvan het oordeel nog vorm krijgt evenmin.</li>
-<li>Badges tonen bijzondere toestanden: <i>uitgesteld (traag)</i>, <i>prefetchen</i>,
+<li>Badges tonen bijzondere toestanden: <i>geprobeerd, opzijgezet</i>, <i>prefetchen</i>,
 <i>gepauzeerd</i> (zie <a href="#performance">Prestatietools</a>).</li>
 <li>Een burn-down-grafiek volgt het totaal aan resterende GB in de wachtrij.</li>
 </ul>
@@ -796,14 +807,6 @@ is Docker, servers zonder scherm en NAS-apparaten waar helemaal geen sleutelbos
 bestaat, wat twee verschillende opslagpaden zou opleveren die correct moeten blijven.
 Eén goed begrepen formaat dat zich overal hetzelfde gedraagt is voorlopig de betere
 ruil.</p>
-<p>Twee andere opties per server hebben nog geen bediening in het dashboard: zet ze
-met de hand bij de vermelding van die server in <code>config.local.json</code>
-(zie <a href="#files">§17</a>) en herstart.</p>
-<div class="tblwrap"><table>
-<tr><th>Sleutel</th><th>Opmerkingen</th></tr>
-<tr><td><code>bind_ip</code></td><td>Bindt de uitgaande verbindingen van deze server aan een specifiek lokaal adres, voor machines met meerdere uitgangen en VPN-splittunnels. De adresfamilie kiest meteen de doelfamilie: een v4-binding verbindt met het v4-adres van de server.</td></tr>
-<tr><td><code>socks5</code></td><td>Stuurt het NNTP-verkeer van deze server via een SOCKS5-proxy: <code>host:port</code>, of <code>user:pass@host:port</code>. De hostnaam wordt <em>door de proxy</em> opgezocht, dus geen lokaal DNS-lek.</td></tr>
-</table></div>
 <ul>
 <li>Het <b>vinkje</b> naast elke server is de aan/uit-schakelaar: aangevinkt betekent
 dat de server in de downloadpool zit, niet aangevinkt betekent uitgeschakeld. Een
@@ -1022,6 +1025,7 @@ de indexer-accounts die je hebt toegevoegd, en de watchlist werkt op die account
 <tr><td>Ingest-filters</td><td>JSON-regels die filteren wat de index in gaat: soorten (geobfusceerde rommel wordt standaard genegeerd), jaar/resolutie/taal, grootte-grenzen.</td></tr>
 <tr><td>Nu scannen / diepe rescan</td><td>Voer direct een ronde uit; met een diepte worden zoveel recente headers opnieuw gescand.</td></tr>
 <tr><td>OMDb-sleutel / metadata verversen / wissen</td><td>Bediening van de wall-verrijking (<a href="#wall">§6</a>). Wissen bouwt de database vanaf nul opnieuw op - de reddingsboei als hij ooit corrupt raakt.</td></tr>
+<tr><td>Metadata pauzeren</td><td>Haalt geen titels, posters en cast meer op bij de metadatasites (<a href="#wall">§6</a>), terwijl de scan zelf gewoon doorgaat. Wat al is opgehaald blijft behouden; items die tijdens de pauze worden gevonden houden gewoon de naam waaronder ze zijn geplaatst totdat je dit weer aanzet. De enige instelling op deze kaart die geen enkele usenetprovider raakt.</td></tr>
 <tr><td>Pre-feed</td><td><b>Uit tot je hem aanzet.</b> Veel uploads worden zonder hun naam geplaatst, en een scan heeft dan niets te lezen. Publieke relaykanalen kondigen de echte naam aan, de enige open weg om die berichten te koppelen. Aanzetten houdt een verbinding met een IRC-netwerk open en luistert: er wordt nooit iets verstuurd en er wordt geen account aangemaakt. Vereist de indexer, want een feed zonder plek voor wat hij hoort is een socket die voor niets openstaat.</td></tr>
 <tr><td>Relayserver, Relaykanalen</td><td>Het IRC-netwerk dat de aankondigingen draagt (host of host:poort) en de kanalen om mee te luisteren, door komma's gescheiden. Een wijziging gaat in bij de volgende verbinding: zet de feed uit en weer aan om hem meteen toe te passen.</td></tr>
 <tr><td>Benoemen via correlatie</td><td>De publieke live-relays dragen geen bestandsnamen, dus de meeste versluierde berichten laten zich niet direct koppelen. Wat een aankondiging wel vastlegt, is wanneer een release verscheen en hoe groot die is. Dit vergelijkt aangekondigde tijd en grootte met naamloze berichten en stelt bij een passende match de echte naam voor in Bladeren. Een suggestie is als zodanig gemarkeerd, vraagt om je klik en hernoemt nooit bestanden op schijf.</td></tr>
@@ -1126,15 +1130,16 @@ door en zegt het log waarom.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (een automatische nieuwe poging heeft een mislukte download opnieuw in de wachtrij
-gezet), <code>job.switched</code> (een taak die niet kon worden voltooid is
+gezet), <code>job.requeued</code> (een download heeft de geschiedenis verlaten en staat weer in de wachtrij - een nieuwe poging, of een afgespeeld bibliotheekitem), <code>job.switched</code> (een taak die niet kon worden voltooid is
 vervangen door een alternatieve kopie die ervoor werd achtergehouden), <code>job.replaced</code> (hetzelfde resultaat, alleen werd er geen kopie
 achtergehouden, dus is er een vervanger gezocht en opgehaald) en
 <code>job.delete_kept</code> (een verwijdering haalde het record weg maar
 kon de bestanden niet weghalen), plus <code>watch.picked</code> (een .nzb is uit de
 volgmap gehaald), <code>nzb.refeed</code> (het eigen NZB-bestand van een voltooide download is gepauzeerd in de wachtrij gezet), <code>watchlist.upgraded</code> (een volglijst-upgrade is geland
 en de vervangen kopie is verwijderd),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> en <code>quota.reached</code>. Elk draagt
+<code>queue.idle</code>, <code>queue.paused</code> en <code>queue.resumed</code> (de wachtrij is gestopt of weer gestart, door wie of wat dan ook), <code>queue.finished_action</code>
+(de actie bij het einde van de wachtrij is ingeschakeld, uitgevoerd of geannuleerd), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> en <code>update.available</code> (er is een nieuwere nzbfast-versie gevonden). Elk draagt
 <code>schema_version</code> (nu 1; nieuwe sleutels kunnen verschijnen zonder
 ophoging - negeer wat je niet kent), een monotone <code>seq</code> en een
 <code>at</code>-tijdstempel in milliseconden.</p>
@@ -1486,7 +1491,7 @@ de <b>API-sleutel</b> (volledige controle) en de <b>NZB-sleutel</b> (alleen toev
 <tr><td>Automatisering</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostiek</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: willekeurige gebruiker, API-sleutel als wachtwoord)</td></tr>
-<tr><td>Voorvertoning / afspelen</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; het starten van een geparkeerde bibliotheektaak vereist een <code>?t=</code>-token of de sleutel), <code>/m3u/&lt;id&gt;</code> (vereist de sleutel; geeft het token uit), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Voorvertoning / afspelen</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; het starten van een geparkeerde bibliotheektaak vereist een <code>?t=</code>-token of de sleutel), <code>/m3u/&lt;id&gt;</code> (vereist de sleutel of het token van de taak zelf; geeft het token uit), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Bestanden &amp; locaties</h2>

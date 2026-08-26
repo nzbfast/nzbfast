@@ -60,6 +60,9 @@ pub(super) fn path_writable(p: &std::path::Path) -> bool {
     {
         use std::os::unix::ffi::OsStrExt;
         match std::ffi::CString::new(p.as_os_str().as_bytes()) {
+            // SAFETY: `c` is a live `CString` for the duration of the
+            // call, so the pointer is a valid NUL-terminated path;
+            // access(2) only reads it and returns an int.
             Ok(c) => (unsafe { libc::access(c.as_ptr(), libc::W_OK) }) == 0,
             Err(_) => false,
         }

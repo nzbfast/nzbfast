@@ -85,6 +85,14 @@ pub struct EntryKeys {
 /// the cast is sound for any len % 16 == 0 slice.
 fn as_blocks(data: &mut [u8]) -> &mut [Block] {
     debug_assert_eq!(data.len() % 16, 0);
+    // SAFETY: `Block` is `Array<u8, U16>`, a newtype over `[u8; 16]`, so
+    // it has size 16 and alignment 1 - the cast can neither over-align
+    // nor mis-size, and every bit pattern of 16 bytes is a valid `Block`.
+    // The new slice covers `len / 16 * 16 <= len` bytes of the same
+    // allocation, so it stays in bounds even if the caller broke the
+    // multiple-of-16 contract the debug_assert states. It borrows
+    // exclusively from `data` for the same lifetime, so no aliasing
+    // reference to those bytes can exist while it lives.
     unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr().cast::<Block>(), data.len() / 16) }
 }
 

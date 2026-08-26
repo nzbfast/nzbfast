@@ -37,6 +37,11 @@ const N_ARTICLES: usize = 3;
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trickling_body_is_torn_down_at_the_rate_floor_and_the_job_completes() {
     // Must land before the pool's first body read caches the floor.
+    // SAFETY: `set_var` is unsound only against a concurrent reader of
+    // the same process environment. This runs as the first statement of
+    // the test, before any pool thread exists, and this integration
+    // target is its own PROCESS under nextest - so no other test can be
+    // reading the environment at this instant.
     unsafe {
         std::env::set_var("NZBFAST_BODY_RATE_FLOOR", "200000");
         std::env::set_var("NZBFAST_BODY_RATE_WINDOW_SECS", "1");

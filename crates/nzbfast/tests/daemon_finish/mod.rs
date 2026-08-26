@@ -37,6 +37,46 @@ async fn one_file_job(dir: &Path, seed: u8) -> (MockServer, String) {
     (srv, xml)
 }
 
+/// Two DISTINCT posts on one mock - disjoint articles, different
+/// payloads - for the legs that queue a pair. One post added twice
+/// stopped being a usable stand-in the day §292 landed: the second add
+/// of the same articles is now held as a duplicate of the first
+/// (correctly - the user already has that post queued), so a fixture
+/// that wants "a paused job AND a job that runs" has to queue two
+/// actual posts, exactly as a user would.
+async fn two_file_jobs(seed: u8) -> (MockServer, String, String) {
+    let mut articles = HashMap::new();
+    let wrap = |name: &str, segs: &[(String, u64, u32)]| {
+        let mut xml = format!(
+            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"x\" date=\"0\" subject=\"&quot;{name}&quot; yEnc (1/2)\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+        );
+        for (id, bytes, num) in segs {
+            xml.push_str(&format!(
+                "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+            ));
+        }
+        xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+        xml
+    };
+    let a = make_file_articles(
+        "f.bin",
+        &payload(60_000, seed),
+        30_000,
+        "ffa",
+        &mut articles,
+    );
+    let b = make_file_articles(
+        "g.bin",
+        &payload(60_000, seed.wrapping_add(1)),
+        30_000,
+        "ffb",
+        &mut articles,
+    );
+    let (xml_a, xml_b) = (wrap("f.bin", &a), wrap("g.bin", &b));
+    let srv = MockServer::start(articles, Chaos::default()).await;
+    (srv, xml_a, xml_b)
+}
+
 /// Spawn a daemon against `dir` with the finish commands withheld.
 async fn finish_daemon(dir: &Path, cfg: &Path) -> Daemon {
     let cfg = cfg.to_path_buf();
@@ -206,7 +246,7 @@ async fn shutdown_fires_once_when_the_last_download_finishes() {
 async fn a_paused_download_left_in_the_queue_holds_the_shutdown() {
     let dir = std::env::temp_dir().join(format!("nzbfast-finhold-{}", std::process::id()));
     let _scratch = scratch::ScratchDir::attach(&dir);
-    let (srv, xml) = one_file_job(&dir, 5).await;
+    let (srv, xml_held, xml_runs) = two_file_jobs(5).await;
     let cfg = dir.join("config.json");
     write_config(&cfg, srv.addr.port());
     let d = finish_daemon(&dir, &cfg).await;
@@ -217,10 +257,12 @@ async fn a_paused_download_left_in_the_queue_holds_the_shutdown() {
         set_cfg(port, "queue_finished_delay_secs", "1");
 
         // Paused on arrival (SAB's priority -2), and never touched again.
-        let held = add_nzb(port, &xml, "&priority=-2");
+        // A DIFFERENT post from the one that runs: the same post twice
+        // would be held as a duplicate (§292) rather than sit paused.
+        let held = add_nzb(port, &xml_held, "&priority=-2");
         // ...then a job that runs and finishes, which is what drains the
         // queue and offers the action its edge.
-        add_nzb(port, &xml, "");
+        add_nzb(port, &xml_runs, "");
 
         let log = wait_log(&d, "queue-finished action (shutdown) not run", 30);
         assert!(

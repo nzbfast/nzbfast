@@ -739,7 +739,10 @@ mod tests {
             feed(&ex, i, &part_name(i), &parts[i], 5000, 41 + i as u64);
         }
         for (i, p) in parts.iter().enumerate() {
-            assert!(ex.covered(i, 0, p.len()), "part {i} not fully covered");
+            assert!(
+                ex.covered(i, 0, p.len() as u64),
+                "part {i} not fully covered"
+            );
             let mut back = vec![0u8; p.len()];
             ex.read_at(i, 0, &mut back).unwrap();
             assert_eq!(back, *p, "part {i} read-back differs");
@@ -865,13 +868,13 @@ mod tests {
             feed(&ex, i, &part_name(i), &parts[i], 4000, 61 + i as u64);
         }
         assert!(
-            !ex.covered(1, 0, parts[1].len()),
+            !ex.covered(1, 0, parts[1].len() as u64),
             "the missing part must read as uncovered"
         );
         ex.write_repair(1, &part_name(1), parts[1].len() as u64, 0, &parts[1])
             .unwrap();
         assert!(
-            ex.covered(1, 0, parts[1].len()),
+            ex.covered(1, 0, parts[1].len() as u64),
             "the repair filled the hole"
         );
         let rep = ex.finish().unwrap();

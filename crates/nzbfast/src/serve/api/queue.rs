@@ -9,6 +9,7 @@ mod caps;
 mod controls;
 mod files;
 mod payload;
+mod preview;
 
 use caps::{cap_payload, planned_servers};
 pub(in crate::serve) use controls::{
@@ -339,7 +340,7 @@ fn m_change_cat(
                         "error": e
                     }));
                 }
-                Ok(()) => {
+                Ok(_fence) => {
                     d.save_queue();
                     json!({"status": true})
                 }
@@ -1155,7 +1156,12 @@ fn m_addfile(
                         if stream {
                             json!({
                                 "status": true, "nzo_ids": [id],
-                                "m3u": format!("{}/m3u/{id}{}", ctx.base, ctx.key_q),
+                                // Both links carry the JOB's own token and
+                                // never the API key: `nzbfast stream` hands
+                                // the m3u one to a media player as argv,
+                                // which every other local account can read
+                                // (TODO 23 low1, CLI half). /m3u accepts it.
+                                "m3u": format!("{}/m3u/{id}?t={}", ctx.base, d.stream_token(&id)),
                                 "stream": format!("{}/stream/{id}?t={}", ctx.base, d.stream_token(&id)),
                             })
                         } else {
@@ -1205,8 +1211,17 @@ fn m_addurl(
                     .or_else(|| name_from_fetch(&f, &url))
                     .unwrap_or_else(|| "download.nzb".to_string());
                 let pp = sab_pp_param(params.get("pp").map(String::as_str));
-                match d.enqueue_fetched(&f, &name, &cat, prio, pp, pw.as_deref(), 0, &origin, false)
-                {
+                match d.enqueue_fetched(
+                    &f,
+                    &name,
+                    &cat,
+                    prio,
+                    pp,
+                    pw.as_deref(),
+                    0,
+                    &origin,
+                    DupeExempt::Nobody,
+                ) {
                     // §129 2b: same pp=/script= recording as addfile.
                     Ok(Enqueued { nzo_id: id, .. }) => {
                         d.record_add_params(
@@ -1218,7 +1233,12 @@ fn m_addurl(
                         if stream {
                             json!({
                                 "status": true, "nzo_ids": [id],
-                                "m3u": format!("{}/m3u/{id}{}", ctx.base, ctx.key_q),
+                                // Both links carry the JOB's own token and
+                                // never the API key: `nzbfast stream` hands
+                                // the m3u one to a media player as argv,
+                                // which every other local account can read
+                                // (TODO 23 low1, CLI half). /m3u accepts it.
+                                "m3u": format!("{}/m3u/{id}?t={}", ctx.base, d.stream_token(&id)),
                                 "stream": format!("{}/stream/{id}?t={}", ctx.base, d.stream_token(&id)),
                             })
                         } else {
@@ -1694,6 +1714,11 @@ pub(in crate::serve) fn dispatch(
         // the overlapping-lanes view no sequential client can draw.
         "stats" => return m_stats(d, req, params, ctx, api_body),
         "addfile" => return m_addfile(d, req, params, ctx, api_body),
+        // §303: the add dialog's dry run - the §294 completable verdict
+        // over POSTed NZB bytes, nothing enqueued. Full-key only, like
+        // every mode not on the add-only allowlist: it spends provider
+        // round trips.
+        "nzb_preview" => return preview::m_nzb_preview(d, req, params, ctx, api_body),
         "addurl" => return m_addurl(d, req, params, ctx, api_body),
         // NZBLNK: a link with no NZB behind it. The German and
         // Dutch boards hand out `nzblnk:?h=…` instead of a file
@@ -1798,12 +1823,23 @@ pub(in crate::serve) fn dispatch(
 /// remote_compat.rs). Not done here: both rename doors mutate again
 /// after this returns - `name`, then the password - so a save here would
 /// persist a half-applied record instead of the whole transaction.
+///
+/// Codex F-06: returns the relocation fence, and the caller decides when
+/// it lifts. Every arm that only re-files gets what it wants by dropping
+/// the guard at the end of its own statement - the fence then covers the
+/// publish and the move, which is the whole window this call owns.
+/// `rename_queued` binds it instead, because it writes `name` AFTER this
+/// returns and a job started in that second gap would carry the old
+/// label into `job.started` beside the new-name-derived directory. See
+/// [`Job::relocating`] for what the fence is and who honours it.
+#[must_use = "the relocation fence lifts when this guard drops - bind it \
+              if the transaction continues past this call"]
 pub(in crate::serve) fn requeue_category(
     d: &Arc<Daemon>,
     job: &Arc<Mutex<Job>>,
     name: &str,
     cat: &str,
-) -> Result<(), &'static str> {
+) -> Result<Relocation, &'static str> {
     // Test hook: hold the window between the caller's Queued snapshot
     // and the publish below open, so the suite can start the job inside
     // it (the H5 race). No effect unless the suite sets it.
@@ -1817,13 +1853,23 @@ pub(in crate::serve) fn requeue_category(
     let (dir, _) = refile_out_dir(&d.out_root.read_ok().clone(), cat, name, &|p| {
         d.dir_claim(p)
     });
-    let old_dir = {
+    // The publish and the fence are ONE job-lock critical section, and
+    // they have to be: `start_next` flips the state to Downloading and
+    // snapshots `out_dir` in a critical section of its own, so anything
+    // this call does in two of them can be split by a start. Either the
+    // runner gets there first and the Queued check below refuses this
+    // whole transaction, or this lands first and the runner reads the
+    // fence. There is no third ordering (Codex F-06, extending the H5
+    // refusal that shares this critical section).
+    let (fence, old_dir) = {
         let mut g = job.lock_ok();
         if g.state != JobState::Queued {
             return Err("job already started");
         }
         g.category = cat.to_string();
-        std::mem::replace(&mut g.out_dir, dir.clone())
+        let old_dir = std::mem::replace(&mut g.out_dir, dir.clone());
+        g.relocating += 1;
+        (Relocation(job.clone()), old_dir)
     };
     d.register_cat(cat);
     // A queued job can be RUNNING in the prefetch sidecar, against the
@@ -1843,6 +1889,19 @@ pub(in crate::serve) fn requeue_category(
     // signal is about the fetch, not about the decision.
     let id = job.lock_ok().nzo_id.clone();
     drop(_publish);
+    // Test hook: hold the FENCED window open - the destination is
+    // published and the bytes behind it have not moved yet. The hook at
+    // the top cannot see this window at all, because it fires before the
+    // publish: it proves the H5 refusal, where a job that starts makes
+    // the whole transaction fail. Here the transaction has already
+    // succeeded and the question is whether the runner honours the
+    // fence. No effect unless the suite sets it.
+    if let Some(ms) = std::env::var("NZBFAST_TEST_STALL_RELOCATE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     // ...and when there is no sidecar to poke, THIS call owes the move.
     // The adoption above only ever runs on a prefetch task's exit path,
     // so a job that was prefetched and then stopped - an error, a pause,
@@ -1875,7 +1934,28 @@ pub(in crate::serve) fn requeue_category(
             ),
         }
     }
-    Ok(())
+    Ok(fence)
+}
+
+/// The relocation fence for one job, lifted when this drops.
+///
+/// A guard rather than a matching pair of writes because the move it
+/// covers is bulk I/O that can fail, because `requeue_category` has four
+/// doors, and because the rename wrapper keeps the fence up past that
+/// call's return. A panic anywhere in the transaction lifts it too,
+/// which is the behaviour to want: a fence nothing will ever clear is a
+/// job that can never start again.
+pub(in crate::serve) struct Relocation(Arc<Mutex<Job>>);
+
+impl Drop for Relocation {
+    fn drop(&mut self) {
+        let mut g = self.0.lock_ok();
+        // Saturating because the fence is a depth, and the only thing
+        // that could take it below zero is a double-drop, which cannot
+        // happen - but a wrapping panic here would be a far worse
+        // answer than an already-lifted fence.
+        g.relocating = g.relocating.saturating_sub(1);
+    }
 }
 
 #[cfg(test)]

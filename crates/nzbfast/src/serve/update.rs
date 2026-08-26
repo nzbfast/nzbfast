@@ -252,11 +252,31 @@ pub(super) fn latch_update_manifest(d: &Arc<Daemon>, latched: Option<Value>) {
     };
     let mut g = d.update_manifest.lock_ok();
     let changed = ver(&g) != ver(&latched);
+    let now = ver(&latched);
     *g = latched;
     drop(g);
     if changed {
         d.queue_rev
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // §129 1b(b): the MOMENT a newer version becomes known. The
+        // banner itself stays on the queue payload, and must - an
+        // available update is a STATE, true whenever the user looks,
+        // and a page that opens after the check has to draw it. What
+        // rode the payload and should not have is the once-per-version
+        // chime, which the dashboard recovered by remembering the last
+        // version it had announced. That memory was per-PAGE, so a
+        // reload re-announced an update it had already told the user
+        // about; the ring's cursor is the daemon's, so the news is said
+        // once per discovery, to whoever is looking.
+        //
+        // Inside the `changed` arm, so the 6 h steady-state re-check is
+        // silent for the same reason it does not bump the revision.
+        // Only on a version APPEARING: `latch_update_manifest(d, None)`
+        // is how a check that finds nothing (or fails) clears the
+        // banner, and "the update went away" is not news.
+        if let Some(v) = now {
+            d.life_emit("update.available", json!({"version": v}));
+        }
     }
 }
 
@@ -382,6 +402,51 @@ mod tests {
             let rev = d.queue_rev.load(Ordering::Relaxed);
             latch_update_manifest(d, None);
             assert_eq!(d.queue_rev.load(Ordering::Relaxed), rev);
+        });
+    }
+
+    /// §129 1b(b): the once-per-version CHIME comes off the ring, so it
+    /// is said once per discovery rather than once per page load.
+    ///
+    /// Three things at once, and the second and third are the point.
+    /// The steady-state re-check that already refuses to churn the
+    /// revision must not emit either, or a dashboard left open for a
+    /// day chimes every six hours about the same release. And clearing
+    /// the banner must be SILENT - `latch_update_manifest(d, None)` is
+    /// how a check that finds nothing, or fails outright, takes the
+    /// chip down, and "the update went away" is not news anybody wants
+    /// announced.
+    #[test]
+    fn a_new_version_is_announced_once_and_losing_it_says_nothing() {
+        with_daemon("latch-event", |d| {
+            let kinds = |d: &Arc<Daemon>| -> Vec<String> {
+                d.life_since(0)
+                    .0
+                    .iter()
+                    .filter(|e| e["kind"] == "update.available")
+                    .map(|e| e["version"].as_str().unwrap_or_default().to_string())
+                    .collect()
+            };
+            let m = serde_json::json!({"version": "9.9.9"});
+            latch_update_manifest(d, Some(m.clone()));
+            assert_eq!(kinds(d), ["9.9.9"], "the discovery is the news");
+            // The 6 h steady-state re-check.
+            latch_update_manifest(d, Some(m));
+            assert_eq!(kinds(d), ["9.9.9"], "re-checking is not re-discovering");
+            // The banner comes down: a change, and deliberately silent.
+            latch_update_manifest(d, None);
+            assert_eq!(kinds(d), ["9.9.9"], "losing the banner is not news");
+            // ...and a genuinely newer release is news again.
+            latch_update_manifest(d, Some(serde_json::json!({"version": "9.9.10"})));
+            assert_eq!(kinds(d), ["9.9.9", "9.9.10"]);
+            let e = d
+                .life_since(0)
+                .0
+                .into_iter()
+                .find(|e| e["kind"] == "update.available")
+                .expect("the event is on the ring");
+            assert_eq!(e["schema_version"], 1);
+            assert!(e["seq"].as_u64().unwrap_or(0) > 0);
         });
     }
 

@@ -53,7 +53,7 @@ impl Daemon {
         // §158 item 7: the harness's kill-here seam. Before the lock, so a
         // dropped write holds nothing up.
         #[cfg(test)]
-        if super::storecut::cut_here() {
+        if super::storecut::cut_here(super::storecut::Store::Queue) {
             return false;
         }
         // API requests run on a worker pool - serialize the writes so two
@@ -90,7 +90,12 @@ impl Daemon {
         // revision sees it by construction.
         self.queue_rev.fetch_add(1, Ordering::Relaxed);
         let path = self.spool.join("queue.json");
-        match serde_json::to_string_pretty(&v) {
+        // Whichever way it goes, say so on `save_failed_at`: until now a
+        // refused save was an `error!` line and nothing else, so a
+        // daemon whose queue had stopped reaching disk looked entirely
+        // healthy from every API and every dashboard. See that field,
+        // and `sabcompat::sab_warnings`, which is where it surfaces.
+        let landed = match serde_json::to_string_pretty(&v) {
             Ok(text) => match crate::persist::write_atomic(&path, text.as_bytes()) {
                 Ok(()) => true,
                 Err(e) => {
@@ -102,7 +107,13 @@ impl Daemon {
                 error!(target: "queue", "serialize: {e}");
                 false
             }
-        }
+        };
+        // Stamped at the failure and CLEARED by the next save that
+        // lands: the condition is "the queue on disk is stale right
+        // now", which a later success ends.
+        self.save_failed_at
+            .store(if landed { 0 } else { epoch_secs() }, Ordering::Relaxed);
+        landed
     }
 
     /// Coalesced [`save_queue`](Self::save_queue) for the per-completion
@@ -295,8 +306,17 @@ impl Daemon {
         // `v == None` early return below cannot have a queue half at all -
         // no queue.json means no queue array and no legacy history array,
         // so `queued` is empty and nothing could have lost to history.
-        if !split.reverted.is_empty() {
-            self.history_tombstone(&split.reverted);
+        if !split.reverted.is_empty() && !self.history_tombstone(&split.reverted) {
+            // Reported, never acted on: this runs at load, the winner is
+            // already durable in its own store - that is why it won -
+            // and the resolution is re-derived from scratch on the next
+            // boot. What a refusal costs is that it has to be.
+            error!(
+                target: "queue",
+                "the move-sequence resolution for {} record(s) could not be made \
+                 durable, so the next start derives it again",
+                split.reverted.len()
+            );
         }
         let v = match v {
             Some(v) => v,
@@ -407,10 +427,15 @@ impl Daemon {
     ///    - unless a row names that very path, which is what an
     ///    adoption earlier in this same pass can have made of it.
     ///
-    /// Runs after `load_queue` and after the settings restore: the
-    /// categories must be loaded for §218 to infer one, because the
-    /// category the job was originally added under is not recoverable -
-    /// it lived only in the record that was lost. The duplicate hold
+    /// Runs after `load_queue` and after the settings restore, because
+    /// the categories must be loaded before an adopted job can be filed
+    /// under one. The category the job was ACCEPTED under is recovered
+    /// with it since 25 Aug 2026 - `enqueue` records it in a sidecar
+    /// beside the spool copy, which is the only copy of it that outlives
+    /// a run whose saves never landed (see [`spool_category`]). §218's
+    /// inference is the fallback for an orphan with no sidecar: a copy
+    /// written before this existed, an add that chose no category, or a
+    /// sidecar write the same failing disk refused. The duplicate hold
     /// applies as it would to any add: a release the user re-added under
     /// another NZB while this one was unrecorded comes back as an
     /// ALTERNATIVE behind it, not as a second download. Returns how many
@@ -507,16 +532,20 @@ impl Daemon {
             // Never hand this number out again, whatever the allocator
             // was restored to.
             self.next_id.fetch_max(n + 1, Ordering::Relaxed);
+            // The user's own filing decision, or empty - in which case
+            // `enqueue_as` infers exactly as it did for the add that was
+            // lost, which is the same answer that add got.
+            let cat = spool_category(&path);
             match self.enqueue_as(
                 Some(&id),
                 &bytes,
                 &stem,
-                "",
+                &cat,
                 SAB_DEFAULT_PRIORITY,
                 None,
                 None,
                 "recovered",
-                false,
+                DupeExempt::Nobody,
                 None,
             ) {
                 Ok(e) if e.durable => {
@@ -548,6 +577,41 @@ impl Daemon {
         if adopted > 0 {
             info!(target: "queue", "recovered {adopted} job(s) from orphaned spool files");
         }
+        self.sweep_spool_sidecars();
         adopted
+    }
+
+    /// Remove every category sidecar whose spool copy is no longer
+    /// there.
+    ///
+    /// The sidecar is read by exactly one thing - the adoption above -
+    /// and only ever through the copy it sits beside, so one whose copy
+    /// has gone has no reader left. `drop_spool` and `mask_spool_path`
+    /// take theirs with them at the moment they act, which covers the
+    /// ordinary delete; this is the backstop for the paths that move a
+    /// copy some other way, including the adoption above rewriting one
+    /// under a name the pre-queue hook has just changed.
+    ///
+    /// Runs at the END of the pass and re-checks the copy as things
+    /// stand THEN: a sidecar this very pass has just written is beside a
+    /// copy that exists, and one whose copy the pass has just removed is
+    /// not.
+    fn sweep_spool_sidecars(&self) {
+        let Ok(rd) = std::fs::read_dir(&self.spool) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            // `.nzb.cat` in full, not merely a `.cat` extension: this
+            // deletes what it matches, and the spool holds the daemon's
+            // own state files beside the copies.
+            let is_sidecar = path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| f.ends_with(".nzb.cat"));
+            if is_sidecar && !path.with_extension("").exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }

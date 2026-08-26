@@ -19,6 +19,80 @@ use super::*;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Files eligible as adoption sources: every regular non-.par2 file in
+/// `dir` that is not an identified target (identified files' bytes are
+/// already pinned block-by-block - scanning them again is the perf trap
+/// this gate exists to avoid), followed by every such file in each
+/// DONOR directory (§293 - a failed predecessor's output, offered to
+/// this set's adoption scan).
+///
+/// Order is load-bearing: the repair dir's own files come FIRST, then
+/// each donor directory in the order given, each group sorted - so the
+/// first-candidate-wins adoption semantics prefer the bytes that
+/// already live where the repair lands over a donor's copy of them.
+///
+/// The returned `usize` is the donor boundary: candidates at or past it
+/// are donor-directory files. The split matters because the tolerance
+/// above extends to the FILE level - a donor file that vanishes between
+/// this walk and the read that wanted it (the same racing cleanup, one
+/// step later) is dropped by the passes below, while an unreadable file
+/// in the repair's own `dir` stays fatal exactly as it always was. The
+/// reads AFTER the adoption decision - the solve feed and the patch -
+/// are covered separately: [`pin_donor_sources`] holds the surviving
+/// donors open through both.
+fn adoption_candidates(
+    dir: &Path,
+    donors: &[PathBuf],
+    targets: &[Target],
+    exclude: &HashSet<PathBuf>,
+) -> Result<(Vec<(PathBuf, u64)>, usize), RepairError> {
+    // Keyed by filesystem identity, not by spelling: the PAR2-declared name
+    // and the on-disk name routinely differ in case, and on a case-insensitive
+    // volume an exact compare would hand an identified target's OWN file to
+    // the sliding scan as an adoption source.
+    let fold = crate::disk::case_insensitive_dir(dir);
+    let identified: HashSet<PathBuf> = targets
+        .iter()
+        .filter(|t| t.exists && (t.intact || t.present.iter().any(|&p| p)))
+        .map(|t| path_identity_key(fold, &t.path))
+        .collect();
+    let walk = |d: &Path, out: &mut Vec<(PathBuf, u64)>| -> Result<(), RepairError> {
+        let start = out.len();
+        for e in std::fs::read_dir(d)? {
+            let e = e?;
+            let p = e.path();
+            if !e.file_type()?.is_file()
+                || p.extension()
+                    .is_some_and(|x| x.eq_ignore_ascii_case("par2"))
+                || identified.contains(&path_identity_key(fold, &p))
+                || exclude.contains(&p)
+            {
+                continue;
+            }
+            let len = e.metadata()?.len();
+            if len > 0 {
+                out.push((p, len));
+            }
+        }
+        out[start..].sort();
+        Ok(())
+    };
+    let mut out = Vec::new();
+    walk(dir, &mut out)?;
+    let donor_from = out.len();
+    for d in donors {
+        if d == dir {
+            continue;
+        }
+        // A donor that cannot be read is skipped, not fatal: the donor
+        // is a predecessor's directory this repair does not own, and a
+        // concurrent cleanup racing it must degrade to "no donation",
+        // never to a failed repair.
+        let _ = walk(d, &mut out);
+    }
+    Ok((out, donor_from))
+}
+
 pub(super) fn md5_of_file(path: &Path, limit: Option<u64>) -> Result<[u8; 16], RepairError> {
     let mut f = File::open(path)?;
     let mut hasher = Md5::new();
@@ -121,17 +195,23 @@ fn prefetch_md5s(
 /// match, which is the case unless two candidates share a 16 KB prefix).
 /// Anything the pairing guessed wrong about is simply hashed lazily by
 /// the loop, exactly as before.
+///
+/// The middle of the returned triple is [`adoption_candidates`]'s donor
+/// boundary, passed through so the caller can classify candidate slots
+/// by ownership after this returns - [`pin_donor_sources`] needs it, and
+/// the caller appends its own escalation candidates past it.
 pub(super) fn adopt_blocks(
     dir: &Path,
+    donors: &[PathBuf],
     targets: &[Target],
     missing: &[usize],
     bs: usize,
     exclude: &HashSet<PathBuf>,
-) -> Result<(Vec<(PathBuf, u64)>, HashMap<usize, AdoptSrc>), RepairError> {
-    let cands = adoption_candidates(dir, targets, exclude)?;
+) -> Result<(Vec<(PathBuf, u64)>, usize, HashMap<usize, AdoptSrc>), RepairError> {
+    let (cands, donor_from) = adoption_candidates(dir, donors, targets, exclude)?;
     let mut adopted: HashMap<usize, AdoptSrc> = HashMap::new();
     if cands.is_empty() {
-        return Ok((cands, adopted));
+        return Ok((cands, donor_from, adopted));
     }
     let missing_set: HashSet<usize> = missing.iter().copied().collect();
 
@@ -160,24 +240,43 @@ pub(super) fn adopt_blocks(
             if consumed[ci] || *len != t.file.length {
                 continue;
             }
+            // A donor file that cannot be read anymore - vanished or
+            // unreadable since the walk - is dropped for good (consumed
+            // keeps it out of the sliding scan too), never fatal: the
+            // directory-level tolerance in `adoption_candidates`, kept
+            // at file granularity. The distinction is OWNERSHIP, not
+            // error kind - the same error on one of the repair's own
+            // `dir` files still fails the repair exactly as before.
             let head = match head_cache[ci] {
                 Some(h) => h,
-                None => {
-                    let h = md5_of_file(p, Some((*len).min(16384)))?;
-                    head_cache[ci] = Some(h);
-                    h
-                }
+                None => match md5_of_file(p, Some((*len).min(16384))) {
+                    Ok(h) => {
+                        head_cache[ci] = Some(h);
+                        h
+                    }
+                    Err(_) if ci >= donor_from => {
+                        consumed[ci] = true;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
             };
             if head != t.file.md5_16k {
                 continue;
             }
             let whole = match md5_cache[ci] {
                 Some(h) => h,
-                None => {
-                    let h = md5_of_file(p, None)?;
-                    md5_cache[ci] = Some(h);
-                    h
-                }
+                None => match md5_of_file(p, None) {
+                    Ok(h) => {
+                        md5_cache[ci] = Some(h);
+                        h
+                    }
+                    Err(_) if ci >= donor_from => {
+                        consumed[ci] = true;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
             };
             if whole != t.file.md5 {
                 continue;
@@ -197,8 +296,88 @@ pub(super) fn adopt_blocks(
     }
 
     let indices: Vec<usize> = (0..cands.len()).filter(|&ci| !consumed[ci]).collect();
-    sliding_scan(&cands, &indices, targets, &missing_set, bs, &mut adopted)?;
-    Ok((cands, adopted))
+    sliding_scan(
+        &cands,
+        &indices,
+        donor_from..cands.len(),
+        targets,
+        &missing_set,
+        bs,
+        &mut adopted,
+    )?;
+    Ok((cands, donor_from, adopted))
+}
+
+/// Ceiling on the handles [`pin_donor_sources`] holds open through the
+/// solve and the patch. A donor adoption references about one file per
+/// recovery-set target in practice, so the everyday count is single
+/// digits; the cap exists so a pathological adoption pattern cannot walk
+/// the process toward its fd limit (macOS ships a 256 soft default).
+/// Candidates past it stay on the lazy-open path, with the pre-pin
+/// vanish window that implies.
+const PIN_DONOR_FDS: usize = 64;
+
+/// Close the patch-time half of the donor-vanish window (sweep S3's
+/// residue, one phase later than a564adebf's scan-time fix): open every
+/// §293 donor file the FINAL adoption references and hand the handles to
+/// the caller's [`CandReader`], so the solve feed and the patch read the
+/// donor's bytes through fds the racing cleanup cannot invalidate - an
+/// unlinked inode stays readable on unix, and std's `File::open` shares
+/// FILE_SHARE_DELETE on Windows, so a delete or a rename after this
+/// point is a non-event on both. Truncation is NOT survived, and that
+/// limit is stated rather than chased: the delete-files cleanup this
+/// defends against deletes and trash-moves, it does not truncate.
+///
+/// A donor that cannot be opened HERE vanished after its bytes were
+/// scanned, and degrades exactly as a scan-time vanish does (§293's
+/// ownership rule): its adoptions are dropped and their slices returned
+/// to `missing` - the caller's escalation scan and needed/have
+/// arithmetic then judge the shortfall, never an I/O error. This is
+/// strictly better than failing later, because at this point nothing has
+/// planned around the donor yet. Only slots inside `donor_cands` are
+/// pinned or dropped; the repair's own files keep their lazy open and
+/// their fatal errors.
+pub(super) fn pin_donor_sources(
+    cands: &[(PathBuf, u64)],
+    donor_cands: &std::ops::Range<usize>,
+    adopted: &mut HashMap<usize, AdoptSrc>,
+    missing: &mut Vec<usize>,
+) -> HashMap<usize, File> {
+    let mut wanted: Vec<usize> = adopted
+        .values()
+        .map(|s| s.cand)
+        .filter(|ci| donor_cands.contains(ci))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut open: HashMap<usize, File> = HashMap::new();
+    let mut dropped: Vec<usize> = Vec::new();
+    for ci in wanted {
+        if open.len() >= PIN_DONOR_FDS {
+            break;
+        }
+        match File::open(&cands[ci].0) {
+            Ok(f) => {
+                open.insert(ci, f);
+            }
+            Err(_) => dropped.push(ci),
+        }
+    }
+    if !dropped.is_empty() {
+        let back: Vec<usize> = adopted
+            .iter()
+            .filter(|&(_, s)| dropped.contains(&s.cand))
+            .map(|(&g, _)| g)
+            .collect();
+        for g in back {
+            adopted.remove(&g);
+            missing.push(g);
+        }
+        // `missing` is consumed in ascending slice order downstream
+        // (rebuilt_of, the Reconstructor's row mapping) - restore it.
+        missing.sort_unstable();
+    }
+    open
 }
 
 /// Prefetch: every candidate whose length some probing target declares
@@ -268,6 +447,19 @@ fn prefetch_wholes(
 ///   A worker past that point simply has its list dropped, and its I/O
 ///   error with it: an error only propagates from a candidate the serial
 ///   walk would actually have opened.
+///
+/// `donor_cands` names the candidate slots whose files live in a §293
+/// donor directory. An I/O error on one of THOSE never propagates -
+/// the candidate is dropped and the merge continues, so a donor file
+/// vanishing under a racing cleanup degrades to "no donation" instead
+/// of failing the repair (the file-level half of the tolerance
+/// `adoption_candidates` grants per directory). The cost of dropping an
+/// errored donor mid-scan is only ever LOST adoptions, never wrong
+/// ones: claims it published before erroring may have let later workers
+/// skip confirming those slices, and the merge then drops its list, but
+/// every adoption that does survive was CRC+MD5 confirmed by the worker
+/// that recorded it, and an unadopted slice just stays with the
+/// recovery math. Errors on the repair's own files fail as before.
 /// * Workers publish each adoption into `best[ord]` (a monotone
 ///   `fetch_min` of the adopting position), so a worker at position `k`
 ///   can skip a CRC hit's MD5 confirmation, or stop reading altogether,
@@ -281,6 +473,7 @@ fn prefetch_wholes(
 pub(super) fn sliding_scan(
     cands: &[(PathBuf, u64)],
     indices: &[usize],
+    donor_cands: std::ops::Range<usize>,
     targets: &[Target],
     missing_set: &HashSet<usize>,
     bs: usize,
@@ -355,6 +548,12 @@ pub(super) fn sliding_scan(
     {
         if remaining == 0 {
             break;
+        }
+        // The donor-file half of the racing-cleanup tolerance: an I/O
+        // error from a donor-owned slot (vanished file, the shrank-
+        // mid-scan EOF) drops that candidate's list and moves on.
+        if matches!(slot, Some(Err(_))) && donor_cands.contains(&indices[pos]) {
+            continue;
         }
         for (ord, offset) in slot.transpose()?.unwrap_or_default() {
             if let std::collections::hash_map::Entry::Vacant(v) = adopted.entry(gs[ord]) {
@@ -463,7 +662,7 @@ fn scan_candidate(
     let total = len + bs as u64 - 1;
     'stream: while i < total {
         let n = if i < len {
-            let want = buf.len().min((len - i) as usize);
+            let want = crate::disk::chunk_len(len - i, buf.len());
             let got = f.read(&mut buf[..want])?;
             if got == 0 {
                 return Err(std::io::Error::new(
@@ -474,7 +673,7 @@ fn scan_candidate(
             }
             got
         } else {
-            let want = buf.len().min((total - i) as usize);
+            let want = crate::disk::chunk_len(total - i, buf.len());
             buf[..want].fill(0);
             want
         };
@@ -531,3 +730,32 @@ fn scan_candidate(
 
 #[cfg(test)]
 mod tests;
+
+/// Reads adopted block bytes from candidate files, keeping each source
+/// open across calls. Bytes past a candidate's end are the zero padding
+/// the block checksum was verified against. §293 donor sources arrive
+/// already open ([`pin_donor_sources`] - the handle keeps a deleted
+/// donor readable); the repair's own files open lazily, fatal.
+///
+/// Lives here rather than in the parent because it is the READ side of
+/// this module's own decisions - `cands` is [`adoption_candidates`]'s
+/// list and `AdoptSrc` its verdict - and because the parent is over the
+/// size gate's ceiling while this file is nowhere near it.
+pub(super) struct CandReader<'a> {
+    pub(super) cands: &'a [(PathBuf, u64)],
+    pub(super) open: HashMap<usize, File>,
+}
+
+impl CandReader<'_> {
+    pub(super) fn read(&mut self, s: AdoptSrc, take: usize) -> Result<Vec<u8>, RepairError> {
+        let (path, len) = &self.cands[s.cand];
+        let f = match self.open.entry(s.cand) {
+            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => v.insert(File::open(path)?),
+        };
+        let avail = crate::disk::chunk_len(len.saturating_sub(s.offset), take);
+        let mut v = vec![0u8; take];
+        crate::disk::read_exact_at(f, &mut v[..avail], s.offset)?;
+        Ok(v)
+    }
+}

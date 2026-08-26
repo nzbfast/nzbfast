@@ -445,7 +445,7 @@ impl<R: io::Read> Reader<R> {
         if self.left == 0 || buf.is_empty() {
             return Ok(0);
         }
-        let take = (self.left as usize).min(buf.len());
+        let take = crate::disk::chunk_len(self.left, buf.len());
         let n = self.src.read(&mut buf[..take])?;
         if n == 0 {
             return Err(TarError::Malformed(
@@ -461,7 +461,7 @@ impl<R: io::Read> Reader<R> {
     fn skip_rest(&mut self) -> Result<(), TarError> {
         let mut sink = [0u8; 8192];
         while self.left > 0 {
-            let take = (self.left as usize).min(sink.len());
+            let take = crate::disk::chunk_len(self.left, sink.len());
             let n = self.src.read(&mut sink[..take])?;
             if n == 0 {
                 return Err(TarError::Malformed(
@@ -473,7 +473,7 @@ impl<R: io::Read> Reader<R> {
         }
         let mut pad = std::mem::take(&mut self.pad);
         while pad > 0 {
-            let take = (pad as usize).min(sink.len());
+            let take = crate::disk::chunk_len(pad, sink.len());
             let n = self.src.read(&mut sink[..take])?;
             if n == 0 {
                 // Padding missing at EOF is how plenty of real archives

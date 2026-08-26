@@ -328,6 +328,16 @@ immediate: the active transfer stops within seconds and resumes later from the
 journal, losing nothing. (Force-priority jobs keep downloading, SABnzbd-style.)</li>
 <li>An <b>update banner</b> appears here when a new version is available
 (see <a href="#updates">Updates</a>).</li>
+<li>Each <b>background-work chip</b> reports what nzbfast is doing right now -
+indexing, metadata lookups, the release feed, connection measuring, the
+watchlist, list sync, moving finished files, database upkeep. Click one for
+what to do about it: pause or switch off the subsystems that have a switch,
+or jump straight to the watchlist, list sources or the queue. Moving,
+upkeep and list sync finish on their own and say so instead of offering a
+switch.</li>
+<li>The <b>queue status pill</b> opens the same way, with <b>Pause</b>
+(lets articles already in flight land), <b>Pause now</b> (drops them and
+frees the line immediately) and <b>Resume</b>.</li>
 </ul>
 <h3>Throughput</h3>
 <p>Live MB/s with a scrolling chart; the dashed watermarks mark this session's
@@ -368,7 +378,7 @@ evidence: what your line can do, what the providers delivered, what is arriving
 now, and a per-server table where a shaped provider is visible by inspection. A
 job running at full speed says nothing here, and neither does one whose verdict
 is still forming.</li>
-<li>Badges show special states: <i>deferred (slow)</i>, <i>prefetching</i>,
+<li>Badges show special states: <i>tried, set aside</i>, <i>prefetching</i>,
 <i>paused</i> (see <a href="#performance">Performance tools</a>).</li>
 <li>A burn-down chart tracks total GB remaining across the queue.</li>
 </ul>
@@ -790,14 +800,6 @@ after every update are poor. And a large share of installs are Docker,
 headless servers and NAS boxes where no keychain exists at all, which would
 leave two different storage paths to keep correct. A single well-understood
 format that behaves the same everywhere is, for now, the better trade.</p>
-<p>Two further per-server options have no dashboard control yet: add them by hand to
-that server's entry in <code>config.local.json</code> (see <a href="#files">§17</a>)
-and restart.</p>
-<div class="tblwrap"><table>
-<tr><th>Key</th><th>Notes</th></tr>
-<tr><td><code>bind_ip</code></td><td>Bind this server's outgoing connections to a specific local address, for multi-homed boxes and VPN split tunnels. The address family also picks the target family: a v4 bind connects to the server's v4 address.</td></tr>
-<tr><td><code>socks5</code></td><td>Send this server's NNTP traffic through a SOCKS5 proxy: <code>host:port</code>, or <code>user:pass@host:port</code>. The hostname is resolved <em>by the proxy</em>, so there is no local DNS leak.</td></tr>
-</table></div>
 <ul>
 <li>The <b>tick</b> beside each server is its on/off switch: ticked means the server
 is in the download pool, unchecked means it is disabled. A disabled server keeps its
@@ -1002,6 +1004,7 @@ have added, and the watchlist works off those accounts instead.</div>
 <tr><td>Ingest gates</td><td>JSON rules filtering what enters the index: kinds (obfuscated junk is dropped by default), year/resolution/language, size bounds.</td></tr>
 <tr><td>Scan now / deep rescan</td><td>Run a pass immediately; with a depth, re-scan that many recent headers.</td></tr>
 <tr><td>OMDb key / metadata refresh / wipe</td><td>Wall enrichment controls (<a href="#wall">§6</a>). Wipe rebuilds the database from scratch: the recovery path if it is ever corrupted.</td></tr>
+<tr><td>Pause metadata lookups</td><td>Stops fetching titles, posters and cast from the metadata sites (<a href="#wall">§6</a>) while the scan itself keeps running. Nothing already fetched is lost; rows found while it is paused simply keep the name they were posted under until you turn it back off. The only row on this card that touches no news provider at all.</td></tr>
 <tr><td>Pre feed</td><td><b>Off unless you turn it on.</b> Plenty of uploads are posted with the name taken out, so a scan has nothing to read. Public relay channels announce the real name, which is the one open way to match those posts up. Turning this on keeps a connection open to an IRC network and listens: nothing is ever sent, and no account is created. Needs the indexer on, since a feed with nowhere to store what it hears is a socket held open for nothing.</td></tr>
 <tr><td>Relay server, Relay channels</td><td>The IRC network carrying the announcements (host or host:port) and the comma-separated channels to listen in. A change takes effect on the next connect, so toggle the feed off and on to apply one immediately.</td></tr>
 <tr><td>Name by correlation</td><td>The live public relays carry no filenames, so most obfuscated posts cannot be matched directly. What an announcement does pin down is when a release appeared and how big it is. This compares announcement timing and size against unnamed posts and, when they fit, suggests the real name on Browse. A suggestion is marked as one, takes your click to apply, and never renames files on disk.</td></tr>
@@ -1110,7 +1113,9 @@ the add proceeds untouched and the log says why.</p>
 <p>Every job milestone is a versioned event: <code>job.added</code>,
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
-(an automatic retry has re-queued a failed download), <code>job.switched</code>
+(an automatic retry has re-queued a failed download), <code>job.requeued</code>
+(a download left history and re-entered the queue - a retry, or a library entry
+played), <code>job.switched</code>
 (a job that could not finish was replaced by an alternate copy that was being
 held for it), <code>job.replaced</code> (the same outcome, except that no copy
 was being held, so a replacement was searched for and downloaded) and
@@ -1118,8 +1123,11 @@ was being held, so a replacement was searched for and downloaded) and
 its files), plus <code>watch.picked</code> (a .nzb was taken out of the watch
 folder), <code>nzb.refeed</code> (a finished download's own NZB file was added to the queue, paused), <code>watchlist.upgraded</code> (a watchlist upgrade landed and the
 superseded copy was removed), <code>queue.idle</code>,
-<code>giveup.tripped</code>, <code>disk.low</code>, <code>storage.slow</code>
-and <code>quota.reached</code>. Each carries
+<code>queue.paused</code> and <code>queue.resumed</code> (the queue stopped or
+started again, whoever or whatever did it), <code>queue.finished_action</code>
+(the queue-finished action was armed, ran or was cancelled), <code>giveup.tripped</code>,
+<code>disk.low</code>, <code>storage.slow</code>, <code>quota.reached</code>
+and <code>update.available</code> (a newer nzbfast release was found). Each carries
 <code>schema_version</code> (currently 1; new keys may appear without a bump -
 ignore what you do not know), a monotonic <code>seq</code>, and an
 <code>at</code> timestamp in milliseconds.</p>
@@ -1483,7 +1491,7 @@ the <b>API key</b> (full control) and the <b>NZB key</b> (add-only:
 <tr><td>Automation</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostics</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code>: status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: any user, API key as password)</td></tr>
-<tr><td>Preview / playback</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP ranges; starting a parked library job needs <code>?t=</code> token or key), <code>/m3u/&lt;id&gt;</code> (needs key; mints the token), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Preview / playback</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP ranges; starting a parked library job needs <code>?t=</code> token or key), <code>/m3u/&lt;id&gt;</code> (needs key or the job's own token; mints the token), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Files &amp; locations</h2>

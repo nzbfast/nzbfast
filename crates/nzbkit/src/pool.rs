@@ -21,6 +21,7 @@ use tracing::{debug, error, info, warn};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::ServerConfig;
+use crate::fail::FailCode;
 use crate::nntp::Connection;
 
 /// Live per-server connection target (TODO 112): how many of a server's
@@ -747,8 +748,22 @@ pub enum FetchOutcome {
     Done { id: Arc<str>, raw: Vec<u8> },
     /// No server can produce the article; `cause` says why.
     Missing { id: Arc<str>, cause: MissingCause },
-    /// Transport failures exhausted the retry budget.
-    Failed { id: Arc<str>, error: String },
+    /// The pool gave up on the article without a body. `code` is the
+    /// typed reason - not every one of them is a transport failure of
+    /// the LINK, and a consumer that reads them all as evidence about
+    /// the post repeats the mistake `FailCode`'s header describes.
+    ///
+    /// `error` is the same sentence it always was: the log, SAB-compat
+    /// and `anyhow` surface, carrying the OS's own words in the OS's
+    /// own language. The two travel together and neither replaces the
+    /// other - TODO 307 item 1 added the code BESIDE the string
+    /// precisely so no reader has to parse the string to learn which
+    /// kind of failure it was.
+    Failed {
+        id: Arc<str>,
+        code: FailCode,
+        error: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -834,7 +849,7 @@ pub struct SessionEnds {
 // unchanged, and puts the private note thresholds back in scope for
 // pool's other descendants exactly as they were.
 mod bufpool;
-pub use bufpool::BufPool;
+pub use bufpool::{BufPool, PooledBuf};
 mod livestats;
 pub use livestats::*;
 
@@ -1609,6 +1624,11 @@ struct Shared {
     /// primary (all its workers bowed out) never wedges the queue.
     levels: Vec<u32>,
     alive: Vec<AtomicUsize>,
+    /// Per-server count of workers that have CLAIMED a cross-job
+    /// hand-over and are on their way out ([`Shared::claim_handoff`]).
+    /// Monotone for the run, and never released - the same conservative
+    /// trade `ServerState::claim_yield` makes, and for the same reason.
+    handoff_out: Vec<AtomicUsize>,
     /// Per-server count of workers holding a live-target admission
     /// (see [`Admitted`]); `admit_wake` is pinged whenever one is
     /// returned so a parked worker can take it.
@@ -1955,54 +1975,6 @@ pub fn default_outage_mins() -> u64 {
 /// bodies at worst, large enough to cover realistic damage tails.
 const ENDGAME_MAX: usize = 64;
 
-/// One worker's lifetime in the fleet's two head-counts: its server's
-/// `alive` (routing) and the run-wide `workers_live` (the terminal-state
-/// invariant). Both come down when the worker exits, however it exits -
-/// including a panic, where `Drop` runs during the unwind.
-///
-/// A worker that exits under its own control calls [`retire`](Self::retire)
-/// instead, which reports whether it was the LAST one out; only that
-/// worker can seal the run, and only it is still holding an outcome
-/// sender to seal it with.
-struct WorkerLife {
-    shared: Arc<Shared>,
-    idx: usize,
-    retired: bool,
-}
-
-impl WorkerLife {
-    fn birth(shared: &Arc<Shared>, idx: usize) -> WorkerLife {
-        shared.alive[idx].fetch_add(1, Ordering::Relaxed);
-        shared.workers_born.fetch_add(1, Ordering::AcqRel);
-        shared.workers_live.fetch_add(1, Ordering::AcqRel);
-        WorkerLife {
-            shared: shared.clone(),
-            idx,
-            retired: false,
-        }
-    }
-
-    /// Leave the fleet deliberately. True when this was the last live
-    /// worker of the whole run - exactly one caller ever sees it.
-    fn retire(mut self) -> bool {
-        self.retired = true;
-        let prev = self.shared.alive[self.idx].fetch_sub(1, Ordering::Relaxed);
-        note_server_dark(&self.shared, self.idx, prev);
-        self.shared.workers_live.fetch_sub(1, Ordering::AcqRel) == 1
-    }
-}
-
-impl Drop for WorkerLife {
-    fn drop(&mut self) {
-        if self.retired {
-            return; // retire() already did the arithmetic
-        }
-        let prev = self.shared.alive[self.idx].fetch_sub(1, Ordering::Relaxed);
-        note_server_dark(&self.shared, self.idx, prev);
-        self.shared.workers_live.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 impl Shared {
     /// §96.5: has this server spent its remaining prepaid block on this
     /// run? One relaxed load and a compare - the fast path the top-up
@@ -2275,6 +2247,7 @@ impl Shared {
             fence_off: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
             levels: servers.iter().map(|(s, _)| s.level).collect(),
             alive: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
+            handoff_out: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
             admitted: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
             admit_wake: (0..n_servers).map(|_| tokio::sync::Notify::new()).collect(),
             connected: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
@@ -2756,6 +2729,26 @@ pub async fn fetch_all_multi_ctl(
     out: mpsc::Sender<FetchOutcome>,
     ctl: Option<&QueueControl>,
 ) -> Vec<PoolStats> {
+    // A zero here is not a configuration, it is a hang.
+    //
+    // `connections: 0` spawns no workers at all, so the run returns with
+    // every article still non-terminal and no outcome emitted for any of
+    // them. `window: 0` is worse: workers start, but the top-up loop can
+    // never admit an article, so each one sleeps forever with pending > 0
+    // and `finished` never fires - so the join deadline never arms
+    // either. Both are reachable straight from the CLI (`get --window 0`)
+    // and neither reports anything to the user.
+    //
+    // Clamped here rather than at each of the several CLI call sites, so
+    // the daemon and every other caller of the public pool API get the
+    // same floor - and ONCE, ahead of everything, as `fetch_all_sharded`
+    // does, because the dealer below reads `connections` too.
+    let mut servers = servers.to_vec();
+    for (_, cfg) in servers.iter_mut() {
+        cfg.connections = cfg.connections.max(1);
+        cfg.window = cfg.window.max(1);
+    }
+    let servers = &servers[..];
     let (shared, unservable) = Shared::new(reqs, servers);
     if let Some(c) = ctl {
         c.attach(&shared);
@@ -2771,59 +2764,43 @@ pub async fn fetch_all_multi_ctl(
     }
 
     let mut workers = Vec::new();
-    let mut counters = Vec::new();
+    let counters: Vec<_> = (0..servers.len())
+        .map(|si| {
+            let z = || Arc::new(AtomicU64::new(0));
+            (shared.bytes[si].clone(), z(), z())
+        })
+        .collect();
     // Hold one reference on the run-wide live count for as long as we are
     // still creating workers. Spawned tasks run on other runtime threads
     // immediately, so without this the first worker of a dead server can
     // fail its connect, find itself alone in the count, and seal the run
     // before its siblings have been born.
     shared.workers_live.fetch_add(1, Ordering::AcqRel);
-    for (si, (server, cfg)) in servers.iter().enumerate() {
-        // A zero here is not a configuration, it is a hang.
-        //
-        // `connections: 0` spawns no workers at all, so the run returns with
-        // every article still non-terminal and no outcome emitted for any of
-        // them. `window: 0` is worse: workers start, but the top-up loop can
-        // never admit an article, so each one sleeps forever with pending > 0
-        // and `finished` never fires - so the join deadline never arms
-        // either. Both are reachable straight from the CLI (`get --window 0`)
-        // and neither reports anything to the user.
-        //
-        // Clamped here rather than at each of the several CLI call sites, so
-        // the daemon and every other caller of the public pool API get the
-        // same floor.
-        let cfg = &PoolConfig {
-            connections: cfg.connections.max(1),
-            window: cfg.window.max(1),
-            ..cfg.clone()
-        };
-        let connects = Arc::new(AtomicU64::new(0));
-        let reconnects = Arc::new(AtomicU64::new(0));
-        counters.push((
-            shared.bytes[si].clone(),
-            connects.clone(),
-            reconnects.clone(),
-        ));
+    // Deal the WHOLE fleet before spawning any of it, through the same
+    // `deal_shard_plans` the sharded path uses (one shard is one plan,
+    // in configured order): every `WorkerLife` is born before it
+    // returns, so `alive` - and with it `live_mask` and `required_mask`
+    // - counts the complete fleet from the first instruction any worker
+    // runs. Birthing inside the spawn pass, as this path used to while
+    // claiming to pin the invariant "by counting from spawn", let
+    // server 0's workers route against a fleet that did not exist yet.
+    // The measurement, and what it cost, are on
+    // `every_worker_life_is_born_by_the_one_dealer`, which refuses a
+    // second birth site.
+    for (si, slot, life) in deal_shard_plans(&shared, servers, 1).into_iter().flatten() {
+        let (server, cfg) = servers[si].clone();
+        let shared = shared.clone();
+        let out = out.clone();
         let ctx = ctx_for(servers, si);
-        for i in 0..cfg.connections {
-            let server = server.clone();
-            let cfg = cfg.clone();
-            let shared = shared.clone();
-            let out = out.clone();
-            let connects = connects.clone();
-            let reconnects = reconnects.clone();
-            // Counted from spawn (not first connect) so fill-server gates
-            // see primaries as live during the ramp.
-            let life = WorkerLife::birth(&shared, si);
-            let slot = i as u32;
-            let ramp = cfg.ramp_delay * slot;
-            workers.push(tokio::spawn(async move {
-                worker(
-                    &server, &cfg, ctx, shared, out, connects, reconnects, life, ramp, slot,
-                )
-                .await;
-            }));
-        }
+        let connects = counters[si].1.clone();
+        let reconnects = counters[si].2.clone();
+        let ramp = cfg.ramp_delay * slot;
+        workers.push(tokio::spawn(async move {
+            worker(
+                &server, &cfg, ctx, shared, out, connects, reconnects, life, ramp, slot,
+            )
+            .await;
+        }));
     }
     // The fleet is complete; from here the workers own the live count.
     shared.workers_live.fetch_sub(1, Ordering::AcqRel);
@@ -2926,12 +2903,15 @@ async fn join_fleet(
         // A cancelled task is not a panic - only report real ones.
         note_panic(w.await);
     }
-    let reason = if panics > 0 {
-        "a pool worker panicked before this article was fetched"
+    // TODO 307 item 1: a code rather than a sentence. `seal_run` derives
+    // the wording from it, so the article's typed reason and the text
+    // sent beside it cannot part company.
+    let code = if panics > 0 {
+        FailCode::WorkerPanic
     } else {
-        "no connection worker left to fetch this article"
+        FailCode::FleetExhausted
     };
-    seal_run(shared, &out, reason).await;
+    seal_run(shared, &out, code).await;
     let left = shared.pending.load(Ordering::Acquire);
     if left > 0
         && shared.workers_live.load(Ordering::Acquire) == 0
@@ -3193,10 +3173,12 @@ async fn next_work(
 
 /// Deal every configured connection round-robin across `shards.max(1)`
 /// plans as (server index, per-server ramp step, pre-born life),
-/// birthing each [`WorkerLife`] on the spot. The whole fleet is counted
-/// in `alive` and `workers_live` before this returns - the caller's
-/// shard threads must be able to trust the head-counts from their first
-/// instruction. A plan dropped unspawned (a shard runtime that failed
+/// birthing each [`WorkerLife`] on the spot. THE ONE BIRTH SITE, for
+/// both entry paths: the whole fleet is counted in `alive` and
+/// `workers_live` before this returns, so no worker - shard thread or
+/// spawned task - can route against a fleet that is still being built.
+/// `fetch_all_multi_ctl` passes one shard, which is one plan holding
+/// every worker. A plan dropped unspawned (a shard runtime that failed
 /// to build) releases its lives through `Drop`, exactly like its
 /// workers dying.
 fn deal_shard_plans(
@@ -3364,7 +3346,10 @@ pub fn fetch_all_sharded(
     // there is nobody left to run the async terminal seal. All shard
     // threads are joined here, so the queue and inflight maps are
     // uncontended and can be sealed on this documented blocking path.
-    seal_run_blocking(&shared, &out, "all shard runtimes stopped");
+    // Every shard runtime is joined with work still queued, so nothing
+    // is left that could fetch these articles - the same fact
+    // `seal_run`'s own wind-down reports, reached from the sharded path.
+    seal_run_blocking(&shared, &out, FailCode::FleetExhausted);
     drop(out);
     shared.report_diagnostics();
 

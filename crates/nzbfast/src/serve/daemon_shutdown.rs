@@ -538,50 +538,192 @@ pub(in crate::serve) fn arm_pause_timer(d: &Arc<Daemon>, dur: std::time::Duratio
     // longer than a year is indistinguishable from a pause with no
     // timer, so capping it loses nothing a user can observe.
     let dur = dur.min(std::time::Duration::from_secs(365 * 24 * 3600));
-    let my_gen;
-    {
+    let spawn = {
         let mut until = d.pause_until.lock_ok();
-        my_gen = d.pause_gen.fetch_add(1, Ordering::Relaxed) + 1;
         *until = Some(Instant::now() + dur);
-    }
-    let d = d.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(dur);
-        // Check and clear under the SAME lock every pause/resume writer
-        // bumps the generation under (`set_paused_cancel_timer`). The
-        // bare check-then-store had a preemption-wide hole: a manual
-        // pause landing between the two bumped the generation too late
-        // and was immediately undone by this stale timer (14 Aug sweep).
-        let fired = {
-            let mut until = d.pause_until.lock_ok();
-            let live = d.pause_gen.load(Ordering::Relaxed) == my_gen;
-            if live {
-                d.paused.store(false, Ordering::Relaxed);
-                *until = None;
-            }
-            live
-        };
-        if fired {
-            persist_pause(&d);
-            info!(target: "pause", "timed pause over - resumed");
-            d.note_event("resume", "timed pause over - downloads resumed");
+        // Under the SAME lock the worker clears it under on its way out,
+        // so exactly one of "reprogram the worker that is already there"
+        // and "there is no worker, start one" happens. Read it outside
+        // and two arms landing together spawn two workers, or an arm
+        // racing a retirement notifies a thread that has already gone
+        // and the pause never lifts.
+        !d.pause_timer_live.swap(true, Ordering::Relaxed)
+    };
+    // Outside the lock: the woken worker's first act is to take it.
+    d.pause_wake.notify_all();
+    if spawn {
+        let weak = Arc::downgrade(d);
+        let stop = crate::serve::RunStop::current();
+        // Weak, and through the aux census like every other long-lived
+        // lane. Weak because a worker asleep on a deadline must not be
+        // what keeps a whole daemon generation alive; censused because
+        // that is what makes "at most one of these exists" provable
+        // rather than asserted - this lane replaced a raw
+        // `std::thread::spawn` per arm, which the census never saw.
+        if !crate::serve::spawn_aux("pause-timer", move || pause_timer(&weak, stop)) {
+            // Nothing is running to clear the flag, so clear it here or
+            // no later arm would ever start a worker again.
+            d.pause_timer_live.store(false, Ordering::Relaxed);
         }
-    });
+    }
 }
 
-/// Set or clear the pause flag, cancel any pending auto-resume deadline,
-/// and bump the timer generation - as ONE step with respect to the
-/// expiry thread, which makes its generation check and its store under
-/// this same `pause_until` lock. Writers that bumped the generation and
-/// wrote the flag as two bare atomics raced the thread's check-then-act
-/// window. Returns the previous flag value. Callers do their own
-/// `persist_pause` / events / wind-down outside the lock.
-pub(in crate::serve) fn set_paused_cancel_timer(d: &Daemon, paused: bool) -> bool {
+/// How long the auto-resume worker sleeps at a stretch before it looks
+/// at the run's stop token again.
+///
+/// The deadline itself is exact - the last wait is the whole of what is
+/// left - so this costs precision nothing and buys the one thing a
+/// condvar inside the daemon cannot deliver: an embedded `nzbfast_stop`
+/// notifies the process-wide stop gate, not this lane's condvar, and a
+/// pause with six hours to run must not hold its daemon generation open
+/// for six hours. One wake a second, only while a timed pause is
+/// actually pending, and none at all otherwise.
+const PAUSE_STOP_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The one auto-resume worker: sleep until `pause_until` comes due, lift
+/// the pause, retire.
+///
+/// One reprogrammable timer, not a thread per arm. Every arm used to
+/// spawn a raw sleeper that slept the WHOLE duration and was invalidated
+/// - never woken, never joined - by a generation counter, so N
+/// `set_pause` calls left N OS threads and N `Arc<Daemon>` clones asleep
+/// for up to the clamp of a year. Re-arming now replaces the deadline in
+/// place and wakes this loop; cancelling clears it and this loop retires.
+///
+/// The deadline read under the lock is the WHOLE decision, which is what
+/// retires the generation counter that used to make it: a cancel is
+/// `None` and a re-arm is a later `Some`, both written under this mutex,
+/// so there is no window in which a stale wake can lift a pause somebody
+/// else has just re-taken (the 14 Aug sweep's check-then-act hole,
+/// closed by construction rather than by a matching number).
+fn pause_timer(weak: &std::sync::Weak<Daemon>, stop: crate::serve::RunStop) {
+    // The `Weak` is upgraded once and held only for as long as this
+    // worker is actually timing something: it retires the moment the
+    // deadline is gone, so an idle daemon carries no strong reference
+    // from here at all, and a pending one carries it for at most
+    // [`PAUSE_STOP_POLL`] past a stop.
+    let Some(d) = weak.upgrade() else { return };
     let mut until = d.pause_until.lock_ok();
-    d.pause_gen.fetch_add(1, Ordering::Relaxed);
-    let was = d.paused.swap(paused, Ordering::Relaxed);
+    loop {
+        let Some(deadline) = *until else {
+            // Cancelled by a resume, a manual pause, or going offline.
+            // Retire under the lock, so an arm either sees the flag
+            // still set and reprograms a worker that is still here, or
+            // sees it clear and starts a new one.
+            d.pause_timer_live.store(false, Ordering::Relaxed);
+            return;
+        };
+        if stop.stopping() {
+            d.pause_timer_live.store(false, Ordering::Relaxed);
+            return;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let (next, _) = d
+            .pause_wake
+            .wait_timeout(until, left.min(PAUSE_STOP_POLL))
+            .unwrap_or_else(|p| p.into_inner());
+        until = next;
+    }
+    // Due. Fire and clear under the same lock every pause/resume writer
+    // takes, then retire: a pause that wants a timer arms one.
+    d.paused.store(false, Ordering::Relaxed);
     *until = None;
+    d.pause_timer_live.store(false, Ordering::Relaxed);
+    drop(until);
+    persist_pause(&d);
+    info!(target: "pause", "timed pause over - resumed");
+    d.note_event("resume", "timed pause over - downloads resumed");
+    // Writes the flag directly (it has to - the deadline check and the
+    // store are one step under the lock), so it owes the announce by
+    // hand. Nobody is at the keyboard when a timed pause expires, which
+    // is precisely the resume worth saying.
+    announce_pause(&d);
+}
+
+/// Set or clear the pause flag and cancel any pending auto-resume
+/// deadline - as ONE step with respect to the timer worker, which reads
+/// that deadline and stores the resumed flag under this same
+/// `pause_until` lock. Writers that wrote the two as bare atomics raced
+/// the worker's check-then-act window. Returns the previous flag value.
+/// Callers do their own `persist_pause` / events / wind-down outside the
+/// lock.
+///
+/// It also ANNOUNCES the edge, which is what makes six of the flag's
+/// nine writers free: `mode=pause`, `mode=resume` on both facades, the
+/// shutdown wind-down, the storage pause and the schedule all reach the
+/// atomic through here, so none of them has to remember. The announce
+/// is deliberately OUTSIDE the `pause_until` hold - `life_emit` takes
+/// the ring lock and then offers the event to the webhook dispatcher,
+/// and no other lock may be held across either.
+pub(in crate::serve) fn set_paused_cancel_timer(d: &Daemon, paused: bool) -> bool {
+    let was = {
+        let mut until = d.pause_until.lock_ok();
+        let was = d.paused.swap(paused, Ordering::Relaxed);
+        *until = None;
+        was
+    };
+    // Outside the lock: the worker wakes, reads no deadline, and retires
+    // rather than sleeping out the rest of a pause that is over.
+    d.pause_wake.notify_all();
+    announce_pause(d);
     was
+}
+
+/// Who paused, in the words the queue payload uses. One derivation, two
+/// readers - the payload's `pause_source` field and the `queue.paused`
+/// event - because a second copy could only ever disagree with the
+/// first about which of the two mechanisms stopped the queue.
+pub(in crate::serve) fn pause_source_now(d: &Daemon) -> &'static str {
+    if d.paused_by_offline.load(Ordering::Relaxed) {
+        "offline"
+    } else {
+        *d.pause_source.lock_ok()
+    }
+}
+
+/// §129 1b(b): say `queue.paused` / `queue.resumed` if the flag has
+/// moved since the last time this said anything.
+///
+/// `Daemon::pause_announced` is the memory, and it is separate from
+/// `paused` because the two answer different questions and only one of
+/// them is allowed to be stale: `paused` is what `pick_job` gates on
+/// and must be exact, `pause_announced` is what has been SAID, and the
+/// gap between them is the edge. Seeded false to match a fresh
+/// daemon's unpaused flag, so the first pause is an edge; the restore
+/// path announces the pause it restores rather than writing the flag
+/// behind this one's back, which would leave the pair disagreeing and
+/// swallow the following resume.
+///
+/// THE EDGE IS COMPUTED HERE AND NOT BY THE CALLER, which is the whole
+/// design. The dashboard used to recover this cue by diffing
+/// `q.paused` against the previous poll's value, and that diff is
+/// exactly what §129 1b(b) is retiring - but a per-door emit would put
+/// the same fragile judgement in nine places instead of one, and the
+/// day somebody adds a tenth door the chime is lost with nothing to say
+/// so. Reading the flag and swapping against what was last announced
+/// makes this IDEMPOTENT: call it from anywhere, as often as you like,
+/// and it emits once per real transition. That is what lets the queue
+/// poll call it as a belt (`sabcompat::queue_payload`), so a future
+/// writer that forgets costs one poll of lateness rather than the cue.
+///
+/// Call with no locks held.
+pub(in crate::serve) fn announce_pause(d: &Daemon) {
+    let now = d.paused.load(Ordering::Relaxed);
+    if d.pause_announced.swap(now, Ordering::Relaxed) == now {
+        return;
+    }
+    // `source` only on the pause, for the same reason the payload nulls
+    // it on a running queue: "who paused" is not a fact about a queue
+    // that is not paused, and the resume that follows may be a
+    // different mechanism's entirely.
+    if now {
+        d.life_emit("queue.paused", json!({"source": pause_source_now(d)}));
+    } else {
+        d.life_emit("queue.resumed", json!({}));
+    }
 }
 
 /// Record the queue's pause state so it survives a restart.
@@ -681,6 +823,12 @@ pub(in crate::serve) fn restore_pause(d: &Arc<Daemon>, saved: &serde_json::Map<S
     }
     let Some(deadline) = saved.get("pause_until_unix").and_then(Value::as_i64) else {
         d.paused.store(true, Ordering::Relaxed);
+        // Announced even though nothing can be listening yet: the point
+        // is to leave `pause_announced` AGREEING with the flag, or the
+        // resume that follows computes "false -> false" and says
+        // nothing. A page that opens later adopts the ring's head
+        // (`life_cursor`), so this is never replayed as news.
+        announce_pause(d);
         info!(target: "pause", "restored: queue paused");
         return;
     };
@@ -693,6 +841,7 @@ pub(in crate::serve) fn restore_pause(d: &Arc<Daemon>, saved: &serde_json::Map<S
         return;
     }
     d.paused.store(true, Ordering::Relaxed);
+    announce_pause(d);
     arm_pause_timer(d, std::time::Duration::from_secs(left as u64));
     info!(target: "pause", "restored: paused, {} min left", (left + 59) / 60);
 }
@@ -725,6 +874,8 @@ mod shutdown_sidecar_tests {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             nzbkit::pool::PoolConfig::default(),
         )])
@@ -874,8 +1025,52 @@ mod shutdown_sidecar_tests {
 }
 
 #[cfg(test)]
-mod pause_timer_clamp_tests {
+mod pause_timer_tests {
     use super::*;
+
+    /// The aux-thread census is process-global, and these tests both
+    /// spawn into it and count what is in it, so they run one at a time.
+    /// Taken as the FIRST statement of each, so it drops last.
+    fn one_pause_timer_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static GATE: Mutex<()> = Mutex::new(());
+        GATE.lock_ok()
+    }
+
+    /// Auto-resume workers alive right now. Nothing else in this process
+    /// arms a pause, so under the guard above this is exactly what the
+    /// test under it started.
+    fn live_pause_timers() -> usize {
+        crate::serve::live_aux_threads()
+            .into_iter()
+            .find(|(name, _)| name == "pause-timer")
+            .map_or(0, |(_, n)| n)
+    }
+
+    /// Wait for the census to settle at `want` workers. Zero is the half
+    /// a leak test cannot skip - "stopped growing" is what a leak that
+    /// saturates looks like - and one is the same assertion for a cancel
+    /// that is immediately re-armed: the retiring worker and its
+    /// replacement can both be counted for the instant the first takes
+    /// to return, so the claim is where it settles, not where it is
+    /// caught mid-handover.
+    fn wait_for_workers(want: usize, what: &str) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while live_pause_timers() != want {
+            assert!(
+                Instant::now() < deadline,
+                "expected {want} auto-resume worker(s) after {what}, found {}",
+                live_pause_timers()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("nzbfast-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 
     /// `scheduleresume` takes its seconds as a bare u64 straight off the
     /// wire, and `Instant::now() + dur` panics on overflow - so a
@@ -883,11 +1078,17 @@ mod pause_timer_clamp_tests {
     /// worker thread outright, permanently, since that pool runs with
     /// no catch_unwind. The clamp lives in `arm_pause_timer` so every
     /// caller inherits it; the pause must still be ARMED, not dropped.
+    ///
+    /// It also puts the timer back, which is why the cancel at the end
+    /// is part of the test rather than tidying: this case used to end
+    /// with TWO year-long sleeper threads still asleep, each holding an
+    /// `Arc<Daemon>` for the life of the test binary - the very leak
+    /// `re_arming_reprograms_the_one_worker` is about, shipped inside
+    /// the test that was meant to prove the clamp.
     #[test]
     fn an_absurd_pause_length_clamps_instead_of_panicking() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-pauseclamp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let _serial = one_pause_timer_test_at_a_time();
+        let dir = scratch("pauseclamp");
         let d = crate::serve::testutil::test_daemon(&dir);
 
         arm_pause_timer(&d, std::time::Duration::from_secs(u64::MAX));
@@ -901,6 +1102,208 @@ mod pause_timer_clamp_tests {
         timed_pause(&d, u64::MAX, false);
         assert!(d.paused.load(Ordering::Relaxed), "still paused");
         assert!(d.pause_until.lock_ok().is_some(), "timer armed");
+        wait_for_workers(1, "two absurd pauses - the second reprograms the first");
+
+        set_paused_cancel_timer(&d, false);
+        wait_for_workers(0, "a resume cancelled the clamped pause");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex sweep 24 Aug 2026, F-07: every arm used to spawn a raw `std::thread`
+    /// that slept the WHOLE duration holding an `Arc<Daemon>`, with a
+    /// generation counter that invalidated the old sleeper without ever
+    /// waking it. So N authenticated `set_pause`/`scheduleresume` calls
+    /// left N OS threads and N daemon clones asleep for up to the clamp
+    /// of a year - unbounded accumulation from an ordinary API call.
+    ///
+    /// The fix is one reprogrammable worker: re-arming replaces the
+    /// deadline in place and wakes it. Both halves are asserted, because
+    /// "one thread" is worth nothing if it is timing the wrong deadline
+    /// - the last arm here is SHORTER than the first, so a worker still
+    /// running the original deadline would be timing an hour.
+    #[test]
+    fn re_arming_reprograms_the_one_worker() {
+        let _serial = one_pause_timer_test_at_a_time();
+        let dir = scratch("pausearm");
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        for _ in 0..25 {
+            arm_pause_timer(&d, std::time::Duration::from_secs(3600));
+            assert_eq!(
+                live_pause_timers(),
+                1,
+                "one worker however many times the pause is re-armed"
+            );
+        }
+
+        // Shorter than everything before it: the deadline moved, in
+        // place, rather than a 26th sleeper queueing up behind an hour.
+        arm_pause_timer(&d, std::time::Duration::from_secs(30));
+        let left = d
+            .pause_until
+            .lock_ok()
+            .expect("re-armed pause is armed")
+            .saturating_duration_since(Instant::now());
+        assert!(
+            left <= std::time::Duration::from_secs(30),
+            "the deadline is the LAST arm's, not the first's: {left:?} left"
+        );
+        assert_eq!(live_pause_timers(), 1, "still one worker");
+
+        // And a resume takes it away, rather than leaving it to sleep
+        // out the half hour nobody is waiting for any more.
+        set_paused_cancel_timer(&d, false);
+        wait_for_workers(0, "a resume cancelled the pause");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The behaviour all of the above exists to preserve: the pause
+    /// actually lifts, once, at its deadline - and the worker retires
+    /// behind it rather than sitting on the daemon waiting for a
+    /// deadline that has already passed.
+    #[test]
+    fn the_timer_lifts_the_pause_when_it_comes_due() {
+        let _serial = one_pause_timer_test_at_a_time();
+        let dir = scratch("pausefire");
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        set_paused_cancel_timer(&d, true);
+        arm_pause_timer(&d, std::time::Duration::from_millis(50));
+        wait_for_workers(0, "the pause came due");
+
+        assert!(
+            !d.paused.load(Ordering::Relaxed),
+            "a timed pause that has run out is not a pause"
+        );
+        assert!(
+            d.pause_until.lock_ok().is_none(),
+            "and it leaves no deadline behind for `pause_int` to report"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod pause_edge_tests {
+    use super::*;
+
+    fn kinds(d: &Arc<Daemon>) -> Vec<String> {
+        d.life_since(0)
+            .0
+            .iter()
+            .filter_map(|e| e["kind"].as_str())
+            .filter(|k| k.starts_with("queue.pause") || k.starts_with("queue.resum"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// §129 1b(b): pause and resume are EDGES on the lifecycle ring, and
+    /// the dashboard no longer diffs `q.paused` against the previous
+    /// poll to find them.
+    ///
+    /// The repeats are the substance. `announce_pause` is called on
+    /// every queue poll as a belt (see `sabcompat::queue_payload`), and
+    /// a pause door may reach it more than once on one transition - the
+    /// offline arm does - so an implementation that emitted per CALL
+    /// rather than per EDGE would put a chime on every second of a
+    /// paused queue. Pausing an already-paused queue is not a
+    /// transition either: an *arr sends `mode=pause` routinely.
+    #[test]
+    fn pause_and_resume_are_edges_and_repeats_say_nothing() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-pauseedge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        assert!(kinds(&d).is_empty(), "a fresh daemon has said nothing");
+        // The belt, on a queue nobody has touched: still nothing.
+        announce_pause(&d);
+        announce_pause(&d);
+        assert!(kinds(&d).is_empty(), "polling is not a transition");
+
+        set_paused_cancel_timer(&d, true);
+        assert_eq!(kinds(&d), ["queue.paused"]);
+        // A second pause of a paused queue, and the belt behind it.
+        set_paused_cancel_timer(&d, true);
+        announce_pause(&d);
+        assert_eq!(kinds(&d), ["queue.paused"], "pausing twice is one pause");
+
+        set_paused_cancel_timer(&d, false);
+        announce_pause(&d);
+        assert_eq!(kinds(&d), ["queue.paused", "queue.resumed"]);
+
+        let e = d
+            .life_since(0)
+            .0
+            .into_iter()
+            .find(|e| e["kind"] == "queue.paused")
+            .expect("the pause is on the ring");
+        assert_eq!(e["source"], "user");
+        assert_eq!(e["schema_version"], 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The belt is what makes the ninth pause door - and the tenth
+    /// nobody has written yet - safe. A writer that sets the flag and
+    /// forgets to announce loses ONE POLL, not the cue: the next call
+    /// from the queue payload finds flag and announcement disagreeing
+    /// and says so.
+    ///
+    /// This is the failure mode §129 1b(b) is about. A cue recovered by
+    /// diffing a payload cannot be lost by a new writer, because the
+    /// diff sees the state and not the write; an event can, and the
+    /// belt is the price of moving it.
+    #[test]
+    fn a_writer_that_forgets_to_announce_costs_one_poll_not_the_cue() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-pausebelt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        // A hypothetical tenth door: writes the atomic, says nothing.
+        d.paused.store(true, Ordering::Relaxed);
+        assert!(kinds(&d).is_empty(), "nothing has announced it yet");
+        announce_pause(&d);
+        assert_eq!(kinds(&d), ["queue.paused"], "the belt caught it");
+
+        // And the same in reverse, so a forgotten RESUME cannot leave
+        // the pair stuck agreeing on "paused" forever.
+        d.paused.store(false, Ordering::Relaxed);
+        announce_pause(&d);
+        assert_eq!(kinds(&d), ["queue.paused", "queue.resumed"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A restored pause leaves the pair AGREEING, which is the whole
+    /// reason `restore_pause` announces into an empty room.
+    ///
+    /// Get this wrong and the bug is silent and durable: the flag says
+    /// paused, the announcement still says running, and the user's
+    /// first resume of the session computes "false -> false" and chimes
+    /// nothing. Nothing else in the daemon would ever notice.
+    #[test]
+    fn a_restored_pause_still_lets_the_next_resume_be_heard() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-pauserestore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let d = crate::serve::testutil::test_daemon(&dir);
+
+        let mut saved = serde_json::Map::new();
+        saved.insert("paused".into(), json!(true));
+        restore_pause(&d, &saved);
+        assert!(d.paused.load(Ordering::Relaxed), "the pause was restored");
+
+        set_paused_cancel_timer(&d, false);
+        assert!(
+            kinds(&d).contains(&"queue.resumed".to_string()),
+            "the first resume after a restored pause must be heard: {:?}",
+            kinds(&d)
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

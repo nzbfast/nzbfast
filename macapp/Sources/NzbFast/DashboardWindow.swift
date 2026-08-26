@@ -221,6 +221,28 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
         webView.load(URLRequest(url: url))
     }
 
+    /// Throw the page away, because the engine it was talking to is gone.
+    ///
+    /// The overlay covers the web view; it does not stop it. The
+    /// dashboard polls `mode=queue` every second in front and every five
+    /// seconds hidden, and it holds the API key in this data store's
+    /// localStorage - so a page left alive behind "nzbfast stopped" went
+    /// on posting that key at 127.0.0.1 on a port this app no longer
+    /// owns, once a second, for as long as the alert stood. Whoever takes
+    /// the freed port receives it (Codex sweep 26 Aug, P1-2).
+    ///
+    /// `about:blank` rather than a `removeFromSuperview`: it ends the
+    /// timers, the fetches and the page's own JavaScript context, and it
+    /// leaves this window ready to load the next generation's dashboard
+    /// with no view rebuilding. `stopLoading` first for a navigation
+    /// still in flight, which `load` alone does not cancel in time to
+    /// stop its response being processed.
+    func blankDashboard() {
+        webView.stopLoading()
+        pageLoaded = false
+        webView.load(URLRequest(url: URL(string: "about:blank")!))
+    }
+
     func setOverlay(visible: Bool, text: String = "starting nzbfast…") {
         overlayLabel.stringValue = text
         overlay.isHidden = !visible
@@ -228,6 +250,11 @@ final class DashboardWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // `blankDashboard` is a load too, and it arrives immediately after
+        // the caller has raised an overlay saying the engine stopped.
+        // Hiding it here would uncover an empty white-on-dark page a
+        // fraction of a second after the message the user needs to read.
+        if webView.url?.absoluteString == "about:blank" { return }
         setOverlay(visible: false)
         pageLoaded = true
     }

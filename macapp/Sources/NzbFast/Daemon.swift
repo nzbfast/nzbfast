@@ -90,6 +90,116 @@ final class Daemon {
     /// them (harmless), and the dashboard prompts rather than being
     /// handed the key.
     private var keyBearingAllowed: Bool { identityProven || spawnedByUs }
+    /// Forget that the listener proved itself, because the generation
+    /// that proved it is over.
+    ///
+    /// The proof is a statement about ONE process: the engine that
+    /// answered `hs=<nonce>` with sha256 of the token in `runtime.json`.
+    /// It used to be set once and never cleared, so a child that died -
+    /// or was replaced by Try Again, or by an upgrade restart - left the
+    /// flag standing, and the next URL this wrapper built carried the
+    /// stored API key to whatever now held 127.0.0.1 on that port. That
+    /// key is full control and, through `mode=server_secret`, the
+    /// provider password in cleartext (Codex sweep 26 Aug, P1-2) - the
+    /// same disclosure `identityProven` exists to prevent, one daemon
+    /// generation later. The Windows tray clears and re-arms the same
+    /// latch around its own restart; this is that rule.
+    ///
+    /// Nothing has to hand the proof back by hand: `isNzbfast` mints it,
+    /// and every path that ends a generation is followed by a probe -
+    /// `start()` probes before it attaches, `waitUntilUp` probes after a
+    /// spawn. Until one of them answers, `keyBearingAllowed` is false and
+    /// the URLs this wrapper builds are keyless, which the engine refuses
+    /// harmlessly and an impostor learns nothing from.
+    private func clearIdentityProof(_ why: String) {
+        guard identityProven else { return }
+        identityProven = false
+        Self.log.notice("listener proof cleared: \(why, privacy: .public)")
+    }
+    /// The listener on `port` answered the challenge. Logged only on the
+    /// transition, and it is the half the log was missing: since the
+    /// proof started going DOWN mid-session (`recheckListener`), a log
+    /// that records only the drops describes a wrapper that stopped
+    /// trusting its engine and never started again, which is not what
+    /// happened. The pair is how a support log shows a blip.
+    private func armIdentityProof(_ port: Int) {
+        if !identityProven {
+            Self.log.notice("listener proof armed: port \(port, privacy: .public)")
+        }
+        identityProven = true
+    }
+    /// A listener that ANSWERED and is not the engine we proved. Whatever
+    /// proof was standing described a different process, so drop it -
+    /// this is the authentication-failure arm of the rule above.
+    ///
+    /// The no-reply arm reaches `clearIdentityProof` too, but only
+    /// through `recheckListener` and never through the attach scan in
+    /// `start()`, which walks up to three candidate PORTS and would
+    /// otherwise disarm the port we hold a proof for because a different
+    /// one did not answer. Until 26 Aug 2026 nothing cleared on a silent
+    /// probe at all: nothing here re-probed on a schedule, so one
+    /// transient timeout would have stripped the key from a healthy
+    /// ATTACHED engine for the rest of the session with no path back
+    /// short of relaunching. `recheckListener` is that path, which is
+    /// what makes the silent arm affordable.
+    private func refuseListener(_ port: Int, _ why: String) -> Daemon.ProbeVerdict {
+        clearIdentityProof("port \(port): \(why)")
+        return .stranger
+    }
+
+    /// What one keyless probe of one port concluded.
+    ///
+    /// `isNzbfast` collapses this to attach / do-not-attach, which is all
+    /// the attach scan needs. The periodic re-proof needs the three-way
+    /// answer, because "answered, and is not ours" and "nothing answered"
+    /// are different kinds of evidence and this wrapper acts on each
+    /// differently - see `recheckListener` and the counters in
+    /// `StatusItemController`.
+    enum ProbeVerdict {
+        /// Answered and proved it holds `runtime.json`'s token.
+        case proven
+        /// Answered in the nzbfast shape with no `runtime.json` naming
+        /// this port to hold it to. Attachable, but key-bearing URLs
+        /// stay keyless for it - see `identityProven`.
+        case adopted
+        /// Something answered and it is not the engine we proved.
+        case stranger
+        /// Nothing answered.
+        case silent
+
+        /// May `start()` attach to this listener?
+        var attachable: Bool { self == .proven || self == .adopted }
+    }
+
+    /// Ask the listener on the CURRENT port to prove itself again, and
+    /// forget the proof if it cannot.
+    ///
+    /// The proof is a statement about one process and the port outlives
+    /// it (see `clearIdentityProof`). Every generation-ending path this
+    /// wrapper can SEE - the termination handler, the reap, the restart -
+    /// belongs to a child. An engine this app ATTACHED to has no child
+    /// and no termination handler, so its death was invisible: the proof
+    /// stood, `keyBearingAllowed` stood with it, and the menu bar poll
+    /// went on posting the master API key every 3 to 5 seconds at a
+    /// 127.0.0.1 port nothing of ours held. Measured 26 Aug 2026 against
+    /// a recording listener bound to the freed port: `mode=queue` with
+    /// `apikey=` in the query every 3 s from here, and `mode=dashboard`
+    /// with the same key in an `X-Api-Key` header every second from the
+    /// embedded page. That key is full control and, through
+    /// `mode=server_secret`, the provider password in cleartext.
+    ///
+    /// The probe carries no key and a fresh nonce, so running it against
+    /// a stranger teaches the stranger nothing, and a success re-mints
+    /// the proof by itself - which is what lets the silent arm clear at
+    /// all. The caller decides what a verdict is worth; this only decides
+    /// what the wrapper may still put on the wire.
+    func recheckListener() async -> ProbeVerdict {
+        let verdict = await probe(port: port)
+        if verdict == .silent {
+            clearIdentityProof("port \(port) stopped answering the keyless challenge")
+        }
+        return verdict
+    }
     /// Set before any stop we initiate, so terminationHandler can tell a
     /// crash from a requested exit.
     private var deliberateStop = false
@@ -271,6 +381,29 @@ final class Daemon {
 
     // MARK: probing
 
+    /// The port `runtime.json` says a listener actually BOUND, whatever
+    /// port it was asked for.
+    ///
+    /// The only file the engine itself writes, and the only one that
+    /// records the address the listener GOT rather than the address
+    /// somebody wanted - so it is the first place to look for a live
+    /// engine, and `runtimeFile(forPort:)` below cannot answer that
+    /// question because it takes the port as a premise. Without it the
+    /// attach scan asked only `settings.json` and the port we last used:
+    /// an engine started while the configured port was taken (by a CLI
+    /// `nzbfast serve`, or by a previous run that scanned past it) sits
+    /// on a port neither of them names, this app finds the configured
+    /// port free, spawns, and there are two engines over one spool, one
+    /// index and one watch folder. The Windows tray's
+    /// `handoff_candidates` has ordered its sources this way all along.
+    private func runtimePort() -> Int? {
+        guard let data = try? Data(contentsOf: dataDir.appendingPathComponent("runtime.json")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let p = obj["port"] as? Int, (1...65535).contains(p)
+        else { return nil }
+        return p
+    }
+
     /// `runtime.json`, parsed, when it describes the engine on `port`.
     /// Written by the engine once its listener exists; absent for an
     /// engine older than the handshake, or one started elsewhere.
@@ -311,6 +444,16 @@ final class Daemon {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
+    /// May `start()` attach to the listener on `port`? The two-way form
+    /// of `probe`, which is where the whole rule lives.
+    func isNzbfast(port: Int, timeout: TimeInterval = 1.5) async -> Bool {
+        await probe(port: port, timeout: timeout).attachable
+    }
+
+    /// `probe`, three-way. Split out from `isNzbfast` because the
+    /// periodic re-proof (`recheckListener`) has to tell a stranger from
+    /// a silence, and the attach scan does not care.
+    ///
     /// Does `port` answer /api?mode=version as an nzbfast daemon?
     /// A keyed daemon's refusal counts too: only nzbfast answers in that
     /// shape, and the dashboard is handed the key (or prompts) after attach.
@@ -338,7 +481,7 @@ final class Daemon {
     /// plaintext GET with an alert and a close, which URLSession reports
     /// as a transport error, so the wrapper called its own healthy engine
     /// unreachable. Only that miss costs a second request.
-    func isNzbfast(port: Int, timeout: TimeInterval = 1.5) async -> Bool {
+    private func probe(port: Int, timeout: TimeInterval = 1.5) async -> ProbeVerdict {
         // Probe WITHOUT the key. Nothing has authenticated the far side yet, so
         // any unprivileged local process that binds this port first (6789 is
         // well known and the port is readable from UserDefaults) would receive
@@ -368,19 +511,30 @@ final class Daemon {
         } else {
             reply = await ask(true)
         }
-        guard let obj = reply else { return false }
-        guard Daemon.isNzbfastReply(obj) else { return false }
+        guard let obj = reply else { return .silent }
+        guard Daemon.isNzbfastReply(obj) else {
+            return refuseListener(port, "answered, but not as an nzbfast engine")
+        }
         let token = runtimeToken(forPort: port)
-        guard Daemon.provesIdentity(obj, token: token, nonce: nonce) else { return false }
+        guard Daemon.provesIdentity(obj, token: token, nonce: nonce) else {
+            return refuseListener(port, "failed the runtime.json challenge")
+        }
         // Proven only when a token was actually challenged. The legacy
         // arm (no runtime.json) attaches, but key-bearing URLs stay
-        // keyless for it - see `identityProven`.
-        identityProven = (token != nil)
-        return true
+        // keyless for it - see `identityProven`. That arm goes through
+        // `clearIdentityProof` rather than assigning false, so a port
+        // whose runtime.json has gone away under a standing proof says
+        // so in the log instead of disarming in silence.
+        guard token != nil else {
+            clearIdentityProof("port \(port) answered with no runtime.json to hold it to")
+            return .adopted
+        }
+        armIdentityProof(port)
+        return .proven
     }
 
     /// The identity half of the probe, split out so it is testable without
-    /// a socket. See `isNzbfast` for why each arm is what it is.
+    /// a socket. See `probe` for why each arm is what it is.
     static func provesIdentity(_ obj: [String: Any], token: String?, nonce: String) -> Bool {
         guard let token else {
             // Nothing to hold it to: no runtime.json for this port.
@@ -502,15 +656,26 @@ final class Daemon {
         req.timeoutInterval = 5
         _ = try? await Daemon.loopback.data(for: req)
         for _ in 0..<160 { // 40 s
-            if !portTaken(port) { return true }
+            if !portTaken(port) { return oldEngineGone() }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
         stopBundleOrphans()
         for _ in 0..<20 { // 5 s
-            if !portTaken(port) { return true }
+            if !portTaken(port) { return oldEngineGone() }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
         return false
+    }
+
+    /// `upgradeRestart`'s "the old engine has let go of the port" answer,
+    /// which is a generation boundary like any other: the engine that
+    /// proved itself has exited, and its replacement proves itself again
+    /// through `waitUntilUp` seconds later. The `false` answer keeps the
+    /// proof on purpose - there the old engine is still running and still
+    /// the one we attached to, and `start()` goes on to use it.
+    private func oldEngineGone() -> Bool {
+        clearIdentityProof("the engine being upgraded released :\(port)")
+        return true
     }
 
     /// TCP-level check: is anything listening on 127.0.0.1:port?
@@ -556,8 +721,7 @@ final class Daemon {
         // child by executable path.
         let saved = savedPort()
         // Probe for a LIVE engine before any of that, over every port one
-        // of ours could still be answering on: the saved settings.json
-        // port first, then the port we last used when it differs.
+        // of ours could still be answering on.
         //
         // The saved port is restart-only - the engine reads it once at
         // startup - so right after a port change the engine that is still
@@ -566,8 +730,13 @@ final class Daemon {
         // instead would leave two engines sharing config.local.json, the
         // index db and the watch folder. The new port applies on the next
         // restart, through the wrapper's normal stop/start path.
+        //
+        // `runtime.json` FIRST, by how much each source knows about where
+        // the listener IS: the port it BOUND, then the port we last
+        // attached to, then the port that was asked for. See
+        // `runtimePort()` for what the old two-source scan missed.
         var candidates: [Int] = []
-        for p in [saved ?? 0, port] where p > 0 && !candidates.contains(p) {
+        for p in [runtimePort() ?? 0, port, saved ?? 0] where p > 0 && !candidates.contains(p) {
             candidates.append(p)
         }
         for candidate in candidates {
@@ -678,6 +847,7 @@ final class Daemon {
         if c.isRunning { kill(c.processIdentifier, SIGKILL) }
         child = nil
         spawnedByUs = false
+        clearIdentityProof("the spawn that never answered was reaped")
     }
 
     /// Orders spawn's publish against stop's `stopping = true`. The two
@@ -724,11 +894,44 @@ final class Daemon {
         p.currentDirectoryURL = dataDir
         p.standardOutput = log
         p.standardError = log
+        // GENERATION-SAFE, and the `proc` this closure is handed is what
+        // makes it so. The block used to ignore its argument and mutate
+        // the globals outright: `child = nil` and a read of the CURRENT
+        // `deliberateStop`. A child that timed out and was SIGKILLed is
+        // abandoned by `reapFailedSpawn` without waiting for its
+        // termination to be observed, so its block can run arbitrarily
+        // later - and by then "Try Again" may have published a
+        // replacement. The stale block then cleared ownership of the
+        // LIVE child (which orphans it from `stop()`, whose guard is
+        // `spawnedByUs, let c = child, c.isRunning`) and raised a
+        // "stopped unexpectedly" alert over a perfectly healthy engine.
+        //
+        // Ordinarily the block drains inside the modal - `runModal`
+        // services the main queue - and nothing goes wrong; the window
+        // needs a child whose exit notification outlives the click,
+        // which is a process wedged in an uninterruptible wait. This
+        // fleet has documented exactly that class more than once.
+        //
+        // `deliberateStop` is then safe to read as it stands: past the
+        // identity guard this IS the current child, and the flag was set
+        // false at its own spawn and true by the `stop()` that is ending
+        // it. `reapFailedSpawn` clears `child` before any replacement is
+        // published, so a corpse's block can never match.
         p.terminationHandler = { [weak self] proc in
             try? log.close()
             guard let self else { return }
             DispatchQueue.main.async {
+                guard self.child === proc else {
+                    // A later generation already owns the field. This is
+                    // a corpse's callback: say nothing, touch nothing.
+                    return
+                }
                 self.child = nil
+                // The engine that proved itself is gone. A fresh listener
+                // on the same port is a different generation and has to
+                // prove itself again before this wrapper hands it the API
+                // key - see `clearIdentityProof`.
+                self.clearIdentityProof("the child that held it exited")
                 if !self.deliberateStop {
                     self.onUnexpectedExit?(self.logTail())
                 }
@@ -847,13 +1050,38 @@ final class Daemon {
     /// existing 5-second SIGKILL fallback already strikes for a child.
     private func stopBundleOrphans() {
         for pid in bundleOrphanPIDs() {
+            // IDENTITY IS RE-CHECKED BEFORE EVERY SIGNAL, because the
+            // roster is one snapshot and this loop takes up to two
+            // seconds PER ORPHAN. With two of them, orphan N's SIGTERM
+            // fires up to 2*(N-1) seconds after its path was validated -
+            // and if it exited on its own in the meantime, the signal
+            // goes to whatever now holds that pid. The single-orphan
+            // race the report worried about is not reachable (the poll
+            // itself keeps the pid occupied, and macOS allocates pids
+            // monotonically with a ~92 s wrap even on a build farm at
+            // load 10), but the multi-orphan window is seconds wide and
+            // costs one `proc_pidpath` to close.
+            guard isBundleEngine(pid) else { continue }
             kill(pid, SIGTERM)
             for _ in 0..<20 {
                 if kill(pid, 0) != 0 { break }
                 usleep(100_000)
             }
-            if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+            if kill(pid, 0) == 0, isBundleEngine(pid) { kill(pid, SIGKILL) }
         }
+    }
+
+    /// Is `pid` running THIS bundle's engine, right now? The one-pid
+    /// form of [`bundleOrphanPIDs`]'s path compare, so a signal can be
+    /// held to the identity a snapshot established seconds earlier.
+    private func isBundleEngine(_ pid: pid_t) -> Bool {
+        let canon = { (p: String) in
+            URL(fileURLWithPath: p).resolvingSymlinksInPath().path
+        }
+        guard pid != getpid() else { return false }
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buf, UInt32(MAXPATHLEN)) > 0 else { return false }
+        return canon(String(cString: buf)) == canon(engineURL.path)
     }
 
     /// Engines running out of THIS bundle that are not our own child.
@@ -896,6 +1124,7 @@ final class Daemon {
     func restart() async -> StartResult {
         child = nil
         spawnedByUs = false
+        clearIdentityProof("restarting after the engine died")
         return await start()
     }
 
@@ -935,6 +1164,20 @@ final class Daemon {
     /// Multipart POST of an .nzb to mode=addfile. Returns nil on success,
     /// or an error message.
     func addNzb(_ file: URL) async -> String? {
+        // REFUSE BEFORE READING. A file association points this at
+        // whatever the user double-clicked, and the multipart body is a
+        // second copy of the bytes - so a very large or sparse file
+        // named `.nzb` took the wrapper to twice its size and could be
+        // terminated for it, before the daemon's own 256 MiB cap on an
+        // addfile body had any chance to refuse the upload. The
+        // metadata read is the whole guard; the caller already renders
+        // this String in an alert.
+        let limit = 256 << 20
+        if let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           size > limit {
+            return "\(file.lastPathComponent) is \(size / (1 << 20)) MB - too large for an NZB "
+                + "(the limit is \(limit / (1 << 20)) MB)"
+        }
         guard let bytes = try? Data(contentsOf: file) else {
             return "couldn't read \(file.lastPathComponent)"
         }

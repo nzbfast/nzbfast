@@ -233,10 +233,25 @@ jobs:
           # carries one: 0x09 = whole-file spans WITH a password, which is
           # what reaches the encrypted paths. Without the prefix each seed
           # would lose its signature byte to the selector and parse as junk.
+          #
+          # This loop was the fourth `rar*/*.rar` call site 20ccfdb8f left
+          # behind - it fixed rar_extract, rar_name_probe and
+          # rar_recovery_scan through the shared seed_rars() helper above,
+          # named "three targets" in its own message, and this one is a
+          # separate loop (it writes a numbered, selector-prefixed file
+          # rather than a bare copy) that the sweep never touched. Same
+          # one-level-deep gap: `rar*/*.rar` reached 54 of the fixture
+          # tree's 141 archives. Sequential naming already avoids the
+          # basename collision seed_rars was written to solve, so the fix
+          # here is only the depth: a recursive `find` in place of the
+          # glob, with `i` carried through both loops so no name repeats.
           i=0
-          for f in ../testdata/rar4/*.rar ../testdata/rar5/*.rar \
-                   ../../../vendor/rars/tests/fixtures/rar*/*.rar; do
+          for f in ../testdata/rar4/*.rar ../testdata/rar5/*.rar; do
             [ -f "$f" ] || continue
+            { printf '\011'; cat "$f"; } > "corpus/rar_map/seed-$i.bin"
+            i=$((i+1))
+          done
+          find ../../../vendor/rars/tests/fixtures -name '*.rar' -type f | while read -r f; do
             { printf '\011'; cat "$f"; } > "corpus/rar_map/seed-$i.bin"
             i=$((i+1))
           done
@@ -244,7 +259,7 @@ jobs:
         working-directory: crates/nzbkit/fuzz
         run: |
           set -e
-          # All seventeen targets (sevenz_name_probe runs separately below
+          # All eighteen targets (sevenz_name_probe runs separately below
           # with its own rss limit). Targets that land after this list was
           # last touched belong here too - absence is an accident, not an
           # exclusion: zip_stream is the chase's call order over an
@@ -255,13 +270,15 @@ jobs:
           # than a parser (TODO 133.3 - H7's input parsed fine), and
           # rar_name_probe is the layer above rar_map: the blocker
           # mapping whose EncryptedHeader answer writes a TERMINAL
-          # classification (TODO 131 rung 5), and audio_tags reads a
-          # NAME out of a poster's own metadata and puts it on a file
-          # (issue #55).
+          # classification (TODO 131 rung 5), audio_tags reads a NAME out
+          # of a poster's own metadata and puts it on a file (issue #55),
+          # and tar_parse drives nzbkit::tar::Reader - the container with
+          # no tail structure, so its bomb guard is the declared total
+          # rather than a promote window (TODO 163 item 6's fuzz debt).
           for t in yenc_decode nzb_parse nzblnk_parse par2_parse rar_extract \
                    rar_map rar_recovery_scan mkv_parse zip_parse zip_stream \
                    mediaprobe pesto_msgid par2_verify_diff url_authority_diff \
-                   rar_name_probe audio_tags; do
+                   rar_name_probe audio_tags tar_parse; do
             echo "::group::fuzz $t"
             cargo +nightly fuzz run "$t" -- \
               -max_total_time=60 -rss_limit_mb=4096 -timeout=10

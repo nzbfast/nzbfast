@@ -110,6 +110,8 @@ fn fixture(answer: impl Fn(&str, u16) -> String + Send + 'static) -> Fixture {
 /// `name` - both lanes resolve their source by NAME against that list.
 fn account(d: &Arc<Daemon>, name: &str, port: u16) {
     *d.indexers.lock_ok() = vec![crate::newznab::IndexerConfig {
+        kind: Default::default(),
+        nzbindex: Default::default(),
         name: name.to_string(),
         url: format!("http://127.0.0.1:{port}"),
         apikey: "fixture-key".to_string(),

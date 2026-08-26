@@ -410,6 +410,8 @@ mod quit_tests {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         };
         let r = Connection::connect(&server).await;
         assert!(r.is_err(), "connect to a mute server must error, got Ok");
@@ -460,6 +462,8 @@ mod quit_tests {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         };
         match Connection::connect(&server).await {
             Err(NntpError::AuthFailed { kind, .. }) => assert_eq!(kind, AuthRefusal::Capacity),
@@ -949,6 +953,8 @@ mod quit_tests {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         };
         let (mut conn, _) = Connection::connect(&server).await.expect("connect");
         conn.send("BODY <x@test>").await.expect("send");
@@ -1183,6 +1189,8 @@ mod quit_tests {
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         };
         let (_conn, greeting) = Connection::connect(&server)
             .await
@@ -1452,6 +1460,8 @@ fn at(port: u16) -> crate::config::ServerConfig {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     }
 }
 

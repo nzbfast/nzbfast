@@ -321,6 +321,17 @@ automatisk genoptagelse, eller brug Pause-knappen for en tidsubestemt pause. Pau
 journalen uden at miste noget. (Job med Tving-prioritet henter videre, SABnzbd-stil.)</li>
 <li>Et <b>opdateringsbanner</b> dukker op her, når en ny version er tilgængelig
 (se <a href="#updates">Opdateringer</a>).</li>
+<li>Hver <b>chip for baggrundsarbejde</b> viser, hvad nzbfast laver lige nu -
+indeksering, hentning af metadata, udgivelsesfeed, måling af forbindelser,
+overvågningslisten, listesynkronisering, flytning af færdige filer,
+vedligehold af databasen. Klik på en for at se, hvad du kan gøre: sæt på
+pause eller slå de dele fra, der har en kontakt, eller hop direkte til
+overvågningslisten, listekilderne eller køen. Flytning, vedligehold og
+listesynkronisering bliver færdige af sig selv og siger det, i stedet for
+at tilbyde en kontakt.</li>
+<li><b>Statusindikatoren for køen</b> åbner på samme måde, med <b>Pause</b>
+(lader artikler, der allerede er i gang, blive færdige), <b>Pause nu</b>
+(dropper dem og frigør linjen med det samme) og <b>Genoptag</b>.</li>
 </ul>
 <h3>Gennemløb</h3>
 <p>Live MB/s med et rullende diagram; de stiplede vandmærker markerer denne sessions
@@ -354,7 +365,7 @@ app, API'et…). Knappen <b>Hent .nzb-filen</b> gemmer jobbets <code>.nzb</code>
 beholder sin egen kopi, så det virker for hvert job, selv når den originale fil
 for længst er væk.</li>
 <li><b>"Hvorfor er det langsomt?"</b> Mens et job henter, bærer linjen under dets statuslinje en konklusion om <em>det</em> job, ikke om maskinen: <i>dine udbydere er grænsen</i>, <i>denne maskine er ved sin CPU-grænse</i>, <i>lagringen kan ikke følge med</i>, og så videre. Klik på den, og rækken åbner på beviserne: hvad din linje kan, hvad udbyderne leverede, hvad der kommer ind nu, og en tabel per server hvor en struben udbyder ses med det samme. Et job i fuld fart siger ingenting her, og det gør et job, hvis konklusion stadig er ved at danne sig, heller ikke.</li>
-<li>Mærker viser særlige tilstande: <i>udskudt (langsom)</i>, <i>prefetcher</i>,
+<li>Mærker viser særlige tilstande: <i>forsøgt, sat til side</i>, <i>prefetcher</i>,
 <i>på pause</i> (se <a href="#performance">Ydelsesværktøjer</a>).</li>
 <li>Et nedtællingsdiagram følger de samlede GB, der er tilbage i hele køen.</li>
 </ul>
@@ -766,14 +777,6 @@ er dårlige. Og en stor del af installationerne er Docker, servere uden skærm o
 NAS-kasser, hvor der slet ikke findes en nøglering, hvilket ville efterlade to
 forskellige lagringsveje at holde korrekte. Ét velforstået format, der opfører sig ens
 alle steder, er indtil videre den bedre handel.</p>
-<p>To yderligere indstillinger pr. server har endnu ingen betjening i dashboardet:
-skriv dem i hånden ved den servers post i <code>config.local.json</code>
-(se <a href="#files">§17</a>), og genstart.</p>
-<div class="tblwrap"><table>
-<tr><th>Nøgle</th><th>Noter</th></tr>
-<tr><td><code>bind_ip</code></td><td>Binder denne servers udgående forbindelser til en bestemt lokal adresse, til maskiner med flere udgange og delte VPN-tunneler. Adressefamilien vælger samtidig målfamilien: en v4-binding forbinder til serverens v4-adresse.</td></tr>
-<tr><td><code>socks5</code></td><td>Sender denne servers NNTP-trafik gennem en SOCKS5-proxy: <code>host:port</code>, eller <code>user:pass@host:port</code>. Værtsnavnet slås op <em>af proxyen</em>, så der er intet lokalt DNS-læk.</td></tr>
-</table></div>
 <ul>
 <li><b>Fluebenet</b> ved siden af hver server er dens til/fra-kontakt: sat betyder, at
 serveren er med i download-puljen, ikke sat betyder deaktiveret. En deaktiveret server
@@ -985,6 +988,7 @@ overvågningslisten arbejder på de konti i stedet.</div>
 <tr><td>Ingest-filtre</td><td>JSON-regler, der filtrerer, hvad der kommer ind i indekset: typer (obfuskeret skrald droppes som standard), år/opløsning/sprog, størrelsesgrænser.</td></tr>
 <tr><td>Scan nu / dyb genscanning</td><td>Kør en gennemgang med det samme; med en dybde genscannes så mange nylige headers.</td></tr>
 <tr><td>OMDb-nøgle / genopfrisk metadata / slet</td><td>Kontroller til væg-berigelse (<a href="#wall">§6</a>). Slet genopbygger databasen fra bunden - genoprettelsesvejen, hvis den nogensinde bliver korrupt.</td></tr>
+<tr><td>Sæt metadata på pause</td><td>Holder op med at hente titler, plakater og medvirkende fra metadatasiderne (<a href="#wall">§6</a>), mens selve scanningen fortsætter uændret. Intet af det, der allerede er hentet, går tabt; rækker fundet under pausen beholder simpelthen det navn, de blev lagt op under, indtil du slår det til igen. Den eneste indstilling på dette kort, der slet ikke rører en usenet-udbyder.</td></tr>
 <tr><td>Pre-feed</td><td><b>Slået fra, indtil du slår det til.</b> Mange uploads udgives uden deres navn, og så har en skanning intet at læse. Offentlige relækanaler annoncerer det rigtige navn, den eneste åbne vej til at parre de indlæg. At slå til holder en forbindelse til et IRC-net åben og lytter: der sendes aldrig noget, og der oprettes ingen konto. Kræver at indekseringen er slået til, for et feed uden et sted at lægge det, det hører, er bare en socket, der står åben til ingen nytte.</td></tr>
 <tr><td>Relæserver, Relækanaler</td><td>IRC-nettet, der bærer annonceringerne (vært eller vært:port), og kanalerne at lytte med i, kommasepareret. En ændring træder i kraft ved næste forbindelse: slå feedet fra og til igen for at anvende den straks.</td></tr>
 <tr><td>Navngiv ved korrelation</td><td>De offentlige direkte relæer bærer ingen filnavne, så de fleste sløre indlæg kan ikke parres direkte. Hvad en annoncering derimod fastslår, er hvornår en udgivelse dukkede op, og hvor stor den er. Dette sammenligner annonceret tid og størrelse med navnløse indlæg og foreslår, når de passer, det rigtige navn under Gennemse. Et forslag er markeret som et forslag, kræver dit klik og omdøber aldrig filer på disken.</td></tr>
@@ -1086,15 +1090,16 @@ fortsætter tilføjelsen urørt, og loggen siger hvorfor.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (et automatisk nyt forsøg har sat et mislykket download i kø igen),
-<code>job.switched</code> (et job der ikke kunne fuldføres blev erstattet af en
+<code>job.requeued</code> (et download forlod historikken og kom i kø igen - et nyt forsøg, eller en afspillet bibliotekspost), <code>job.switched</code> (et job der ikke kunne fuldføres blev erstattet af en
 alternativ kopi der blev holdt klar til det), <code>job.replaced</code> (samme udfald, bortset fra at ingen kopi blev
 holdt klar, så en erstatning blev søgt frem og hentet) og
 <code>job.delete_kept</code> (en sletning fjernede posten, men kunne ikke fjerne
 dens filer), plus <code>watch.picked</code> (en .nzb blev taget ud af
 overvågningsmappen), <code>nzb.refeed</code> (en færdig downloads egen NZB-fil blev lagt i køen på pause), <code>watchlist.upgraded</code> (en opgradering fra
 overvågningslisten landede, og den erstattede kopi blev fjernet),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> og <code>quota.reached</code>. Hver bærer
+<code>queue.idle</code>, <code>queue.paused</code> og <code>queue.resumed</code> (køen stoppede eller startede igen, uanset hvem eller hvad der gjorde det), <code>queue.finished_action</code>
+(handlingen ved køens afslutning blev slået til, kørte eller blev annulleret), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> og <code>update.available</code> (en nyere nzbfast-version blev fundet). Hver bærer
 <code>schema_version</code> (i øjeblikket 1; nye nøgler kan dukke op uden et hop -
 ignorer det, du ikke kender), et monotont <code>seq</code> og et
 <code>at</code>-tidsstempel i millisekunder.</p>
@@ -1437,7 +1442,7 @@ SABnzbd-kompatibelt, så eksisterende SAB-integrationer virker uændret. To nøg
 <tr><td>Automatisering</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostik</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: enhver bruger, API-nøgle som adgangskode)</td></tr>
-<tr><td>Forhåndsvisning / afspilning</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; at starte et parkeret biblioteksjob kræver <code>?t=</code>-token eller nøgle), <code>/m3u/&lt;id&gt;</code> (kræver nøgle; udsteder token'en), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Forhåndsvisning / afspilning</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; at starte et parkeret biblioteksjob kræver <code>?t=</code>-token eller nøgle), <code>/m3u/&lt;id&gt;</code> (kræver nøgle eller jobbets eget token; udsteder token'en), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Filer &amp; placeringer</h2>

@@ -43,15 +43,28 @@ impl QuotaLedger {
         #[cfg(unix)]
         {
             let t = Self::now() as libc::time_t;
+            // SAFETY: `libc::tm` is a plain C struct of integers and a
+            // pointer; all-zero is a valid bit pattern for it, and
+            // localtime_r overwrites it before anything is read.
             let mut tm: libc::tm = unsafe { std::mem::zeroed() };
             // localtime_r does not imply tzset (POSIX) - without it,
             // macOS ignores a TZ set on the environment, and TZ is how
             // Docker users pin their timezone. Not in the libc crate,
             // so declared here.
+            // SAFETY: this signature matches POSIX's `void tzset(void)`
+            // exactly, so the declaration cannot disagree with the libc
+            // the process links (which is also what
+            // `clashing_extern_declarations` is denied workspace-wide to
+            // keep true).
             unsafe extern "C" {
                 fn tzset();
             }
+            // SAFETY: tzset takes no arguments and touches no memory of
+            // ours; it only reads TZ and updates libc's own timezone
+            // state, which localtime_r below is the consumer of.
             unsafe { tzset() };
+            // SAFETY: both pointers are live locals of the expected
+            // types and cannot overlap (one is an exclusive borrow).
             if !unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
                 return (
                     tm.tm_year as i64 + 1900,
@@ -64,7 +77,13 @@ impl QuotaLedger {
         {
             use windows_sys::Win32::Foundation::SYSTEMTIME;
             use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+            // SAFETY: SYSTEMTIME is a struct of sixteen u16 fields, so
+            // all-zero is a valid bit pattern, and GetLocalTime fills it
+            // before anything is read.
             let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
+            // SAFETY: `&mut st` is a live, exclusively borrowed
+            // SYSTEMTIME - the one thing GetLocalTime requires - and the
+            // call only writes to it.
             unsafe { GetLocalTime(&mut st) };
             if st.wYear != 0 {
                 return (st.wYear as i64, st.wMonth as u32, st.wDay as u32);

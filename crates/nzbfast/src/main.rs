@@ -58,7 +58,10 @@ mod nettools;
 // and URL credential redaction. Hoisted out of serve/ by TODO 276 item 3.
 mod netfetch;
 mod newznab;
+// TODO 297 (issue #57): the nzbindex.com JSON API, a second search
+// source dispatched to from serve/indexers.rs on `newznab::SourceKind`.
 mod notify;
+mod nzbindex;
 #[cfg(feature = "indexer")]
 mod oracle_backtest;
 mod persist;

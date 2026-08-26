@@ -11,7 +11,7 @@
 
 use crate::*;
 use std::path::Path;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Plaintext-once (`D`) journal record parked until its seam bytes are
 /// on disk: (slot, article id, name, size, frags).
@@ -286,7 +286,7 @@ pub(super) struct DecodeCtx {
     pub(super) takedown_430: Arc<CauseSplit>,
     pub(super) transport_failed: Arc<CauseSplit>,
     pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
-    pub(super) decode_error_sample: Arc<std::sync::Mutex<Option<String>>>,
+    pub(super) decode_error_sample: crate::diag::DecodeSampleCell,
     pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) verifier: Arc<nzbkit::live::LiveVerifier>,
     pub(super) extractor: Arc<nzbkit::extract::Extractor>,
@@ -564,6 +564,13 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
             match outcome {
                 FetchOutcome::Done { id, raw } => {
                     use nzbkit::pool::{DecodeAck, DecodeReport};
+                    // Re-guard the body the moment it leaves the channel:
+                    // the pool charged these bytes to its outstanding
+                    // gauge at `take` and this drop is the matching
+                    // release, on every one of the arms below. Charges
+                    // nothing (the bytes are already outstanding) and
+                    // costs no allocation.
+                    let raw = pool.adopt(raw);
                     let Some(&(sidx, nbytes)) = id_to_slot.get(&id) else {
                         // Not ours to place - but the pool is waiting
                         // on this id's verdict (steer) AND its settle
@@ -575,7 +582,6 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             queue_ctl.note_decoded(&id, DecodeReport::Clean { part: None });
                         }
                         queue_ctl.note_settled(&id);
-                        pool.give(raw);
                         continue;
                     };
                     let sidx = sidx as usize;
@@ -608,8 +614,6 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                     .note_decoded(&id, DecodeReport::Clean { part: dec.part })
                                     == DecodeAck::Steered
                             {
-                                out_pool.give(out);
-                                pool.give(raw);
                                 continue;
                             }
                             // This article is now accounted for,
@@ -669,9 +673,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             ) {
                                 Err(e) => {
                                     warn!(target: "get", "write {name}: {e}");
-                                    decode_error_sample
-                                        .lock_ok()
-                                        .get_or_insert_with(|| format!("write {name}: {e}"));
+                                    note_write_fault(&decode_error_sample, name, &e);
                                     decode_errors.fetch_add(1, Ordering::Relaxed);
                                     slot.errors.fetch_add(1, Ordering::Relaxed);
                                     // The storage itself ran out under the
@@ -883,15 +885,11 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                     },
                                 ) == DecodeAck::Steered
                             {
-                                out_pool.give(out);
-                                pool.give(raw);
                                 continue;
                             }
                             fetch_done.fetch_add(nbytes, Ordering::Relaxed);
                             warn!(target: "get", "decode error ({id}): {e}");
-                            decode_error_sample
-                                .lock_ok()
-                                .get_or_insert_with(|| format!("decode error: {e}"));
+                            note_corrupt_fault(&decode_error_sample, &e);
                             decode_errors.fetch_add(1, Ordering::Relaxed);
                             slot.errors.fetch_add(1, Ordering::Relaxed);
                         }
@@ -905,8 +903,12 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                     // after the write. Steered paths continue'd above
                     // and never reach this line.
                     queue_ctl.note_settled(&id);
-                    out_pool.give(out);
-                    pool.give(raw);
+                    // Both buffers back to their pools HERE rather than at
+                    // the end of this arm: the slot bookkeeping below can
+                    // run for a while and the pools should be able to
+                    // recycle across it.
+                    drop(out);
+                    drop(raw);
                     if slot.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
                         if extractor.is_mapped(sidx) {
                             let shape = match extractor.archive_shape() {
@@ -954,9 +956,48 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                     }
                     par2.article_lost(&id, &id_to_slot, &fetch_done);
                 }
-                FetchOutcome::Failed { id, error } => {
+                FetchOutcome::Failed { id, code, error } => {
                     transport_failed.add(is_recovery_article(&id, &id_to_slot, &slots));
-                    transport_sample.lock_ok().get_or_insert(error);
+                    // TODO 307 item 1: the pool now says WHICH KIND of
+                    // failure this was as a value, so a reader no longer
+                    // has to parse the sentence to learn it.
+                    //
+                    // Instrument-first, and deliberately so: nothing
+                    // here reads `code` to CHANGE anything, because
+                    // every one of these lands in `transport_failed`
+                    // today and moving any of them to a different
+                    // counter would move the verdict `incomplete_reason`
+                    // writes - a policy change, which item 1 is not.
+                    //
+                    // What it buys now is the only reading of a lost
+                    // article that does not go through a sentence.
+                    // `fail_kind_of` answers off the CODE, so this line
+                    // states the classification as recorded WHERE THE
+                    // LOSS HAPPENED - against which the job's eventual
+                    // verdict, re-derived from a message opening several
+                    // files away, can be read. A log that says
+                    // `transport` here and reports the post dead at the
+                    // end is the 31 Jul 2026 stall, and until now
+                    // nothing anywhere printed the first half. It also
+                    // tells a link that failed (`Transport`,
+                    // `ReadStall`) from our own fleet winding down under
+                    // the run (`FleetExhausted`, `WorkerPanic`), which
+                    // the counters cannot say.
+                    //
+                    // Logged with the sample and not per article: on a
+                    // dead link that would be one line per segment.
+                    let mut sample = transport_sample.lock_ok();
+                    if sample.is_none() {
+                        let kind = crate::failkind::fail_kind_of(Some(code), &error);
+                        debug!(
+                            target: "get",
+                            "first article loss: {code:?} ({}) - classified {} where it happened",
+                            code.reason(),
+                            crate::failkind::fail_kind_token(kind),
+                        );
+                        *sample = Some(error);
+                    }
+                    drop(sample);
                     par2.article_lost(&id, &id_to_slot, &fetch_done);
                 }
             }
@@ -1192,10 +1233,12 @@ pub(super) struct DamageWatch {
     pub(super) nzb: Arc<Nzb>,
     pub(super) slot_file: Vec<usize>,
     pub(super) verifier: Arc<nzbkit::live::LiveVerifier>,
-    /// Recovery blocks the NZB's volume NAMES declare, summed over
-    /// every volume - [`spec_ladder`]'s own count, which is what the
-    /// post PROMISES rather than what has reached disk.
-    pub(super) declared_blocks: usize,
+    /// Every recovery volume the NZB declares, as
+    /// `(count read off the name, encoded bytes)` - see
+    /// [`declared_volumes`]. Summed into a block total in [`Self::project`]
+    /// once the set is live, which is what the post PROMISES rather than
+    /// what has reached disk.
+    pub(super) volumes: Vec<(Option<usize>, u64)>,
 }
 
 /// What the run is on course to finish with. §282 item 3.
@@ -1262,6 +1305,15 @@ pub(super) fn project_damage(
     declared: usize,
 ) -> Option<DamageProjection> {
     if planned == 0 || resolved == 0 || now == 0 {
+        return None;
+    }
+    // A post that declares NO recovery at all is one whose volumes
+    // subject-line classification could not see - obfuscated names, the
+    // in-stream magic sniff - not one where any damage is fatal.
+    // Without this the comparison below is `projected >= 0`, which is
+    // always true, so the warning fires on every such job the moment
+    // the sample gates pass.
+    if declared == 0 {
         return None;
     }
     let f = resolved as f64 / planned as f64;
@@ -1382,14 +1434,55 @@ impl DamageWatch {
         }
         let now = par_race_missing_blocks(block, slots, &self.slot_file, &self.nzb);
         let (_, live_bad) = self.verifier.live_counts();
-        project_damage(
-            resolved,
-            planned,
-            now,
-            live_bad as usize,
-            self.declared_blocks,
-        )
+        // What the post declares, in blocks. A volume whose NAME does
+        // not size it (the `.vol-NN.par2` form) is sized from its bytes
+        // instead - the same estimate `repair::recovery_candidates`
+        // makes, and never the ladder's floor of 1, which would
+        // undercount the cure and fire this warning on a post that
+        // repairs comfortably.
+        let declared: usize = self
+            .volumes
+            .iter()
+            .map(|&(count, bytes)| {
+                count.unwrap_or_else(|| {
+                    nzbkit::par2::est_recovery_blocks(bytes, set.block_size).max(1)
+                })
+            })
+            .sum();
+        project_damage(resolved, planned, now, live_bad as usize, declared)
     }
+}
+/// Record the run's FIRST decode-or-write fault, with the fault this
+/// site knows it hit rather than the opening words of the sentence it
+/// writes. See [`crate::diag::DecodeFault`] for what deriving it from
+/// the sentence downstream used to cost.
+///
+/// The two doors are separate functions rather than one taking a
+/// `DecodeFault`, so neither call site can pass the wrong one: `name`
+/// is a thing only a write has, and there is no argument at either
+/// call that selects between them. First writer wins, so the sample is
+/// the run's opening failure and not its last.
+fn note_write_fault(
+    sample: &crate::diag::DecodeSampleCell,
+    name: &str,
+    e: &(impl std::fmt::Display + ?Sized),
+) {
+    sample
+        .lock_ok()
+        .get_or_insert_with(|| crate::diag::DecodeSample::write(format!("write {name}: {e}")));
+}
+
+/// [`note_write_fault`]'s twin for a body that ARRIVED and failed its
+/// own yEnc check: the server's copy is wrong, not this machine's disk,
+/// and the remedy is a re-fetch (often from a second provider) rather
+/// than free space and permissions.
+fn note_corrupt_fault(
+    sample: &crate::diag::DecodeSampleCell,
+    e: &(impl std::fmt::Display + ?Sized),
+) {
+    sample
+        .lock_ok()
+        .get_or_insert_with(|| crate::diag::DecodeSample::corrupt(format!("decode error: {e}")));
 }
 
 /// A storage-exhaustion write error halts the fetch. Classifies
@@ -1510,10 +1603,10 @@ pub(super) fn spawn_deadlock_watchdog(
 // The recovery-side speculation - the M2c.5 speculative recovery
 // prefetch and its ladder, the dark PAR2-race experiment, and the
 // §146 tail give-up - is one subject and came out whole (TODO 106,
-// 24 Aug 2026). `spec_ladder` is re-exported because get/mod.rs
+// 24 Aug 2026). `declared_volumes` is re-exported because get/mod.rs
 // prices a job's declared recovery off it by the `workers::` path.
 mod recovery;
-pub(super) use recovery::spec_ladder;
+pub(super) use recovery::declared_volumes;
 use recovery::{par_race_missing_blocks, spawn_par_race, spawn_spec_prefetch, spawn_tail_giveup};
 
 /// Wind the network phase down: stop the side tasks, join the decode
@@ -1699,7 +1792,7 @@ pub(super) struct Counters {
     pub(super) takedown_430: Arc<CauseSplit>,
     pub(super) transport_failed: Arc<CauseSplit>,
     pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
-    pub(super) decode_error_sample: Arc<std::sync::Mutex<Option<String>>>,
+    pub(super) decode_error_sample: crate::diag::DecodeSampleCell,
     pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) throttle_mbps: Option<f64>,
     pub(super) throttle_t0: Instant,
@@ -1774,7 +1867,7 @@ pub(super) fn build_counters(
     // First error of each kind, verbatim, for the failure summary to
     // quote - the counter alone says nothing a bug report can act on.
     let transport_sample: Arc<std::sync::Mutex<Option<String>>> = Default::default();
-    let decode_error_sample: Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let decode_error_sample: crate::diag::DecodeSampleCell = Default::default();
     // First storage-exhaustion write error, verbatim: its presence IS
     // the halt signal drain_network turns into the out-of-disk-space
     // verdict (see note_storage_exhausted_halt).
@@ -1845,7 +1938,7 @@ pub(super) fn spawn_decode_consumers(
     takedown_430: &Arc<CauseSplit>,
     transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
-    decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
+    decode_error_sample: &crate::diag::DecodeSampleCell,
     disk_full_sample: &Arc<std::sync::Mutex<Option<String>>>,
     verifier: &Arc<nzbkit::live::LiveVerifier>,
     extractor: &Arc<nzbkit::extract::Extractor>,
@@ -2040,6 +2133,45 @@ mod disk_full_halt_tests {
                 .unwrap()
                 .starts_with("write a.r01:")
         );
+    }
+
+    /// The pairing [`note_write_fault`] and [`note_corrupt_fault`]
+    /// exist to make un-mistakable: each records the fault its own call
+    /// site knows it hit, and the sentence it writes goes with it.
+    ///
+    /// Before 26 Aug 2026 `diag` rebuilt this from
+    /// `sample.starts_with("decode error")`, so an edited opening moved
+    /// a machine's disk fault into "the copies on the server are
+    /// corrupt" with nothing anywhere going red. The end-to-end proof
+    /// that the CORRUPT door really is the one a bad yEnc check reaches
+    /// is `e2e_faults` shape 15; this is the doors themselves.
+    #[test]
+    fn each_decode_fault_door_records_its_own_fault_and_the_first_wins() {
+        use crate::diag::DecodeFault;
+        let sample: crate::diag::DecodeSampleCell = Default::default();
+        note_corrupt_fault(&sample, "pcrc32 mismatch");
+        {
+            let s = sample.lock_ok();
+            let s = s.as_ref().unwrap();
+            assert_eq!(s.fault, DecodeFault::Corrupt);
+            assert_eq!(s.text, "decode error: pcrc32 mismatch");
+        }
+        // First writer wins: a later fault of the OTHER kind must not
+        // repaint the run's opening failure, or a job that hit one
+        // corrupt article and then filled its disk reports the wrong
+        // remedy for the wrong one.
+        note_write_fault(&sample, "a.r01", "No space left on device");
+        assert_eq!(
+            sample.lock_ok().as_ref().unwrap().fault,
+            DecodeFault::Corrupt
+        );
+
+        let other: crate::diag::DecodeSampleCell = Default::default();
+        note_write_fault(&other, "a.r01", "Permission denied");
+        let s = other.lock_ok();
+        let s = s.as_ref().unwrap();
+        assert_eq!(s.fault, DecodeFault::Write);
+        assert_eq!(s.text, "write a.r01: Permission denied");
     }
 
     #[test]

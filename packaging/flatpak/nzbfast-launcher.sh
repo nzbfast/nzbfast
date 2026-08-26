@@ -122,6 +122,30 @@ port_is_nzbfast() {
     esac
 }
 
+# §129 2a: port_is_nzbfast cannot pass against a native-TLS daemon. It
+# writes plaintext HTTP down /dev/tcp, a TLS listener accepts the TCP
+# connection but never returns the plaintext mode=version body it looks
+# for, and there is no openssl (or curl) in this runtime to speak TLS
+# instead - so a healthy daemon that has TLS on would read as a stranger
+# on the port and get refused on every second launch.
+#
+# runtime.json is what stands in. It lives inside this app's own
+# private config directory - nothing else on the system can have
+# written it - and is rewritten with the port the daemon actually bound
+# on every start, which is why PORT and SCHEME above are read from it
+# rather than assumed. There is no live pid check to fall back on
+# either: this sandbox gets a fresh pid namespace on every `flatpak
+# run`, so a second launch's /proc cannot see the first launch's daemon
+# at all, TLS or not. So when it says tls, a live TCP accept on the
+# exact port it named (already established by port_is_up before this
+# runs) is the whole of the ownership fact available without a TLS
+# client - and it is trusted. A local process that answers in plaintext
+# still goes through port_is_nzbfast below and can still be refused.
+port_is_ours() {
+    [ "$SCHEME" = https ] && return 0
+    port_is_nzbfast
+}
+
 open_dashboard() {
     # xdg-open in the runtime is a shim onto the OpenURI portal, so this
     # reaches the user's real browser on the host without the sandbox
@@ -133,17 +157,53 @@ open_dashboard() {
 # CLI verb that hands a file to a running daemon, so it goes through the
 # watch folder, which is the mechanism the daemon already polls - and it
 # works whether or not the daemon is up yet.
+#
+# THREE THINGS THIS USED TO GET WRONG, all of them silent.
+#
+# `*.nzb.gz` was accepted and copied through unchanged, and the watch
+# folder only ever consumes files whose extension is `nzb` - so a
+# gzipped NZB was copied into a folder that would never look at it and
+# the download simply never started. Nothing in the product
+# decompresses one, so the honest fix is to stop claiming to take it.
+#
+# `cp ... || true` swallowed every failure, so a full or unwritable
+# watch directory answered a double-click with nothing at all.
+#
+# And a bare `cp` into `$WATCH/` OVERWRITES: two opens of different
+# files that happen to share a basename - `nzb` from two indexers is
+# the everyday case - meant the second one destroyed the first, which
+# may already have been picked up. The " (2)" convention is the
+# daemon's own, from `watchfolder.rs`'s quarantine path, and it matters
+# that it is that one: the filename becomes the job name.
 for arg in "$@"; do
     case "$arg" in
-        *.nzb|*.nzb.gz)
-            mkdir -p "$WATCH"
-            cp -f -- "$arg" "$WATCH/" 2>/dev/null || true
+        *.nzb)
+            mkdir -p "$WATCH" || {
+                echo "nzbfast: cannot create the watch folder at $WATCH" >&2
+                exit 1
+            }
+            base=${arg##*/}
+            dest="$WATCH/$base"
+            n=1
+            while [ -e "$dest" ] && [ "$n" -lt 1000 ]; do
+                n=$((n + 1))
+                dest="$WATCH/${base%.nzb} ($n).nzb"
+            done
+            cp -f -- "$arg" "$dest" || {
+                echo "nzbfast: could not copy $arg into $WATCH" >&2
+                exit 1
+            }
+            ;;
+        *.nzb.gz)
+            echo "nzbfast: $arg is gzipped - decompress it first" >&2
+            echo "  (gunzip \"$arg\") and open the .nzb." >&2
+            exit 1
             ;;
     esac
 done
 
 if port_is_up; then
-    if port_is_nzbfast; then
+    if port_is_ours; then
         open_dashboard
         exit 0
     fi

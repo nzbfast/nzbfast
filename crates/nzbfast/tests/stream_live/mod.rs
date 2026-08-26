@@ -3,11 +3,22 @@
 //! seek that promotes a deep window, the deep-window preempt, and the
 //! `addfile&stream=1` front door with its player-handoff links.
 //!
-//! ...plus the other end of that contract (TODO 16m): the four rigs at
+//! ...plus the other end of that contract (TODO 16m): the NINE rigs at
 //! the bottom of this file drive /stream against a job that is NOT
 //! downloading, where the whole question is whether the answer is
-//! knowable now, worth waiting 30 s for, or - the last of them - an
-//! honest refusal about a payload that is not where the record says.
+//! knowable now or worth waiting 30 s for. Three of them are the wait
+//! answering at once (a settled record, a far-off armed retry, a job
+//! deleted under the wait), two are it correctly declining to (a queued
+//! record, one still settling), two are the finished-from-disk branch
+//! beside it - the file served, and an honest refusal about a payload
+//! that is not where the record says - and the last two are the AUTH
+//! question rather than the clock one: a spent run's writers are not
+//! the live pipeline, so they take the same key-or-token gate, through
+//! the bare route and through a Failed row.
+//!
+//! The count is written out because it has been wrong twice: this note
+//! said "four" through the 23 Aug second pass and the 25 Aug third,
+//! which added three rigs between them. If you add one, say so here.
 //!
 //! A sibling-dir child of daemon.rs (the daemon_chip6 / stream_chaos
 //! pattern) so the parent stays inside its size-gate baseline; harness
@@ -882,6 +893,26 @@ async fn stream_add_returns_player_links() {
         assert!(r.contains("\"status\":true"), "{r}");
         assert!(r.contains("\"m3u\":") && r.contains("/m3u/"), "no m3u link: {r}");
         assert!(r.contains("\"stream\":") && r.contains("/stream/"), "no stream link: {r}");
+        // TODO 23 low1, CLI half: BOTH handoff links carry the job's own
+        // `?t=` capability token and never the API key. `nzbfast stream`
+        // hands the m3u one to a media player as argv, where every other
+        // local account can read it.
+        assert!(
+            !r.contains("apikey="),
+            "a player-handoff link carries the API key: {r}"
+        );
+        // Read the FIELD, never a substring of the payload: the m3u link
+        // is what the CLI hands the player, and it must be the job's own
+        // token.
+        let m3u_link = r
+            .split("\"m3u\":\"")
+            .nth(1)
+            .and_then(|t| t.split('"').next())
+            .unwrap_or_default();
+        assert!(
+            m3u_link.contains("/m3u/") && m3u_link.contains("?t="),
+            "untokened m3u link {m3u_link:?}: {r}"
+        );
 
         // Force priority: the queue/history slot reports it (job may
         // complete instantly - 600 KB, no delay - so check both).
@@ -1152,7 +1183,7 @@ async fn a_queued_job_still_waits_out_the_admit_deadline() {
 /// payload the move to its final home - cannot be rigged from a seeded
 /// spool: startup re-enqueues every owed move before the mover worker
 /// starts draining, so the flag is gone by the time a request could ask
-/// about it. That arm is pinned in `serve::stream::stream_admit_tests`,
+/// about it. That arm is pinned in `serve::stream::admit::stream_admit_tests`,
 /// against the predicate directly.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_still_settling_still_waits() {
@@ -1475,5 +1506,424 @@ async fn a_failed_job_with_a_far_off_retry_answers_stream_without_waiting() {
         "a retry armed 20 minutes out took {took:?} - it is still being \
          read as a prospect of writers inside a 30 s wait"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 16m's THIRD shape, and the last one that still paid the full 30
+/// s: the job is DELETED while a player sits in the admit wait.
+///
+/// The wait loop holds the record as an `Arc` - deliberately, because
+/// `activate_parked` and `park` move the SAME `Arc` between the two
+/// stores, so a handle taken from either one stays the live record
+/// whichever store it is in. What it cannot survive is the record
+/// leaving BOTH: a `mode=queue&name=delete` under the wait left the loop
+/// reading a job nothing owns any more, whose status word is frozen at
+/// whatever it said when the delete took it out. That word is `Queued`,
+/// which is the one answer the predicate treats as "writers are
+/// coming" - so the request sat out the remaining deadline for a 404
+/// that was knowable the instant the delete landed. The 1 Hz re-ask
+/// that landed with the second shape did run; it was the settle that
+/// refused.
+///
+/// The same seeded row as `a_queued_job_still_waits_out_the_admit_deadline`
+/// on purpose, so the two rigs differ by the delete and nothing else:
+/// that one is this one's control arm, and it still pays its 30 s.
+///
+/// Paused as well as serverless, for that rig's reason - two independent
+/// reasons the row cannot start, so nothing here depends on either one
+/// alone, and the writers this request is waiting for genuinely never
+/// appear.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_deleted_under_the_admit_wait_is_answered_at_once() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-deleted-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    const ID: &str = "SABnzbd_nzo_deleted1";
+
+    let d = seeded_daemon(
+        &dir,
+        &[],
+        &[seed_row(
+            ID,
+            &dir,
+            "Queued",
+            serde_json::json!({"paused": true}),
+        )],
+    )
+    .await;
+    let port = d.port;
+
+    let waiting = tokio::task::spawn_blocking(move || {
+        let t0 = std::time::Instant::now();
+        let out = String::from_utf8_lossy(&raw(port, &stream_get(ID))).to_string();
+        (t0.elapsed(), out)
+    });
+
+    // Long enough that the request is past the entry-path question and
+    // inside the wait, and far short of the 30 s deadline it would
+    // otherwise run to.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let deleted = tokio::task::spawn_blocking(move || {
+        http(
+            port,
+            &format!("/api?mode=queue&name=delete&value={ID}&output=json&apikey=sekrit"),
+            None,
+        )
+    })
+    .await
+    .unwrap();
+    assert!(
+        deleted.contains("\"status\": true") || deleted.contains("\"status\":true"),
+        "the delete itself failed, so this rig never tested the wait: {deleted}"
+    );
+
+    let (took, body) = waiting.await.unwrap();
+    assert!(body.starts_with("HTTP/1.1 404"), "{body}");
+    assert!(body.contains("no active media"), "{body}");
+    assert!(
+        took >= std::time::Duration::from_secs(2),
+        "answered in {took:?} - too fast to have been waiting when the \
+         delete landed, so this rig is no longer testing the wait"
+    );
+    // The re-ask is 1 Hz, so the answer is owed about a second after the
+    // delete. The bound is loose because the daemon suite shares a box
+    // with other sessions' builds - what it has to separate is "answered
+    // on the delete" from "sat out the 30 s deadline", and any bound in
+    // between does that. The measured defect was the full deadline.
+    assert!(
+        took < std::time::Duration::from_secs(15),
+        "answered in {took:?} - the wait is still sitting out its full \
+         deadline for a record that has been deleted from both stores"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 16m residue, the auth half: a run that has FINISHED no longer
+/// hands its bytes to an unauthenticated caller through the live route.
+///
+/// `active_stream` is set as a fetch spawns and is never cleared - only
+/// overwritten when the NEXT job claims the hub - and the spent
+/// extractor beside it goes on listing that run's media writers, whose
+/// files a normal completion leaves whole. So on an idle daemon a
+/// keyless `GET /stream` answered 206 with the finished download's
+/// payload, byte-exact, for as long as nothing else ran: measured on
+/// this rig's own shape at 25 s past the parked row before the fix, and
+/// bounded by nothing. The bare route is the sharp spelling because it
+/// reads no record at all, so the disk gate never gets a look in and no
+/// nzo_id has to be guessed; `/stream/<id>` reaches the same place
+/// through any history row that gate declines to judge (see the failed
+/// rig below).
+///
+/// BOTH arms are asserted from one download, which is what makes this a
+/// rig rather than an assertion: the M11 contract is that a player
+/// needs no key for the download in front of it, so a fix that closed
+/// the finished case by closing the live one would pass a
+/// finished-only test and break playback for every player that cannot
+/// send a key. The write throttle holds the job on the wire long enough
+/// for the open arm to be observed first.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_run_stops_serving_the_bare_stream_route_keyless() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-spent-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let inner = payload(12_000_000, 13);
+    let mut articles = HashMap::new();
+    let segs = make_file_articles("movie.mkv", &inner, 300_000, "mk", &mut articles);
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
+    );
+    xml.push_str(&format!(
+        "  <file poster=\"x\" date=\"0\" subject=\"&quot;movie.mkv&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+        segs.len()
+    ));
+    for (id, bytes, num) in &segs {
+        xml.push_str(&format!(
+            "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+    let srv = MockServer::start(articles, Chaos::default()).await;
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        // A key, so a keyless request is genuinely unauthenticated -
+        // on a deliberately keyless install every request is authed and
+        // there is nothing here to test.
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .env("NZBFAST_THROTTLE_WRITE_MBPS", "3")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("2");
+        c
+    })
+    .await;
+    let port = d.port;
+
+    let expect = inner.clone();
+    tokio::task::spawn_blocking(move || {
+        let boundary = "----spentrun";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"p.nzb\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(xml.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let added = http(
+            port,
+            "/api?mode=addfile&output=json&apikey=sekrit",
+            Some((&format!("multipart/form-data; boundary={boundary}"), &body)),
+        );
+        let nzo = added
+            .split("\"nzo_ids\":[\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_else(|| panic!("no nzo_id in {added}"))
+            .to_string();
+
+        // No id, no apikey, no token - and `?t=` cannot help here, since
+        // the token is per-job and this spelling names no job.
+        let bare =
+            b"GET /stream HTTP/1.1\r\nHost: x\r\nRange: bytes=0-4095\r\nConnection: close\r\n\r\n";
+
+        // ARM ONE, the M11 contract: while the job is on the wire, a
+        // keyless player gets its bytes.
+        let mut served = None;
+        for _ in 0..300 {
+            let out = raw(port, bare);
+            if out.starts_with(b"HTTP/1.1 206") {
+                let at = out
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .expect("headers end");
+                served = Some(out[at + 4..].to_vec());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let served = served.expect(
+            "the keyless bare /stream route never served a downloading job - \
+             the M11 contract is broken, not merely narrowed",
+        );
+        assert_eq!(
+            served.len(),
+            4096,
+            "short live body: {} bytes",
+            served.len()
+        );
+        assert_eq!(
+            served, expect[..4096],
+            "the live route served something that is not the payload"
+        );
+
+        // ARM TWO: once the row has parked, the same request is a
+        // request for a finished download and takes the same gate the
+        // disk route does.
+        let mut parked = false;
+        for _ in 0..900 {
+            let h = http(port, "/api?mode=history&output=json&apikey=sekrit", None);
+            if history_slot(&h, &nzo)["status"] == "Completed" {
+                parked = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(parked, "the job never reached history as Completed");
+        // The hub keeps the spent extractor and `active_stream` keeps
+        // naming this job, so nothing about the daemon's state changes
+        // from here on. Asked repeatedly for exactly that reason: the
+        // defect was not a window, it was permanent.
+        for i in 0..6 {
+            let out = raw(port, bare);
+            let head = String::from_utf8_lossy(&out[..out.len().min(200)]).to_string();
+            assert!(
+                head.starts_with("HTTP/1.1 401"),
+                "keyless bare /stream answered {head:?} at poll {i}, \
+                 {}s past the parked row - a finished download's bytes are \
+                 not the live pipeline's to give away",
+                i,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        // ...and the key still opens it, so this is an auth gate and not
+        // a route that stopped working.
+        let keyed = format!(
+            "GET /stream/{nzo}?apikey=sekrit HTTP/1.1\r\nHost: x\r\nRange: bytes=0-4095\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        let out = raw(port, &keyed);
+        let head = String::from_utf8_lossy(&out[..out.len().min(200)]).to_string();
+        assert!(
+            head.starts_with("HTTP/1.1 206"),
+            "the keyed request no longer plays the finished download: {head:?}"
+        );
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same gate through `/stream/<id>`, on the history row shape the
+/// disk gate declines to judge.
+///
+/// `serve_finished_from_disk` fires on `Completed && fetched &&
+/// !tombstone` and hands every other row back UNANSWERED, so a `Failed`
+/// row went straight down the open live route to whatever its spent
+/// extractor still listed. Which file that is depends on what the
+/// failure cleanup happened to leave behind - a partial payload, a
+/// quarantined one, or nothing - and "what cleanup happened to leave"
+/// is not an access decision. The keyed arm is what pins that: it takes
+/// the same route and gets the same answer the file itself dictates, so
+/// the difference between the two arms is the key and nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_takes_the_finished_gate_too() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-16m-spentfail-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let inner = payload(6_000_000, 13);
+    let mut articles = HashMap::new();
+    let segs = make_file_articles("movie.mkv", &inner, 300_000, "mk", &mut articles);
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
+    );
+    xml.push_str(&format!(
+        "  <file poster=\"x\" date=\"0\" subject=\"&quot;movie.mkv&quot; yEnc (1/{})\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+        segs.len()
+    ));
+    for (id, bytes, num) in &segs {
+        xml.push_str(&format!(
+            "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+    // The last third of the post is gone: articles missing, which is the
+    // commonest failure there is and the one that arms a 20-minute
+    // retry - far outside any admit deadline, so the wait cannot end by
+    // the job coming back.
+    let mut chaos = Chaos::default();
+    let cut = segs.len() * 2 / 3;
+    for (id, _, _) in &segs[cut..] {
+        chaos.missing.insert(format!("<{id}>"));
+    }
+    let srv = MockServer::start(articles, chaos).await;
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("2");
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        let boundary = "----spentfail";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"p.nzb\"\r\n\r\n").as_bytes(),
+        );
+        body.extend_from_slice(xml.as_bytes());
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let added = http(
+            port,
+            "/api?mode=addfile&output=json&apikey=sekrit",
+            Some((&format!("multipart/form-data; boundary={boundary}"), &body)),
+        );
+        let nzo = added
+            .split("\"nzo_ids\":[\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or_else(|| panic!("no nzo_id in {added}"))
+            .to_string();
+
+        let mut failed = false;
+        for _ in 0..900 {
+            let h = http(port, "/api?mode=history&output=json&apikey=sekrit", None);
+            if history_slot(&h, &nzo)["status"] == "Failed" {
+                failed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(failed, "the job never reached history as Failed");
+
+        let keyless = format!(
+            "GET /stream/{nzo} HTTP/1.1\r\nHost: x\r\nRange: bytes=0-99\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        let t0 = std::time::Instant::now();
+        let out = raw(port, &keyless);
+        let head = String::from_utf8_lossy(&out[..out.len().min(200)]).to_string();
+        assert!(
+            head.starts_with("HTTP/1.1 401"),
+            "keyless /stream/<id> on a Failed row answered {head:?} - it took \
+             the open live route past the disk gate, which never looks at a \
+             row that is not Completed"
+        );
+        // Answered on the spot, not after the admit wait: this arm must
+        // not become a 30 s hang for a player.
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "the refusal took {:?} - it is sitting out the admit deadline",
+            t0.elapsed()
+        );
+        // The key takes the same route and is not refused, so the gate
+        // is about the caller and not about the row.
+        let keyed = format!(
+            "GET /stream/{nzo}?apikey=sekrit HTTP/1.1\r\nHost: x\r\nRange: bytes=0-99\r\nConnection: close\r\n\r\n"
+        )
+        .into_bytes();
+        let out = raw(port, &keyed);
+        let head = String::from_utf8_lossy(&out[..out.len().min(200)]).to_string();
+        assert!(
+            !head.starts_with("HTTP/1.1 401") && !head.starts_with("HTTP/1.1 429"),
+            "the keyed request was refused too: {head:?} - this is no longer \
+             an auth gate"
+        );
+    })
+    .await
+    .unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

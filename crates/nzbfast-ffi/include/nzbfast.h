@@ -23,11 +23,24 @@ extern "C" {
  */
 int32_t nzbfast_start(const char *config_dir, uint16_t port, const char *apikey);
 
-/* Stop the engine and release the port. Blocks briefly (bounded).
- * Returns 0 = stopped, -1 = not running. */
+/* Stop the engine and release the port. Blocks until the engine thread
+ * has finished, or for at most 12 seconds - whichever comes first.
+ * Returns 0 = stopped, -1 = not running, -2 = still stopping.
+ *
+ * -2 is a STATE, not a failure to act on: the stop request is permanent
+ * and the engine is still winding up. While that lasts nzbfast_is_up()
+ * keeps answering 1 (poll it to learn when the old engine has gone) and
+ * nzbfast_start() refuses with -1, so a second engine can never come up
+ * underneath a live one. Calling nzbfast_stop() again is safe and is
+ * how you wait longer; it answers 0 once the thread is really gone.
+ * Nothing you can call will deadlock on a wedged engine. See the
+ * `STOP_WAIT` note in src/lib.rs for where 12 seconds comes from. */
 int32_t nzbfast_stop(void);
 
-/* 1 while the engine thread is alive; readiness is the HTTP port. */
+/* 1 while the engine thread is alive; readiness is the HTTP port. Also
+ * 1 during the window after a nzbfast_stop() that answered -2. Takes
+ * the same lock as start/stop, so a stop in flight delays it by at most
+ * the stop bound above. */
 int32_t nzbfast_is_up(void);
 
 #ifdef __cplusplus

@@ -77,7 +77,7 @@ fn a_selected_rung_builds_its_volumes_requests() {
     let n = ladder_nzb();
     let mut reqs = Vec::new();
     let mut idm = std::collections::HashMap::new();
-    crate::repair::volume_reqs(&n, 1, &mut reqs, &mut idm);
+    let _ = crate::repair::volume_reqs(&n, 1, &mut reqs, &mut idm);
     assert_eq!(
         reqs.iter().map(|r| (&*r.id, r.part)).collect::<Vec<_>>(),
         [("<v8a@t>", 1), ("<v8b@t>", 2)]
@@ -92,6 +92,60 @@ fn a_selected_rung_builds_its_volumes_requests() {
             r.id
         );
     }
+}
+
+/// Sweep 9, finding 7: a rung whose volume repeats a message-id
+/// INSIDE ITSELF is short, and the shortfall shows up in exactly one
+/// place - `volume_reqs`' return.
+///
+/// The duplicate is never requested (first owner wins, sweep 8 L3), so
+/// no `Missing`/`Failed` outcome ever comes back for it and the fetch's
+/// own `total()` reads 0 over a volume missing a segment. The prefetch
+/// judged completeness on that number alone, recorded the file index in
+/// `prefetched`, and settle then struck the whole volume off the
+/// post-settle fetch list - the false-complete shape F-02 closed on
+/// `fetch_volumes` and did not close here.
+///
+/// One volume per rung and a fresh id map per rung, so this is
+/// intra-volume duplication only: a malformed or hostile recovery set,
+/// never a healthy NZB.
+#[test]
+fn a_rung_whose_volume_repeats_an_id_is_not_complete() {
+    let n = Arc::new(
+        Nzb::parse(
+            br#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"m.part1.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="700000" number="1">pay@t</segment></segments>
+ </file>
+ <file subject='"m.vol00+02.par2" yEnc (1/2)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="500000" number="1">dup@t</segment>
+   <segment bytes="500000" number="2">dup@t</segment>
+  </segments>
+ </file>
+</nzb>"#,
+        )
+        .unwrap(),
+    );
+    let mut reqs = Vec::new();
+    let mut idm = std::collections::HashMap::new();
+    let omitted = crate::repair::volume_reqs(&n, 1, &mut reqs, &mut idm);
+    assert_eq!(reqs.len(), 1, "the repeated id is requested once");
+    assert_eq!(omitted, 1, "and the skip is COUNTED, not just taken");
+    // The predicate the prefetch arm runs, with the failure count a
+    // fetch of those unique articles would report: every request
+    // succeeded, so `total()` is 0 and the volume looks whole until the
+    // omitted count is added back.
+    let failures = 0u32;
+    assert_eq!(failures, 0, "nothing failed on the wire, by construction");
+    assert_ne!(
+        failures.saturating_add(omitted),
+        0,
+        "the rung must read as PARTIAL - recording it strikes the volume off the post-settle fetch list"
+    );
 }
 
 /// C5 measurement (ignored - it is a number, not a gate). Prices
@@ -182,7 +236,7 @@ async fn c5_spec_ladder_rss_at_field_scale() {
     let t1 = std::time::Instant::now();
     let mut reqs = Vec::new();
     let mut idm = std::collections::HashMap::new();
-    crate::repair::volume_reqs(&n, 1, &mut reqs, &mut idm);
+    let _ = crate::repair::volume_reqs(&n, 1, &mut reqs, &mut idm);
     let rung_cost = t1.elapsed();
     eprintln!(
         "C5 spec ladder RSS: {rec_segs} recovery segments across {VOLS} volumes; \

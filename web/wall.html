@@ -3077,7 +3077,14 @@ async function watchThis(season){
     if(kind==='movie'&&c.year) w.year=c.year;
     list.push(w);
   }
-  const j=await api('config',`&name=watchlist&value=${encodeURIComponent(JSON.stringify(list))}`);
+  // POST, not the query string. The whole watchlist rides this write,
+  // and a JSON blob outgrows the 8 KB request line long before it
+  // outgrows anything else - around 25 watched titles - at which point
+  // the daemon correctly answers 414 and the star silently does not
+  // save, while adding the same title from Settings (which has posted
+  // past 1500 chars since Codex F-18) works. `mode=config` takes the
+  // same name/value pair in a body.
+  const j=await apiPost('config',{name:'watchlist', value:JSON.stringify(list)});
   toast(j.status?'☆ '+t('wall.watching','Watching {title}{series}: grabs happen automatically',
       {title:c.title, series:season!=null?' '+t('wall.serieslc','series {n}',{n:season}):''})
     :t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.rejected','rejected')}));

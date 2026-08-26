@@ -667,7 +667,13 @@ impl Index {
             )
             .map(|n| n as u64)?;
         // Same fixed vocabulary as the exact path, one column shallower:
-        // what was MAX(r.x) over a group is m.x here.
+        // what was MAX(r.x) over a group is m.x here. That includes the
+        // `title_key` tiebreak on the ORDER BY below, which is not
+        // optional on this side: the differential tests hold this path
+        // and the exact one to a single answer, so a total order on one
+        // of them and not the other is a disagreement the moment two
+        // cards share a `first_posted` second. `cards.rs` carries the
+        // reasoning.
         let key: &str = match sort {
             CardSort::Latest => "m.latest",
             CardSort::Arrived => "m.latest_seen",
@@ -698,7 +704,7 @@ impl Index {
                     COALESCE(t.air_date,'')
                FROM title_summaries m LEFT JOIN titles t ON t.key = m.title_key
               WHERE {where_clause}
-              ORDER BY {group_prefix}{key} {dir}, m.latest DESC
+              ORDER BY {group_prefix}{key} {dir}, m.latest DESC, m.title_key ASC
               LIMIT ?{} OFFSET ?{}",
             params.len() + 1,
             params.len() + 2
@@ -1873,6 +1879,101 @@ mod tests {
         assert_eq!(
             with.iter().map(|r| r.id).collect::<Vec<_>>(),
             without.iter().map(|r| r.id).collect::<Vec<_>>()
+        );
+        teardown(&dir, ix);
+    }
+
+    /// Paging over cards that TIE on the sort key returns each card
+    /// exactly once - no repeat between pages, and nothing skipped.
+    ///
+    /// Both paths, because both had the same defect until 25 Aug 2026
+    /// and fixing one alone would have made them disagree here: the
+    /// outer ORDER BY ended `{key} {dir}, latest DESC`, and under the
+    /// wall's default `CardSort::Latest` the key IS `latest`, so a row
+    /// of cards sharing a `first_posted` second had no defined order
+    /// between them. SQLite is entitled to settle that differently for
+    /// the `OFFSET 0` statement and the `OFFSET 1` one, and the pages
+    /// are separate HTTP requests, so "entitled to" is the whole risk.
+    ///
+    /// **This is a guard on the property, not a reproduction of a live
+    /// bug, and the difference is worth stating rather than implying.**
+    /// Measured 25 Aug 2026: the pre-fix ORDER BY passes this test too,
+    /// on both paths, exactly as the handoff that reported the wart said
+    /// it would ("stable in practice today"). What the tiebreak buys is
+    /// that the order is now total by CONSTRUCTION instead of by
+    /// observation - and the thing being observed is a planner's freedom
+    /// to settle a tie differently for two statements it is under no
+    /// obligation to settle the same way. So the fixture is built to
+    /// make a regression decidable rather than to catch today's SQLite
+    /// out: every card ties with every other on `latest`, so once the
+    /// tiebreak goes the ONLY thing between this test and a duplicate is
+    /// a choice nothing in the SQL constrains.
+    #[test]
+    fn paging_over_tied_cards_repeats_nothing_and_skips_nothing() {
+        let (dir, mut ix) = open_ix("tiedpaging");
+        // Eight titles, one release each, all posted in the SAME second.
+        const TIED_AT: i64 = 1_700_000_000;
+        const N: u32 = 8;
+        for i in 0..N as i64 {
+            let key: &'static str = [
+                "t:tie-a", "t:tie-b", "t:tie-c", "t:tie-d", "t:tie-e", "t:tie-f", "t:tie-g",
+                "t:tie-h",
+            ][i as usize];
+            put(
+                &ix,
+                (
+                    i + 1,
+                    key,
+                    "tv",
+                    TIED_AT,
+                    100 + i,
+                    "1080p",
+                    true,
+                    0,
+                    false,
+                    "",
+                ),
+            );
+            put_title(&ix, key, "tv", "Drama", 2011, true);
+        }
+        ix.drain_title_dirty(1_000).unwrap();
+        assert_rows_match_recompute(&ix);
+
+        let mut seen: Vec<String> = Vec::new();
+        for offset in 0..N {
+            let q = BrowseQuery {
+                limit: 1,
+                offset,
+                ..wall_q()
+            };
+            // Asserts the two paths agree on this page, and that the
+            // fast path was the one that answered it - a differential
+            // that quietly ran the slow query twice would prove nothing
+            // about the summary's ORDER BY.
+            assert!(
+                both_ways(&mut ix, &q, CardSort::Latest, true, false),
+                "page {offset} must be summary-eligible"
+            );
+            let (cards, total) = ix
+                .browse_cards_once(&q, CardSort::Latest, true, false, None)
+                .unwrap();
+            assert_eq!(total, N as u64, "every tied card counts, page {offset}");
+            assert_eq!(cards.len(), 1, "one card per page, page {offset}");
+            seen.push(cards[0].title_key.clone());
+        }
+
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            seen.len(),
+            "a card was served on two different pages: {seen:?}"
+        );
+        assert_eq!(
+            sorted.len(),
+            N as usize,
+            "paging reached every tied card exactly once: {seen:?}"
         );
         teardown(&dir, ix);
     }

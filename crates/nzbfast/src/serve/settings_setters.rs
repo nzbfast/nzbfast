@@ -860,6 +860,17 @@ pub(super) fn set_indexers(
             for i in list.iter_mut() {
                 i.name = i.name.trim().to_string();
                 i.url = i.url.trim().to_string();
+                // TODO 297: a group list is typed by hand, so it
+                // arrives with the blanks and stray whitespace a
+                // textarea leaves behind. Cleaned here so `search_url`
+                // never has to decide what an empty group means.
+                i.nzbindex.groups = i
+                    .nzbindex
+                    .groups
+                    .iter()
+                    .map(|g| g.trim().to_string())
+                    .filter(|g| !g.is_empty())
+                    .collect();
                 if i.apikey.is_empty()
                     && let Some(old) = cur.iter().find(|o| o.name == i.name)
                 {
@@ -877,6 +888,27 @@ pub(super) fn set_indexers(
             }
             if !seen.insert(i.name.clone()) {
                 return Err(format!("indexers: duplicate name {}", i.name));
+            }
+            // TODO 297: an nzbindex entry's own ranges, refused HERE
+            // rather than at search time. An inverted range is not an
+            // error at the far end - it is a filter that matches
+            // nothing - so a search would come back empty and read as
+            // "nzbindex has none of that", which is the failure this
+            // whole source is built to avoid reporting falsely.
+            if i.kind == crate::newznab::SourceKind::Nzbindex {
+                let o = &i.nzbindex;
+                if o.max_size_mb > 0 && o.min_size_mb > o.max_size_mb {
+                    return Err(format!(
+                        "indexers: {}: smallest size is above the largest",
+                        i.name
+                    ));
+                }
+                if o.max_age_days > 0 && o.min_age_days > o.max_age_days {
+                    return Err(format!(
+                        "indexers: {}: oldest age is below the newest",
+                        i.name
+                    ));
+                }
             }
         }
         let persist = serde_json::to_value(&list).unwrap_or(json!([]));

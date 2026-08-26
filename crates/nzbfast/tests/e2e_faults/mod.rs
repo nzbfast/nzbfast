@@ -46,7 +46,7 @@ use super::{Fixture, have_par2, run_get};
 /// `par2 create -c<n>` fixes the recovery block count outright, where
 /// `-r<pct>` leaves it to a percentage of a file size the test would
 /// then have to model.
-fn matrix_post(fx: &mut Fixture, blocks: usize, bs: usize, recovery: usize) -> Vec<u8> {
+pub(crate) fn matrix_post(fx: &mut Fixture, blocks: usize, bs: usize, recovery: usize) -> Vec<u8> {
     matrix_post_vols(fx, blocks, bs, recovery, None)
 }
 
@@ -56,7 +56,7 @@ fn matrix_post(fx: &mut Fixture, blocks: usize, bs: usize, recovery: usize) -> V
 /// shape 2 needs: a volume that arrives in PART is only expressible when
 /// the part that arrives and the part that does not are inside the same
 /// file.
-fn matrix_post_vols(
+pub(crate) fn matrix_post_vols(
     fx: &mut Fixture,
     blocks: usize,
     bs: usize,
@@ -76,7 +76,7 @@ fn matrix_post_vols(
 /// argument is about the PAYLOAD. Nothing about a recovery volume needs
 /// its articles to be block-sized, and one shape needs them not to be -
 /// see [`RECOVERY_YIELD_ART`].
-fn matrix_post_art(
+pub(crate) fn matrix_post_art(
     fx: &mut Fixture,
     blocks: usize,
     bs: usize,
@@ -86,10 +86,16 @@ fn matrix_post_art(
 ) -> Vec<u8> {
     let data = unique_payload(blocks * bs, 0x5eed_0283);
     fx.add_file("payload.bin", &data, bs);
-    assert!(
-        par2_create_exact(fx, recovery, bs as u64, vols, &["payload.bin"], par2_art),
-        "par2 create failed - callers must gate on have_par2()"
-    );
+    // Every caller gates on `have_par2()`, and CI's TWELFTH gate holds
+    // them to it - so a failure HERE is the create call, never a
+    // missing binary. Say which, in par2's own words: the geometry it
+    // was asked for and what it answered.
+    if let Err(why) = par2_create_exact(fx, recovery, bs as u64, vols, &["payload.bin"], par2_art) {
+        panic!(
+            "par2 create failed for blocks={blocks} bs={bs} recovery={recovery} \
+             vols={vols:?} par2_art={par2_art}\n  {why}"
+        );
+    }
     data
 }
 
@@ -111,7 +117,7 @@ fn matrix_post_art(
 /// This is the fixture bending to the product's rule, not around it.
 /// The floor is a real threshold in shipped code and a shape whose
 /// sample is under it is testing the floor, not the gate.
-const RECOVERY_YIELD_ART: usize = 8_192;
+pub(crate) const RECOVERY_YIELD_ART: usize = 8_192;
 
 /// `Fixture::add_par2_opts` with the recovery BLOCK COUNT pinned rather
 /// than a redundancy percentage.
@@ -119,6 +125,33 @@ const RECOVERY_YIELD_ART: usize = 8_192;
 /// A free function over `&mut Fixture` rather than a method on it: the
 /// e2e fixture builder is edited by several lanes at once, and this
 /// needs nothing from it that a child module cannot reach.
+///
+/// **`-u` IS LOAD-BEARING WHENEVER `vols` IS SET, and its absence held
+/// nightly red for two nights.** par2cmdline's DEFAULT file scheme is
+/// `scVariable`, which allocates blocks across the `-n` files
+/// EXPONENTIALLY - 1, 2, 4, 8 ... - and simply gives every file past
+/// the point the blocks run out a count of ZERO. Those empty files all
+/// get the same name, because a volume is named for the block it starts
+/// at and the count it carries, and the second one to be written is
+/// refused: `Could not create "testset.vol8+0.par2": File already
+/// exists.` `-c8 -n8` allocates 1+2+4+1 and asks for four `vol8+0`;
+/// `-c20 -n20` asks for fifteen. `-u` selects `scUniform`, which is
+/// `count / files` with the remainder spread over the front, so `-n8`
+/// really is eight one-block volumes.
+///
+/// It is the geometry every caller here already DOCUMENTS wanting (see
+/// [`matrix_post_vols`], and "one block per volume" at
+/// [`a_bootstrap_volume_and_a_refused_repair_fetch_are_both_stated`]).
+/// Nothing about the fixtures changes on the version this fleet
+/// develops on - measured 26 Aug 2026 on par2cmdline 1.2.0, which
+/// distributes `-n` evenly on its own: `-c8 -n8`, `-c20 -n20` and
+/// `-c8 -n1` each produce byte-identical volume sets with and without
+/// it. Ubuntu ships 0.8.1, which is what CI runs and what the
+/// exponential scheme above is read out of.
+///
+/// It is added ONLY under `-n`. Without it par2 picks the file count
+/// itself, and forcing uniform there would re-cut every recovery set in
+/// this module that does not pin one.
 fn par2_create_exact(
     fx: &mut Fixture,
     blocks: usize,
@@ -126,23 +159,47 @@ fn par2_create_exact(
     vols: Option<usize>,
     files: &[&str],
     art_size: usize,
-) -> bool {
-    let mut cmd = Command::new("par2");
-    cmd.arg("create")
-        .arg(format!("-s{block_size}"))
-        .arg(format!("-c{blocks}"));
+) -> Result<(), String> {
+    let mut args: Vec<String> = vec![
+        "create".into(),
+        format!("-s{block_size}"),
+        format!("-c{blocks}"),
+    ];
     if let Some(n) = vols {
-        cmd.arg(format!("-n{n}"));
+        args.push(format!("-n{n}"));
+        args.push("-u".into());
     }
-    let st = cmd
-        .arg("-q")
-        .arg("testset")
-        .args(files)
+    args.push("-q".into());
+    args.push("testset".into());
+    args.extend(files.iter().map(|f| (*f).to_string()));
+    let out = Command::new("par2")
+        .args(&args)
         .current_dir(&fx.dir)
-        .status();
-    match st {
-        Ok(s) if s.success() => {}
-        _ => return false,
+        .output();
+    // par2's OWN words, or nobody can tell a missing binary from a
+    // geometry it refuses. This used to be `.status()`, which inherits
+    // the streams: nextest DID capture the message and print it, but the
+    // assertion over the boolean named a cause that was not the one, so
+    // two nightly runs (25 and 26 Aug 2026) read as "par2 is not
+    // installed" while par2 was installed and talking.
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            return Err(format!(
+                "`par2 {}` in {} exited {}\n  stdout: {}\n  stderr: {}",
+                args.join(" "),
+                fx.dir.display(),
+                o.status,
+                String::from_utf8_lossy(&o.stdout).trim(),
+                String::from_utf8_lossy(&o.stderr).trim(),
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "could not run `par2` at all ({e}) - THIS is the shape \
+                 `have_par2()` gates on"
+            ));
+        }
     }
     let mut par2s: Vec<PathBuf> = std::fs::read_dir(&fx.dir)
         .unwrap()
@@ -160,12 +217,12 @@ fn par2_create_exact(
         fx.nzb_files.push((name, segs));
         std::fs::remove_file(&p).unwrap();
     }
-    true
+    Ok(())
 }
 
 /// The fault plan for a fixture, resolved off the rows it already
 /// carries.
-fn plan(fx: &Fixture) -> FaultPlan {
+pub(crate) fn plan(fx: &Fixture) -> FaultPlan {
     FaultPlan::from_segments(&fx.nzb_files)
 }
 
@@ -813,7 +870,7 @@ fn eager_and_total(log: &str) -> Option<(f64, f64)> {
 ///
 /// The NZB subject and the yEnc-declared name both move, which is what
 /// a poster who names volumes their own way actually produces.
-fn rename_par2_posts(fx: &mut Fixture, f: impl Fn(usize) -> String) {
+pub(crate) fn rename_par2_posts(fx: &mut Fixture, f: impl Fn(usize) -> String) {
     let mut n = 0usize;
     for (name, _) in fx.nzb_files.iter_mut() {
         if name.to_ascii_lowercase().ends_with(".par2") {
@@ -1490,5 +1547,92 @@ async fn a_refused_escalation_is_judged_like_any_other_ask() {
     assert!(
         wall < Duration::from_secs(180),
         "the job took {wall:?} to reach a verdict:\n{log}"
+    );
+}
+
+/// **Shape 15 - a corrupt copy is the SERVER's, and the verdict has to
+/// know that at the site that saw it.**
+///
+/// `derrs` is one counter over two failures with opposite remedies. A
+/// DECODE error means every article arrived and the server's bytes
+/// failed their own yEnc CRC, so free space and permissions are
+/// irrelevant and a re-fetch (often from a second provider) is the fix.
+/// A WRITE error means the bytes decoded and this machine could not
+/// store them, so the folder is where the evidence is. Sending someone
+/// to check their disk over a corrupt article is a wild goose chase -
+/// the reason `incomplete_reason` splits the two at all.
+///
+/// Until 26 Aug 2026 it split them by reading the opening words of a
+/// SAMPLE STRING (`starts_with("decode error")`) that
+/// `crates/nzbfast/src/get/workers.rs` had formatted a moment earlier,
+/// at a site that already knew which of the two it had hit. TODO 307
+/// item 1 named that as an instance of the tree's string-classification
+/// class and left it for its own claim; the fault now travels as a
+/// value (`crate::diag::DecodeFault`) recorded in the same statement as
+/// the text.
+///
+/// WHAT THIS SHAPE IS FOR, and it is not the sentence. The sentence is
+/// pinned six ways over in `crates/nzbfast/src/failkind/tests.rs`, which
+/// CONSTRUCTS the sample and can therefore pin only what it was handed.
+/// What no unit test in this tree can reach is the pairing itself - that
+/// the site which saw a yEnc check fail is the site that records
+/// `Corrupt` - and that pairing is exactly what the string used to carry
+/// implicitly and now carries explicitly. So this drives a real fetch of
+/// real damaged bodies from a real server and reads the verdict off the
+/// far end.
+///
+/// ONE server, deliberately: with a second the TODO 114 CRC steer
+/// re-fetches a bad body elsewhere and never charges a decode error at
+/// all, which is the correct behaviour and the wrong shape for this.
+/// And no PAR2 set, so nothing repairs the damage away before the census
+/// runs.
+///
+/// STATED LIMIT, in the shape rather than left to be found: this covers
+/// the CORRUPT producer only. The write producer at the same call site
+/// needs a real write fault under a live fetch, which no e2e leg in this
+/// tree reaches - `daemon_bomb` gets there through the settle path and a
+/// different sample. Its pairing rests on the construction tests.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_copy_reads_as_the_servers_and_never_as_this_machines() {
+    let mut fx = Fixture::new("corrupt-blame");
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7 + 11) as u8).collect();
+    fx.add_file("c.bin", &data, 20_000);
+    // Every article's decoded payload gets a byte flipped, so the yEnc
+    // CRC fails on all of them and nothing is MISSING - which is the
+    // only branch of `incomplete_reason` that has to tell the two
+    // failures apart.
+    let corrupt: std::collections::HashSet<String> = fx.articles.keys().cloned().collect();
+    assert!(corrupt.len() >= 8, "want a multi-article file");
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            corrupt,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+        .await
+        .unwrap();
+
+    assert!(!ok, "a wholly damaged post cannot succeed:\n{log}");
+    assert!(
+        log.contains("the articles did not decode"),
+        "the server served damaged bodies and the verdict did not say so - if it \
+         reads `could not write the download`, the fault recorded beside the sample \
+         does not match the site that recorded it:\n{log}"
+    );
+    assert!(
+        !log.contains("could not write the download"),
+        "a corrupt article sent the user to check free space and permissions on a \
+         machine that is working perfectly:\n{log}"
+    );
+    assert!(
+        log.contains("no missing segments"),
+        "the shape is meant to have every article ARRIVE:\n{log}"
     );
 }

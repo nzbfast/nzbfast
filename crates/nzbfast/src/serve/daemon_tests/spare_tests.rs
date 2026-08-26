@@ -13,6 +13,7 @@
 //! everything daemon.rs's test module already has in scope.
 
 use super::*;
+use crate::serve::testutil::flat_rate_config;
 
 /// An NZB declaring exactly `ids` as its articles, posted by `poster` to
 /// `group`. Everything §282 item 6 and item 7 judge is in that triple.
@@ -304,8 +305,8 @@ fn the_promote_path_will_not_promote_the_same_post_again() {
         let clone = write("clone", nzb_of("p", "g", &same));
         let real = write("real", nzb_of("q", "h", &["b1@x", "b2@x", "b3@x"]));
         let cands = [
-            ("Show.Name.S01E01.2160p.BluRay-GRPA".to_string(), clone),
-            ("Show.Name.S01E01.720p.WEB-GRPB".to_string(), real),
+            ("Show.Name.S01E01.2160p.BluRay-GRPA".to_string(), clone, 1),
+            ("Show.Name.S01E01.720p.WEB-GRPB".to_string(), real, 1),
         ];
         let (i, _) = spare::best_alternative(&failed, &cands).expect("a promotable candidate");
         assert_eq!(i, 1, "the 2160p is the same post, so the 720p wins");
@@ -318,6 +319,117 @@ fn the_promote_path_will_not_promote_the_same_post_again() {
     });
 }
 
+/// §295, and the A/B is both legs of one pick. Two held spares: X
+/// outranks Y on quality (2160p over 720p), and the prober has watched
+/// X's post go red. Leg A - the pre-§295 pick, which is exactly what
+/// equal bands produce - promotes X, and the user pays a full download
+/// to rediscover what the probe already knew. Leg B - the bands the
+/// prober actually wrote - promotes Y first. Within a band nothing
+/// moved: the baseline leg IS the old ordering, pinned here so the A/B
+/// is two measured outcomes of the same fixture rather than a claim
+/// about history.
+#[test]
+fn a_probed_dead_spare_is_promoted_after_a_live_one() {
+    with_daemon("spare-health-band", |d| {
+        let dir = d.spool.clone();
+        let write = |name: &str, body: String| {
+            let p = dir.join(format!("{name}.nzb"));
+            std::fs::write(&p, body).expect("spool copy");
+            p
+        };
+        let failed = write("hb-failed", nzb_of("p", "g", &["ha1@x", "ha2@x"]));
+        let x = write("hb-x", nzb_of("q", "h", &["hb1@x", "hb2@x"]));
+        let y = write("hb-y", nzb_of("r", "i", &["hc1@x", "hc2@x"]));
+        let name_x = "Show.Name.S01E01.2160p.BluRay-GRPX".to_string();
+        let name_y = "Show.Name.S01E01.720p.WEB-GRPY".to_string();
+
+        // Leg A: no probe has run (band 1 everywhere) - the quality
+        // rank decides, X wins. This is the pre-§295 behaviour.
+        let blind = [
+            (name_x.clone(), x.clone(), 1),
+            (name_y.clone(), y.clone(), 1),
+        ];
+        let (i, _) = spare::best_alternative(&failed, &blind).expect("promotable");
+        assert_eq!(i, 0, "leg A (unprobed): quality rank picks the 2160p");
+        println!("§295 A/B leg A (no probe): promotion picks {}", blind[i].0);
+
+        // Leg B: the prober marked X red - the band overrules the rank.
+        let probed = [(name_x.clone(), x, 3), (name_y.clone(), y, 0)];
+        let (i, _) = spare::best_alternative(&failed, &probed).expect("promotable");
+        assert_eq!(
+            i, 1,
+            "leg B (X probed red): the live 720p is promoted first"
+        );
+        println!(
+            "§295 A/B leg B (X probed red): promotion picks {}",
+            probed[i].0
+        );
+
+        // The band never REFUSES: an all-red ladder still promotes its
+        // best rung rather than leaving everything parked.
+        let allred = [
+            (name_x, probed[0].1.clone(), 3),
+            (name_y, probed[1].1.clone(), 3),
+        ];
+        let (i, _) = spare::best_alternative(&failed, &allred).expect("still promotable");
+        assert_eq!(i, 0, "equal bands fall back to the old order exactly");
+    });
+}
+
+/// §295's other half: the numbers the bands come from.
+/// `promote_band` orders green ahead of unprobed ahead of amber ahead
+/// of red, and the worse of payload and recovery decides - a spare
+/// whose recovery set is dead fails exactly like one whose payload is.
+#[test]
+fn promote_band_orders_green_unprobed_amber_red() {
+    use crate::health::{Bucket, promote_band};
+    let verdict = |b: Bucket, rec: Option<Bucket>| crate::health::PostHealth {
+        bucket: b,
+        reason: String::new(),
+        sampled: 8,
+        present: 8,
+        absent: 0,
+        answered: 1,
+        servers: 1,
+        per_server: Vec::new(),
+        age_days: 1,
+        checked_at: 0,
+        probes: 1,
+        waived: false,
+        completable: None,
+        recovery: rec.map(|rb| crate::health::RecoveryHealth {
+            bucket: rb,
+            reason: String::new(),
+            sampled: 4,
+            present: 4,
+            absent: 0,
+            answered: 1,
+            servers: 1,
+            per_server: Vec::new(),
+            volumes: 2,
+            fetched: None,
+        }),
+    };
+    assert_eq!(
+        promote_band(None),
+        1,
+        "unprobed sits between green and amber"
+    );
+    assert_eq!(promote_band(Some(&verdict(Bucket::Green, None))), 0);
+    assert_eq!(promote_band(Some(&verdict(Bucket::Amber, None))), 2);
+    assert_eq!(promote_band(Some(&verdict(Bucket::Red, None))), 3);
+    assert_eq!(
+        promote_band(Some(&verdict(Bucket::Green, Some(Bucket::Red)))),
+        3,
+        "a dead recovery set is §282's founding incident - it must weigh \
+         exactly as much as a dead payload"
+    );
+    assert_eq!(
+        promote_band(Some(&verdict(Bucket::Green, Some(Bucket::Green)))),
+        0
+    );
+}
+
 /// End to end, and the shape the feature is FOR: a grab holds two
 /// spares, the grab fails, the best surviving spare is promoted, and the
 /// one that did not win is re-pointed at it so the ladder has a second
@@ -326,6 +438,11 @@ fn the_promote_path_will_not_promote_the_same_post_again() {
 #[test]
 fn the_best_spare_is_promoted_when_the_grab_fails() {
     with_daemon("spare-promote", |d| {
+        // The promotion runs on the AUTOMATIC road, so it reads the
+        // metered guard - see `flat_rate_config`. Without this the
+        // winner stays held at -3 on any host with no SABnzbd install,
+        // which is every CI runner and no machine on this fleet.
+        flat_rate_config(d);
         let primary = nzb_of("poster-a", "alt.binaries.one", &["a1@x", "a2@x"]);
         let cands = [
             (
@@ -373,6 +490,80 @@ fn the_best_spare_is_promoted_when_the_grab_fails() {
         assert_eq!(
             other.4, winner.0,
             "and now held against the row that replaced the grab"
+        );
+    });
+}
+
+/// Sweep 9, finding 5: the failure a promotion is ABOUT can be deleted
+/// from history while park is still inside the park that filed it.
+///
+/// `park_gen` emits `job.failed` (the dashboard pairs that emit with
+/// the replacement one, so the order is deliberate) and only then
+/// promotes. A subscriber acting on the event - an *arr script, a
+/// dashboard `mode=history&name=delete` - can remove the record in
+/// between, and park went on to unpause a spare on the strength of a
+/// `tombstone` flag snapshotted long before. `tombstone` is a statement
+/// about the QUEUE row and cannot answer this; the user who dismissed a
+/// failure watched the same title start downloading.
+///
+/// "The owner is in neither store" is precisely what
+/// `drop_stranded_spares` sweeps, so the spares go now rather than at
+/// the next sweep - and a promoted row would be past that sweep's reach
+/// anyway, being a download in its own right rather than a held one.
+#[cfg(feature = "indexer")]
+#[test]
+fn a_history_delete_inside_the_park_drops_the_spare_instead_of_starting_it() {
+    with_daemon("spare-promote-race", |d| {
+        // As above: the drop asserted below has to be the tombstone
+        // re-check's answer, not the metered guard's.
+        flat_rate_config(d);
+        let primary = nzb_of("poster-a", "alt.binaries.one", &["a1@x", "a2@x"]);
+        let cands = [(
+            "Show.Name.S01E01.2160p.BluRay-GRPB",
+            nzb_of("poster-b", "alt.binaries.two", &["b1@x", "b2@x"]),
+        )];
+        let (id, held, _) = grab_and_hold(d, &primary, &cands, 2);
+        assert_eq!(held, 1);
+
+        let job = d
+            .queue
+            .lock_ok()
+            .iter()
+            .find(|j| j.lock_ok().nzo_id == id)
+            .cloned()
+            .expect("the grab");
+        {
+            let mut g = job.lock_ok();
+            g.state = JobState::Failed;
+            g.fail_message = "articles never arrived".into();
+            g.finished_unix = Some(1);
+        }
+        // Item 8's other road out of the same decision: with nothing
+        // held, park asks the hunt worker for a replacement. That is
+        // the promotion's bug wearing a different hat, so it is pinned
+        // from the same window rather than left for the next sweep.
+        d.alt.auto_search.store(true, Ordering::Relaxed);
+        // The webhook's delete, at the one instant it races: the record
+        // is filed and announced, nothing is unpaused yet.
+        let doomed = id.clone();
+        crate::serve::storecut::on_promote_gap(move |d| {
+            d.history.lock_ok().retain(|j| j.lock_ok().nzo_id != doomed);
+        });
+        d.park_gen(job, None);
+        crate::serve::storecut::disarm();
+
+        let rows = queue_rows(d);
+        assert!(
+            rows.iter().all(|r| r.2 && r.3 == DUPE_PRIORITY),
+            "a dismissed failure started its alternative anyway: {rows:?}"
+        );
+        assert!(
+            rows.is_empty(),
+            "the owner is in neither store, so park should have cleared it: {rows:?}"
+        );
+        assert!(
+            d.hunt.q.lock_ok().is_empty(),
+            "a dismissed failure was sent to the hunt worker for a replacement"
         );
     });
 }
@@ -555,5 +746,88 @@ fn a_spare_with_no_owner_id_is_left_alone_by_the_sweep() {
         ));
         d.drop_stranded_spares();
         assert_eq!(d.queue.lock_ok().len(), 1, "the legacy hold was dropped");
+    });
+}
+
+/// The sweep's three reads NOMINATE; the drop re-asks under one hold.
+///
+/// The reads are taken and released one at a time, so a mover that
+/// writes its destination store AND drops its `hist_inflight`
+/// registration inside the gap between two of them is in none of the
+/// three samples - a retry whose guard drops between the history read
+/// and the inflight read, a park whose history push lands there too.
+/// Nothing re-verified before the rows went, and the drop unlinks the
+/// spooled NZB, so the answer could not be taken back: the alternatives
+/// had to be searched for again at fresh indexer cost.
+///
+/// Each arm here is one store answering "it came back" on its own.
+#[test]
+fn a_drop_refuses_an_owner_that_came_back_after_it_was_nominated() {
+    with_daemon("spare-nominate-recheck", |d| {
+        let spool =
+            std::env::temp_dir().join(format!("nzbfast-282-recheck-{}.nzb", std::process::id()));
+        let hold = |path: &std::path::Path| {
+            jv(
+                "spare-row",
+                "Show.S01E01-B",
+                serde_json::json!({
+                    "paused": true, "priority": DUPE_PRIORITY,
+                    "held_for": "owner-back", "origin": "spare",
+                    "nzb_path": path.to_string_lossy(),
+                }),
+            )
+        };
+        // Landed in the QUEUE (a retry's push), in HISTORY (a park's
+        // file), and still REGISTERED (either mover mid-flight).
+        for back in ["queue", "history", "inflight"] {
+            std::fs::write(&spool, b"<nzb></nzb>").expect("write spool fixture");
+            d.queue.lock_ok().clear();
+            d.history.lock_ok().clear();
+            d.hist_inflight.lock_ok().clear();
+            d.queue.lock_ok().push_back(hold(&spool));
+            match back {
+                "queue" => d.queue.lock_ok().push_back(jv(
+                    "owner-back",
+                    "Show.S01E01-A",
+                    serde_json::json!({}),
+                )),
+                "history" => d.history.lock_ok().push(jv(
+                    "owner-back",
+                    "Show.S01E01-A",
+                    serde_json::json!({"state": "Failed"}),
+                )),
+                _ => {
+                    d.hist_inflight.lock_ok().insert("owner-back".to_string());
+                }
+            }
+            d.drop_spares_if_still_stranded("owner-back");
+            assert!(
+                d.queue
+                    .lock_ok()
+                    .iter()
+                    .any(|j| j.lock_ok().nzo_id == "spare-row"),
+                "the spare was dropped for an owner that is alive in the {back}"
+            );
+            assert!(
+                spool.is_file(),
+                "the spare's spooled NZB was unlinked for an owner alive in the {back}"
+            );
+        }
+        // And with the owner gone from all three, the drop still fires:
+        // the re-test must not have turned the sweep into a no-op.
+        d.queue.lock_ok().clear();
+        d.history.lock_ok().clear();
+        d.hist_inflight.lock_ok().clear();
+        d.queue.lock_ok().push_back(hold(&spool));
+        d.drop_spares_if_still_stranded("owner-back");
+        assert!(
+            d.queue.lock_ok().is_empty(),
+            "a genuinely stranded spare was left behind"
+        );
+        assert!(
+            !spool.is_file(),
+            "the dropped spare's spool copy is still on disk"
+        );
+        let _ = std::fs::remove_file(&spool);
     });
 }

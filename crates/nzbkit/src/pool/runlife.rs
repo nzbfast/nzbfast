@@ -11,10 +11,15 @@
 //!
 //! Split out of `pool.rs` whole (TODO 106 size gate) - the code is
 //! verbatim, only visibility changed. A child module, so `Shared`,
-//! `Work`, `WorkerLife` and `ServerCtx` stay in scope as they were
-//! inline; `pub(super)` reads "pub in pool", which is what puts these
+//! `Work` and `ServerCtx` stay in scope as they were inline;
+//! `pub(super)` reads "pub in pool", which is what puts these
 //! back in front of pool.rs AND its other children (pool/session.rs
 //! calls most of them) exactly as the private ones were.
+//!
+//! `WorkerLife` came over in the same way on 26 Aug 2026, one split
+//! later: it is what `worker` below holds for its whole life, and both
+//! of its exits call `note_server_dark`, which has lived here since the
+//! first split.
 
 use super::*;
 
@@ -38,8 +43,13 @@ thread_local! {
 pub(super) fn seal_run_blocking(
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
-    reason: &str,
+    code: FailCode,
 ) -> usize {
+    // TODO 307 item 1: the CODE is the parameter and the sentence is
+    // derived from it. It was the other way round - the caller picked a
+    // reason string and handed it down - which is exactly the shape
+    // that lets a later code disagree with the message sent beside it.
+    let reason = code.reason();
     let mut seal_waits = 0u32;
     if shared.workers_live.load(Ordering::Acquire) > 0
         || shared.pending.load(Ordering::Acquire) == 0
@@ -107,6 +117,7 @@ pub(super) fn seal_run_blocking(
         }
         let _ = out.blocking_send(FetchOutcome::Failed {
             id,
+            code,
             error: reason.to_string(),
         });
         shared.complete_one();
@@ -169,6 +180,59 @@ pub(super) async fn spare_filler(shared: Arc<Shared>, server: ServerConfig, idx:
     let leftover = shared.spares[idx].lock_ok().take();
     if let Some(c) = leftover {
         c.quit().await;
+    }
+}
+
+/// One worker's lifetime in the fleet's two head-counts: its server's
+/// `alive` (routing) and the run-wide `workers_live` (the terminal-state
+/// invariant). Both come down when the worker exits, however it exits -
+/// including a panic, where `Drop` runs during the unwind.
+///
+/// A worker that exits under its own control calls [`retire`](Self::retire)
+/// instead, which reports whether it was the LAST one out; only that
+/// worker can seal the run, and only it is still holding an outcome
+/// sender to seal it with.
+///
+/// Moved here from pool.rs whole (TODO 106 size gate) - the code is
+/// verbatim, only visibility changed. It belongs beside `worker`, which
+/// owns one for its whole life, and beside `note_server_dark`, which is
+/// what both exits below call to say the server went dark.
+pub(super) struct WorkerLife {
+    shared: Arc<Shared>,
+    idx: usize,
+    retired: bool,
+}
+
+impl WorkerLife {
+    pub(super) fn birth(shared: &Arc<Shared>, idx: usize) -> WorkerLife {
+        shared.alive[idx].fetch_add(1, Ordering::Relaxed);
+        shared.workers_born.fetch_add(1, Ordering::AcqRel);
+        shared.workers_live.fetch_add(1, Ordering::AcqRel);
+        WorkerLife {
+            shared: shared.clone(),
+            idx,
+            retired: false,
+        }
+    }
+
+    /// Leave the fleet deliberately. True when this was the last live
+    /// worker of the whole run - exactly one caller ever sees it.
+    pub(super) fn retire(mut self) -> bool {
+        self.retired = true;
+        let prev = self.shared.alive[self.idx].fetch_sub(1, Ordering::Relaxed);
+        note_server_dark(&self.shared, self.idx, prev);
+        self.shared.workers_live.fetch_sub(1, Ordering::AcqRel) == 1
+    }
+}
+
+impl Drop for WorkerLife {
+    fn drop(&mut self) {
+        if self.retired {
+            return; // retire() already did the arithmetic
+        }
+        let prev = self.shared.alive[self.idx].fetch_sub(1, Ordering::Relaxed);
+        note_server_dark(&self.shared, self.idx, prev);
+        self.shared.workers_live.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -276,12 +340,7 @@ pub(super) async fn worker(
         .await;
     }
     if life.retire() {
-        seal_run(
-            &shared,
-            &out,
-            "no connection worker left to fetch this article",
-        )
-        .await;
+        seal_run(&shared, &out, FailCode::FleetExhausted).await;
     }
 }
 
@@ -342,8 +401,11 @@ pub(super) fn note_read_stall(
 pub(super) async fn seal_run(
     shared: &Arc<Shared>,
     out: &mpsc::Sender<FetchOutcome>,
-    reason: &str,
+    code: FailCode,
 ) -> usize {
+    // See `seal_run_blocking`: the code is the parameter, the sentence
+    // follows from it.
+    let reason = code.reason();
     // Not the last one out: on the sharded path another shard's runtime
     // still has workers that can finish this work.
     if shared.workers_live.load(Ordering::Acquire) > 0
@@ -379,6 +441,7 @@ pub(super) async fn seal_run(
         let _ = out
             .send(FetchOutcome::Failed {
                 id,
+                code,
                 error: reason.to_string(),
             })
             .await;
@@ -409,6 +472,9 @@ pub(super) async fn shed_pipeline(shared: &Shared, inflight: &mut VecDeque<Work>
     let mut at = q.iter().take_while(|w| w.promoted).count();
     while let Some(w) = inflight.pop_front() {
         if w.dup {
+            // Give the article its hedge budget back: this dup never
+            // emitted, so the rescue it was charged for never happened.
+            shared.uncharge_dup(&w);
             continue;
         }
         shared.deregister_inflight(&w);
@@ -513,6 +579,7 @@ pub(super) async fn requeue_or_fail(
     cfg: &PoolConfig,
     ctx: ServerCtx,
     inflight: &mut VecDeque<Work>,
+    code: FailCode,
     error: &str,
     charge_front: bool,
 ) {
@@ -543,6 +610,9 @@ pub(super) async fn requeue_or_fail(
             let charged = first && charge_front;
             first = false;
             if w.dup {
+                // Same as the shed above: an un-emitted dup returns the
+                // hedge budget its pick charged.
+                shared.uncharge_dup(&w);
                 continue;
             }
             shared.deregister_inflight(&w);
@@ -599,6 +669,7 @@ pub(super) async fn requeue_or_fail(
         let _ = out
             .send(FetchOutcome::Failed {
                 id,
+                code,
                 error: error.to_string(),
             })
             .await;

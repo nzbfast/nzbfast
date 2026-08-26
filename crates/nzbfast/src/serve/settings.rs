@@ -279,6 +279,9 @@ pub(super) const PATHS: &[Setting] = &[
     rw("cors_origin", |c| json!(c.d.cors_origin.lock_ok().clone())),
     rw("out_dir", |c| json!(c.d.out_dir().to_string_lossy())),
     rw("move_pace", |c| json!(c.d.move_pace.lock_ok().clone())),
+    rw("early_file_publish", |c| {
+        json!(c.d.early_file_publish.load(Ordering::Relaxed))
+    }),
     rw("move_completed", |c| {
         json!(
             c.d.move_completed
@@ -668,6 +671,11 @@ pub(super) const INDEXING: &[Setting] = &[
     rw("index_paused", |c| {
         json!(c.d.index_paused.load(Ordering::Relaxed))
     }),
+    // Metadata lanes only. `index_paused` is the NNTP spend; this is
+    // the third-party HTTP spend, and they are wanted off separately.
+    rw("enrich_paused", |c| {
+        json!(c.d.enrich_paused.load(Ordering::Relaxed))
+    }),
     // M34 size cap. Bytes, not a SAB-style string: the UI formats, the
     // API parses.
     rw("index_max_bytes", |c| {
@@ -826,6 +834,18 @@ pub(super) const AUTOMATION: &[Setting] = &[
                             "hits_per_day": i.hits_per_day,
                             "grabs_per_day": i.grabs_per_day,
                             "has_key": !i.apikey.is_empty(),
+                            // TODO 297. The nzbindex knobs round-trip
+                            // in full - unlike the key, none of them is
+                            // a secret, and the editor has to be able to
+                            // show what is set. NESTED, in exactly the
+                            // shape the writer parses back, so the
+                            // editor round-trips what it was given
+                            // rather than translating between two
+                            // spellings of one object. `kind` is always
+                            // present, so the page never has to guess
+                            // what an entry saved before this landed is.
+                            "kind": i.kind.as_str(),
+                            "nzbindex": i.nzbindex,
                         })
                     })
                     .collect(),
@@ -863,6 +883,14 @@ pub(super) const AUTOMATION: &[Setting] = &[
     }),
     rw("watchlist_instant_max", |c| {
         json!(c.d.watchlist_instant_max.load(Ordering::Relaxed))
+    }),
+    // Retention insurance: the GB budget deferred rows may fetch payload
+    // into ahead of promotion; 0 = the feature is off entirely.
+    rw("insurance_cap_gb", |c| {
+        json!(c.d.insurance_cap_gb.load(Ordering::Relaxed))
+    }),
+    rw("watchlist_deferred", |c| {
+        json!(c.d.watchlist_deferred.load(Ordering::Relaxed))
     }),
     rw_opaque("smart_folders", |c| {
         annotate_patterns(serde_json::to_value(&*c.d.smart_folders.lock_ok()).unwrap_or(json!([])))
@@ -1493,6 +1521,11 @@ pub(super) fn apply_setting(
         "shape_chip_color" => {
             let on = flag();
             d.shape_chip_color.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
+        "early_file_publish" => {
+            let on = flag();
+            d.early_file_publish.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
         "rename_junk" => {

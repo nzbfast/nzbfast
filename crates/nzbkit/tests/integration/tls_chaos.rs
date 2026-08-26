@@ -229,7 +229,7 @@ async fn run_leg(servers: Vec<(ServerConfig, PoolConfig)>, ids: &[String]) -> Re
             match o {
                 FetchOutcome::Done { id, raw } => done.push((id, raw)),
                 FetchOutcome::Missing { id, .. } => missing.push(id),
-                FetchOutcome::Failed { id, error } => failed.push(format!("{id}: {error}")),
+                FetchOutcome::Failed { id, error, .. } => failed.push(format!("{id}: {error}")),
             }
         }
         (done, missing, failed)

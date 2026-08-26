@@ -1,0 +1,704 @@
+# cargo-nextest configuration. The reason nextest exists in this repo:
+# a flake must never again appear as an anonymous exit 505/506 - nextest
+# names the failing test, and with the retry policy below a flaky test
+# is reported as FLAKY (with both attempts' output) instead of either
+# killing the run or vanishing into a green retry. Retries CAPTURE
+# flakes; they do not hide them.
+
+[profile.default]
+# One retry: enough to tell a hard failure ("FAIL twice") from a flake
+# ("FLAKY: passed on retry"), cheap enough to leave on everywhere.
+retries = 1
+# VISIBILITY ONLY - no terminate-after here, deliberately. On 18 Aug a
+# contended run spent 1,409 s inside ONE test
+# (dashboard_rev history_paging_and_search, 1.7 s on a quiet box) and
+# printed nothing at all for 23 minutes, which is indistinguishable from
+# a hang. `period` makes nextest emit a SLOW line every minute instead.
+# The qemu profile below already says exactly this and has said it since
+# 15 Aug; default and ci simply never got it.
+#
+# `terminate-after` stays OFF for `default` on purpose: this profile is
+# what a bare `cargo nextest run` uses on a loaded dev box, where
+# slowness is contention, and killing a starved test would turn a busy
+# machine into a red gate.
+#
+# THAT SENTENCE READ "default/ci" UNTIL 25 Aug 2026 and the `ci` half is
+# no longer true: that profile now carries a generous repo-wide ceiling,
+# measured and argued at its own block below. The REASON above survives
+# intact for `default` - it is about a box, not about a profile - and
+# the number chosen for `ci` is set so that only a wedge can reach it.
+# Read that block before touching either.
+#
+# TWO NARROW EXCEPTIONS sit at override level, because their bounds are
+# properties of the TESTS rather than of the box, and they go in
+# OPPOSITE directions - which is the thing to notice. The chase wedge
+# ceiling on `extract::` in the nzbkit lib (300 s, near the foot of this
+# file) is TIGHTER, because there a four-figure number of seconds is a
+# DEADLOCK and not contention. `leak_soak`'s is far LOOSER (200 min),
+# because that test's wall is a configured budget rather than work.
+# Both apply under `default` as well as `ci`.
+# wedge-gate: default is the loaded-dev-box profile - see above
+slow-timeout = { period = "60s" }
+# Keep running after a failure so one red test cannot mask the rest of
+# the suite (same rationale as --no-fail-fast in pr-check.yml).
+fail-fast = false
+# 10x nextest's 100 ms default (22 Aug 2026). At 100 ms a LEAK verdict on
+# a loaded dev box is measuring the scheduler rather than a held pipe -
+# the measurement, and what this deliberately gives up, are with the
+# concurrent-daemon cap note at the bottom of this file.
+leak-timeout = "1s"
+
+# The daemon suite spawns real daemons and binds ports; it must run one
+# test at a time (CLAUDE.md invariant 4). Under libtest that was
+# --test-threads=1; under nextest it is test-group serialization here,
+# so a bare `cargo nextest run --test daemon` is safe even without -j1.
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(daemon)'
+test-group = 'daemon-serial'
+
+[test-groups.daemon-serial]
+max-threads = 1
+
+# The §129 3c fault contract spawns a real `nzbfast get` per leg, binds
+# mock listeners, and MEASURES the wall each leg takes. Legs racing each
+# other for the same cores is a wall regression the code did not cause -
+# and the answer to that must never be "widen the bound" (memory
+# nzbfast-daemon-test-flake). Serialize instead, the same way the daemon
+# suite is: the whole binary is ~13 s single-threaded.
+# Matched by TEST NAME, not by binary: fault_contract stopped being its
+# own executable when the light integration targets were merged into one
+# (17 Aug 2026), and it is now the `fault_contract` module inside
+# `integration`. Note this filter CANNOT be left naming a binary that no
+# longer exists - unlike an `-E` expression on the command line, where an
+# unmatched `binary()` is tolerated, an unmatched `binary()` in a config
+# override is a hard ERROR that refuses the whole run.
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(integration) and test(/^fault_contract::/)'
+test-group = 'fault-contract-serial'
+
+[test-groups.fault-contract-serial]
+max-threads = 1
+
+[profile.ci]
+retries = 1
+fail-fast = false
+# ---------------------------------------------------------------------
+# THE REPO-WIDE WEDGE CEILING (25 Aug 2026). Ten minutes, per test,
+# everywhere this profile reaches - which is every CI test job and the
+# pre-push sweep CLAUDE.md documents.
+#
+# WHY IT EXISTS. 58b793077 put a ceiling on `extract::` in the nzbkit
+# lib and DELIBERATELY went no wider, because its instrument needs
+# `retries = 0` and that trade cannot be made repo-wide: the header of
+# this file is built on retries CAPTURING flakes. Measured on
+# origin/main the day after, this file had exactly TWO `terminate-after`
+# in it - the qemu profile and that one - so the four `linux-tests`
+# shards, the six `windows-unit` shards and every nightly heavy suite
+# had NO per-test ceiling at all. A wedge in any of them ran on to the
+# job's own `timeout-minutes`, which GitHub renders as `cancelled` with
+# no test named: the exact confusion the qemu block below was written to
+# end, still live everywhere else.
+#
+# AND IT COMES WITH THE OTHER HALF, which is what makes it more than a
+# kill switch. `[profile.ci.junit]` below has been writing `junit.xml`
+# all along and, measured the same day, `grep -rn junit
+# .github/workflows/ tools/` returned ZERO hits - nothing had ever read
+# it. `tools/wedge-gate.py` reads it now, in every job that runs this
+# profile, and reddens a run whose FIRST attempt timed out even when a
+# later attempt passed. So `retries = 1` STAYS everywhere: the flake
+# capture this file is built on is kept, and the hidden-wedge class is
+# still refused. Neither half works alone - with no ceiling nothing can
+# ever time out, so the junit arm would be a green line about a question
+# nothing asked.
+#
+# TEN MINUTES, MEASURED RATHER THAN GUESSED. Slowest legitimate test in
+# each place this profile runs, 25 Aug 2026:
+#
+#   linux-tests shard, real runner       51.96 s
+#   windows-unit shard, real runner      45.40 s
+#   nightly long-suites, real runner    117.40 s  (conn_tuner's
+#                                                  ladder_finds_the_knee)
+#   this 18-core mac dev box, full
+#     `--profile ci` sweep, load 13-16  141.28 s  (index::schema::tests::
+#                                                  a_reopen_reclaims_a_wal)
+#
+# 600 s is 4.2x the worst of those. The binding number is the LOCAL one,
+# not CI's, and that is the point worth keeping: `--profile ci` is what
+# CLAUDE.md's pre-push oracle line runs, on a shared box with eight
+# other sessions on it. Those same two WAL tests take 4.1 s when run
+# alone on this box - a 34x contention swing - so the number has to be
+# read off a real contended sweep and never off a solo timing.
+#
+# THE OTHER SIDE OF THE NUMBER is the job's own cap, because a ceiling
+# above it buys nothing: GitHub renders a job timeout as `cancelled`
+# with no test named. Measured the same day, `linux-tests` shards
+# complete in 2.5 to 3.8 minutes and `windows-unit` in 2.4 to 3.5,
+# against a `timeout-minutes: 30`. A wedged shard is therefore ~4 + 10 =
+# 14 minutes and still reports a NAMED timeout with 16 minutes to
+# spare. nightly's `long-suites` has 90.
+#
+# ONE NUMBER, NOT A FAMILY TABLE, AND THAT IS THE MEASUREMENT TALKING.
+# The heavy suites were expected to need their own raises and do not:
+# the slowest test across daemon, e2e, conn_tuner, index_size_cap,
+# http_wedge and queue_soak is that 117 s, well inside this ceiling.
+# Confirmed from BOTH ends the same day - all six were also run here,
+# and the per-suite worst agrees with the runner almost exactly
+# (conn_tuner 116.5 s locally against 117.4 s on CI; daemon 39.3,
+# index_size_cap 63.0, queue_soak 59.0, http_wedge 30.2, e2e 27.5). The
+# ONLY exception in the workspace is `leak_soak`, and it is the one test
+# whose wall is a configured BUDGET rather than work - its override near
+# the foot of this file says so.
+#
+# HOW A NEW SUITE GETS COVERED, which is the question a list of families
+# cannot answer: automatically. This is a PROFILE SCALAR, so every test
+# in the workspace is under it the day it is written, including a
+# binary added tomorrow. Overrides only ever RAISE it, and each one is a
+# named excuse with its own measurement. A list of COVERED families is a
+# gate that cannot see the next family; a default cover with named
+# excuses cannot have that shape of hole.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO.
+#   * It does not touch `[profile.default]`. A bare `cargo nextest run`
+#     on a contended dev box is untouched, which is the rule at the top
+#     of this file, and a local wedge is visible to the person watching
+#     the SLOW lines anyway. The invisible case is CI, and CI runs this
+#     profile.
+#   * It does not reach the one-process jobs. `cargo test --lib/--bin`
+#     and `unit-one-process` do not run nextest at all, so no config in
+#     this file bounds them.
+#   * It does not turn a slow test red. If a test ever legitimately
+#     needs more than ten minutes, the answer is its OWN override with
+#     its own measured number, or a cheaper test - NEVER raising this
+#     one, which would take the cover off all ~6,100 of them at once.
+#
+# IF YOU CHANGE THIS NUMBER, move `tools/wedge-gate.py`'s measurement
+# note with it in the same commit, and re-read the job caps above: the
+# two halves of the argument are the slowest legitimate test and the
+# job's own budget, and neither is a constant of the repo.
+slow-timeout = { period = "60s", terminate-after = 10 }
+# Same leak window as `default` above, same reason. Spelled out rather
+# than inherited because every other setting in this profile is, and a
+# profile that lists four of its five knobs invites the reader to think
+# the fifth is nextest's default.
+leak-timeout = "1s"
+
+# JUnit output so CI can attach/inspect structured results: every test
+# has a name in the report, including retried ones.
+[profile.ci.junit]
+path = "junit.xml"
+
+# The nightly armv7-cross job (nightly.yml). Same contract as `ci`, plus
+# a PER-TEST ceiling. On 15 Aug that job hit its own `timeout-minutes`
+# mid-suite; GitHub reports a timeout kill as `cancelled`, with no test
+# named and no summary printed, which is exactly why it read as somebody
+# cancelling it by hand. terminate-after turns that failure mode into a
+# named TIMEOUT on the test that ate the budget, and `period` makes
+# nextest print a SLOW line every minute so a long run is visibly
+# progressing rather than indistinguishable from a hang.
+#
+# 15 minutes is deliberately far above anything legitimate: under qemu
+# the slowest test measured 1249s UNOPTIMIZED, and that same test is 23x
+# cheaper at the opt-level the job now builds with. A test that reaches
+# this ceiling is wedged, not slow.
+[profile.qemu]
+retries = 1
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 15 }
+
+# ---------------------------------------------------------------------
+# THE CHASE WEDGE CEILING (25 Aug 2026). The one and only exception to
+# the "terminate-after stays OFF for default/ci" rule at the top of this
+# file, and it does not weaken that rule. That rule is about SLOWNESS on
+# a contended box; this is about a test that is not running at all.
+#
+# WHY IT EXISTS. On 23 Aug 2026 a real deadlock wedged
+# `extract::zip::tests::zip_nested_budget_demote_materializes_byte_exact`
+# for 4,666 seconds. nextest retried it, the retry passed in 0.028 s,
+# and the run was reported as "6101 passed (1 flaky)", exit 0. A
+# 78-minute deadlock came out of CI as a GREEN run, and it was found by
+# a person noticing rather than by any job. That is the whole argument:
+# every other verdict in this file is one nextest will show you, and
+# this class is the one it will not.
+# (`FrontierBuffer::gate_limit_unlocked` releases the state lock to read
+# the §94 B verify gate; an abort landing inside that window notified
+# `arrived` before the reader was on the condvar, so the reader parked
+# on a buffer nothing would ever notify again and the chase worker slept
+# for the life of the process. Fixed in b4e6c9ef4, pinned by
+# frontier.rs's
+# `an_abort_or_trim_inside_the_gate_window_ends_both_blocking_reads`;
+# `git show b4e6c9ef4` carries the full write-up, and the class is
+# gated by tools/wait-recheck-gate.py.)
+#
+# BOTH KEYS ARE LOAD-BEARING AND `retries = 0` IS THE HALF NOBODY WOULD
+# THINK TO ADD. A ceiling ALONE does not fix this. nextest treats a
+# TIMEOUT as an ordinary failure and RETRIES it, so a wedge that does
+# not reproduce on the second attempt is reported FLAKY at exit 0 - the
+# same green run this exists to abolish, reached faster. Measured 25 Aug
+# 2026 on a throwaway crate, one test that parks forever on its first
+# attempt and passes on its second (the shape the real one had):
+#
+#   terminate-after only, retries = 1   "3 passed (2 flaky)"   exit 0
+#   terminate-after plus retries = 0    "1 timed out", TIMEOUT
+#                                       naming the test        exit 100
+#
+# So do NOT delete `retries = 0` as redundant with "one retry
+# everywhere" at the top of this file. Here the retry IS the defect.
+# There is no way to keep retries for ordinary failures and refuse them
+# for timeouts - nextest has no per-verdict retry policy - so the two
+# must cover the same set, and the set is chosen below to make that
+# cheap.
+#
+# WHICH TESTS, and why the whole module rather than a list. Everything
+# that can exhibit this hazard is `FrontierBuffer` and the chase worker,
+# and both live entirely under `crates/nzbkit/src/extract/`: the only
+# mention of `FrontierBuffer` anywhere else in the workspace is one
+# comment in crates/nzbfast/src/repair.rs. So the scope is that module,
+# all 349 of its tests across 17 submodules, and NOT a list of the ones
+# that happen to spawn a chase worker today - a list is a gate that
+# cannot see the 350th test, which is exactly how the original wedge
+# arrived in a zip test rather than a chase one. `binary(nzbkit)` is in
+# the filter for the reason the fault_contract override above gives: an
+# unmatched `binary()` in a config override is a hard ERROR that refuses
+# the whole run, so that half of the filter cannot rot in silence.
+#
+# THE CEILING, measured rather than guessed. Slowest legitimate test in
+# scope is `extract::chase::chase_shape_tests::
+# a_chase_survives_trimming_the_volume_its_deferred_walk_resumes_in`,
+# on this 18-core mac dev box, NZBFAST_NO_ENRICH=1:
+#
+#   load avg  6    14.4 s   (ordinary shared-checkout background)
+#   load avg 19    22.2 s   (20 spinners added)
+#   load avg 75    67.2 / 66.9 / 67.5 s
+#                           (36 spinners plus THREE concurrent copies of
+#                            this same 349-test sweep, 3 reps)
+#
+# 300 s is 4.4x the worst of those, and that worst is a box nobody
+# should ever produce: reaching the ceiling legitimately would need
+# roughly 21x the contention of a normal run, at which point the sweep
+# around it is taking hours. It is also comfortably inside the 30-minute
+# `timeout-minutes` on linux-tests and windows-unit, which is the other
+# side of the number - a ceiling above the job's own cap buys nothing,
+# because GitHub renders a job timeout as `cancelled` with no test
+# named, which is the confusion the qemu profile above was written to
+# end.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO.
+#   * It does not touch anything outside the nzbkit lib. The extraction
+#     path is also reached through nzbfast's e2e and integration suites,
+#     which spawn daemons and mocks and whose legitimate walls vary by
+#     orders of magnitude; picking a ceiling for those is a different
+#     measurement and a different judgement, not this one.
+#     THAT MEASUREMENT WAS TAKEN on 25 Aug 2026 and the answer is at the
+#     top of `[profile.ci]`: a 600 s repo-wide ceiling, plus
+#     `tools/wedge-gate.py` reading `junit.xml` so the retries do not
+#     have to go. The judgement it reached is that those walls do NOT in
+#     fact vary by orders of magnitude - the slowest legitimate test
+#     anywhere in the workspace bar the soak is 141 s - so one number
+#     covers all of them. This block still applies and is still tighter.
+#   * It does not reach the one-process jobs. `cargo test --lib/--bin`
+#     and `unit-one-process` do not run nextest at all, so no config in
+#     this file bounds them.
+#   * It cannot see a wedge that is slower than the whole sweep is
+#     allowed to be. If a future extract test legitimately needs more
+#     than 300 s, the answer is to make that test cheaper or give it its
+#     own override, NEVER to raise this number for all 349.
+#
+# THE COST OF `retries = 0`, and it was measured before it was accepted:
+# these tests do not flake. Zero flaky verdicts across the five sweeps
+# in the table above and five further sweeps at load average 18 to 43 -
+# ten full 349-test sweeps, 3,490 test executions, and not one retry
+# ever needed. A genuinely flaky extract test now
+# reds the run on its first failure instead of being reported FLAKY -
+# which is the trade being made on purpose, because in THIS module a
+# test that passes on the second attempt is the exact signature of the
+# defect above. `fail-fast = false` means it still cannot mask the rest
+# of the suite.
+#
+# HOW TO RE-VERIFY IT BITES, because a configuration that is not
+# checked is one that quietly stops applying - and this one was
+# verified on the REAL deadlock rather than on reasoning, 25 Aug 2026.
+#
+# DO NOT reach for the historical stress harness first. Reverting the
+# two `if relocked` blocks in
+# `crates/nzbkit/src/extract/frontier.rs::gate_limit_unlocked` and
+# running the zip test named above 30 concurrent loops x 40 iterations,
+# the shape that found the bug on 23 Aug, produced 1,200 completed
+# iterations and ZERO hangs on this box at load 12 to 30. That harness
+# was always probabilistic and its odds are not a constant of the
+# repo. What DOES wedge on demand, in the same code and on the same
+# reverted line, is the existing pin's own scaffolding with its exit
+# taken away: build the abort-inside-the-gate-window case exactly as
+# `read_in_the_gate_window` does, then JOIN the reader thread instead
+# of bounding it with `recv_timeout`. The reader parks on the condvar
+# and the join never returns, which is the production deadlock. Make it
+# pass on its second attempt (an attempt counter in a file) and you
+# have the original's full observable shape. Measured, one test, that
+# construction, fix reverted:
+#
+#   this override                    TIMEOUT [300.012s] naming the
+#                                    test, "1 timed out",  exit 100
+#   the same ceiling, retries = 1    TRY 1 TMT then TRY 2 PASS,
+#                                    "1 passed (1 flaky)", exit 0
+#   this file as it stood before     no verdict at all: still SLOW
+#                                    past 300 s, and it would have gone
+#                                    on to the job's own timeout-minutes
+#                                    and been rendered `cancelled`
+#
+# The middle row is the whole reason `retries = 0` is here. And a
+# normal run is unaffected: the full 349-test sweep under this override
+# passes with no test anywhere near the ceiling.
+#
+# AND IT STAYS, ASKED AND ANSWERED 25 Aug 2026. The repo-wide ceiling
+# plus `tools/wedge-gate.py` now gives the same guarantee everywhere
+# WITHOUT the retries trade, so this line looks redundant. It is not,
+# for two reasons that do not overlap. First, the junit half only exists
+# under `--profile ci`: a bare `cargo nextest run` writes no junit.xml
+# at all, and this override is on `default`, so `retries = 0` is the
+# only thing that makes a wedge red on a laptop. Second, it is the one
+# module where the defect has actually been seen, so it gets the two
+# instruments rather than one - and the cost was measured and is zero
+# (ten full sweeps, 3,490 test executions, not one retry ever needed).
+# Deleting it would trade a self-contained config guarantee for one that
+# depends on every job's wiring staying correct.
+#
+# TWO WAYS THIS BLOCK CAN GO INERT, stated rather than left to be
+# found. A typo inside the `slow-timeout` table (`terminate-aftr`) is a
+# WARNING and not an error, so the ceiling silently vanishes; and a
+# `test()` predicate that stops matching is not an error either, unlike
+# the `binary()` beside it. Verified both, 25 Aug 2026. If `extract::`
+# is ever renamed or moved, this filter has to move with it in the same
+# commit.
+#
+# Placement is free: every other override in this file filters on
+# `package(nzbfast)`, so none of them can interact with this one. And
+# an override declared on `default` DOES apply under `--profile ci`,
+# which is what CI runs - verified 25 Aug 2026 rather than assumed,
+# since every scalar in `[profile.ci]` above is spelled out rather than
+# inherited.
+[[profile.default.overrides]]
+filter = 'package(nzbkit) and binary(nzbkit) and test(/^extract::/)'
+slow-timeout = { period = "60s", terminate-after = 5 }
+retries = 0
+
+# ---------------------------------------------------------------------
+# The nightly heavy suites, migrated off bare `cargo test` on 17 Aug
+# 2026. Until then nightly.yml and its Windows twin were the LAST places
+# in CI running libtest directly - and they run the flakiest suites in
+# the repo, so a flake there arrived as exactly the anonymous tally this
+# file's header says nextest exists to abolish.
+#
+# Their `-- --test-threads=1` moves HERE, for the reason the daemon
+# group above already gives: serialization that lives in config cannot
+# be forgotten at a call site, and a bare `cargo nextest run --test
+# http_wedge` is then safe on a laptop too. One group per binary rather
+# than one shared group, because "one test at a time WITHIN this
+# binary" is precisely what --test-threads=1 meant; these suites each
+# ran in their own workflow step, so they never overlapped each other.
+#
+# conn_tuner is deliberately NOT here: it is the one elapsed-time suite
+# that never carried --test-threads=1, so giving it a group now would
+# change its behaviour rather than preserve it.
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(e2e)'
+test-group = 'e2e-serial'
+
+[test-groups.e2e-serial]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(index_size_cap)'
+test-group = 'index-size-cap-serial'
+
+[test-groups.index-size-cap-serial]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(http_wedge)'
+test-group = 'http-wedge-serial'
+
+[test-groups.http-wedge-serial]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(queue_soak)'
+test-group = 'queue-soak-serial'
+
+[test-groups.queue-soak-serial]
+max-threads = 1
+
+# leak_soak is ONE test that runs for 150 minutes (NZBFAST_SOAK_MINUTES)
+# inside a job capped at 240. Every profile in this file sets
+# `retries = 1`, and a retry here would ask for 300 minutes of soak in a
+# 240-minute job - so a genuine soak FAILURE would be killed by the
+# timeout instead of reported, and GitHub renders a timeout kill with no
+# test named. That is the "cancelled is not failed" confusion, bought
+# for nothing: a soak does not flake in a way a second 150-minute run
+# would settle. Config rather than a CLI flag so a local run cannot
+# forget it.
+#
+# AND IT NEEDS ITS OWN CEILING, added 25 Aug 2026 with the repo-wide one
+# at the top of `[profile.ci]`, because of a nextest mechanic that is
+# invisible until it bites: settings resolve ONE AT A TIME, so an
+# override that names only `retries` INHERITS `slow-timeout` from the
+# profile scalar. Measured on cargo-nextest 0.9.143 with a two-test
+# probe. This block named only `retries` until today, so the moment
+# `[profile.ci]` grew a ten-minute ceiling this 150-minute soak would
+# have been killed at it, every night, and the failure would have read
+# as the soak finding something.
+#
+# 200 MINUTES, and the margin is founded differently from every other
+# number in this file. A soak's wall is not work, it is a BUDGET -
+# `NZBFAST_SOAK_MINUTES` - so a slower runner does fewer cycles in the
+# same 150 minutes rather than taking longer. It does not scale with
+# contention, so the only slack needed is the test's own setup and
+# teardown. Measured on the 25 Aug 2026 nightly: the test itself
+# reported 9,078.4 s (151.3 min) for a 150-minute budget, inside a job
+# that took 168.1 min of its `timeout-minutes: 240` - 10.5 of those
+# minutes being the release build in front of it. 200 min is 1.32x the
+# measured soak and still leaves ~40 minutes of job budget for a build
+# on a cold cache.
+#
+# SO THE TWO NUMBERS MOVE TOGETHER. A manual dispatch asking for a soak
+# longer than about 195 minutes needs BOTH this ceiling and that job's
+# `timeout-minutes` raised in the same commit. The workflow's own input
+# description says a dispatch is for asking for a SHORT one, which is
+# why 200 is safe today; it is not safe by construction.
+[[profile.default.overrides]]
+filter = 'package(nzbfast) and binary(leak_soak)'
+slow-timeout = { period = "60s", terminate-after = 200 }
+retries = 0
+
+# ---------------------------------------------------------------------
+# Concurrent-daemon cap (18 Aug 2026).
+#
+# These 21 integration binaries each spawn a REAL nzbfast daemon that
+# binds a port and initialises an index. None of them was in a group, so
+# nextest ran them at full parallelism: sampling `ps` once a second
+# during a six-suite, 32-test run measured a PEAK OF 33 CONCURRENT
+# DAEMONS on a 32-core box.
+#
+# That is what turned `dashboard_rev history_paging_and_search` - 1.695 s
+# on a quiet machine - into 1,409 s in a run contended by another
+# session's build. `serve()` waits 300x100ms over three attempts for the
+# daemon's banner, which is ample at one daemon and hopeless at thirty
+# plus somebody else's compile. The same run's two failures were in
+# `cors`, also on this list.
+#
+# max-threads = 6 rather than 1: serialising all 21 would cost real wall
+# time for no reason, whereas a cap only bites at the point the machine
+# is oversubscribed. Measured, 3 reps each, quiet box, six of these
+# suites (32 tests):
+#
+#   unbounded        7.950 / 7.955 / 7.986 s   33 daemons   leaky 3, 1, 4
+#   max-threads = 6  8.118 / 7.913 / 8.027 s    7 daemons   leaky 0, 0, 0
+#
+# No wall cost, 5x fewer daemons, and no leaks IN THESE SUITES - the
+# unbounded baseline leaked 1-4 of them every single run, nextest's word
+# for a test whose process outlived it, i.e. daemons that were not being
+# reaped. That is a real defect the parallelism was hiding.
+#
+# SCOPE, measured on the full workspace afterwards and worth stating so
+# nobody reads more into the line above: the whole sweep still reports
+# ~5 leaky, and NONE of them is in these 21 binaries. They are lib/bin
+# unit tests (check_tests, serve::tests_index, identity::tests,
+# daemon_tests, lane_proof_tests) with a different cause that this cap
+# neither creates nor fixes. Their own investigation is still owed.
+#
+# CORRECTION (22 Aug 2026): "no leaks in these suites" and the reaping
+# inference above are NOT reliably true, and the leaky column cannot
+# mean what it was read to mean. That morning a fully green sweep
+# (5883/5883) reported `LEAK nzbfast::cors
+# the_sab_api_answers_cors_the_way_sabnzbd_does`, and sibling sweeps the
+# same hour reported 1, 3, 5 and 6 leaky with a shifting mix. Re-measured
+# at load average 20-24 (18 cores, three other sessions running their
+# own sweeps at the same time - not a quiet box, not a deliberately
+# loaded one): `binary(cors)` x15, the whole 21-binary group x3 (492
+# tests) and the full CI sweep x4 (23,544 tests) reported ZERO leaky.
+# The cors leak does not reproduce on demand, and nothing is left
+# behind: every one of the 21 launchers kills AND waits its daemon on
+# Drop, and `ps` after a run shows no daemon or scratch dir from it.
+#
+# Why the verdict cannot be a daemon in the first place: nextest's leak
+# detection only sees a child that INHERITS the test's stdout/stderr -
+# it waits `leak-timeout` (100 ms) after the test exits for those two
+# pipes to reach EOF. All 21 launchers point the daemon's stdio at a
+# logfile (`.stdout(Stdio::from(file))`), so a daemon from these suites,
+# reaped or not, is invisible to it. A LEAK line here means nextest's
+# reader had not observed EOF 100 ms after the exit, which on a box
+# with 30+ concurrent daemon launches (or three parallel sweeps) is
+# scheduling jitter, not a held pipe. The same verdict lands on
+# check_tests, identity::tests, lane_proof_tests and tests_index, none
+# of which spawns a process at all. So the 3/1/4 -> 0/0/0 column above
+# measured the launch storm starving nextest, which the cap genuinely
+# reduces (and is still a reason to keep it); it did not measure
+# reaping. Reaping is ensured by the launchers, not by this cap.
+#
+# Treat a LEAK line from any of these 21 under load as noise unless
+# `lsof -iTCP -sTCP:LISTEN` or `ps` shows an orphaned test daemon; that
+# would be a real launcher bug and worth a root cause, this was not.
+#
+# NOT measured: the cure under genuine contention, which cannot be
+# reproduced on demand without disrupting other sessions. Re-measure on a
+# busy box before treating this as closed. On CI runners, which have far
+# fewer cores, the cap may already be effectively met and buy little -
+# it should not cost anything either.
+#
+# LEAK-TIMEOUT RAISED to 1 s (22 Aug 2026), set at the top of this file
+# on both `default` and `ci`. This is the change the correction above
+# implies and stopped short of making: if a LEAK line means "nextest's
+# reader had not observed EOF 100 ms after the test exited", then the
+# knob that decides it is the window, not the tests.
+#
+# What makes the window the right lever is that the tests it fires on
+# cannot be holding a pipe. Across eleven full sweeps the leaky set
+# never repeated once - eleven different tests, among them
+# `xrel::tests::malformed_bodies_are_no_results_not_a_panic`, which
+# calls `parse_releases` on seven string literals, and
+# `serve::indexers::redaction_case_tests::a_mixed_case_scheme_is_redacted_like_any_other`,
+# which calls `redact_url_creds` on two. Microseconds of pure
+# computation, no I/O, no spawn, nothing to leak. A verdict whose
+# membership is random and whose members cannot exhibit the defect is
+# not naming one.
+#
+# Measured, NZBFAST_NO_ENRICH=1, on this shared 18-core box with three
+# other sessions running their own sweeps, load average 21 to 91 and
+# nothing added on purpose. Interleaved over the two unit binaries the
+# leaks land in (1,573 tests, 3 reps per arm, arms alternating so load
+# drift hits all three equally):
+#
+#   100 ms (nextest default)   leaky 1, 1, 1
+#   1 s                        leaky 0, 0, 0
+#   10 s                       leaky 0, 0, 0
+#
+# On the full CI sweep (5,901 tests) the win is real but partial: 5
+# leaky over 4 runs at 100 ms (mean load-before 35) against 6 over 7
+# runs at 1 s (mean load-before 48). The survivors report elapsed
+# 1.017 s to 2.538 s, i.e. nextest waited the whole new second and
+# still saw no EOF, so a multi-second stall tail exists under
+# full-sweep load that this does not reach. Do not answer that by
+# raising the value, for the reason below.
+#
+# And that tail is NOT simply load: two sweeps after merging origin/main
+# reported 2 leaky each at load-before 10.25 and 21.65, elapsed 1.012 s
+# to 1.802 s, on a box quieter than any run in the table above. What
+# separates them from the clean subset is that the full sweep launches
+# real daemons (the group capped below) while the subset does not, which
+# is the same launch storm the 18 Aug measurement caught. The window
+# covers the sub-second jitter class completely and does not reach that
+# one; the cap below is the lever for it, not this.
+#
+# WHY NOT LONGER, which is the whole reason the value is 1 s and not
+# the 10 s that also scored zero above. A throwaway test spawning
+# `sleep 5` on INHERITED stdio - the only shape the detector can see,
+# per the correction above - reports:
+#
+#   100 ms   LEAK [0.213s]
+#   1 s      LEAK [1.015s]
+#   10 s     PASS [5.022s]
+#
+# At 10 s a five-second orphan is not merely missed, it is reported
+# green. The window has to stay shorter than the lifetime of an orphan
+# worth catching, so this value is bounded from BOTH sides and is not
+# free to grow. What 1 s does give up is the 100 ms to 1 s band: a
+# child that holds the pipes for, say, 300 ms and then exits on its own
+# is no longer reported. That is exactly the band the jitter lives in,
+# and a self-reaping 300 ms child is not the defect class this gate is
+# kept for, which is a daemon that outlives the run.
+#
+# The cost is paid only on a test that IS leaky, at most once each, so
+# a clean sweep pays nothing.
+#
+# CORRECTION (23 Aug 2026, TODO 240 closed NO-GO). Two claims above are
+# false, and the measurement that refutes them is in that section.
+#
+# THE CAP IS NOT THE LEVER FOR THE REMAINING LEAKS. 28 full CI sweeps,
+# arms rotated per rep so load drift hits all of them, run through
+# `--config-file` variants so the tree was never edited between arms.
+# Shared 18-core box, NZBFAST_NO_ENRICH=1, load-before 7.7 to 79:
+#
+#   cap 6   10 legs   14 leaks   1.40 per sweep
+#   cap 3    4 legs    4 leaks   1.00
+#   cap 2    4 legs    4 leaks   1.00
+#   cap 1   10 legs    8 leaks   0.80
+#
+# On the quiet subset (load-before under 25), where the walls are stable
+# to a second or two, cap 1 costs +45% wall for 0.29 fewer leaks a
+# sweep: 1.29/leg and 127.2 s at cap 6 against 1.00/leg and 184.8 s at
+# cap 1. At cap 1 only one daemon in the group can launch at a time, so
+# the launch storm is gone BY CONSTRUCTION, and the count barely moves.
+# Widening the group instead does not move it either: the four
+# daemon-spawning binaries that are not in the filter below
+# (log_daemon, remote_compat, stream_repair, queue_handoff) added to the
+# group scored 4 leaks in 3 legs, against 4 in 3 as-is.
+#
+# AND THE "MULTI-SECOND TAIL" ABOVE IS THIS COLUMN BEING MISREAD. The
+# elapsed in a LEAK line is the test's SLOT time, its own body plus the
+# leak wait, and the wait can never exceed leak-timeout - so every
+# number above 1 s in that column is body time, not stall. Measured
+# against each long-bracket leaky test run alone: 6.130 s against
+# 5.087 s for provider_demote_rig's oldmiss case (residue 1.04 s, the
+# window on the nose), 3.778 s against 2.636 s for
+# fault_contract::contract_brownout (1.14 s), 42.459 s against 38.255 s
+# for the chase cap-trim case. The `sleep 5` calibration above already
+# said as much - PASS [5.022s] at a 10 s window for a test whose body is
+# instant is the bracket counting the wait - and it was read as the
+# window alone.
+#
+# So `max-threads = 6` below stays. Do not lower it again to chase this
+# column, and do not read a LEAK line as a held pipe without `ps` or
+# `lsof -iTCP -sTCP:LISTEN` showing an orphan, exactly as above.
+#
+# The seven suites that already have their own serial groups above are
+# deliberately absent: they are stricter than this cap, not looser.
+[[profile.default.overrides]]
+# Matched by MODULE NAME inside `integration`, not by binary: these 21
+# stopped being their own executables when the light targets were merged
+# (17 Aug 2026). Same trap as the fault_contract filter above - an
+# unmatched `binary()` in a config override is a hard ERROR that refuses
+# the whole run, so this list cannot be left naming the old executables.
+# `wall` is `wall_tests` here: the module is renamed via `#[path]` to
+# keep it clear of the crate-root `wall` shim.
+# The measurement commands quoted in the block above still read
+# `binary(cors)` and "the 21-binary group". They were run when those
+# were executables and the numbers stand; to re-run one now, ask for
+# `binary(integration) and test(/^cors::/)` instead.
+# The list is still those 21 and DELIBERATELY does not name the five
+# modules folded in on 23 Aug 2026 (TODO 235). Three of them -
+# `queue_handoff`, `remote_compat`, `stream_repair` - do spawn real
+# daemons, but they were added to main after this cap landed and have
+# never been inside it, so adding them here would be a behaviour change
+# smuggled in on a link-time refactor whose whole claim is that nothing
+# changed. Two of the three also MEASURE elapsed wall (queue_handoff
+# bounds a hand-over against the mock's own sleep, stream_repair paces a
+# range response), which is exactly the class that a change in how many
+# neighbours it runs beside would perturb. Worth measuring on its own
+# terms; not worth folding into this one.
+#
+# NARROWED (24 Aug 2026, TODO 288). The queue_handoff half of that last
+# sentence is no longer true of the assertion it was written about, and
+# the cap is not the lever for it either way. Both of that file's gap
+# assertions took BOTH their instants from a 5 ms polling loop's own
+# `Instant::now()`, so what a neighbour perturbed was the OBSERVER, not
+# the daemon - it cost a 1-in-7 red on the mac dev box that day with the
+# daemon behaving correctly. 74aacca3f moved them onto the mock's own
+# arrival stamps (`nzbkit::mock::BodyLog`), and the 2000 ms lower bound
+# is now floored BY CONSTRUCTION: the mock sleeps `slow_ttfb` downstream
+# of the stamp in the same task, so no amount of scheduling - of the
+# observer, of the daemon, or of the mock itself - can produce a gap
+# below it. Measured over 32 runs at load average 82 to 128, with an
+# observer stall injected from 0 to 3000 ms: 2.048 to 2.280 s, unmoved
+# by every rung. Adding this binary to the group would not make that
+# assertion sounder, and leaving it out no longer risks it.
+#
+# What is NOT settled: the sibling assertion's UPPER bound
+# (`gap < DEAD_AIR_MS / 2`, 2500 ms) can still be inflated by a starved
+# DAEMON, and stream_repair's range pacing and remote_compat were not
+# measured at all. So the open question the paragraph above raises is
+# narrower than it was, not answered.
+filter = '''
+package(nzbfast) and binary(integration) and test(/^(cors|dashboard_load|dashboard_rev|firstrun_key|groups_api|interests|library|newznab|nzblnk|oracle|postproc_lane|pull_search|settings_catalogue|throttle|tls|wall_tests|watch_dedupe|watchlist_instant|watchlist_packs|watchlist_regressions|webasset)::/)
+'''
+test-group = 'daemon-spawners'
+
+[test-groups.daemon-spawners]
+max-threads = 6

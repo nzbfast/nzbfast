@@ -450,6 +450,10 @@ fn announce(d: &Arc<Daemon>, action: FinishAction, what: &str, detail: &str) {
     let sentence = format!("queue-finished action {} {what}: {detail}", action.as_str());
     info!(target: "finish", "{sentence}");
     d.note_event("finish", sentence);
+    // event-arm-gate: a STATE, not a moment - the countdown banner and
+    // the header's finChip both draw it from the queue payload's
+    // `finish_action`, live and with a button that stops it. §129 1b
+    // finding (b) is the rule.
     d.life_emit(
         "queue.finished_action",
         json!({"action": action.as_str(), "phase": what, "detail": detail}),

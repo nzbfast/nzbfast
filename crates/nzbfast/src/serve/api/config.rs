@@ -259,6 +259,18 @@ fn m_get_config(
                             // parts the editor shows, and the password is
                             // masked like every other secret here.
                             "bind_ip": s.bind_ip.clone().unwrap_or_default(),
+                            // §291. Always echoed as one of the three
+                            // names, never absent: the editor round-trips
+                            // the whole form, and a blank <select> would
+                            // save "auto" over whatever was stored. It
+                            // also shows a hand-edited typo for what it
+                            // is, since the loader reads an unknown value
+                            // as auto and this reports what took effect.
+                            "address_family": s.address_family.as_str(),
+                            // §291. Blank when unset, which is what the
+                            // editor's empty box means and what the save
+                            // path reads as "check the dialled host".
+                            "tls_hostname": s.tls_hostname.clone().unwrap_or_default(),
                             "socks5": super::super::servers::socks5_addr(s.socks5.as_deref()),
                             "socks5_user": super::super::servers::socks5_creds(s.socks5.as_deref()).0,
                             "has_socks5_pass":
@@ -1095,7 +1107,6 @@ mod tests {
             host_hdr: "",
             base: "",
             ua_hdr: "",
-            key_q: "",
             bootstrap_apikey: false,
             via_add_only: false,
         };

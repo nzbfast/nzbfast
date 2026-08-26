@@ -303,6 +303,102 @@ pub(crate) fn collect_obfuscated_sevenz_splits(dir: &std::path::Path) -> Result<
         .collect())
 }
 
+/// Every file in `dir` that belongs to a numbered byte split OF A
+/// CONTAINER, asked as SETS - the membership a cleanup sweep needs and
+/// cannot derive one file at a time.
+///
+/// `smart::is_packed_archive` decides what a media-only sweep KEEPS, and
+/// every question it asks is per-path: a name grammar, or a head read.
+/// Part 1 of one of these sets answers both - it carries the container's
+/// own signature - and parts 2..=n answer neither, because they are raw
+/// continuation bytes under a name that says nothing. So the sweep kept
+/// the head and deleted the payload behind it, leaving a stub that still
+/// looks like an archive and a job that still reported Completed. TODO
+/// 262's "Left open" paragraph is this, and it predates §262: the join
+/// is not involved, only what a sweep is free to delete.
+///
+/// Exactly the move `zip_part_set` already makes for a bare-numeric
+/// split zip, whose part 1 carries the magic and whose rest do not, and
+/// it reuses the SAME grammar the extractor routes these by rather than
+/// a second opinion about them: gapless from 1, one file per index, one
+/// numbering width, uniform part sizes, a head on part 1 and on none of
+/// the others, a base no other arm owns. Deliberately not a deeper
+/// sniff - there is nothing in parts 2..=n to sniff, which is the whole
+/// defect, and a sweep should not be opening more files than it already
+/// does.
+///
+/// Membership is asked with [`SplitScan::Container`] rather than by
+/// whether anything would ever JOIN the set, so rule 6 (never an
+/// overwrite) still applies here: a set whose joined output is already
+/// sitting in the directory is not reported, and its parts are spent
+/// beside a payload that exists. Two shapes ride along that the sweep
+/// would otherwise remove, and both are accepted knowingly: a byte split
+/// whose part 1 opens with PAR2 packet magic (recovery data is never
+/// posted this way - every real recovery volume carries the magic, so a
+/// set of them refuses on parts 2..=n), and a set the extractor has
+/// already consumed. Keeping recovery data is a tidiness cost; the other
+/// way costs the download.
+pub(crate) fn container_part_set(dir: &std::path::Path) -> std::collections::HashSet<PathBuf> {
+    collect_container_split_sets(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|s| s.parts)
+        .collect()
+}
+
+/// [`container_part_set`] for the PLAIN reading of the same shape - a
+/// numbered byte split with no archive head on ANY part, the HJSplit run
+/// [`collect_split_sets`] owns and joins.
+///
+/// The container twin loses all-but-one part; this one loses the WHOLE
+/// set, because there is no member the sweep can classify at all. Every
+/// question `smart::is_packed_archive` asks is per-path - a name grammar,
+/// or a head read - and a plain part answers neither BY CONSTRUCTION:
+/// carrying an archive head is what disqualifies a set from this reading
+/// in the first place (rule 5). So the sweep does not spare the head and
+/// delete the payload here, it deletes the payload and the head together.
+///
+/// **Reachability was checked first, as TODO 299 asked, and it is not the
+/// failed join that gets you there.** A join that fails claims
+/// `NestOutcome::Failed`, the level returns it, and the tail turns that
+/// into a FAILED job - which never reaches `finalize_names` at all
+/// (`serve/job.rs` runs the tail on `state == Completed`). Three routes
+/// reach it without any failure, and the third was OBSERVED end to end
+/// before a line here was changed - see
+/// `a_plain_split_in_a_subfolder_survives_a_clean_nested_pass_and_the_sweep`:
+///
+///  * A subdirectory holding nothing BUT split parts is never descended
+///    into. `extract_nested_why` seeds its recursion with directories that
+///    gained a new EXTRACTABLE ARCHIVE, plus the ones that already held
+///    one; a headless part is neither, so the arm never runs there. The
+///    pass returns `Produced`, the job completes, and `keep_media_only`
+///    sweeps top level AND one directory down.
+///  * A locked set skips the whole pass. `demoted_volume_ladder` raises
+///    `locked_no_password` with `all_good` still true, and the tail's
+///    `nested_hold` then declines to run the pass at all - so the parts
+///    are untouched when a password arrives, from the passwords file
+///    inside `finalize_payload` or typed into the dashboard, and
+///    `finalize_names` runs over a directory that still holds every one.
+///  * Leftover outer volumes skip it the same way. A tolerated leftover
+///    (`VouchVerdict::Tolerated`) leaves named RAR volumes on disk with
+///    `all_good` true, `outer_vols_on_disk()` reads true, and with no
+///    nested archive beside them the pass is skipped by that final `else`.
+///
+/// Membership only, and every design decision behind it - why the
+/// extractor's own grammar rather than a second opinion, why not a deeper
+/// sniff, why rule 6 still applies - is written up at
+/// [`container_part_set`] and holds here unchanged. What does NOT carry
+/// over is that function's two ride-alongs: this reading refuses a head on
+/// part 1, so a PAR2-headed set cannot reach it, and a set the extractor
+/// consumed is not on disk to collect.
+pub(crate) fn split_part_set(dir: &std::path::Path) -> std::collections::HashSet<PathBuf> {
+    collect_split_sets(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|s| s.parts)
+        .collect()
+}
+
 fn collect_sets(dir: &std::path::Path, scan: SplitScan) -> Result<Vec<SplitSet>> {
     use std::collections::BTreeMap;
     // base (lowercased, for grouping) -> index -> (path, base as written, size, tail width)

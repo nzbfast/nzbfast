@@ -14,6 +14,7 @@
 
 use serde_json::Value;
 use std::path::Path;
+use std::time::Duration;
 
 /// A stored credential is usable only after trimming. Older nzbfast
 /// releases persisted `{"apikey":""}` when the user cleared the field;
@@ -268,26 +269,124 @@ pub fn body_version(body: &str) -> Option<EngineVersion> {
 /// Out here rather than in `mod app` so the precedence is tested on
 /// every host, not only when someone builds for Windows.
 pub fn load_port(data_dir: &Path) -> Option<u16> {
-    let from_settings = || -> Option<u16> {
-        let s = std::fs::read_to_string(data_dir.join("settings.json")).ok()?;
-        let v: Value = serde_json::from_str(&s).ok()?;
-        // Settings values arrive as numbers or strings depending on which
-        // path wrote them; accept both, reject anything out of range.
-        let port = v.get("port")?;
-        port.as_u64()
-            .or_else(|| port.as_str()?.trim().parse().ok())
-            .and_then(|p| u16::try_from(p).ok())
-            .filter(|p| *p != 0)
-    };
-    let from_tray = || -> Option<u16> {
-        let v: Value =
-            serde_json::from_str(&std::fs::read_to_string(data_dir.join("tray.json")).ok()?)
-                .ok()?;
-        u16::try_from(v.get("port")?.as_u64()?)
-            .ok()
-            .filter(|p| *p != 0)
-    };
-    from_settings().or_else(from_tray)
+    port_from_settings(data_dir).or_else(|| port_from_tray(data_dir))
+}
+
+/// The port the user CONFIGURED, which is what the daemon applies over
+/// the `--port` we pass it. Named rather than inline so
+/// [`handoff_candidates`] can order it against the other two sources.
+fn port_from_settings(data_dir: &Path) -> Option<u16> {
+    let s = std::fs::read_to_string(data_dir.join("settings.json")).ok()?;
+    let v: Value = serde_json::from_str(&s).ok()?;
+    // Settings values arrive as numbers or strings depending on which
+    // path wrote them; accept both, reject anything out of range.
+    let port = v.get("port")?;
+    port.as_u64()
+        .or_else(|| port.as_str()?.trim().parse().ok())
+        .and_then(|p| u16::try_from(p).ok())
+        .filter(|p| *p != 0)
+}
+
+/// The port the tray SETTLED on, written by `save_port` after
+/// `ensure_daemon` returned.
+fn port_from_tray(data_dir: &Path) -> Option<u16> {
+    let v: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("tray.json")).ok()?).ok()?;
+    u16::try_from(v.get("port")?.as_u64()?)
+        .ok()
+        .filter(|p| *p != 0)
+}
+
+/// First index of `needle` in `hay`. The tray has no reason to pull
+/// a search crate in for one call.
+pub fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// A multipart boundary this call's payload cannot have anticipated.
+///
+/// The old one was a compile-time literal, so any .nzb could carry
+/// it - see `post_nzb` for what that buys an attacker. It does NOT
+/// have to be cryptographically unpredictable, because the caller
+/// CHECKS the result against the bytes and refuses on a hit; it has
+/// to be different per call and per file, which the clock, the path
+/// and the size give it. `sha2` is already a dependency of this
+/// crate (the runtime-token handshake uses it) and `rand` is not.
+///
+/// Kept inside the 70-character limit `valid_boundary` enforces on
+/// the daemon side, and free of CR/LF by construction (hex).
+pub fn unique_boundary(path: &Path, size: u64) -> String {
+    use sha2::{Digest, Sha256};
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut h = Sha256::new();
+    h.update(nanos.to_le_bytes());
+    h.update(size.to_le_bytes());
+    h.update(std::process::id().to_le_bytes());
+    h.update(
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_le_bytes(),
+    );
+    h.update(path.to_string_lossy().as_bytes());
+    let d = h.finalize();
+    let mut out = String::from("nzbtray");
+    for b in &d[..12] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// The floor of the port scan, and the port a fresh install lands on.
+/// Out here with [`handoff_candidates`] rather than in `mod app` so the
+/// last-resort candidate is the same value the test pins.
+pub const BASE_PORT: u16 = 6789;
+
+/// Every port a SECOND instance should try when handing its `.nzb` (or
+/// its dashboard request) to the first one, best source first, deduped.
+///
+/// [`load_port`] is the wrong question here and that is not a nuance:
+/// it answers "which port should a daemon be STARTED on", so
+/// `settings.json` deliberately wins, and `settings.json` records what
+/// the daemon was ASKED for. `runtime.json` is the only file the daemon
+/// itself writes, it is written from the address the listener actually
+/// GOT (see the `--port 0` note at the bind site), and it is rewritten
+/// on every start. When the two disagree - the configured port was
+/// taken, so `ensure_daemon` scanned past it - a second instance
+/// following `load_port` alone polls a port the first instance already
+/// abandoned, for its whole budget, and never finds the daemon that is
+/// sitting there answering. That is not a race: it is permanent for as
+/// long as the stranger holds the configured port.
+///
+/// Order is by how much each source knows about where the listener IS:
+/// `runtime.json` (bound), `tray.json` (settled on), `settings.json`
+/// (asked for), then the scan floor. Every candidate is still put to
+/// `probe`, which is what makes a wrong guess harmless - see the
+/// caller. The scan SPAN is deliberately not enumerated: the first
+/// instance writes `tray.json` when it finishes, and the caller
+/// re-reads these files on every pass, so a non-floor port arrives on
+/// its own rather than being hunted for across fifty sockets.
+pub fn handoff_candidates(data_dir: &Path) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::with_capacity(4);
+    for p in [
+        runtime(data_dir).map(|r| r.port),
+        port_from_tray(data_dir),
+        port_from_settings(data_dir),
+        Some(BASE_PORT),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
 }
 
 /// What `runtime.json` tells us about the daemon we expect to find:
@@ -406,6 +505,221 @@ pub fn identity_ok(body: &str, token: Option<&str>, nonce: &str) -> bool {
     match token {
         Some(t) => proof_matches(body, t, nonce),
         None => true,
+    }
+}
+
+/// What one keyless probe of one port concluded.
+///
+/// The attach scan only ever needed two answers - reuse this listener,
+/// or keep looking - and for months that is all `probe` returned. The
+/// PERIODIC re-proof needs four, because it acts differently on each:
+/// a listener that ANSWERS and is not ours is positive evidence of a
+/// stranger, while a silence is absence of evidence and may be a
+/// healthy engine wedged in a long index transaction (TODO 166
+/// measured ~80 s). Collapsing those two is what makes a watchdog
+/// either blind or a nuisance - see [`ListenerWatch`].
+///
+/// `Free` and `Silent` are also distinct on purpose, and the spawn
+/// scan is why: `Free` means nothing is listening, so a daemon may be
+/// STARTED there, and a port that accepted the connection and then
+/// said nothing must never be treated that way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    /// Answered, and proved it holds `runtime.json`'s per-start token.
+    Proven,
+    /// Answered in the nzbfast shape with no `runtime.json` naming this
+    /// port to hold it to. Attachable, but key-bearing URLs stay
+    /// keyless for it - see [`IdentityProof`].
+    Adopted,
+    /// Something answered and it is not the engine we proved.
+    Stranger,
+    /// The port accepted a connection and gave nothing usable back.
+    Silent,
+    /// Nothing is listening.
+    Free,
+}
+
+impl Verdict {
+    /// May the tray attach to this listener?
+    pub fn attachable(self) -> bool {
+        matches!(self, Verdict::Proven | Verdict::Adopted)
+    }
+
+    /// Did anything answer at all? The two arms of [`ListenerWatch`]
+    /// split here, not on `attachable`: an answering stranger is a
+    /// finding, a silence is a maybe.
+    pub fn answered(self) -> bool {
+        matches!(self, Verdict::Proven | Verdict::Adopted | Verdict::Stranger)
+    }
+
+    /// May the tray hand this listener the stored API key?
+    ///
+    /// Strictly narrower than `attachable`: the legacy arm attaches and
+    /// stays keyless, because a reply SHAPE is not an identity and
+    /// sending the key to something we cannot tell from an impostor
+    /// hands over daemon control and, through `mode=server_secret`, the
+    /// provider password (Codex sweep 10 Aug M10).
+    pub fn proves_identity(self) -> bool {
+        self == Verdict::Proven
+    }
+}
+
+/// Classify one probe from what the wire gave back.
+///
+/// Pure, and split out from the socket work in `app::probe` for one
+/// reason: `mod app` is `#[cfg(windows)]`, so nothing about the tray's
+/// decisions could be tested on any box this fleet owns. This half can
+/// be, and is - `a_stranger_that_cannot_answer_the_challenge_is_not_ours`
+/// and its neighbours drive it with bodies captured off a real daemon.
+///
+/// `connected` is separate from `body` because the two absences mean
+/// different things to the spawn scan (see [`Verdict::Free`]).
+pub fn classify(connected: bool, body: Option<&str>, token: Option<&str>, nonce: &str) -> Verdict {
+    if !connected {
+        return Verdict::Free;
+    }
+    let Some(body) = body else {
+        return Verdict::Silent;
+    };
+    if !is_nzbfast(body) || !identity_ok(body, token, nonce) {
+        return Verdict::Stranger;
+    }
+    // Proven only when a token was actually challenged. The legacy arm
+    // attaches but must not carry the stored key (Codex sweep 10 Aug
+    // M10); a spawn we performed ourselves overrides it at the spawn
+    // site.
+    if token.is_some() {
+        Verdict::Proven
+    } else {
+        Verdict::Adopted
+    }
+}
+
+/// The running verdict on the listener an ATTACHED tray is talking to.
+///
+/// The proof latch is a statement about one PROCESS and the port
+/// outlives it. Every generation-ending path this tray could SEE
+/// belonged to a child: `try_wait` in the timer, and `restart_daemon`.
+/// An engine the tray ATTACHED to has no child at all, so its death
+/// was invisible, the proof stood over it, and every keyed call went
+/// on posting the master API key at a port nothing of ours held.
+/// Rehearsed 26 Aug 2026 against a recording listener bound to the
+/// freed port of a real daemon:
+///
+/// ```text
+/// GET /api?mode=queue&output=json&apikey=<MASTER KEY>
+/// GET /api?mode=server_secret&output=json&apikey=<MASTER KEY>
+/// ```
+///
+/// That key is full control and, through `mode=server_secret`, the
+/// provider password in cleartext.
+///
+/// This type holds only the COUNTING, which is the half that decides
+/// whether the user is told anything. Dropping the key does not wait
+/// on it: `app::recheck_listener` does that on the first verdict that
+/// is not attachable, because it costs nothing and the next answering
+/// probe undoes it.
+pub struct ListenerWatch {
+    silent: u32,
+    reported: bool,
+}
+
+impl ListenerWatch {
+    /// Consecutive no-answer probes before the engine is called gone.
+    ///
+    /// One is not evidence. A healthy engine wedged in a long index
+    /// transaction (TODO 166 measured ~80 s) holds the port and answers
+    /// nothing, and this verdict puts a balloon on the user's desktop
+    /// and turns on a Restart menu item; doing that over one dropped
+    /// probe would be worse than the bug it fixes. A probe that ANSWERS
+    /// and is not ours takes no count at all - that is positive
+    /// evidence, which is the same split `classify` already makes.
+    pub const SILENT_BEFORE_GONE: u32 = 3;
+
+    /// Gap between challenges while the listener keeps answering.
+    ///
+    /// The tray's keyed calls are hover- and click-driven, so unlike
+    /// the Mac wrapper there is no steady poll to ride and a failed one
+    /// only happens when the user is looking. This cadence is what
+    /// covers the case a failed call cannot see: a listener that
+    /// answers a keyed call convincingly and cannot answer the keyless
+    /// challenge. It is the ceiling on how long that mistake lasts, for
+    /// one extra loopback GET per half minute.
+    pub const GAP: Duration = Duration::from_secs(30);
+
+    /// Gap once a probe has come back silent.
+    ///
+    /// Something is already wrong, so waiting out the full cadence
+    /// three times would leave a dead engine unreported for 90 s. The
+    /// Mac wrapper's equivalent ceiling is 9 s (3 x its 3 s poll); this
+    /// is the same order for a clock the tray already runs, and it
+    /// costs nothing while the engine is healthy because a healthy
+    /// engine never reaches it.
+    pub const GAP_UNSETTLED: Duration = Duration::from_secs(5);
+
+    pub fn new() -> Self {
+        ListenerWatch {
+            silent: 0,
+            reported: false,
+        }
+    }
+
+    /// How long until the next challenge is due.
+    pub fn gap(&self) -> Duration {
+        if self.silent > 0 {
+            Self::GAP_UNSETTLED
+        } else {
+            Self::GAP
+        }
+    }
+
+    /// Has the engine on this port been reported gone? The Restart menu
+    /// item is drawn off this: a tray that ATTACHED has no child, so
+    /// the `child_dead` test that offers Restart today can never fire
+    /// for it, and a balloon telling the user to restart would name a
+    /// menu item that is not there.
+    pub fn engine_gone(&self) -> bool {
+        self.reported
+    }
+
+    /// Fold one verdict in. `Some(v)` means say so - ONCE per
+    /// generation, because this runs on a repeating timer and a balloon
+    /// every thirty seconds would be worse than the silence it
+    /// replaced.
+    pub fn record(&mut self, v: Verdict) -> Option<Verdict> {
+        if v.attachable() {
+            self.silent = 0;
+            return None;
+        }
+        if v.answered() {
+            // A stranger: positive evidence, and no count to wait out.
+            self.silent = 0;
+        } else {
+            self.silent += 1;
+            if self.silent < Self::SILENT_BEFORE_GONE {
+                return None;
+            }
+            self.silent = 0;
+        }
+        if self.reported {
+            return None;
+        }
+        self.reported = true;
+        Some(v)
+    }
+
+    /// A fresh engine is on the port: forget the whole verdict history.
+    /// Called from `restart_daemon`, which is the only thing that puts
+    /// one there.
+    pub fn restarted(&mut self) {
+        self.silent = 0;
+        self.reported = false;
+    }
+}
+
+impl Default for ListenerWatch {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -801,8 +1115,8 @@ pub fn wide_capped(s: &str, cap: usize) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineVersion, apikey, body_version, bundled_version, dash_url, is_nzbfast, keyed_url,
-        proof_minted_for_tests, query_value, stored_key,
+        EngineVersion, apikey, body_version, bundled_version, dash_url, find_bytes, is_nzbfast,
+        keyed_url, proof_minted_for_tests, query_value, stored_key, unique_boundary,
     };
     use std::path::PathBuf;
 
@@ -1223,6 +1537,87 @@ mod tests {
         }
     }
 
+    /// The second-instance hand-off's candidate list, which is the
+    /// half of Codex sweep F-16 that a host can run. `mod app` is
+    /// `cfg(windows)`, so the win32 loop around this cannot be tested
+    /// on the machines these tests run on; what CAN be pinned is the
+    /// decision it makes on every pass, which is where the defect was.
+    ///
+    /// The race itself: the first tray takes the single-instance mutex
+    /// BEFORE `ensure_daemon`, so a file-association launch landing in
+    /// that window finds the mutex held and must work out where to hand
+    /// its .nzb. `load_port` is the wrong oracle for that - it is the
+    /// "where should a daemon be STARTED" answer, so `settings.json`
+    /// wins it deliberately, and `settings.json` records the port the
+    /// daemon was ASKED for. When something else holds that port,
+    /// `ensure_daemon` scans past it and the daemon answers somewhere
+    /// else entirely, which `runtime.json` is the only file to record.
+    #[test]
+    fn the_handoff_prefers_the_port_the_daemon_actually_bound() {
+        use super::{BASE_PORT, handoff_candidates, load_port};
+
+        let write = |dir: &std::path::Path, name: &str, body: &str| {
+            std::fs::write(dir.join(name), body).unwrap();
+        };
+        // A runtime.json needs a usable token or `runtime()` rejects it
+        // wholesale, which would make this test pass for the wrong
+        // reason - the port would drop out with the file.
+        let rt = |port: u16| format!(r#"{{"port": {port}, "token": "abc123", "tls": false}}"#);
+
+        // Cold, first run, nothing on disk anywhere: the scan floor is
+        // the only guess there is, and it must still be OFFERED (the
+        // caller probes it) rather than posted to blind.
+        let d = data_dir("handoff-cold", None, None);
+        assert_eq!(handoff_candidates(&d), vec![BASE_PORT]);
+
+        // THE DEFECT, in one assertion. settings.json names 7000; the
+        // daemon could not have it and bound 6790, which only
+        // runtime.json knows. `load_port` still answers 7000 - correctly,
+        // for its own question - so a hand-off following it polls a port
+        // the first instance abandoned, for its whole budget, while the
+        // daemon sits answering on 6790. The bound port must come first.
+        write(&d, "settings.json", r#"{"port": 7000}"#);
+        write(&d, "runtime.json", &rt(6790));
+        assert_eq!(load_port(&d), Some(7000));
+        assert_eq!(handoff_candidates(&d)[0], 6790);
+
+        // Every source is still offered behind it, best-informed first:
+        // bound, then settled-on, then asked-for, then the floor. A
+        // stale runtime.json from a crashed run is not a hazard - the
+        // caller puts each candidate to `probe`, which challenges that
+        // same file's per-start token - so the later sources are what
+        // make a wrong first guess recoverable rather than fatal.
+        write(&d, "tray.json", r#"{"port": 6795}"#);
+        assert_eq!(handoff_candidates(&d), vec![6790, 6795, 7000, BASE_PORT]);
+
+        // Deduped, and the floor is not repeated when a source already
+        // named it. A duplicate would double this port's share of every
+        // pass for nothing.
+        let d = data_dir("handoff-dedup", None, None);
+        write(&d, "runtime.json", &rt(BASE_PORT));
+        write(&d, "tray.json", &format!(r#"{{"port": {BASE_PORT}}}"#));
+        assert_eq!(handoff_candidates(&d), vec![BASE_PORT]);
+
+        // Junk on disk degrades to the floor rather than to nothing:
+        // an unreadable file is not evidence that the daemon is absent,
+        // and an empty candidate list would refuse a hand-off that the
+        // ordinary first-run path would have completed.
+        let d = data_dir("handoff-junk", None, None);
+        for bad in [
+            r#"{"port": 0, "token": "abc123"}"#,
+            r#"{"port": 6790}"#,
+            r#"{"token": "abc123"}"#,
+            "not json",
+        ] {
+            write(&d, "runtime.json", bad);
+            assert_eq!(
+                handoff_candidates(&d),
+                vec![BASE_PORT],
+                "runtime.json {bad} should not have named a candidate"
+            );
+        }
+    }
+
     /// Two probes must not share a nonce, or a recorded answer replays.
     #[test]
     fn probe_nonces_differ() {
@@ -1582,5 +1977,266 @@ mod tests {
         assert_eq!(wide_capped("ab\u{1F680}", 5).len(), 5);
         // Degenerate cap: no room for even a terminator.
         assert!(wide_capped("abc", 0).is_empty());
+    }
+
+    /// The upload boundary is DIFFERENT every call, and shaped so the
+    /// daemon's own `valid_boundary` accepts it.
+    ///
+    /// It was the compile-time literal `nzbtray9f4c2b7e`, and the
+    /// daemon's multipart splitter looks for `--<boundary>` anywhere in
+    /// the body with no line anchoring - so an .nzb whose metadata or
+    /// subject text carried that marker split the body where its POSTER
+    /// chose, and everything after the forged delimiter was parsed as
+    /// another form field on a call that already carries the full API
+    /// key. `post_nzb` also checks the result against the payload, which
+    /// is what makes this correct rather than merely unlikely; this test
+    /// covers the generator's half.
+    #[test]
+    fn the_upload_boundary_is_per_call_and_well_formed() {
+        let p = std::path::Path::new("/tmp/a.nzb");
+        let a = unique_boundary(p, 10);
+        let b = unique_boundary(p, 10);
+        assert_ne!(a, b, "two calls for the same file must differ");
+        assert_ne!(
+            unique_boundary(p, 10),
+            unique_boundary(std::path::Path::new("/tmp/b.nzb"), 10),
+            "and two files must differ"
+        );
+        for v in [&a, &b] {
+            assert!(!v.is_empty() && v.len() <= 70, "{v}");
+            assert!(
+                v.bytes().all(|c| c.is_ascii_alphanumeric()),
+                "no CR/LF, no quoting trouble: {v}"
+            );
+            assert_ne!(v, "nzbtray9f4c2b7e", "the fixed literal is gone");
+        }
+    }
+
+    /// The collision check `post_nzb` runs on the payload.
+    #[test]
+    fn find_bytes_locates_a_delimiter_and_is_total_on_the_edges() {
+        assert_eq!(find_bytes(b"abcdef", b"cd"), Some(2));
+        assert_eq!(find_bytes(b"abcdef", b"abcdef"), Some(0));
+        assert_eq!(find_bytes(b"abcdef", b"xy"), None);
+        assert_eq!(find_bytes(b"ab", b"abc"), None, "needle longer than hay");
+        assert_eq!(
+            find_bytes(b"abc", b""),
+            None,
+            "an empty needle finds nothing"
+        );
+        assert_eq!(find_bytes(b"", b"a"), None);
+    }
+
+    // ---- the listener re-proof (`Verdict`, `classify`, `ListenerWatch`) ----
+    //
+    // WHY THESE ARE HERE AND NOT BESIDE THE SOCKET WORK. `mod app` in
+    // main.rs is `#[cfg(windows)]`, so nothing about the tray's
+    // behaviour could be tested on any box this fleet owns - and the
+    // fleet's only Windows build box has been offline since roughly
+    // winter. `probe_body` is `#[cfg(any(windows, test))]` for exactly
+    // this reason, so the decision table lives here and every arm below
+    // runs on every host.
+    //
+    // THE BODIES ARE REAL. Each was captured 26 Aug 2026 off a live
+    // 1.2.3 daemon on a scratch port, and off a squatter bound to that
+    // port after the daemon was killed. The TOKEN is this file's own
+    // hand-typed vector rather than the captured one, so no per-start
+    // secret is committed; the proof is computed here from it, which
+    // also means a change to the digest rule fails these rather than
+    // agreeing with itself.
+
+    /// The `mode=version&hs=` reply of a daemon that holds the token,
+    /// spelled the way the wire spelled it.
+    #[cfg(test)]
+    fn proven_body(token: &str, nonce: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(token.as_bytes());
+        h.update(b":");
+        h.update(nonce.as_bytes());
+        let hex = h.finalize().iter().fold(String::new(), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+        format!(r#"{{"beta":"2","hs_proof":"{hex}","nzbfast":"1.2.3","version":"4.5.0"}}"#)
+    }
+
+    /// A daemon older than the handshake: nzbfast-shaped, no proof, and
+    /// no runtime.json naming the port to hold it to.
+    const LEGACY_BODY: &str = r#"{"beta":"2","nzbfast":"1.2.3","version":"4.5.0"}"#;
+
+    /// What a process that merely bound the freed port can serve. It is
+    /// nzbfast-shaped and answers `mode=queue` plausibly, and it cannot
+    /// produce an `hs_proof` because it cannot read our runtime.json.
+    /// Captured from the 26 Aug 2026 rehearsal.
+    const SQUATTER_BODY: &str =
+        r#"{"nzbfast":"1.2.3","version":"4.5.0","queue":{"paused":false,"slots":[]}}"#;
+
+    /// The hand-typed vector, kept out of the captured bodies above.
+    const TOKEN: &str = "3c2f0f9a5e1d4b8f7a6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e"; // leakcheck-allow-synthetic: hand-typed hex test vector
+    const NONCE: &str = "0123456789abcdef";
+
+    /// The whole point of the cadence arm: a listener can answer a KEYED
+    /// call convincingly and still not be ours, so the tray cannot learn
+    /// this from a failed request - only from the keyless challenge.
+    #[test]
+    fn a_stranger_that_cannot_answer_the_challenge_is_not_ours() {
+        use super::{Verdict, classify};
+        assert_eq!(
+            classify(true, Some(SQUATTER_BODY), Some(TOKEN), NONCE),
+            Verdict::Stranger,
+            "nzbfast-shaped with no proof, against a runtime.json naming this port"
+        );
+        assert!(
+            super::is_nzbfast(SQUATTER_BODY),
+            "and the shape alone would have attached to it - which is the bug"
+        );
+        // The legacy arm is unchanged: no runtime.json for this port, so
+        // there is nothing to hold it to and it still attaches. It just
+        // never carries the key.
+        assert_eq!(
+            classify(true, Some(SQUATTER_BODY), None, NONCE),
+            Verdict::Adopted
+        );
+        assert!(!Verdict::Adopted.proves_identity());
+    }
+
+    /// A real daemon's reply, and the two things that must move with it.
+    #[test]
+    fn a_daemon_holding_the_token_classifies_as_proven() {
+        use super::{Verdict, classify};
+        let body = proven_body(TOKEN, NONCE);
+        assert_eq!(
+            classify(true, Some(&body), Some(TOKEN), NONCE),
+            Verdict::Proven
+        );
+        assert!(Verdict::Proven.attachable() && Verdict::Proven.proves_identity());
+        // A different nonce is a replayed answer, which is what the
+        // nonce exists to refuse.
+        assert_eq!(
+            classify(true, Some(&body), Some(TOKEN), "ffffffffffffffff"),
+            Verdict::Stranger
+        );
+        assert_eq!(
+            classify(true, Some(LEGACY_BODY), None, NONCE),
+            Verdict::Adopted
+        );
+        assert_eq!(
+            classify(true, Some(LEGACY_BODY), Some(TOKEN), NONCE),
+            Verdict::Stranger,
+            "runtime.json names this port, so the proof is mandatory"
+        );
+    }
+
+    /// `Free` and `Silent` are both "no answer" to the watch and are NOT
+    /// interchangeable to the spawn scan: a port that accepted the
+    /// connection and then said nothing is holding something.
+    #[test]
+    fn an_unreachable_port_and_a_mute_one_are_different_answers() {
+        use super::{Verdict, classify};
+        assert_eq!(classify(false, None, Some(TOKEN), NONCE), Verdict::Free);
+        assert_eq!(classify(true, None, Some(TOKEN), NONCE), Verdict::Silent);
+        // A body that is not ours at all - a random web server.
+        assert_eq!(
+            classify(true, Some("<html>hello</html>"), None, NONCE),
+            Verdict::Stranger
+        );
+        for v in [Verdict::Free, Verdict::Silent, Verdict::Stranger] {
+            assert!(!v.attachable(), "{v:?} is never attached to");
+            assert!(!v.proves_identity(), "{v:?} never arms the key");
+        }
+        assert!(!Verdict::Free.answered() && !Verdict::Silent.answered());
+        assert!(
+            Verdict::Stranger.answered(),
+            "a stranger is positive evidence"
+        );
+    }
+
+    /// The counting split: answered-and-wrong acts at once, a silence
+    /// waits for a run of three (a healthy engine wedged in a long index
+    /// transaction holds the port and says nothing - TODO 166 measured
+    /// ~80 s of that).
+    #[test]
+    fn the_watch_reports_a_stranger_at_once_and_a_silence_after_three() {
+        use super::{ListenerWatch, Verdict};
+        let mut w = ListenerWatch::new();
+        assert_eq!(w.record(Verdict::Stranger), Some(Verdict::Stranger));
+
+        let mut w = ListenerWatch::new();
+        assert_eq!(ListenerWatch::SILENT_BEFORE_GONE, 3);
+        assert_eq!(w.record(Verdict::Silent), None, "one is not evidence");
+        assert_eq!(w.record(Verdict::Free), None, "two is not either");
+        assert_eq!(
+            w.record(Verdict::Silent),
+            Some(Verdict::Silent),
+            "Free and Silent count as one run - both are no answer"
+        );
+    }
+
+    /// A blip must not consume the run. This is the case that makes
+    /// dropping the key on the FIRST silence affordable: the key comes
+    /// back on the next answering probe and nothing was said out loud.
+    #[test]
+    fn an_answering_listener_resets_the_silent_run() {
+        use super::{ListenerWatch, Verdict};
+        let mut w = ListenerWatch::new();
+        w.record(Verdict::Silent);
+        w.record(Verdict::Silent);
+        assert_eq!(w.record(Verdict::Proven), None);
+        assert!(!w.engine_gone());
+        w.record(Verdict::Silent);
+        w.record(Verdict::Silent);
+        assert_eq!(w.record(Verdict::Silent), Some(Verdict::Silent));
+    }
+
+    /// This runs on a repeating timer, so a balloon per tick would be
+    /// worse than the silence it replaces.
+    #[test]
+    fn the_watch_speaks_once_per_generation_and_a_restart_resets_it() {
+        use super::{ListenerWatch, Verdict};
+        let mut w = ListenerWatch::new();
+        assert!(!w.engine_gone(), "and so Restart is not offered yet");
+        assert_eq!(w.record(Verdict::Stranger), Some(Verdict::Stranger));
+        assert!(w.engine_gone(), "which is what draws the Restart item");
+        for _ in 0..10 {
+            assert_eq!(w.record(Verdict::Stranger), None, "said once");
+        }
+        for _ in 0..10 {
+            assert_eq!(w.record(Verdict::Silent), None);
+        }
+        w.restarted();
+        assert!(!w.engine_gone());
+        assert_eq!(
+            w.record(Verdict::Stranger),
+            Some(Verdict::Stranger),
+            "a fresh engine gets a fresh verdict history"
+        );
+    }
+
+    /// Waiting out the full cadence three times would leave a dead
+    /// engine unreported for a minute and a half; the Mac wrapper's
+    /// equivalent ceiling is 9 s.
+    #[test]
+    fn the_challenge_cadence_tightens_once_a_probe_comes_back_silent() {
+        use super::{ListenerWatch, Verdict};
+        let mut w = ListenerWatch::new();
+        assert_eq!(w.gap(), ListenerWatch::GAP);
+        w.record(Verdict::Silent);
+        assert_eq!(w.gap(), ListenerWatch::GAP_UNSETTLED);
+        assert!(
+            ListenerWatch::GAP_UNSETTLED < ListenerWatch::GAP,
+            "the unsettled gap is the shorter one"
+        );
+        w.record(Verdict::Proven);
+        assert_eq!(
+            w.gap(),
+            ListenerWatch::GAP,
+            "a good answer settles it again"
+        );
+        // A stranger takes no run, so nothing to hurry back for: it has
+        // already been reported and the key is already off the wire.
+        w.record(Verdict::Stranger);
+        assert_eq!(w.gap(), ListenerWatch::GAP);
     }
 }

@@ -155,7 +155,17 @@ async fn a_primary_that_spends_its_budget_hands_the_article_down() {
         sh.register_inflight(&w, 0);
         let mut inflight: VecDeque<Work> = VecDeque::new();
         inflight.push_back(w);
-        requeue_or_fail(&sh, &tx, &cfg, ctx0, &mut inflight, "rst", true).await;
+        requeue_or_fail(
+            &sh,
+            &tx,
+            &cfg,
+            ctx0,
+            &mut inflight,
+            FailCode::Transport,
+            "rst",
+            true,
+        )
+        .await;
     }
     assert!(
         rx.try_recv().is_err(),
@@ -291,7 +301,7 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         false,
         false,
         &mut Default::default(),
@@ -325,7 +335,7 @@ async fn a_bare_430_defers_the_verdict_and_says_so() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         false,
         false,
         &mut Default::default(),
@@ -368,7 +378,7 @@ async fn the_bare_430_recheck_jumps_the_queue() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         false,
         false,
         &mut Default::default(),
@@ -416,7 +426,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         false,
         false,
         &mut ledger,
@@ -449,7 +459,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         false,
         false,
         &mut Default::default(),
@@ -478,7 +488,7 @@ async fn a_proven_desync_gives_the_bare_430_pass_back() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         false,
         false,
         &mut Default::default(),
@@ -519,7 +529,7 @@ async fn the_re_armed_pass_is_capped_so_the_run_still_terminates() {
             &sh,
             &tx,
             &mut inflight,
-            Vec::new(),
+            PooledBuf::unpooled(Vec::new()),
             false,
             false,
             &mut ledger,

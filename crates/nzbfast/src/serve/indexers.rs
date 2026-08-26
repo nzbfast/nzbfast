@@ -346,12 +346,21 @@ pub(super) fn shared_indexer_agent() -> ureq::Agent {
 pub(super) fn redact_apikey(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(p) = rest.find("apikey=") {
-        out.push_str(&rest[..p + "apikey=".len()]);
+    // `key=`, not `apikey=`, since TODO 297: nzbindex's API spells its
+    // credential `key=`, and matching the shorter literal covers BOTH
+    // spellings because one is a suffix of the other - `apikey=SECRET`
+    // matches at the `key=` and the leading `api` is copied through
+    // ahead of it, so the Newznab output is byte-identical to what the
+    // narrower pass produced. Over-matching is the safe direction here:
+    // redacting one query parameter too many costs a reader nothing,
+    // and this function's whole job is that a credential never reaches
+    // a log line or the dashboard.
+    while let Some(p) = rest.find("key=") {
+        out.push_str(&rest[..p + "key=".len()]);
         out.push_str("***");
         // The value runs to the next query separator or to whatever ends
         // the URL inside a longer sentence.
-        let tail = &rest[p + "apikey=".len()..];
+        let tail = &rest[p + "key=".len()..];
         let end = tail
             .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
             .unwrap_or(tail.len());
@@ -435,19 +444,57 @@ pub(super) fn indexer_search_one(
     (Vec<crate::newznab::SearchResult>, SourceOrigin),
     crate::newznab::NewznabError,
 > {
-    let url = crate::newznab::search_url(cfg, q);
+    use crate::newznab::SourceKind;
+    // TODO 297: the one place that knows there are two protocols. Every
+    // caller above this - pull search, the hunt, the watchlist, the
+    // `nzblnk:` ladder - is untouched, which is the whole reason the
+    // nzbindex adapter answers in `newznab::SearchResult`.
+    let url = match cfg.kind {
+        SourceKind::Newznab => crate::newznab::search_url(cfg, q),
+        SourceKind::Nzbindex => {
+            // An empty query is refused HERE rather than sent. Newznab
+            // answers a `q=` with an error document; nzbindex answers it
+            // with its whole firehose (10,000 elements, measured 26 Aug
+            // 2026), so the same mistake that fails loudly against one
+            // source would quietly flood the merge from the other.
+            if q.q.trim().is_empty() {
+                return Err(crate::newznab::NewznabError::Api(
+                    0,
+                    "nzbindex: refusing an empty query (it would return everything)".into(),
+                ));
+            }
+            crate::nzbindex::search_url(cfg, q)
+        }
+    };
     // The netloc of the CONFIGURED url, which is what the grab compares
     // against; `endpoint()` only ever adds a path, so it is the netloc
     // this request is dialling too.
     let (body, addrs) = witness_resolution(&url_netloc(&cfg.url), || indexer_fetch(&url));
     let body = body?;
-    if let Some(e) = crate::newznab::parse_error(&body) {
-        return Err(scrub_indexer_body_error(e, &cfg.apikey));
-    }
-    Ok((
-        crate::newznab::parse_results(&body),
-        SourceOrigin::witnessed(&cfg.url, addrs),
-    ))
+    let items = match cfg.kind {
+        SourceKind::Newznab => {
+            if let Some(e) = crate::newznab::parse_error(&body) {
+                return Err(scrub_indexer_body_error(e, &cfg.apikey));
+            }
+            crate::newznab::parse_results(&body)
+        }
+        // Strict, and it reports a schema break as an ERROR rather than
+        // as an empty result list - see `nzbindex::parse_results`. That
+        // error reaches the user as this entry's own note in the search
+        // answer, which is the point: a hardcoded third-party schema
+        // WILL move, and when it does the source has to say it is
+        // broken rather than look like it found nothing.
+        SourceKind::Nzbindex => {
+            crate::nzbindex::parse_results(&body, cfg).map_err(|e| {
+                // Same scrub as the Newznab body path. Their
+                // `errorMessage` is a third party's text echoed to the
+                // dashboard and the logs, and this API takes its key in
+                // the query string.
+                scrub_indexer_body_error(e, &cfg.apikey)
+            })?
+        }
+    };
+    Ok((items, SourceOrigin::witnessed(&cfg.url, addrs)))
 }
 
 /// This indexer's caps, from the cache when fresh, else probed. A probe
@@ -488,6 +535,29 @@ pub(super) fn indexer_caps_cached(
 pub(super) fn indexer_caps_one(
     cfg: &crate::newznab::IndexerConfig,
 ) -> std::result::Result<crate::newznab::Caps, crate::newznab::NewznabError> {
+    // TODO 297: nzbindex publishes no `t=caps`, so "does this entry
+    // work" is answered by the only question that API takes - a real,
+    // narrow search. That is a better Test than caps anyway: it
+    // exercises the exact path a search will take, including the strict
+    // schema check, so a Test that passes means results will parse.
+    if cfg.kind == crate::newznab::SourceKind::Nzbindex {
+        let body = indexer_fetch(&crate::nzbindex::probe_url(cfg))?;
+        // The probe is judged by whether the ANSWER PARSES, not by
+        // whether it found anything: `q=test` legitimately matching
+        // nothing is a working source, while a body that is not the
+        // documented shape is the rot this source has to report.
+        crate::nzbindex::parse_results(&body, cfg)
+            .map_err(|e| scrub_indexer_body_error(e, &cfg.apikey))?;
+        return Ok(crate::newznab::Caps {
+            server: "nzbindex".into(),
+            // Free-text search is the whole of what this API does: no
+            // categories, no id search. Saying so truthfully is what
+            // keeps `plan_query` from ever planning one - and what lets
+            // the dashboard's Test line tell the user what they got.
+            search: true,
+            ..Default::default()
+        });
+    }
     let body = indexer_fetch(&crate::newznab::caps_url(cfg))?;
     if let Some(e) = crate::newznab::parse_error(&body) {
         return Err(scrub_indexer_body_error(e, &cfg.apikey));
@@ -807,8 +877,18 @@ pub(super) fn resolve_nzblnk(
             match fetch_url_from(&item.link, &origin)
                 .map_err(|e| e.to_string())
                 .and_then(|f| {
-                    d.enqueue_fetched(&f, &name, cat, prio, None, password, 0, "nzblnk", dupe_ok)
-                        .map_err(|e| e.to_string())
+                    d.enqueue_fetched(
+                        &f,
+                        &name,
+                        cat,
+                        prio,
+                        None,
+                        password,
+                        0,
+                        "nzblnk",
+                        DupeExempt::asked(dupe_ok),
+                    )
+                    .map_err(|e| e.to_string())
                 }) {
                 Ok(Enqueued { nzo_id: nzo, .. }) => {
                     d.indexer_rt.lock_ok().usage.count_grab(&indexer);

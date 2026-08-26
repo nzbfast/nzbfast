@@ -2,10 +2,17 @@
 name = "nzbtray"
 # Keep in lockstep with crates/nzbfast (the version source of truth) -
 # the installer stamps that string on both exes' packaging.
-version = "1.2.3"
+version = "1.2.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+
+# The tray opted out of the workspace lint table until 26 Aug 2026,
+# which left it the one first-party crate the unsafe-policy ratchet
+# could not reach - and it is very nearly all Win32 `unsafe`, so it was
+# the crate that most wanted it.
+[lints]
+workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # The daemon is always 127.0.0.1, but it is not always plain HTTP: with

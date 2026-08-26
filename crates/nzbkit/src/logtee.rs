@@ -389,6 +389,12 @@ mod wincap {
     /// Borrow a handle as a `File` WITHOUT owning it - dropping the
     /// `File` would close the process's own stdout.
     fn borrow(h: RawHandle) -> ManuallyDrop<File> {
+        // SAFETY: `from_raw_handle` requires a valid, open handle that
+        // the new `File` may own. `h` always comes from `handles()`,
+        // i.e. the process's own live stdout/stderr, so it is valid -
+        // and the `ManuallyDrop` is what discharges the ownership half:
+        // the `File` is never dropped, so it never closes the handle
+        // out from under the process. See this function's own name.
         ManuallyDrop::new(unsafe { File::from_raw_handle(h) })
     }
 
@@ -400,6 +406,9 @@ mod wincap {
     /// truncate the tray's IPC channel.
     fn is_disk_file(h: RawHandle) -> bool {
         use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, GetFileType};
+        // SAFETY: GetFileType takes a handle and returns a u32; it
+        // touches no memory of ours, and a handle that is invalid is not
+        // unsound - it answers FILE_TYPE_UNKNOWN, which this rejects.
         let kind = unsafe { GetFileType(h) };
         kind == FILE_TYPE_DISK && borrow(h).metadata().map(|m| m.is_file()).unwrap_or(false)
     }
@@ -463,6 +472,12 @@ mod wincap {
             // it wants (not counting the terminator), so grow and ask
             // again rather than guessing at MAX_PATH - the tray's data
             // dir sits under a user profile name of any length.
+            // SAFETY: `buf` is a live `Vec<u16>` and the length passed
+            // is its own `len()`, so the call cannot write past it. `h`
+            // is the process's own stdout/stderr handle, valid for the
+            // call. The wide string is only read back on the `n <
+            // buf.len()` path, where the API guarantees it wrote `n`
+            // units plus a terminator.
             let n = unsafe {
                 GetFinalPathNameByHandleW(
                     h,
@@ -491,6 +506,18 @@ pub fn install() {
             return;
         }
         let ring: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
+        // SAFETY: every call in this block is an fd syscall whose only
+        // requirement is that the descriptors it names are live and that
+        // any pointer argument is valid for the length the call writes.
+        // `fds` is a live local array of exactly the two ints pipe(2)
+        // fills; `rd`, `wr` and `orig` are fds this block itself just
+        // created, and each is used only while open (`wr` is closed only
+        // after both dup2 calls have copied it into 1 and 2, and the
+        // early `return` paths leave the process with fds that are still
+        // consistent, just untee'd). `File::from_raw_fd(orig)` takes
+        // ownership of `orig` exactly once: it is moved into the echo
+        // thread's closure, nothing else ever closes it, so the File's
+        // Drop is that descriptor's only close.
         unsafe {
             let mut fds = [0i32; 2];
             if libc::pipe(fds.as_mut_ptr()) != 0 {
@@ -649,6 +676,15 @@ pub fn restore_for_exec() {
         drain();
         let orig = ORIG_STDOUT.load(Ordering::Relaxed);
         if orig >= 0 {
+            // SAFETY: dup2 takes two integers and touches no memory, so
+            // soundness here is only that `orig` names a live descriptor.
+            // It does: install() stashed the dup of the real stdout in
+            // ORIG_STDOUT and nothing in this module ever closes it (it
+            // is owned for the process lifetime by the echo thread's
+            // File), and the `>= 0` above rejects the not-installed
+            // sentinel. Overwriting fds 1 and 2 is the intent, not a
+            // hazard - see this function's doc comment for why fd 2 goes
+            // first.
             unsafe {
                 libc::dup2(orig, 2);
                 libc::dup2(orig, 1);

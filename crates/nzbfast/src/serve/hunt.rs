@@ -266,7 +266,14 @@ impl NoHunt {
             }
             NoHunt::GivenUp => "this target has already been given up".into(),
             NoHunt::CopyCap(n) => {
-                format!("{n} copies of this have already failed, which is the configured ceiling")
+                // "spent" and not "failed": since §290 this count is
+                // live copies as well as buried ones, which is the
+                // whole of F-09's fix - two admissions at zero progress
+                // used to see a spend of nothing.
+                format!(
+                    "{n} copies of this title have already been spent, which is the \
+                         configured ceiling"
+                )
             }
             NoHunt::MeteredNoBudget => {
                 "one of your servers is a block account and no byte ceiling is set, so no paid \
@@ -719,7 +726,17 @@ impl Daemon {
         // the one paying by the byte.
         let before = cands.len();
         cands.retain(|c| affordable(c.size, budget));
-        let any_over_budget = cands.len() != before;
+        let mut any_over_budget = cands.len() != before;
+        // §290 (Codex F-09). The two checks above are the CHEAP ones and
+        // they stay: `budget` is historical spend against an indexer's
+        // ADVERTISED size, which is what lets an unaffordable candidate
+        // be dropped before it eats one of the four fetches. Neither is
+        // a ceiling on its own. The advertised figure is the seller's,
+        // and the spend is read off rows that may have downloaded
+        // nothing yet, so the decision that actually binds is taken
+        // below - under `alt_gate`, against the parsed NZB's real size,
+        // and released only once the row is published.
+        let ctx = self.alt_ctx(&req.nzo_id, &req.name, keys.clone());
 
         let want = std::fs::read(&req.nzb_path)
             .ok()
@@ -755,8 +772,37 @@ impl Daemon {
                 );
                 continue;
             }
-            if self.hunt_enqueue(req, &cand, bytes, &keys) {
-                return Ok(());
+            // §290: admission and publication under ONE hold of the
+            // gate, so a second hunt for this target cannot read a
+            // spend this one is about to add to. `total_bytes` off the
+            // PARSED NZB, never `cand.size`: an external result that
+            // advertises 1 MB and supplies 100 GB walked through a 1 GB
+            // ceiling until this line existed (F-09).
+            let want = got.as_ref().map(|n| n.total_bytes()).unwrap_or(0);
+            let gate = self.alt_gate();
+            match self.alt_admit(&ctx, want, Trigger::Auto) {
+                Ok(()) => {
+                    if self.hunt_enqueue(req, &cand, bytes, &keys) {
+                        return Ok(());
+                    }
+                }
+                // The candidate is too big, not the target too spent:
+                // a smaller one behind it may still fit, so this is a
+                // `continue` and the refusal is only reported if
+                // nothing else lands.
+                Err(NoHunt::ByteCap) => {
+                    drop(gate);
+                    info!(
+                        target: "queue",
+                        "{}: {} was not queued as a replacement - its .nzb is {} bytes, which \
+                         is over the byte ceiling left for this title",
+                        req.nzo_id, cand.stem, want
+                    );
+                    any_over_budget = true;
+                }
+                // A copy ceiling or a metered refusal is about the
+                // TARGET, so no other candidate can help.
+                Err(e) => return Err(e),
             }
         }
         if any_over_budget {
@@ -810,7 +856,7 @@ impl Daemon {
     /// 24 Aug, F-10). Failing the other way costs one skipped automatic
     /// hunt on an install with no ceiling set, and the refusal names
     /// itself in the giveup clause.
-    fn hunt_metered(&self) -> bool {
+    pub(super) fn hunt_metered(&self) -> bool {
         nzbkit::config::Config::load(&self.cfg_path)
             .map(|c| {
                 c.servers
@@ -1086,11 +1132,46 @@ impl Daemon {
         }
     }
 
-    /// Put the surviving candidate on the queue, runnable, and say so.
+    /// Put the surviving candidate on the queue and say so. Runnable in
+    /// the ordinary case; HELD if some other live copy of the release
+    /// holds it, which since 25 Aug 2026 is a state this road can reach
+    /// - see below. Either way a replacement was placed, so the answer
+    /// is `true` and the candidate loop stops: hunting a THIRD copy
+    /// while a second is already live is the waste the caps exist for.
     ///
-    /// `allow_dupe`: the replacement IS a duplicate of the release that
-    /// just failed, and that is the whole point - without it the M14f
-    /// hold would park the only copy that can still deliver.
+    /// [`DupeExempt::Row`], naming the row this hunt is replacing: the
+    /// replacement IS a duplicate of the release that just failed, and
+    /// that is the whole point - without the exemption the M14f hold
+    /// would park the only copy that can still deliver.
+    ///
+    /// **ONE row, and this was a bare `allow_dupe = true` until 25 Aug
+    /// 2026** (§290, Codex F-09). That bool switched BOTH duplicate arms
+    /// off at once - the name arm and §292's same-post arm - against
+    /// every record in both stores, and the argument above is true about
+    /// the failed source row and about nothing else. Against any OTHER
+    /// live copy of the release the hold is the correct answer, and it
+    /// was being suppressed: a hunted copy started downloading beside a
+    /// copy the user, an *arr or a watchlist had already queued.
+    ///
+    /// Not covered by the admission test above, and that is why this is
+    /// its own defect rather than a second spelling of one: `hunt_one`
+    /// holds each candidate to `spare::admits` against THE FAILED JOB's
+    /// message-id set, so a candidate that is the same post as the row
+    /// being replaced is already refused. The gap is the same question
+    /// asked about a DIFFERENT live row, which is precisely what §292's
+    /// arm exists to answer - and it was the arm being bypassed.
+    ///
+    /// Not covered by §290's byte ceiling either: `altspend`'s
+    /// population is this mechanism's own `alt_from` chain, `hunt:`
+    /// origins and the §96.3 breaker's stems, so an unrelated live copy
+    /// somebody else queued is in none of them.
+    ///
+    /// The failed row stays exempt whichever store it is in. It is
+    /// usually in HISTORY as Failed by the time the worker runs - park
+    /// files it before `hunt_request` - and a Failed history row is not
+    /// a collision target for either arm anyway; naming it here is what
+    /// makes that true by construction rather than by timing, and covers
+    /// the window in which it is still on the queue.
     fn hunt_enqueue(
         &self,
         req: &HuntRequest,
@@ -1110,9 +1191,10 @@ impl Daemon {
                 None,
                 0,
                 &origin,
-                true,
+                DupeExempt::Row(&req.nzo_id),
             ),
-            None => self.enqueue(
+            None => self.enqueue_as(
+                None,
                 &bytes,
                 &cand.stem,
                 &req.category,
@@ -1120,7 +1202,8 @@ impl Daemon {
                 None,
                 None,
                 &origin,
-                true,
+                DupeExempt::Row(&req.nzo_id),
+                None,
             ),
         };
         match out {
@@ -1149,9 +1232,20 @@ impl Daemon {
                     );
                     return false;
                 }
+                // §290: the replacement is an ordinary duplicate of
+                // every live copy that is NOT the row it replaces, so
+                // it can land held. Saying "queued" for a row parked at
+                // Duplicate priority is the confusing sentence
+                // `held_as_duplicate` exists to stop the add reply
+                // telling, and it would be no less confusing here.
+                let placed = if self.held_as_duplicate(&e.nzo_id) {
+                    "was held behind a copy of it that is already live"
+                } else {
+                    "was queued in its place"
+                };
                 info!(
                     target: "queue",
-                    "{}: {} could not complete, so {} was queued in its place ({})",
+                    "{}: {} could not complete, so {} {placed} ({})",
                     e.nzo_id, req.name, cand.stem, origin
                 );
                 // The event ring, which is what a WEBHOOK subscriber
@@ -1326,7 +1420,15 @@ impl Daemon {
             let h = self.history.lock_ok();
             let found = h.iter().find(|j| j.lock_ok().nzo_id == req.nzo_id).cloned();
             if let Some(j) = &found {
-                j.lock_ok().alt_to_name = new_name.to_string();
+                let mut g = j.lock_ok();
+                g.alt_to_name = new_name.to_string();
+                // ...and it stops being due for an automatic retry. The
+                // offer is shown precisely while a stamp sits past due and
+                // unconsumed (a long live job, a pause, a min-free hold),
+                // so leaving it armed re-queues a record this search has
+                // already replaced.
+                g.auto_retry_at = None;
+                g.auto_retry_why = None;
             }
             found
         };
@@ -1403,6 +1505,22 @@ impl Daemon {
             return self.hunt_parked_request(nzo_id);
         };
         let g = job.lock_ok();
+        // A HELD SPARE never gets a hunt, for the reason `offer_json`
+        // already refuses it the offer (ac45c507e): a spare exists to
+        // catch its primary's failure, it is not downloading anything,
+        // and hunting a replacement FOR A SPARE is §4b's junk-queue
+        // class. The button never renders on such a row - it is drawn
+        // from `alt_offer` - so this refusal is the same guard at the
+        // door a direct API call walks through (release-eve sweep S10,
+        // 25 Aug 2026). If the spare is promoted and then proves dead,
+        // THAT run gets the offer and this door as an ordinary row.
+        if !g.held_for.is_empty() {
+            return Err(
+                "this row is a spare held for another download, so there is nothing \
+                 to replace - promote it first if you want to run it"
+                    .into(),
+            );
+        }
         if matches!(g.state, JobState::Downloading | JobState::Finishing) {
             return Err(
                 "this download has already started - pause it first, or let it finish".into(),
@@ -1699,7 +1817,7 @@ impl Daemon {
             None,
             None,
             origin,
-            false,
+            DupeExempt::Nobody,
             Some(&req.nzo_id),
         )?;
         if let Some(f) = fetched.filter(|f| !f.failure_link.is_empty()) {
@@ -1733,6 +1851,38 @@ impl Daemon {
     /// switched to. Unlike the other `drop_spool` callers this one is
     /// not fault-conditioned: every refused switch left the orphan
     /// (Codex sweep 24 Aug, F-04).
+    ///
+    /// **UNLINK BEFORE `save_queue`, on purpose** (sweep 9, finding 4,
+    /// which read the order as a defect and proposed the inverse). The
+    /// rename and the durable write are two syscalls and nothing makes
+    /// them one, so SOME crash window exists whichever way round they
+    /// go; what differs is what the next start finds. Take them in
+    /// turn, remembering that `save_queue` writes through a temp file
+    /// and renames, so a crash during it leaves the PREVIOUS queue.json
+    /// - the one that still holds this row:
+    ///
+    /// * unlink, then save (this order): the row comes back naming an
+    ///   NZB that is gone. A broken spare, held at -3, that promotes
+    ///   into a parse failure. Bad, and bounded.
+    /// * save, then unlink: the row is gone and the file is still under
+    ///   the adoptable name, so `recover_orphaned_spool` enqueues it -
+    ///   a real download, un-held, of the very copy the user was just
+    ///   told could not be switched to. That is F-04 above, and it is
+    ///   the worse of the two.
+    /// * mask to `.deleting`, save, unlink - the shape the sweep asked
+    ///   for. Its second window is benign (recovery skips a masked
+    ///   name), but its FIRST is not: queue.json is not rewritten until
+    ///   the save, so a crash between the rename and it restores the
+    ///   same broken row as the first option AND strands the masked
+    ///   file, which nothing then names. One window traded for two, one
+    ///   of them identical. Measured against the loader
+    ///   (`recover_orphaned_spool` skips a name that fails
+    ///   `strip_suffix(".nzb")`, and skips any file whose allocator
+    ///   number matches a live row's nzo_id), not assumed.
+    ///
+    /// So the order below prefers a stuck row over an unwanted
+    /// download, and this block is where it says so. Do not invert it
+    /// without a journal to make the pair atomic.
     fn hunt_unhold(&self, nzo_id: &str) {
         let nzb = {
             let mut q = self.queue.lock_ok();

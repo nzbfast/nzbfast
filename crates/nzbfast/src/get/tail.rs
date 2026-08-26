@@ -869,6 +869,14 @@ pub(super) fn sweep_sniffed_leftovers(
 #[expect(clippy::too_many_arguments)]
 pub(super) fn finish_job(
     all_good: bool,
+    // A `no_extract` run banks volumes for a LATER extracting run - the
+    // CLI's materialize-now-extract-later workflow, and the daemon's
+    // retention-insurance bank - so its good finish keeps the journal:
+    // the journal is what credits the on-disk volumes to that later
+    // run. Retiring it here turned the whole banked payload back into
+    // "7 missing of 7 segments" at promotion, measured 25 Aug 2026 by
+    // the insurance A/B before this parameter existed.
+    no_extract: bool,
     out_dir: &Path,
     incomplete_spared: &[String],
     journal: Arc<nzbkit::journal::Journal>,
@@ -889,7 +897,7 @@ pub(super) fn finish_job(
     retention_skipped_payload: u64,
     transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
-    decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
+    decode_error_sample: &crate::diag::DecodeSampleCell,
     dead_servers: &[String],
     left_servers: &[String],
     slots: &[Arc<FileSlot>],
@@ -931,7 +939,13 @@ pub(super) fn finish_job(
                 kept.join(", ")
             )))
         }
-        if let Ok(j) = Arc::try_unwrap(journal) {
+        if no_extract {
+            info!(
+                target: "get",
+                "volumes banked on disk - the journal stays so a later \
+                 extracting run resumes from them"
+            );
+        } else if let Ok(j) = Arc::try_unwrap(journal) {
             j.remove();
         }
         return Ok(());
@@ -995,7 +1009,48 @@ pub(super) fn finish_job(
             backbones,
             post_age_days,
         };
-        anyhow::bail!(with_build(incomplete_reason(incomplete, derrs, &causes)))
+        let mut msg = incomplete_reason(incomplete, derrs, &causes);
+        // TODO 305. The repair ARITHMETIC, when it ran on a download that
+        // was already short and came up against a post that never
+        // carried enough parity to cover the damage. Until now that
+        // verdict was reached, logged, and then dropped on the floor:
+        // this arm wins over the `repair_shortfall` arm below whenever a
+        // single article is missing, so the one fact that settles the
+        // job - the NZB declares 8 recovery blocks and 9 payload blocks
+        // are damaged, so no provider and no amount of asking again
+        // could ever have repaired it - reached the console and never
+        // the user. What they read instead was "1 file(s) with missing
+        // segments", which is the same sentence a two-hour-old post
+        // gets while it is still propagating.
+        //
+        // A CLAUSE, appended, never an opening: `fail_kind` classifies
+        // on the opening and TODO 283 item 13 records that this one is
+        // load-bearing for the age gate. `Blocks` only - `Unservable` is
+        // the same repair-ladder verdict `incomplete_reason` already
+        // leads with (or appends itself, see its UNOBTAINABLE clause),
+        // and saying it twice in one sentence reads as two losses.
+        // `failkind::another_copy_can_help` reads this back, which is
+        // what turns it from prose into the remedy the parked row
+        // offers; `a_shortfall_past_the_declared_recovery_reads_back`
+        // pins the round trip.
+        //
+        // ONLY ON THE MISSING-ARTICLES OPENING, and that guard is the
+        // same one `incomplete_reason` applies to its own age clause:
+        // a stall and an all-transport run are OUR failure, so their
+        // damage count is inflated by articles nobody ever asked for,
+        // and "20 blocks needed but the NZB carries 8" is then a claim
+        // about the POST derived from our own link. The write-error
+        // opening is excluded by the same test and for the same reason.
+        // It also keeps this clause inside the one population
+        // `another_copy_can_help` reads it from - a `Transport` message
+        // is refused by that predicate on its kind whatever it carries,
+        // so a clause there could only ever mislead a human.
+        if let Some(short @ crate::repair::RepairShortfall::Blocks { .. }) = repair_shortfall
+            && msg.starts_with("download incomplete")
+        {
+            msg.push_str(&format!("; {}", short.clause()));
+        }
+        anyhow::bail!(with_build(msg))
     } else if let Some(short) = repair_shortfall {
         // Which of the post's two halves let the user down. §282 item 4
         // added the second clause: a recovery set the provider will not
@@ -1445,7 +1500,7 @@ pub(super) async fn finish_run(
     takedown_430: &Arc<CauseSplit>,
     transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
-    decode_error_sample: &Arc<std::sync::Mutex<Option<String>>>,
+    decode_error_sample: &crate::diag::DecodeSampleCell,
     stalled: &Arc<std::sync::atomic::AtomicBool>,
     pending_r: &std::sync::Mutex<PendingR>,
     elapsed: std::time::Duration,
@@ -1462,6 +1517,10 @@ pub(super) async fn finish_run(
     eat_consent: bool,
     note_activity: &(dyn Fn(&'static str) + Sync),
     cancel: Option<&crate::repair::SideCancel>,
+    // §293: donor directories for the disk repair's adoption scan -
+    // the failed predecessor's output on a switch job; empty
+    // otherwise. Threaded like `cancel`.
+    donor_dirs: &[PathBuf],
     hub: &Option<Arc<StreamHub>>,
     stream_owner: &str,
     budget: &nzbkit::mem::MemBudget,
@@ -1537,6 +1596,7 @@ pub(super) async fn finish_run(
         recovery_missing,
         &note_activity,
         cancel,
+        donor_dirs,
     )
     .await?;
 
@@ -1640,6 +1700,7 @@ pub(super) async fn finish_run(
     // finish_job in get/tail.rs.
     finish_job(
         all_good,
+        no_extract,
         out_dir,
         &incomplete_spared,
         journal,
@@ -1814,6 +1875,7 @@ mod tests {
         let (j, _) = nzbkit::journal::Journal::open(dir, b"<nzb/>").unwrap();
         finish_job(
             false,
+            false,
             dir,
             &[],
             Arc::new(j),
@@ -1865,6 +1927,7 @@ mod tests {
         let (j, _) = nzbkit::journal::Journal::open(dir, b"<nzb/>").unwrap();
         finish_job(
             all_good,
+            false,
             dir,
             &[],
             Arc::new(j),
@@ -1960,6 +2023,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A good `no_extract` finish KEEPS the journal: the banked volumes
+    /// are for a LATER extracting run, and the journal is what credits
+    /// them to it. Retiring it turned a whole banked payload back into
+    /// "7 missing of 7 segments" at promotion (retention-insurance A/B,
+    /// 25 Aug 2026).
+    #[test]
+    fn a_good_no_extract_finish_keeps_the_journal() {
+        let d = tdir("bank");
+        let (j, _) = nzbkit::journal::Journal::open(&d, b"<nzb/>").unwrap();
+        let res = finish_job(
+            true,
+            true,
+            &d,
+            &[],
+            Arc::new(j),
+            &[],
+            &[],
+            None,
+            0,
+            0,
+            0,
+            0,
+            false,
+            &Arc::new(CauseSplit::default()),
+            &Arc::new(CauseSplit::default()),
+            0,
+            0,
+            &Arc::new(CauseSplit::default()),
+            &Arc::new(std::sync::Mutex::new(None)),
+            &Arc::new(std::sync::Mutex::new(None)),
+            &[],
+            &[],
+            &[],
+            &Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            0,
+            0,
+            0,
+            &[],
+            0,
+            None,
+            &[],
+            None,
+            &Arc::new(nzbkit::extract::Extractor::new(&d, 0, true)),
+        );
+        assert!(res.is_ok());
+        assert!(
+            d.join(".nzbfast.journal").exists(),
+            "a banked payload's journal must survive its good finish"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The four failure arms are ranked: reextract beats incomplete and
     /// derrs, which beat repair_shortfall, which beats the bare verdict.
     #[test]
@@ -1987,7 +2102,19 @@ mod tests {
             Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
         ));
         assert!(m.contains("download incomplete"), "{m}");
-        assert!(!m.contains("recovery block"), "{m}");
+        // TODO 305: the OPENING is still incomplete's - `fail_kind`
+        // classifies on it and TODO 283 item 13 requires that - but the
+        // arithmetic no longer vanishes behind it. This assertion read
+        // `!m.contains("recovery block")` until 26 Aug 2026, which
+        // codified the drop: the one fact that settles the job reached
+        // the console and never the user, and round B measured the
+        // consequence as a parked row telling them to retry a post that
+        // could never have been repaired.
+        assert!(m.contains("9 recovery block(s) needed"), "{m}");
+        assert!(
+            m.starts_with("download incomplete"),
+            "as a CLAUSE and never as the opening: {m}"
+        );
         // derrs alone also beat the shortfall arm.
         let m = msg(run_finish(
             &d,
@@ -2024,6 +2151,7 @@ mod tests {
                 crate::repair::VolumeYield {
                     asked: 1293,
                     failed: 1206,
+                    ours: 0,
                 },
             )),
         ));
@@ -2296,6 +2424,80 @@ mod tests {
         assert!(held.iter().any(|n| n.contains("part1")), "{held:?}");
         assert!(!held.contains(&"proved.bin".to_string()), "{held:?}");
         assert!(!held.contains(&"unhealed.bin".to_string()), "{held:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    /// TODO 305: a repair shortfall that the missing-articles opening
+    /// used to swallow now rides as a clause, and
+    /// `failkind::another_copy_can_help` reads it back.
+    ///
+    /// The arithmetic is the whole finding. `RepairShortfall::Blocks`
+    /// says the post declares fewer recovery blocks than the damage
+    /// needs, so no provider anywhere could have repaired THIS post -
+    /// and the arm above it wins whenever a single article is missing,
+    /// which is every job where that arithmetic can be reached. So the
+    /// verdict was logged and dropped, the user read "1 file(s) with
+    /// missing segments" - the same sentence a two-hour-old post gets
+    /// while it is still propagating - and round B measured the
+    /// consequence as a parked row telling them to retry a post that
+    /// cannot be repaired.
+    ///
+    /// Both halves are pinned: the clause is APPENDED (so `fail_kind`
+    /// still reads `MissingArticles` off the opening, which TODO 283
+    /// item 13 requires for the age gate), and the predicate that reads
+    /// it back agrees. Without the second half a reworded clause would
+    /// empty the predicate silently, which is the state TODO 305 exists
+    /// to end.
+    #[test]
+    fn a_shortfall_past_the_declared_recovery_reads_back() {
+        use crate::failkind::{FailKind, another_copy_can_help, fail_hint, fail_kind};
+        let d = tdir("shortfallclause");
+        let ex = Arc::new(nzbkit::extract::Extractor::new(&d, 0, true));
+        let short = crate::repair::RepairShortfall::Blocks { needed: 9, have: 8 };
+        let msg = run_finish_full(&d, false, None, 1, 0, Some(short), &[], &[], &ex)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.starts_with("download incomplete: 1 file(s) with missing segments"),
+            "the opening is load-bearing and must not have moved: {msg}"
+        );
+        assert_eq!(fail_kind(&msg), FailKind::MissingArticles, "{msg}");
+        assert!(
+            msg.contains("9 recovery block(s) needed but the NZB only carries 8"),
+            "the arithmetic that settles the job has to reach the user: {msg}"
+        );
+        assert!(
+            another_copy_can_help(fail_kind(&msg), fail_hint(&msg), &msg, false),
+            "no amount of asking again fixes a post short of parity - \
+             another release is the only remedy there is: {msg}"
+        );
+
+        // The Unservable half is deliberately NOT appended here:
+        // `incomplete_reason` already leads with that verdict, or
+        // appends its own UNOBTAINABLE clause, and saying it twice in
+        // one sentence reads as two separate losses.
+        let unserv = crate::repair::RepairShortfall::Unservable(Default::default());
+        let msg2 = run_finish_full(&d, false, None, 1, 0, Some(unserv), &[], &[], &ex)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !msg2.contains("could not be fetched from your provider"),
+            "the repair ladder's seam is `incomplete_reason`'s to state: {msg2}"
+        );
+
+        // AND NOT ON AN OPENING THAT IS OURS. A write error puts the
+        // damage count somewhere the post did not: appending a post-shaped
+        // arithmetic to it would be the same mistake `incomplete_reason`
+        // refuses when it withholds the age clause from a stalled or
+        // all-transport run.
+        let ours = run_finish_full(&d, false, None, 0, 2, Some(short), &[], &[], &ex)
+            .unwrap_err()
+            .to_string();
+        assert!(ours.contains("could not write the download"), "{ours}");
+        assert!(
+            !ours.contains("recovery block(s) needed"),
+            "this failure is this machine's, so the post's parity ledger \
+             is not evidence about it: {ours}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

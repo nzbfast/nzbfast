@@ -1560,6 +1560,246 @@ fn max_source_ips_round_trips_and_clears() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// §291 box 2 (public issue #60): the per-server TLS name override, end
+/// to end through the surface someone with a reverse-proxied or
+/// self-hosted provider would actually use.
+///
+/// What is pinned here is the SURFACE only, and the distinction matters:
+/// that the value survives a round trip, that a cleared box goes back to
+/// the default rather than storing an empty name, that a partial save
+/// leaves it alone, and that a value the handshake could not use is
+/// refused at the form instead of stored. The property that the name
+/// actually REACHES the handshake - as both the verified name and the
+/// SNI - is asserted against a real rustls session in
+/// `crates/nzbkit/tests/integration/tls.rs`
+/// (`the_tls_name_override_is_what_the_handshake_verifies_and_announces`),
+/// because a test that stops at the config struct is exactly the shape
+/// that let the sibling box's `db2523936` defect sit green for a day.
+///
+/// The refusal arm is not symmetry with `address_family`. That one has a
+/// lenient loader behind it; this one has none, so a stored name the
+/// handshake cannot parse would fail every dial to this provider with a
+/// `TlsName` error and nothing on screen tying it to the box that was
+/// typed into.
+#[test]
+fn tls_hostname_round_trips_and_clears() {
+    let dir = scratch("tlsname");
+    let d = serve(&dir);
+    let srv = |port: u16| -> serde_json::Value {
+        settings_block(port)["servers"]
+            .as_array()
+            .expect("servers array")
+            .iter()
+            .find(|s| s["host"] == "10.0.0.7")
+            .expect("saved server echoed")
+            .clone()
+    };
+    // Saved without the field at all: blank, which is the editor's empty
+    // box and the daemon's "check the host we dial".
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":-1,"server":{"host":"10.0.0.7","port":563,"connections":8}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let s = srv(d.port);
+    assert_eq!(s["tls_hostname"], "", "absent echoes blank: {s}");
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        !disk.contains("tls_hostname"),
+        "unset is not written: {disk}"
+    );
+
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"10.0.0.7","port":563,"connections":8,
+            "tls_hostname":"news.cert.example"}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let s = srv(d.port);
+    assert_eq!(s["tls_hostname"], "news.cert.example", "must echo: {s}");
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        disk.contains(r#""tls_hostname""#) && disk.contains("news.cert.example"),
+        "stored under the wire name: {disk}"
+    );
+
+    // A partial save - the "Apply N to this server" button posts only
+    // the fields it knows - must leave a stored name alone.
+    let partial = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"10.0.0.7","port":563,"connections":12}}"#,
+    );
+    assert!(
+        partial.contains("\"status\":true"),
+        "save failed: {partial}"
+    );
+    assert_eq!(
+        srv(d.port)["tls_hostname"],
+        "news.cert.example",
+        "a partial save must not clear the name"
+    );
+
+    // A name the handshake could not use, and an ADDRESS, which is the
+    // mistake the box invites and which gets its own message.
+    for (bad, want) in [
+        (r#""news cert example""#, "not a hostname"),
+        (r#""1.2.3.4""#, "not an address"),
+    ] {
+        let refused = http_post(
+            d.port,
+            "/api?mode=server_save&output=json",
+            &format!(
+                r#"{{"index":0,"server":{{"host":"10.0.0.7","port":563,"connections":8,
+                    "tls_hostname":{bad}}}}}"#
+            ),
+        );
+        assert!(
+            refused.contains("\"status\":false") && refused.contains(want),
+            "{bad} must be refused saying {want:?}: {refused}"
+        );
+    }
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        !disk.contains("1.2.3.4"),
+        "a refused name must not be stored: {disk}"
+    );
+
+    // Cleared: back to checking the dialled host, and the key goes away
+    // rather than being written empty - an empty TLS name would fail
+    // every handshake instead of restoring the default.
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"10.0.0.7","port":563,"connections":8,
+            "tls_hostname":""}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        !disk.contains("tls_hostname"),
+        "a cleared box removes the key: {disk}"
+    );
+    assert_eq!(srv(d.port)["tls_hostname"], "", "and echoes blank again");
+    d.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §291 (public issue #60): the per-server address-family preference,
+/// end to end through the surface the reporter would actually use.
+///
+/// Three properties, and each one is a bug that shipped in some other
+/// setting before it was pinned here. The value ECHOES, or the editor
+/// round-trip - which posts the whole form every time - would save
+/// `auto` over whatever the user had chosen, the way an unechoed
+/// `pin_connections` once silently unpinned a server. `auto` REMOVES the
+/// key rather than writing it, because people hand-edit this file and a
+/// key restating the default is noise. And a value outside the three is
+/// REFUSED here rather than stored, because the loader reads an unknown
+/// one as auto (it must not fail a whole config over one preference), so
+/// storing it would be a save that silently did nothing.
+#[test]
+fn address_family_round_trips_and_clears() {
+    let dir = scratch("addrfam");
+    let d = serve(&dir);
+    let srv = |port: u16| -> serde_json::Value {
+        settings_block(port)["servers"]
+            .as_array()
+            .expect("servers array")
+            .iter()
+            .find(|s| s["host"] == "news.dualstack.example")
+            .expect("saved server echoed")
+            .clone()
+    };
+    // A server saved without the field at all: the echo still names a
+    // value, so the editor's <select> has something to land on.
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":-1,"server":{"host":"news.dualstack.example","port":563,"connections":8}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let s = srv(d.port);
+    assert_eq!(s["address_family"], "auto", "absent means auto: {s}");
+
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.dualstack.example","port":563,"connections":8,
+            "address_family":"ipv6"}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let s = srv(d.port);
+    assert_eq!(s["address_family"], "ipv6", "preference must echo: {s}");
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    // The file is written pretty-printed, so match the two tokens
+    // rather than a packed pair.
+    assert!(
+        disk.contains(r#""address_family""#) && disk.contains(r#""ipv6""#),
+        "stored under the wire name: {disk}"
+    );
+
+    // Back to automatic: the key goes away rather than being written.
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.dualstack.example","port":563,"connections":8,
+            "address_family":"auto"}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        !disk.contains("address_family"),
+        "auto is removed, not written: {disk}"
+    );
+    assert_eq!(srv(d.port)["address_family"], "auto", "still echoes auto");
+
+    // A partial save - the "Apply N to this server" button posts only
+    // the fields it knows - must leave a stored preference alone.
+    let saved = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.dualstack.example","port":563,"connections":8,
+            "address_family":"ipv4"}}"#,
+    );
+    assert!(saved.contains("\"status\":true"), "save failed: {saved}");
+    let partial = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.dualstack.example","port":563,"connections":12}}"#,
+    );
+    assert!(
+        partial.contains("\"status\":true"),
+        "save failed: {partial}"
+    );
+    let s = srv(d.port);
+    assert_eq!(
+        s["address_family"], "ipv4",
+        "a partial save must not clear the preference: {s}"
+    );
+
+    // Outside the three: refused with a message, and nothing stored.
+    let bad = http_post(
+        d.port,
+        "/api?mode=server_save&output=json",
+        r#"{"index":0,"server":{"host":"news.dualstack.example","port":563,"connections":8,
+            "address_family":"v6"}}"#,
+    );
+    assert!(
+        bad.contains("\"status\":false"),
+        "an unknown family must be refused: {bad}"
+    );
+    let disk = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(
+        !disk.contains("\"v6\""),
+        "the bad value must not be stored: {disk}"
+    );
+    d.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// M32's route controls (`bind_ip`, `socks5`) shipped in the engine in
 /// July and could only be set by hand-editing config.local.json until
 /// the server editor grew rows for them. The SOCKS spec is stored as ONE

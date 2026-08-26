@@ -887,7 +887,6 @@ async fn stream_runway_wait_is_time_capped_on_slow_lines() {
         wait_stream_up(port, 60.0);
         let started = std::time::Instant::now();
         let curve = record_stream(port, "/stream", 40.0, 30.0);
-        let daemon_log = std::fs::read_to_string(&log).unwrap_or_default();
         // The proof is the first megabyte's arrival time, not the whole
         // body: 1 MB needs ~4 s of line plus the capped wait. 20 s is a
         // 2x margin over the worst honest path and a 3x improvement on
@@ -911,7 +910,7 @@ async fn stream_runway_wait_is_time_capped_on_slow_lines() {
             curve.status,
             started.elapsed(),
             timeline.join(" "),
-            &daemon_log[daemon_log.len().saturating_sub(4000)..]
+            log_tail(&log, 4000)
         );
         // And the bytes that did arrive are the real payload.
         let n = curve.samples.last().map(|(_, b)| *b).unwrap_or(0) as usize;
@@ -923,19 +922,46 @@ async fn stream_runway_wait_is_time_capped_on_slow_lines() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The last `max` bytes of the daemon log, cut on a CHAR BOUNDARY.
+///
+/// `&s[s.len().saturating_sub(max)..]` over a `String` PANICS when that
+/// index lands inside a multi-byte glyph, and this log is full of them:
+/// the keyless `\u{26a0} SECURITY` banner, and a `\u{2714}` on every file that
+/// finishes. The panic then replaces the diagnosis the tail was written
+/// to carry - and at [`assert_zero_filled_body`] the tail was taken
+/// EAGERLY, ahead of every assertion, so it failed tests that were
+/// otherwise PASSING. Nightly 32952164821 (26 Aug 2026) died on `start
+/// byte index 273 is not a char boundary; it is inside '\u{26a0}'` and passed
+/// on the retry, the only difference between the two attempts being how
+/// long the log happened to be.
+///
+/// Cutting FORWARD to the next boundary is what makes this correct by
+/// construction rather than tuned: `is_char_boundary(len)` is always
+/// true, so the walk terminates, and it can only ever return slightly
+/// LESS than `max` - never an invalid index, on any log, ever.
+fn log_tail(log: &Path, max: usize) -> String {
+    let s = std::fs::read_to_string(log).unwrap_or_default();
+    let mut cut = s.len().saturating_sub(max);
+    while !s.is_char_boundary(cut) {
+        cut += 1;
+    }
+    s[cut..].to_string()
+}
+
 /// The zero-fill contract, shared by the two tests below: the body
 /// completed, everything outside the hole is the real payload, and the
 /// hole itself is zeros - never garbage, never a truncated response.
 /// `log` is the daemon's log path - its tail is the diagnosis when the
 /// contract fails.
 fn assert_zero_filled_body(curve: &ArrivalCurve, inner: &[u8], log: &Path) {
-    let daemon_log = std::fs::read_to_string(log).unwrap_or_default();
-    let tail = &daemon_log[daemon_log.len().saturating_sub(4000)..];
     let got = curve.samples.last().map(|(_, b)| *b).unwrap_or(0);
     assert_eq!(
-        got, curve.expect,
-        "stream truncated at {got}/{} (status={})\n--- daemon log tail ---\n{tail}",
-        curve.expect, curve.status
+        got,
+        curve.expect,
+        "stream truncated at {got}/{} (status={})\n--- daemon log tail ---\n{}",
+        curve.expect,
+        curve.status,
+        log_tail(log, 4000)
     );
     assert_eq!(curve.body.len(), inner.len(), "body/payload length");
     let mut wrong = 0u64;

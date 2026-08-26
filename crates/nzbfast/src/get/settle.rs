@@ -109,6 +109,10 @@ pub(super) async fn settle_verify_repair(
     // now outlives the download slot, so a deleted job must be able
     // to stop them. `crate::repair::SideCancel`; None on the CLI.
     cancel: Option<&crate::repair::SideCancel>,
+    // §293: directories a switch job's disk repair may adopt blocks
+    // from - the failed predecessor's output. Threaded the same way
+    // `cancel` is; empty on the CLI and on every non-switch job.
+    donor_dirs: &[PathBuf],
 ) -> Result<SettleVerdict> {
     // Phase marker: the network phase is over, the checks begin. On the
     // chart this is where throughput sits at zero on purpose - without
@@ -159,6 +163,7 @@ pub(super) async fn settle_verify_repair(
                 sparse_slots,
                 note_activity,
                 cancel,
+                donor_dirs,
             )
             .await
         }
@@ -374,6 +379,8 @@ async fn settle_with_set(
     // now outlives the download slot, so a deleted job must be able
     // to stop them. `crate::repair::SideCancel`; None on the CLI.
     cancel: Option<&crate::repair::SideCancel>,
+    // §293: donor directories for the disk repair's adoption scan.
+    donor_dirs: &[PathBuf],
 ) -> Result<SettleVerdict> {
     // --- settle verification (in-stream results; read-back only for gaps) ---
     let all_good;
@@ -641,6 +648,7 @@ async fn settle_with_set(
             &missing_files,
             in_set_bad,
             uncovered_pairs,
+            donor_dirs,
         )
         .await?;
         all_good = o.all_good;
@@ -790,6 +798,9 @@ async fn run_set_repair(
     missing_files: &[String],
     in_set_bad: Vec<&str>,
     mut uncovered_pairs: Vec<(usize, &str)>,
+    // §293: donor directories for the adoption scan - see
+    // `fetch_and_repair`, which is the only reader.
+    donor_dirs: &[PathBuf],
 ) -> Result<RepairOutcome> {
     let mut all_good;
     let mut reextract_failed: Option<String> = None;
@@ -981,6 +992,7 @@ async fn run_set_repair(
             &mut repair_shortfall,
             cancel,
             &mut cpu,
+            donor_dirs,
         )
         .await?;
         // A successful disk repair re-read the WHOLE set off

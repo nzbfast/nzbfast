@@ -81,6 +81,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NzbFastBetaSerial</key><string>$BETA</string>
   <key>CFBundleIconFile</key><string>NzbFast</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <!-- ONE wrapper per machine. Every instance spawns its own engine over
+       the SAME data directory (~/Library/Application Support/nzbfast:
+       one spool, one index db, one watch folder), and the attach scan
+       cannot save us from a second COPY of this app - it only ever
+       probes for an engine, not for another wrapper. LaunchServices
+       already refuses a plain second launch; this key is what makes
+       `open -n` refuse too, which is the spelling a script or a curious
+       user reaches for. -->
+  <key>LSMultipleInstancesProhibited</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>

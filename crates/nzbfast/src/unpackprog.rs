@@ -71,6 +71,17 @@
 //!    harvested candidates makes three passes at ONE set, and folding
 //!    each into the running total the way a new set is folded would
 //!    leave the lane stuck at a third of a total that never happens.
+//!
+//! # Retries
+//!
+//! Every one of those arms can have ANOTHER go at a set it has already
+//! reported: the mismatch rewind inside `write_archives_to_spending`,
+//! `unpack::unpack_named_rar`'s `.rev` and recovery-record rungs,
+//! `sfx::extract_sfx`'s carve fallback, and
+//! `repair::reextract_dir_outcome` falling through from its native
+//! shortcut to the plain feed. A retry is not a new set and must not be
+//! banked as one, or the row reports twice the bytes the extraction can
+//! ever produce. [`mark`] is what puts the lane back between two goes.
 
 use crate::MutexExt;
 use std::sync::Arc;
@@ -97,7 +108,7 @@ pub(crate) struct UnpackProgress {
 /// make several ATTEMPTS at one set - the zip and 7z arms walk a
 /// password shortlist - and only the last of them is what the set
 /// produced.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct CurSet {
     /// The live counter of the attempt in flight - the very `written`
     /// accumulator the extractor hands its bomb guard, so nothing extra
@@ -271,6 +282,74 @@ pub(crate) fn attempt(written: &Arc<AtomicU64>, total: u64, resumed: u64) {
     });
 }
 
+/// The progress state as it stands right now, so a RETRY of the work
+/// about to run can be put back to it.
+///
+/// The ladder's arms retry. `write_archives_to_spending` runs its pass a
+/// second time when a resumed prefix fails its verification (TODO 217),
+/// `unpack::unpack_named_rar` re-enters the whole named ladder after a
+/// `.rev` reconstruction and again for the recovery-record rung,
+/// `sfx::extract_sfx` falls back to a carved copy of the archive it just
+/// failed on, and `repair::reextract_dir_outcome` falls through from its
+/// native shortcut to the plain feed. Every one of those is another go
+/// at the SAME set, and without this each go was banked by [`begin_set`]
+/// as though it were a new one - so a set that needed two tries reported
+/// twice the bytes it will ever produce, and the lane under it read at
+/// half the progress it had really made.
+///
+/// A REWIND rather than a "do not bank this time" flag, because what
+/// retries is a LADDER and not a call: one re-entry of
+/// `try_unrar_outcome` walks a whole group loop, banking one set per
+/// group legitimately as it goes. Only restoring the state as a whole
+/// can undo that, and restoring it lets the second run redo the same
+/// banking from the same start - which is why [`Mark::rewind`] at the
+/// TOP of a retry loop's body is correct rather than merely harmless:
+/// on the first pass it restores the state to what it already is.
+///
+/// Inert when no ladder is armed (a CLI run, a hubless prefetch
+/// sidecar), like every other reporting call in this module.
+pub(crate) fn mark() -> Mark {
+    let mut m = Mark(None);
+    with_live(|p| {
+        m = Mark(Some(Snapshot {
+            base: p.base.load(Ordering::Relaxed),
+            base_total: p.base_total.load(Ordering::Relaxed),
+            cur: p.cur.lock_ok().clone(),
+        }));
+    });
+    m
+}
+
+/// What [`mark`] took, and the retry's way back to it.
+///
+/// Not a `Drop` guard: the LAST attempt is the one that stands, so
+/// rewinding on the way out would throw away the try that worked.
+pub(crate) struct Mark(Option<Snapshot>);
+
+/// The three fields [`UnpackProgress`] keeps that an attempt can move.
+/// `volumes` is fixed for the ladder's life and so is not among them.
+struct Snapshot {
+    base: u64,
+    base_total: u64,
+    cur: CurSet,
+}
+
+impl Mark {
+    /// Put the ladder back to where [`mark`] found it: the attempt that
+    /// ran in between is about to be made again, and only its last try
+    /// counts.
+    pub(crate) fn rewind(&self) {
+        let Some(s) = &self.0 else {
+            return;
+        };
+        with_live(|p| {
+            p.base.store(s.base, Ordering::Relaxed);
+            p.base_total.store(s.base_total, Ordering::Relaxed);
+            *p.cur.lock_ok() = s.cur.clone();
+        });
+    }
+}
+
 /// The current set expects at least `total` unpacked bytes after all.
 ///
 /// For the arms that cannot declare a figure up front:
@@ -416,6 +495,57 @@ mod tests {
         attempt(&good, 100, 0);
         good.store(100, Ordering::Relaxed);
         assert_eq!((p.total(), p.done()), (100, 100));
+    }
+
+    /// A rewind puts back everything the attempt it marked did - a
+    /// whole LOOP of banked sets included, which is what one re-entry
+    /// of the named-RAR ladder is - and replaying it at the top of the
+    /// first pass restores the state to what it already is, which is
+    /// what makes the retry loops able to call it unconditionally.
+    #[test]
+    fn a_rewind_undoes_every_set_the_attempt_it_marked_banked() {
+        let (hub, _a) = armed(3);
+        let p = hub.unpack.lock_ok().get("nzo-1").cloned().expect("armed");
+        // A set the ladder finished with before the retrying arm ran.
+        let done_before = Arc::new(AtomicU64::new(0));
+        watch(&done_before, &[], 0);
+        raise_total(10);
+        done_before.store(10, Ordering::Relaxed);
+
+        let mark = mark();
+        for _try in 0..2 {
+            // Unconditional, exactly as the arms call it: on the first
+            // pass there is nothing yet to undo.
+            mark.rewind();
+            // One pass of a group loop: two sets, banked as it goes.
+            for (n, produced) in [(100u64, 100u64), (50, 20)] {
+                let w = Arc::new(AtomicU64::new(0));
+                watch(&w, &[], 0);
+                raise_total(n);
+                w.store(produced, Ordering::Relaxed);
+            }
+            assert_eq!(
+                (p.total(), p.done()),
+                (160, 130),
+                "one pass reports the set before it plus its own two"
+            );
+        }
+    }
+
+    /// The mark is inert with no ladder armed, like every other call in
+    /// this module - and a rewind taken while unarmed must not touch a
+    /// ladder that arms later.
+    #[test]
+    fn a_mark_taken_with_no_ladder_armed_rewinds_nothing() {
+        let mark = mark();
+        let (hub, _a) = armed(1);
+        let p = hub.unpack.lock_ok().get("nzo-1").cloned().expect("armed");
+        let w = Arc::new(AtomicU64::new(0));
+        watch(&w, &[], 0);
+        raise_total(70);
+        w.store(70, Ordering::Relaxed);
+        mark.rewind();
+        assert_eq!((p.total(), p.done()), (70, 70));
     }
 
     /// The plain feed route learns its total as the extractor reaches

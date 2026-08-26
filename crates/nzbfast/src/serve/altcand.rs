@@ -103,7 +103,23 @@ pub struct AltSettings {
     /// flat-rate account and the wrong one on a metered block account -
     /// so this MUST be consulted before spending a spare on any server
     /// marked as a block account, whatever it is set to.
+    ///
+    /// That sentence was a promise nothing kept until §290: the hunt
+    /// consulted it and `daemon_park::promote_held_alternative` did not,
+    /// which is the one door that ships ON. `serve/altspend.rs` is where
+    /// both roads now ask.
     pub max_extra_bytes: AtomicU64,
+    /// §290: the admission gate, taken by every door that spends a copy
+    /// and held across the ledger read AND the publication.
+    ///
+    /// It lives beside the two ceilings for the reason the struct's own
+    /// header gives about them: a ceiling checked without one is not a
+    /// ceiling, only a suggestion, because two doors can both read the
+    /// spend before either has published. It guards no data of its own,
+    /// which is why it is `Mutex<()>` - the ledger it serializes is the
+    /// QUEUE, derived at every admission rather than stored, so there is
+    /// nothing here to leak. See `altspend`'s header.
+    pub(super) admit: Mutex<()>,
 }
 
 impl Default for AltSettings {
@@ -117,6 +133,7 @@ impl Default for AltSettings {
             auto_search: AtomicBool::new(false),
             max_copies: AtomicU32::new(2),
             max_extra_bytes: AtomicU64::new(0),
+            admit: Mutex::new(()),
         }
     }
 }
@@ -225,19 +242,62 @@ pub(super) fn terminal_reason(j: &Job) -> Option<(&'static str, String, &'static
             "pre-flight: articles missing beyond repair",
         ));
     }
-    if !h.no_server_can_supply() {
-        return None;
+    if h.no_server_can_supply() {
+        return Some((
+            "gone",
+            format!(
+                "all {} sampled article(s) were reported missing by every one of your {} \
+                 configured server(s), and at {} day(s) old the post is past the point where \
+                 propagation explains it",
+                h.sampled, h.servers, h.age_days
+            ),
+            "post is gone",
+        ));
     }
-    Some((
-        "gone",
-        format!(
-            "all {} sampled article(s) were reported missing by every one of your {} \
-             configured server(s), and at {} day(s) old the post is past the point where \
-             propagation explains it",
-            h.sampled, h.servers, h.age_days
-        ),
-        "post is gone",
-    ))
+    // THIRD ARM, §294: the joint verdict. The two above see the total
+    // losses - a dead recovery set, a wholly gone post - and this one
+    // sees the partial loss that is still past saving: enough sampled
+    // articles missing that, projected over the post, the damage
+    // exceeds what the declared PAR2 recovery can fund even at the
+    // optimistic end of the confidence interval (`score_completable`'s
+    // `No` is exactly that claim, and nothing weaker reaches here -
+    // `Doubtful` offers nothing). Ordered LAST so a total loss keeps
+    // its sharper sentence. Same classification prefix as the recovery
+    // arm: the remedy is another release, and no retry can help.
+    //
+    // AND BEHIND THE SAME AGE GATE AS ITS SIBLINGS (release-eve sweep
+    // S4, 25 Aug 2026). Both arms above only fire through Red, and Red
+    // requires the post to be past `GONE_MIN_AGE_DAYS` - below that,
+    // `health::score`'s own Amber sentence calls the identical evidence
+    // "a warning and nothing more", because a post still propagating
+    // looks exactly like a short one. `score_completable` never reads
+    // the age (deliberately: the VERDICT "this sample projects past
+    // recovery" is an honest statement about the sample at any age, and
+    // the drawer may keep rendering it), so without this clause an *arr
+    // grab minutes after upload could sprout copy asserting the sampled
+    // articles "are gone" and a class saying no retry can help - and a
+    // click on that button fails a job that would have completed. The
+    // gate lives here, on the OFFER, because the offer copy is the
+    // overclaim; `h.age_days` is the payload sample's own age, the same
+    // figure Red is gated on for the arm above. (The RECOVERY set's own
+    // age is the scorer's problem, and handled there since the S4
+    // follow-on: a young-and-absent recovery sample cannot fund a `No`,
+    // so that shape reads `doubtful` and never reaches this arm.)
+    if h.completable == Some(crate::health::Completable::No)
+        && h.age_days >= crate::diag::GONE_MIN_AGE_DAYS
+    {
+        return Some((
+            "short",
+            format!(
+                "this post is missing more than its repair data can rebuild: {} of {} \
+                 sampled article(s) are gone, and projected over the whole post that \
+                 damage exceeds the PAR2 recovery declared for it",
+                h.absent, h.sampled
+            ),
+            "pre-flight: articles missing beyond repair",
+        ));
+    }
+    None
 }
 
 /// The queue row's offer: the reason, the spares that could be switched
@@ -267,6 +327,20 @@ pub(super) fn terminal_reason(j: &Job) -> Option<(&'static str, String, &'static
 ///   only the hold setting, which read as "nothing else can happen" from
 ///   the day section C landed.
 pub(super) fn offer_json(j: &Job, held: &[HeldSpare], auto_search: bool) -> Option<Value> {
+    // A HELD row never carries the offer, whatever its health says.
+    // Unreachable before §295 - held rows were never probed, so they
+    // had no health for `terminal_reason` to read - and reachable the
+    // day the prober started visiting them: a held spare of a dead
+    // post would sprout "cannot finish" with a search button, on a row
+    // that is not downloading anything. Its dead-ness is already
+    // expressed where §295 designed it to be: the health badge on the
+    // row, and the promotion band that ranks it last. Hunting a
+    // replacement FOR A SPARE is §4b's junk-queue class - the spare
+    // exists to catch its primary's failure, and if it is promoted and
+    // then proves dead, THAT run gets the offer as an ordinary row.
+    if !j.held_for.is_empty() {
+        return None;
+    }
     let (token, why, _) = terminal_reason(j)?;
     let spares: Vec<Value> = held
         .iter()
@@ -303,16 +377,42 @@ pub(super) fn offer_json(j: &Job, held: &[HeldSpare], auto_search: bool) -> Opti
 /// than by a number somebody picked.** Every clause below is a
 /// mechanism and none of them is an age:
 ///
-/// 1. `fail_action` must be `"search"`. That is the retry surface's own
-///    "is this still worth acting on" test, already shipped and already
-///    drawn: those are exactly the rows whose Retry is dimmed with
-///    "asking again cannot fix this one - the post is the problem, not
-///    the download", and which already carry a `find another` button
-///    into a manual search. Everything else is either local (another
-///    copy fails the same way, which is `NoHunt::LocalFault` one step
-///    later) or genuinely retryable. A ranked one-click replacement
-///    must not be offered on a NARROWER set than the hand search
-///    beside it, and it must not be offered on a WIDER one.
+/// 1. `failkind::another_copy_can_help` must say yes. THIS CLAUSE WAS
+///    `fail_action == "search"` UNTIL TODO 305, and the swap is the
+///    section's own repair rather than a loosening, so the argument for
+///    both spellings belongs here.
+///
+///    The old rule read the retry surface's test - the rows whose Retry
+///    is dimmed with "asking again cannot fix this one - the post is the
+///    problem, not the download", which already carry a `find another`
+///    button into a manual search - on the reasoning that a ranked
+///    one-click replacement must not be offered on a NARROWER set than
+///    the hand search beside it, nor on a WIDER one. That parity was a
+///    good instinct and it borrowed the wrong predicate. Round B
+///    measured what it cost (26 Aug 2026,
+///    `research/RECOVERY-LADDER-YIELD-2026-08-26.md`): of twelve
+///    failures, SEVEN where another release is the only remedy the
+///    product has were told to retry, and they are one shape - a payload
+///    that arrived all but whole over a recovery set no server would
+///    serve. That is TODO 282's founding incident, and item 2 of THIS
+///    section names it as the case the parked surface was built for. The
+///    gate excluded it because `incomplete_reason` must open "download
+///    incomplete" for the age gate's sake (TODO 283 item 13), so the
+///    kind is `MissingArticles` and the action is `retry`.
+///
+///    `fail_action` was NOT widened to fix that, and must not be: the
+///    dashboard's dimmed Retry hangs off it and `history_json` derives
+///    SAB's `retry` BOOLEAN from `== "retry"`, so moving this family
+///    would tell every *arr, nzb360 and LunaSea client that a row a
+///    journal-resume retry can still shorten may not be asked for again.
+///    The two questions are different - "what should this person press"
+///    against "can another copy of this release help" - and the second
+///    is answerable from the failure's own evidence. So it has its own
+///    predicate, which is a strict superset of the old one plus exactly
+///    the recovery-set family, and the parity that clause was reaching
+///    for is preserved where it actually matters: the OFFER and the
+///    clicked hunt still ask one predicate, so a button that is on the
+///    page is a button `hunt_parked_request` will answer.
 /// 2. The spooled `.nzb` must still be on disk. Not decoration: the
 ///    hunt's age gate reads it when the failure sentence carries no age
 ///    clause, and `hunt_pick`'s item 6 admission test reads it to
@@ -345,12 +445,12 @@ pub(super) fn parked_replaceable(j: &Job) -> bool {
         // `unix_now` hands back an i64; the two are the same number on
         // every clock this runs on.
         && !j.auto_retry_at.is_some_and(|t| t > unix_now().unsigned_abs())
-        && fail_action(
+        && another_copy_can_help(
             fail_kind(&j.fail_message),
             fail_hint(&j.fail_message),
             &j.fail_message,
             j.password_required,
-        ) == "search"
+        )
         && j.nzb_path.is_file()
 }
 
@@ -523,6 +623,17 @@ impl Daemon {
     /// which is the point: none of them changed a job, so there is no
     /// switch to announce.
     pub(super) fn alt_switch(&self, failed_id: &str, spare_id: &str) -> Option<String> {
+        // §290 (Codex F-09/F-11). The gate is taken FIRST and held to
+        // the end of the switch, so the ceilings are read and the spare
+        // is unpaused without the automatic promotion or a hunt slipping
+        // a second copy in between. It also carries `hunt::hunt_pick`'s
+        // post-fetch weighing: that road parks its fetched copy as a
+        // held spare and promotes it through here, so the size checked
+        // is the parsed NZB's and not the indexer's advertisement.
+        let _gate = self.alt_gate();
+        if let Some(no) = self.alt_switch_admit(failed_id, spare_id) {
+            return Some(no);
+        }
         // §284: the original may be a HISTORY row, and it is resolved
         // BEFORE the queue lock is taken rather than inside the hold
         // below. `history_job` takes the history mutex, and nothing on
@@ -671,6 +782,18 @@ impl Daemon {
                     g.finished_unix = Some(unix_now());
                 }
                 g.alt_to_name = spare_name.clone();
+                // The auto-retry stamp goes with it. `parked_replaceable`
+                // deliberately admits a row whose stamp is already PAST
+                // due (clause 3), which is the very state a busy or held
+                // daemon leaves it in, so a record something has just
+                // replaced would otherwise come back through the queue on
+                // a stamp that never fired - downloading the same release
+                // a second time beside its replacement, and taking item
+                // 14's "replaced by" row out of history on the way. The
+                // queue road needs no such line: it re-parks the row
+                // itself.
+                g.auto_retry_at = None;
+                g.auto_retry_why = None;
                 g.fail_message.clone()
             };
             let was_queued = lead.is_some();
@@ -726,7 +849,26 @@ impl Daemon {
         }
         drop(held_writes);
         if was_queued {
-            let _ = self.history_upsert(std::slice::from_ref(&orig));
+            // QUEUE -> history, so there is no `park_prewrite` behind
+            // this one and no second chance after it: the row was pushed
+            // into `self.history` above and this is the only write that
+            // will ever put it on disk. Its answer was dropped by a
+            // semicolon, so a store that refused the append left the
+            // original in memory and nowhere else, under a switch the
+            // user had already been told happened - the record would come
+            // back at the next start as a QUEUED job, beside the
+            // alternative that replaced it. `history_publish` rescues the
+            // refused append with the rewrite and names the cost when it
+            // cannot, and its present-check is the same guard the arm
+            // below already takes for the same reason.
+            self.history_publish(&orig, || {
+                format!(
+                    "{}: the replaced job's history row did not reach the store - \
+                     after a restart it comes back as a queued job beside the \
+                     alternative that replaced it",
+                    orig.lock_ok().name
+                )
+            });
         } else {
             // `_if_present` and not `history_upsert`, the same call
             // `promote_held_alternative` makes for the same reason: a

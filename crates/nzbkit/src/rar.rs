@@ -663,9 +663,23 @@ impl VolumeMapper {
 
     /// Copy the part of the span that overlaps the parse window.
     fn stash(&mut self, offset: u64, data: &[u8]) {
-        let win_end = self.win_base + MAX_WIN as u64;
+        // SATURATING, both of them. These are the first two operations
+        // `feed` performs and both operands come straight off the wire:
+        // a `.rar.NNN` split whose part 1 declares `=ybegin size=<u64
+        // max>` gives `split_target` a logical offset of `u64::MAX`, and
+        // a volume whose article carries no `size=` at all disarms
+        // `advance_to`'s `volume_size > 0` guard so a RAR5 header can
+        // walk `win_base` to just under `u64::MAX`. Honest yEnc reaches
+        // neither - `check_part_geometry` pins `offset + len == end` -
+        // so this is a hostile or badly corrupt post. Plain `+` panicked
+        // in debug and wrapped in release (there is no `overflow-checks`
+        // in the release profile, as `advance_to` records below); both
+        // saturated forms fall through the `s >= e` guard immediately
+        // below, which is the benign span-drop release already
+        // performed, and nothing non-overflowing moves.
+        let win_end = self.win_base.saturating_add(MAX_WIN as u64);
         let s = offset.max(self.win_base);
-        let e = (offset + data.len() as u64).min(win_end);
+        let e = offset.saturating_add(data.len() as u64).min(win_end);
         if s >= e {
             return;
         }
@@ -772,15 +786,33 @@ impl VolumeMapper {
     }
 
     /// Move the window base forward to `new_base` (>= win_base).
+    ///
+    /// THE DELTA IS COMPARED IN u64 AND NARROWED ONLY INSIDE THE DRAIN
+    /// ARM. `(new_base - self.win_base) as usize` narrowed FIRST, and
+    /// `usize` is 32 bits on the shipped armv7 target - so a rebase of
+    /// exactly k*2^32 read as `skip == 0` and took the early `return`,
+    /// which is the one exit that does NOT reach `self.win_base =
+    /// new_base` at the foot. The cursor has already moved by then
+    /// (`self.cursor = next; self.rebase(next);`), so the window would go
+    /// on serving bytes from the OLD logical offset under the new
+    /// cursor - `avail()` carries only a `debug_assert_eq!`, which the
+    /// shipped artifact does not run. `k*2^32 + m` was the other half:
+    /// it drained m bytes and then relabelled the survivors as living at
+    /// `new_base`. This must NOT be written as a `chunk_len` clamp
+    /// against `win.len()` - that answers 0 for an EMPTY window, which
+    /// takes the same early return and reintroduces the desync from the
+    /// other direction. See [`crate::disk::chunk_len`] for the class.
     fn rebase(&mut self, new_base: u64) {
-        let skip = (new_base - self.win_base) as usize;
-        if skip == 0 {
+        let delta = new_base - self.win_base;
+        if delta == 0 {
             return;
         }
-        if skip >= self.win.len() {
+        if delta >= self.win.len() as u64 {
             self.win.clear();
             self.filled.clear();
         } else {
+            // Proven below `win.len()`, which is capped at MAX_WIN.
+            let skip = delta as usize;
             self.win.drain(..skip);
             let mut nf = Vec::with_capacity(self.filled.len());
             for &(s, e) in &self.filled {

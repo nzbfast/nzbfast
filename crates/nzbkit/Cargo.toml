@@ -39,7 +39,16 @@ webpki-roots = "1"
 # download path uses. Every downloaded byte is decrypted, so on a weak
 # core that term belongs in the per-byte budget next to md5 and decode.
 aws-lc-rs = "1.17"
-rusqlite = { version = "0.40.1", features = ["bundled", "functions"], optional = true }
+# `hooks` moved here from [dev-dependencies] on 25 Aug 2026 (TODO 300):
+# `progress_handler` stopped being a test-only affordance the day the
+# pooled readers got a query budget, and `index/deadline.rs` is
+# production code. The dep is optional, so this widens the feature set of
+# `indexer` builds only - a slim build still has no rusqlite at all.
+rusqlite = { version = "0.40.1", features = [
+    "bundled",
+    "functions",
+    "hooks",
+], optional = true }
 rsa = "0.9"
 sha1 = { version = "0.11", features = ["oid"] }
 flate2 = "1"
@@ -146,10 +155,18 @@ heavy-tests = []
 # `hooks` is what gives the compact-abort test `progress_handler`, the
 # only way to fire an interrupt from inside the rewrite's own VM loop
 # rather than betting on a timer. It is a code gate (`hooks = []`
-# upstream, no extra C) and it belongs HERE, not on the dependency
-# above: resolver 2 keeps dev-dependency features out of non-test
-# builds, so the shipping binary's feature set does not widen for a
-# test. Verify with `cargo tree --no-dev-dependencies`.
+# upstream, no extra C).
+#
+# It used to be HERE AND NOT on the dependency above, on the argument
+# that resolver 2 keeps dev-dependency features out of non-test builds
+# so the shipping binary's feature set does not widen for a test. That
+# argument expired on 25 Aug 2026: `index/deadline.rs` gives every
+# pooled reader a query budget through the same callback, so the
+# shipping binary needs it now and the feature is declared above. This
+# entry stays because nzbkit's TESTS use rusqlite directly and the
+# `indexer` feature is not on in every one of them; it is no longer what
+# decides whether a release build has hooks. Verify the split with
+# `cargo tree --no-dev-dependencies`.
 rusqlite = { version = "0.40.1", features = ["hooks"] }
 # Examples only. nzbkit itself emits tracing events and installs no
 # subscriber (the binary does that); without one here, the PAR2 bench

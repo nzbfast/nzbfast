@@ -76,8 +76,10 @@ pub(super) static COMPACT_BARRIER: std::sync::Mutex<Option<(String, Arc<std::syn
 pub(super) enum HistWrite {
     /// The record's current state is on disk.
     Wrote,
-    /// The record is not in history: nothing was written, and nothing
-    /// was owed.
+    /// Nothing was written because nothing was owed: the record is not
+    /// in history (the `_if_present` race this enum was minted for), or
+    /// it is not bound for history at all (`park_prewrite`'s demote arm,
+    /// which returns the job to the queue).
     Absent,
     /// The record IS in history and could not be written. Its current
     /// state is live in memory and nowhere else.
@@ -93,6 +95,16 @@ impl Daemon {
     /// call, not per line; callers batch. Best-effort like save_queue -
     /// a failed write must never take down a live daemon - but logged,
     /// because a silent miss here is a history row lost across restart.
+    ///
+    /// A CALLER WHOSE MISS COSTS MORE THAN A ROW does not stop at that
+    /// trade: [`Daemon::history_publish`] on the mutation side, and
+    /// `delete_prewrite` / `history_tombstone` on the removal side, take
+    /// [`HIST_IO`] themselves and stand the atomic rewrite in for a
+    /// refused append rather than logging and carrying on. The rewrite
+    /// needs only the DIRECTORY, which is the whole way out of the
+    /// commonest refusal there is - see
+    /// [`Daemon::history_rescue_locked`]. What is left on this bare path
+    /// is the caller whose refusal really does cost one row.
     fn history_append(&self, lines: &[String]) -> bool {
         if lines.is_empty() {
             return true;
@@ -108,7 +120,7 @@ impl Daemon {
     fn history_write_locked(&self, lines: &[String]) -> bool {
         // §158 item 7: the harness's kill-here seam, matching save_queue's.
         #[cfg(test)]
-        if super::storecut::cut_here() {
+        if super::storecut::cut_here(super::storecut::Store::HistoryAppend) {
             return false;
         }
         let path = self.history_store_path();
@@ -261,26 +273,40 @@ impl Daemon {
             HistWrite::Refused => {}
             settled => return settled,
         }
-        // The rewrite writes every live record, so a folder that is not
-        // coming back must not turn each job event into a full-store
-        // write: one attempt a minute after a failed one. A rewrite that
-        // LANDS clears nothing, because it heals the store and the next
-        // caller is back to appending.
-        let now = nzbkit::pool::now_ms();
-        let last = self.hist_rewrite_fail_ms.load(Ordering::Relaxed);
-        if last != 0 && now.saturating_sub(last) < 60_000 {
-            error!(target: "queue", "history store refused the write - {}", cost());
+        let Some(now) = self.hist_rescue_open() else {
+            self.hist_report_refusal(cost, false);
             return HistWrite::Refused;
-        }
+        };
         if self.history_compact() {
             return HistWrite::Wrote;
         }
-        self.hist_rewrite_fail_ms
-            .store(now.max(1), Ordering::Relaxed);
+        self.hist_rescue_failed(now);
+        self.hist_report_refusal(cost, true);
+        HistWrite::Refused
+    }
+
+    /// The sentence a store refusal owes, in ONE place - both the
+    /// mutation side ([`Daemon::history_publish`]) and the park's
+    /// prewrite say it, and a rule written twice drifts.
+    ///
+    /// `on_ring` is the whole of the difference between the two exits,
+    /// and it is a RATE LIMIT rather than a judgement about severity.
+    /// Both callers reach this from two places: the rescue was GATED
+    /// (some other caller tried and failed inside the last minute, so
+    /// this one did not even attempt it) and the rescue was ATTEMPTED
+    /// and failed. Only the second raises the event, so a data folder
+    /// that is not coming back costs the ring one entry a minute instead
+    /// of one per job event - the same argument
+    /// [`Daemon::hist_rescue_open`] makes about the write itself.
+    ///
+    /// `cost` stays a closure all the way in: the ordinary path must not
+    /// pay to format a sentence nobody will read.
+    fn hist_report_refusal(&self, cost: impl FnOnce() -> String, on_ring: bool) {
         let cost = cost();
         error!(target: "queue", "history store refused the write - {cost}");
-        self.note_event("disk", format!("history not saved - {cost}"));
-        HistWrite::Refused
+        if on_ring {
+            self.note_event("disk", format!("history not saved - {cost}"));
+        }
     }
 
     /// [`Daemon::history_publish`] with the ordinary cost sentence, for
@@ -342,6 +368,62 @@ impl Daemon {
         })
     }
 
+    /// The one-a-minute gate every rewrite RESCUE takes before standing
+    /// the atomic rewrite in for a refused append.
+    ///
+    /// The rewrite writes every live record, so a folder that is not
+    /// coming back must not turn each job event into a full-store write.
+    /// `None` means the last attempt failed less than a minute ago and
+    /// this one must not be made; `Some(now)` is the clock to hand
+    /// [`Daemon::hist_rescue_failed`] if it fails. A rewrite that LANDS
+    /// clears nothing, because it heals the store and the next caller is
+    /// back to appending.
+    fn hist_rescue_open(&self) -> Option<u64> {
+        let now = nzbkit::pool::now_ms();
+        let last = self.hist_rewrite_fail_ms.load(Ordering::Relaxed);
+        (last == 0 || now.saturating_sub(last) >= 60_000).then_some(now)
+    }
+
+    /// The other half of [`Daemon::hist_rescue_open`]: stamp a rewrite
+    /// that was attempted and failed, so the next minute's callers skip
+    /// straight past it.
+    fn hist_rescue_failed(&self, now: u64) {
+        self.hist_rewrite_fail_ms
+            .store(now.max(1), Ordering::Relaxed);
+    }
+
+    /// Stand the atomic rewrite in for an append this store refused, with
+    /// [`HIST_IO`] ALREADY held. Returns whether the store now says what
+    /// the refused line said.
+    ///
+    /// [`Daemon::history_publish`] is the same move on the mutation side
+    /// and carries the argument at length: the append needs write
+    /// permission ON THE FILE while the rewrite goes through
+    /// `persist::write_atomic` and needs only the DIRECTORY, so a
+    /// `history.jsonl` left 0444, owned by a uid this daemon no longer
+    /// runs as (one `sudo nzbfast` is enough) or holding an immutable
+    /// flag is REPLACED by a file this daemon owns. That asymmetry is the
+    /// whole of P2-1's trigger, so it is also the whole of its way out -
+    /// a delete's tombstone and a delete's placeholder get the same
+    /// second chance a recategorize has had since M5.
+    ///
+    /// Its own function rather than `history_publish`'s, because THIS one
+    /// must run under the lock. A removal that dropped [`HIST_IO`]
+    /// between "the append was refused" and "rewrite the store without
+    /// the record" would let an `history_upsert_if_present` land in
+    /// between and write back the very record the rewrite is about to
+    /// omit - the H6 shape, one store-write further out.
+    fn history_rescue_locked(&self, extra: &[String], drop_ids: &[String]) -> bool {
+        let Some(now) = self.hist_rescue_open() else {
+            return false;
+        };
+        if self.history_rewrite_locked(extra, drop_ids) {
+            return true;
+        }
+        self.hist_rescue_failed(now);
+        false
+    }
+
     /// §158 item 7: a park's history row, written BEFORE the row leaves
     /// the live queue. Returns whether it landed.
     ///
@@ -367,8 +449,85 @@ impl Daemon {
     /// the demote scrub settle it afterwards and the upsert beside the
     /// history push writes it again; last line wins on replay, so this one
     /// only has to EXIST.
-    pub(super) fn park_prewrite(&self, job: &Arc<Mutex<Job>>, dropping: bool) -> bool {
-        !dropping && self.history_upsert(std::slice::from_ref(job))
+    ///
+    /// [`HistWrite`] AND NOT A BOOL, for the reason that enum was minted:
+    /// a `false` here conflated "this park is dropping the record, so no
+    /// row was owed" with "the row was owed and the store would not take
+    /// it", and the caller bound the pair to one `filed_early` flag. The
+    /// demote is the daemon working; the refusal is §158.7's window
+    /// reopening under a park that carried straight on to drop the queue
+    /// row. Only the second is a fault, and until 26 Aug 2026 neither the
+    /// caller nor the log could tell them apart. `Absent` is the demote -
+    /// nothing owed, nothing written - and `Refused` means the row was
+    /// owed and no store holds it.
+    ///
+    /// A refused append is retried as the atomic rewrite, exactly as
+    /// `delete_prewrite`'s placeholder is and for the reason
+    /// [`Daemon::history_rescue_locked`] gives: the append needs write
+    /// permission ON THE FILE and the rewrite needs only the DIRECTORY,
+    /// so the commonest refusal there is - a `history.jsonl` left 0444 or
+    /// owned by a uid this daemon no longer runs as - now files the park
+    /// rather than losing it. The line is carried into the rewrite as
+    /// `extra`, because the record is in neither `self.history` (park
+    /// pushes it a hundred lines below) nor, once the append was refused,
+    /// the file. `Refused` therefore means the whole spool folder is
+    /// unwritable, not merely the file.
+    ///
+    /// `cost` is the sentence a `Refused` owes, on
+    /// [`Daemon::history_publish`]'s model: logged always, and raised on
+    /// the event ring when the rescue was actually attempted, so it
+    /// reaches the dashboard rather than a log nobody reads at 3am. It
+    /// matters most on the two arms that have no later filing to report
+    /// for them - a tombstoned park files into no store at all, and the
+    /// M5 delete arm's `already` path writes nothing either.
+    ///
+    /// WHAT A `Refused` MEANS ON A REAL BOX, and why park does not stop
+    /// on it: the rewrite and `save_queue` both go through
+    /// `persist::write_atomic` on the same directory, so a directory that
+    /// refuses one refuses the other. A refusal here is therefore a
+    /// daemon whose queue store has stopped landing too - which
+    /// `save_failed_at` already surfaces through `sab_warnings`. The
+    /// download has happened and the bytes are on disk; there is no
+    /// caller waiting on an answer the way a delete verb's is, so the
+    /// park carries on and says what the next start loses.
+    ///
+    /// Serialized BEFORE [`HIST_IO`] is taken, the way `delete_prewrite`
+    /// does it: the rescue path underneath takes the history lock and
+    /// then job locks, so this must not be holding a job guard on its way
+    /// in.
+    pub(super) fn park_prewrite(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        dropping: bool,
+        cost: impl FnOnce() -> String,
+    ) -> HistWrite {
+        if dropping {
+            return HistWrite::Absent;
+        }
+        let line = job_json(&job.lock_ok()).to_string();
+        let lines = std::slice::from_ref(&line);
+        let _g = HIST_IO.lock_ok();
+        if self.history_write_locked(lines) {
+            return HistWrite::Wrote;
+        }
+        // Spelled out rather than delegated to
+        // [`Daemon::history_rescue_locked`], because the gate and the
+        // report are ONE decision: a rescue that was never attempted
+        // must not raise a ring event, and a caller outside this
+        // function cannot tell "gated" from "tried and failed". Exactly
+        // the shape [`Daemon::history_publish`] has on the mutation
+        // side, and it reports through the same helper so the two say
+        // the same thing.
+        let Some(now) = self.hist_rescue_open() else {
+            self.hist_report_refusal(cost, false);
+            return HistWrite::Refused;
+        };
+        if self.history_rewrite_locked(lines, &[]) {
+            return HistWrite::Wrote;
+        }
+        self.hist_rescue_failed(now);
+        self.hist_report_refusal(cost, true);
+        HistWrite::Refused
     }
 
     /// The same idea one caller further back: the DELETE's history row,
@@ -407,27 +566,82 @@ impl Daemon {
     /// still-Downloading job surfacing as a history row would race that
     /// check and `dir_claim`'s two-store scan. Last line wins on replay,
     /// so park's later rows simply overwrite this one.
-    pub(super) fn delete_prewrite(&self, job: &Arc<Mutex<Job>>, status: &str) {
-        // FinalDelete's contract is that no record survives at all, so
-        // an empty status must never reach here.
-        if status.is_empty() {
-            return;
+    ///
+    /// RETURNS WHETHER THE PLACEHOLDER IS DURABLE, and the caller has to
+    /// read it BEFORE it removes anything: this row is the ONLY thing
+    /// that will name the record between the queue row going and a park
+    /// that is a pipeline drain away, so a caller that goes on to drop
+    /// the row anyway has lost it from both stores - which is what the
+    /// answer being a `()` cost until 26 Aug 2026 (P2-1). A refused
+    /// append is retried as the atomic rewrite WITH this line carried
+    /// into it, for the reason [`Daemon::history_rescue_locked`] gives;
+    /// `false` therefore means the whole spool folder is unwritable, not
+    /// merely the file.
+    ///
+    /// An empty `status` is `true` and not a lie: FinalDelete's contract
+    /// is that no record survives at all, so nothing was owed and
+    /// nothing can be missing.
+    ///
+    /// A SLICE, and one append for the batch. The verb takes a list of
+    /// ids, and since the answer became load-bearing the call moved
+    /// ahead of the queue retain - so a bulk cancel of a hundred rows
+    /// would otherwise be a hundred `fsync`s in front of the user's
+    /// request instead of one.
+    #[must_use]
+    pub(super) fn delete_prewrite(&self, jobs: &[Arc<Mutex<Job>>], status: &str) -> bool {
+        if status.is_empty() || jobs.is_empty() {
+            return true;
         }
-        let (id, line) = {
-            let g = job.lock_ok();
-            let mut v = job_json(&g);
-            v["state"] = json!("Failed");
-            v["fail_message"] = json!(if status == "DUPE" {
-                "deleted from the queue as a duplicate"
-            } else {
-                "deleted from the queue"
-            });
-            v["finished_unix"] = json!(unix_now());
-            v["delete_status"] = json!(status);
-            (g.nzo_id.clone(), v.to_string())
-        };
-        self.hist_inflight.lock_ok().insert(id);
-        self.history_append(&[line]);
+        let mut lines: Vec<String> = Vec::with_capacity(jobs.len());
+        {
+            let mut inflight = self.hist_inflight.lock_ok();
+            for job in jobs {
+                let g = job.lock_ok();
+                let mut v = job_json(&g);
+                v["state"] = json!("Failed");
+                v["fail_message"] = json!(if status == "DUPE" {
+                    "deleted from the queue as a duplicate"
+                } else {
+                    "deleted from the queue"
+                });
+                v["finished_unix"] = json!(unix_now());
+                v["delete_status"] = json!(status);
+                inflight.insert(g.nzo_id.clone());
+                lines.push(v.to_string());
+            }
+        }
+        let _g = HIST_IO.lock_ok();
+        if self.history_write_locked(&lines) || self.history_rescue_locked(&lines, &[]) {
+            return true;
+        }
+        // No line reached disk, so there is nothing for the Q2
+        // carry-forward to protect and the ids would sit in the set for
+        // the life of the daemon - the caller is about to refuse, and a
+        // refused verb leaves nothing of itself behind. HIST_IO then
+        // `hist_inflight` is the order `history_rewrite_locked` already
+        // takes them in.
+        let mut inflight = self.hist_inflight.lock_ok();
+        for job in jobs {
+            inflight.remove(&job.lock_ok().nzo_id);
+        }
+        false
+    }
+
+    /// The far end of a [`Daemon::delete_prewrite`] whose record was
+    /// filed into `self.history` right here rather than by a `park` an
+    /// unbounded wait away.
+    ///
+    /// The Q2 hazard that registration covers runs from the placeholder
+    /// to the record reaching memory, and for a row the delete verb
+    /// files itself that is a few lines, not a pipeline drain - so the
+    /// id comes back out here. `park`'s own guard does it for the active
+    /// arm; without this the set would grow for the life of the daemon
+    /// on the arm that has no park to reach.
+    pub(super) fn delete_prewrite_filed(&self, ids: &[String]) {
+        let mut inflight = self.hist_inflight.lock_ok();
+        for id in ids {
+            inflight.remove(id);
+        }
     }
 
     /// Register a park's nzo_id as in flight between its prewrite and its
@@ -446,12 +660,71 @@ impl Daemon {
     /// for good (delete) AND for one moving back into the queue (retry,
     /// stream) - in both cases the id must stop replaying into history;
     /// the queue arm of `save_queue` carries the latter onward.
-    pub(super) fn history_tombstone(&self, ids: &[String]) {
+    ///
+    /// RETURNS WHETHER THE REMOVAL IS DURABLE, and every caller has to
+    /// read it. `history_replay` drops a row only when it finds a
+    /// `"deleted": true` line, so a refused tombstone is not a cosmetic
+    /// miss: the record comes back at the next start, and it comes back
+    /// after its retry `.nzb` and its early-published copies have been
+    /// destroyed on the strength of a delete that reported success.
+    /// A `()` here is what let all four delete paths do exactly that
+    /// (P2-1) - so the answer is `#[must_use]`, and a caller must not
+    /// destroy anything the returning record will need until it is
+    /// `true`.
+    ///
+    /// A refused append is retried as the atomic rewrite, which OMITS
+    /// these ids: a rewrite that does not name a record is that record's
+    /// tombstone, because replay reads the file as the whole truth. See
+    /// [`Daemon::history_rescue_locked`] for why that second chance
+    /// exists at all and for why it takes the lock rather than dropping
+    /// it. `false` therefore means the whole spool folder is unwritable,
+    /// not merely the file.
+    #[must_use]
+    pub(super) fn history_tombstone(&self, ids: &[String]) -> bool {
+        if ids.is_empty() {
+            return true;
+        }
         let lines: Vec<String> = ids
             .iter()
             .map(|id| json!({"nzo_id": id, "deleted": true}).to_string())
             .collect();
-        self.history_append(&lines);
+        let _g = HIST_IO.lock_ok();
+        self.history_write_locked(&lines) || self.history_rescue_locked(&[], ids)
+    }
+
+    /// Put records back into `self.history` where they were, after a
+    /// removal whose tombstone the store REFUSED.
+    ///
+    /// Every delete path takes the row out of memory before asking the
+    /// store to forget it, and that order is deliberate: an
+    /// `history_upsert_if_present` landing in the gap finds the record
+    /// absent and writes nothing, where the other order would let it
+    /// write back the row the tombstone had just buried (the H6 shape).
+    /// The price is that a refused tombstone leaves a record on disk and
+    /// not in memory - live at the next start, invisible until then -
+    /// so it goes back.
+    ///
+    /// `at` is each record's position in the list AS IT STOOD once the
+    /// removal was done, so re-inserting in REVERSE order of removal
+    /// reconstructs it. Clamped rather than asserted: the list is not
+    /// held across the store write, so a park can file a row meanwhile,
+    /// and a stale index must land at the end instead of panicking a
+    /// live daemon. Order is best-effort for that reason and correctness
+    /// does not rest on it - `history_replay` keys on the id.
+    ///
+    /// The caller owns the record's own FIELDS: a delete stamps
+    /// `tombstone` (and the queue arm stamps a terminal state) before it
+    /// gets here, and only the caller knows what it stamped.
+    pub(super) fn history_restore(&self, removed: Vec<(usize, Arc<Mutex<Job>>)>) {
+        if removed.is_empty() {
+            return;
+        }
+        let mut h = self.history.lock_ok();
+        for (at, job) in removed.into_iter().rev() {
+            let at = at.min(h.len());
+            h.insert(at, job);
+        }
+        self.history_rev.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A GENERATION-BOUND tombstone: deletes only history rows whose
@@ -471,9 +744,21 @@ impl Daemon {
     /// Bounded by the mover's OWN stamp, the tombstone still buries the
     /// row it is meant to bury (the seq-N record the move pulled out of
     /// history) and can never touch a generation stamped after it.
-    pub(super) fn history_tombstone_upto(&self, id: &str, seq: u64) {
+    ///
+    /// Returns whether the removal is durable, for the reason the plain
+    /// tombstone above gives. The rescue passes NO `drop_ids`, and that
+    /// is the generation bound rather than a hole in it: the rewrite
+    /// publishes the LIVE records, so a job that has left history is
+    /// omitted (which is what this move asked for) while one that has
+    /// already parked again at a later seq is present (which is what the
+    /// bound exists to protect). The seq is a property of the LINE, and
+    /// a rewrite has no earlier lines to be bounded against.
+    #[must_use]
+    pub(super) fn history_tombstone_upto(&self, id: &str, seq: u64) -> bool {
         let line = json!({"nzo_id": id, "deleted": true, "move_seq": seq}).to_string();
-        self.history_append(&[line]);
+        let _g = HIST_IO.lock_ok();
+        self.history_write_locked(std::slice::from_ref(&line))
+            || self.history_rescue_locked(&[], &[])
     }
 
     /// Rewrite the store as exactly the live records, atomically. Called
@@ -487,16 +772,54 @@ impl Daemon {
     /// own note for what an unsynchronised rewrite cost.
     pub(super) fn history_compact(&self) -> bool {
         let _g = HIST_IO.lock_ok();
+        self.history_rewrite_locked(&[], &[])
+    }
+
+    /// The rewrite itself, with [`HIST_IO`] ALREADY held, and with two
+    /// knobs the plain compaction above does not need.
+    ///
+    /// Both exist because this is also the RESCUE for a refused append
+    /// (see [`Daemon::history_rescue_locked`]), and a rescue has to be
+    /// able to publish the same thing the refused line said:
+    ///
+    ///  * `drop_ids` are records the caller is REMOVING and has not taken
+    ///    out of `self.history` yet, so the snapshot would otherwise put
+    ///    them straight back. A rewrite that omits a record IS its
+    ///    tombstone - the replay reads the file as the whole truth - so
+    ///    this is what makes a refused tombstone survivable.
+    ///  * `extra` are pre-serialized lines with no live record behind
+    ///    them: `delete_prewrite`'s placeholder for a job that is still
+    ///    downloading and is in neither `self.history` nor, once the
+    ///    append was refused, the file. Written LAST so last-wins replay
+    ///    treats them exactly as an append would have.
+    ///
+    /// The two never overlap in practice and are not asserted not to:
+    /// `extra` is a bare line, `drop_ids` are ids, and a caller passing
+    /// both would be saying "remove the record and then write this row",
+    /// which is what an append pair would have done anyway.
+    fn history_rewrite_locked(&self, extra: &[String], drop_ids: &[String]) -> bool {
+        // The rewrite's own kill-here seam. Separate from the append's
+        // because the two writes need DIFFERENT permissions - append
+        // needs the file, this needs the directory - and P2-1's trigger
+        // is exactly a store where one works and the other does not.
+        #[cfg(test)]
+        if super::storecut::cut_here(super::storecut::Store::HistoryRewrite) {
+            return false;
+        }
         let path = self.history_store_path();
+        let doomed = |id: &str| drop_ids.iter().any(|d| d == id);
         let mut snap_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         let lines: Vec<String> = self
             .history
             .lock_ok()
             .iter()
-            .map(|j| {
+            .filter_map(|j| {
                 let g = j.lock_ok();
+                if doomed(&g.nzo_id) {
+                    return None;
+                }
                 snap_ids.insert(g.nzo_id.clone());
-                job_json(&g).to_string()
+                Some(job_json(&g).to_string())
             })
             .collect();
         let mut buf = String::with_capacity(lines.iter().map(|l| l.len() + 1).sum());
@@ -513,10 +836,13 @@ impl Daemon {
         // the very hole `park_prewrite` exists to close (Codex sweep
         // 13 Aug Q2). Parks register in `hist_inflight` around that
         // interval; carry their latest disk line into the snapshot.
+        // ...and a record the caller is REMOVING is not carried forward
+        // either, however in-flight it is: the whole point of the call is
+        // that its row must not survive this rewrite.
         let inflight: Vec<String> = {
             let set = self.hist_inflight.lock_ok();
             set.iter()
-                .filter(|id| !snap_ids.contains(*id))
+                .filter(|id| !snap_ids.contains(*id) && !doomed(id))
                 .cloned()
                 .collect()
         };
@@ -547,6 +873,12 @@ impl Daemon {
                     buf.push('\n');
                 }
             }
+        }
+        // LAST, so last-wins replay reads them exactly as the append
+        // that was refused would have left them.
+        for l in extra {
+            buf.push_str(l);
+            buf.push('\n');
         }
         #[cfg(test)]
         {
@@ -827,6 +1159,12 @@ impl Daemon {
                 // notify router uses for its "repaired" token.
                 let repaired = g.bad_blocks.unwrap_or(0) > 0;
                 if repaired {
+                    // event-arm-gate: a STATE, not a moment - the
+                    // history row carries it (`s.bad_blocks` renders
+                    // "repaired"), and the `job.completed` emitted right
+                    // after this one in the same park carries `repaired`
+                    // for anything that wants the pair in one event.
+                    // §129 1b finding (b) is the rule.
                     self.life_emit(
                         "job.repaired",
                         json!({
@@ -889,6 +1227,10 @@ impl Daemon {
             .as_secs() as i64;
         let mut doomed: Vec<String> = Vec::new();
         let mut spooled: Vec<PathBuf> = Vec::new();
+        // Where each retired row sat, so a store that refuses the
+        // tombstone can have them all back (P2-1); see
+        // `Daemon::history_restore`.
+        let mut removed: Vec<(usize, Arc<Mutex<Job>>)> = Vec::new();
         {
             let mut h = self.history.lock_ok();
             let moving = self.moving.lock_ok();
@@ -899,6 +1241,7 @@ impl Daemon {
                 // plain subtraction would panic in a debug build rather
                 // than mean "keep everything".
                 let cutoff = now.saturating_sub(keep_secs.min(i64::MAX as u64) as i64);
+                let mut at = 0usize;
                 h.retain(|j| {
                     let g = j.lock_ok();
                     let old = g.state == JobState::Completed
@@ -906,48 +1249,77 @@ impl Daemon {
                     if old && !untouchable(&g) {
                         doomed.push(g.nzo_id.clone());
                         spooled.push(g.nzb_path.clone());
+                        removed.push((at, j.clone()));
                         false
                     } else {
+                        at += 1;
                         true
                     }
                 });
             }
             if keep_count > 0 && h.len() > keep_count {
                 let mut excess = h.len() - keep_count;
+                let mut at = 0usize;
                 // Oldest first = front of the Vec.
                 h.retain(|j| {
                     if excess == 0 {
+                        at += 1;
                         return true;
                     }
                     let g = j.lock_ok();
                     if untouchable(&g) {
+                        at += 1;
                         return true;
                     }
                     doomed.push(g.nzo_id.clone());
                     spooled.push(g.nzb_path.clone());
+                    removed.push((at, j.clone()));
                     excess -= 1;
                     false
                 });
             }
         }
-        // The RECORD retires; the payload on disk is the user's. Only
+        if doomed.is_empty() {
+            return;
+        }
+        // THE TOMBSTONE FIRST. The comment that used to stand here
+        // asserted exactly that - "through `drop_spool`, because the
+        // tombstone is durable by now" - above code that ran the unlinks
+        // and then tombstoned, so the claim was false against the lines
+        // under it from the day it was written (P2-1, 26 Aug 2026). A
+        // refused tombstone with the spool copies already gone is the
+        // worst state this sweep can reach: the aged-out record replays
+        // at the next start with nothing left to retry it from.
+        if !self.history_tombstone(&doomed) {
+            // Nothing has been destroyed, so put the rows back rather
+            // than leave them live on disk and invisible in memory. They
+            // age out again on the next tick, by which time the store
+            // may be writable.
+            self.history_restore(std::mem::take(&mut removed));
+            error!(
+                target: "queue",
+                "history retention: the store refused the removal of {} old \
+                 record(s), so they were kept - the spool copies they retry \
+                 from are untouched",
+                doomed.len()
+            );
+            return;
+        }
+        info!(
+            target: "queue",
+            "history retention: dropped {} old record(s) (keep_count {}, keep_secs {})",
+            doomed.len(),
+            keep_count,
+            keep_secs
+        );
+        // The RECORD has retired; the payload on disk is the user's. Only
         // the spooled .nzb (kept for retry, and retry needs a record)
-        // goes with it - through `drop_spool`, because the tombstone is
+        // goes with it - through `drop_spool`, because the tombstone IS
         // durable by now and a copy whose unlink is refused would be
         // re-adopted at the next start as a fresh download of a release
         // retention just aged out (Codex sweep 24 Aug, F-04).
         for p in spooled {
             drop_spool(&p);
-        }
-        if !doomed.is_empty() {
-            info!(
-                target: "queue",
-                "history retention: dropped {} old record(s) (keep_count {}, keep_secs {})",
-                doomed.len(),
-                keep_count,
-                keep_secs
-            );
-            self.history_tombstone(&doomed);
         }
     }
 }
@@ -1348,7 +1720,7 @@ mod store_tests {
                     d.history
                         .lock_ok()
                         .retain(|j| j.lock_ok().nzo_id != "victim");
-                    d.history_tombstone(&["victim".to_string()]);
+                    assert!(d.history_tombstone(&["victim".to_string()]));
                 })
             };
             // The mover's shape: mutate the record it holds an Arc to,
@@ -1469,6 +1841,82 @@ mod store_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Retention must not throw the spool copies away before the store
+    /// has agreed to forget the records they belong to.
+    ///
+    /// The sweep ran `drop_spool` over every retired row and THEN
+    /// tombstoned, discarding the answer - while the comment three lines
+    /// above the unlinks asserted the opposite ("because the tombstone is
+    /// durable by now"), which was false against the code under it from
+    /// the day it was written (P2-1). A refused tombstone left the
+    /// aged-out record replaying at the next start with the `.nzb` its
+    /// retry needs already gone - the one state this sweep must never
+    /// reach, because the record is the user's only handle on it.
+    ///
+    /// Both stores are cut: the atomic rewrite rescues the ordinary
+    /// refusal (a 0444 store in a writable folder), so the refusal that
+    /// has to be survivable is the one with nothing left to try.
+    #[test]
+    fn retention_keeps_the_spool_copies_when_the_store_refuses() {
+        use crate::serve::storecut::{Store, arm_store_cut, disarm};
+
+        let dir = tmp("retainrefuse");
+        let d = test_daemon(&dir);
+        let mut nzbs = Vec::new();
+        for id in ["r1", "r2", "r3"] {
+            let nzb = dir.join(format!("{id}.nzb"));
+            std::fs::write(&nzb, b"<nzb/>").unwrap();
+            let job = Arc::new(Mutex::new(
+                job_from_json(&json!({
+                    "nzo_id": id, "name": format!("Release.{id}"),
+                    "out_dir": "/tmp/o", "nzb_path": nzb.to_string_lossy(),
+                    "state": "Completed", "finished_unix": 1,
+                }))
+                .expect("job"),
+            ));
+            d.history.lock_ok().push(job);
+            nzbs.push(nzb);
+        }
+        assert!(d.history_compact(), "the fixture's own premise");
+        // Keep one: the other two are the oldest and go.
+        d.history_keep_count.store(1, Ordering::Relaxed);
+
+        arm_store_cut(&[Store::HistoryAppend, Store::HistoryRewrite]);
+        d.history_enforce_retention();
+        disarm();
+
+        for nzb in &nzbs {
+            assert!(
+                nzb.exists(),
+                "{} was unlinked before the removal was durable - the record \
+                 it retries from is still in the store on disk",
+                nzb.display()
+            );
+        }
+        let ids: Vec<String> = d
+            .history
+            .lock_ok()
+            .iter()
+            .map(|j| j.lock_ok().nzo_id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            ["r1", "r2", "r3"],
+            "a refused reap leaves the list exactly as it found it, in order"
+        );
+
+        // ...and the ordinary outcome is unchanged: with a store that
+        // takes the tombstone, the copies go with the records.
+        d.history_enforce_retention();
+        assert!(!nzbs[0].exists() && !nzbs[1].exists());
+        assert!(nzbs[2].exists(), "the kept record keeps its own copy");
+        let (rows, _) = d.history_replay();
+        let ids: Vec<String> = rows.iter().map(|j| j.nzo_id.clone()).collect();
+        assert_eq!(ids, ["r3"], "the store forgot the two it reaped");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Every emitted event reaches a client that keeps polling with the
     /// cursor it was handed.
     ///
@@ -1570,7 +2018,7 @@ mod store_tests {
         // The delete verb's active arm, in order: the durable
         // placeholder, then the tombstone, then the row leaving the
         // queue and the save that publishes its absence.
-        d.delete_prewrite(&job, "MANUAL");
+        assert!(d.delete_prewrite(std::slice::from_ref(&job), "MANUAL"));
         {
             let mut g = job.lock_ok();
             g.tombstone = true;
@@ -1945,7 +2393,13 @@ mod store_tests {
     /// KILOBYTES, for the same field of the same struct.
     #[cfg(unix)]
     fn peak_rss_kb() -> Option<u64> {
+        // SAFETY: `libc::rusage` is a C struct of integers and timevals,
+        // so all-zero is a valid bit pattern, and getrusage fills it
+        // before `ru_maxrss` is read.
         let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `&mut u` is a live, exclusively borrowed struct of
+        // exactly the type getrusage(2) writes, and the field is only
+        // read on the success path.
         if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) } != 0 {
             return None;
         }

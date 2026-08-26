@@ -264,3 +264,86 @@ then poll `mode=playback` once a second while the job downloads and
 keep a sample where `reason` is `live`, `tail_ok` is false and
 `coverage.pct` is well under 100 (the committed one has pct 33.8 at
 48% downloaded).
+
+### The queue and history snapshots
+
+`queue_downloading.json`, `queue_empty.json` and `history_completed.json`
+come from a bigger corpus than the playback recipe above, because they
+have to hold a slot open long enough to catch it mid-download. The
+committed three were re-recorded on 25 Aug 2026 against a 1.2.3 daemon
+with this rig, which reproduces the file byte for byte (93,018,817 bytes)
+and therefore reproduces every figure the tests assert:
+
+```sh
+ffmpeg -f lavfi -i "testsrc2=size=1280x720:rate=30" \
+  -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 180 \
+  -c:v libx264 -preset veryfast -b:v 4M -pix_fmt yuv420p \
+  -c:a aac -b:a 128k -shortest \
+  Chaos.Test.Pattern.2026.720p.WEB.x264-BENCH.mkv
+nzbfast chaos-serve --profile clean --bind 127.0.0.1 --port 8899 \
+  --files 0 --media Chaos.Test.Pattern.2026.720p.WEB.x264-BENCH.mkv \
+  --nzb chaos-video.nzb --line 2M
+NZBFAST_NO_ENRICH=1 nzbfast --config config.json serve \
+  --bind 127.0.0.1 --port 8877 --apikey snapkey --out /tmp/snap/out
+```
+
+Record `mode=queue` once BEFORE the add for `queue_empty.json`, then add
+`chaos-video.nzb` and poll `mode=queue` about four times a second: keep
+the sample reading `percentage: "7"` with `mbleft: "84.25"`, which is
+what `ParseSnapshotTest.queueDownloading` asserts. `mode=history` after
+the job settles is `history_completed.json`. Give the daemon an `--out`
+under a neutral path: the history row carries `path` and `storage` in
+full, and a home directory or a worktree name would ship to the public
+repo with the fixture.
+
+### Drift audit, 25 Aug 2026
+
+Every snapshot in the directory was compared, key by key and type by
+type, against a fresh recording from a 1.2.3 daemon. A snapshot is
+WRONG when the payload has retired a key it shows or changed a type it
+shows; a snapshot that is merely missing keys ADDED since it was taken
+is still a valid capture of a conforming payload, because the freeze
+rule above lets the daemon add keys and a client must ignore what it
+does not read.
+
+Three were wrong and were re-recorded. `queue_downloading.json` and
+`queue_empty.json` still carried `watch_picked`, `watch_upgraded`,
+`giveup_tripped` and `auto_retried`, four seen-sets TODO 129 1b(b) moved
+off `mode=queue` and onto the sequence-cursored event ring; both also had
+`speedlimit_abs` as a number where the payload sends a string.
+`history_completed.json` had `retry` as a number where the payload sends
+a boolean.
+
+`delete_kept` and `watch_failed` are still on the payload and are NOT
+drift. The rule that separates them is worth keeping in mind before
+adding anything to this call: a MOMENT (a watch folder picked something
+up, a give-up tripped) belongs on the event ring, and a STATE that
+describes something still on disk stays on the queue payload.
+
+The event ring is NOT on `mode=queue`. It rides `mode=dashboard`, as
+`events`, `events_seq` and `events_reset`, alongside a `queue` object of
+the same shape row 2 answers with. That is why a faithful `mode=queue`
+capture carries none of the three, and why neither client sees those
+four cues today: no client polls `mode=dashboard`. Whether a phone
+should consume the ring at all (the cues the dashboard turns into
+toasts) is an open product question, not a gap in this file.
+
+The rest were additive only and were left as recorded. `probe_live.json`
+and `probe_disk.json` are two `codec_rfc6381` fields behind;
+`get_config.json` is 69 keys behind, of which the app reads none.
+`version.json`, `auth_wrong_key.json`, `addfile.json`,
+`addnzblnk_bad.json`, `pause_all.json`, `resume_all.json`,
+`job_pause_missing.json`, `stream_token.json`,
+`stream_token_unknown.json` and `m3u.txt` answer with the same keys and
+the same types a 1.2.3 daemon does. The only difference in any of them
+is the `nzbfast` build string a 1.0.16 daemon stamped on `version.json`
+and `auth_wrong_key.json`, which no client reads and which would be
+stale again by the next release whatever it said.
+
+**Do not re-record the four `playback_*.json`.** Their only gap is
+`link_peak` and `link_peak_src`, and that gap is the subject of a test:
+`playbackWithoutLinkPeakMeansNoAnchor` proves a pre-addition daemon's
+answer still parses to no anchor, and `playbackLinkPeakParses` covers
+the present case by splicing the two keys in. Re-recording deletes the
+absent case and leaves the client untested against the daemons that
+answer without it.

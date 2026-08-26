@@ -44,6 +44,8 @@ pub(super) fn server(host: &str) -> ServerConfig {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     }
 }
 
@@ -267,13 +269,15 @@ fn buf_pool_reuses_small_buffers_and_frees_oversized_ones() {
     let mut a = pool.take();
     assert!(a.is_empty(), "a fresh take is an empty buffer");
     a.extend_from_slice(b"body bytes");
-    pool.give(a);
+    drop(a); // the guard IS the give
     let b = pool.take();
     assert!(b.is_empty(), "give() clears before parking");
     // At max_held 1, a second parked buffer is dropped, not stored.
     pool.give(Vec::with_capacity(1024));
     pool.give(Vec::with_capacity(2048));
-    let _ = pool.take();
+    // Bound, not `let _`: a bare `_` drops the guard on the spot, which
+    // would hand the buffer straight back and defeat the point.
+    let _popped = pool.take();
     let refilled = pool.take();
     assert_eq!(
         refilled.capacity(),
@@ -1038,7 +1042,7 @@ fn requeue_refuses_when_the_last_worker_retires_inside_the_gate_window() {
     // include the article still in flight through `requeue`.
     sh.workers_live.store(0, Ordering::Release);
     assert_eq!(
-        seal_run_blocking(&sh, &tx, "no connection worker left"),
+        seal_run_blocking(&sh, &tx, FailCode::FleetExhausted),
         1,
         "the seal drains the queue it can see: <b@x> only"
     );
@@ -1352,6 +1356,64 @@ fn shard_plans_are_born_before_any_thread() {
     assert_eq!(shared.workers_live.load(Ordering::Acquire), 0);
 }
 
+/// BOTH entry paths must deal the fleet through the one dealer, and
+/// this is a source scan because the defect it refuses is an
+/// INTERLEAVING: nothing a rig can assert distinguishes
+/// "born then spawned" from "born and spawned server by server"
+/// except by winning a race.
+///
+/// `fetch_all_multi_ctl` used to birth each server's lives inside the
+/// same pass that spawned them, and claimed to pin the invariant "by
+/// counting from spawn". That closes the CONNECT ramp and not the
+/// birth loop: `tokio::spawn` hands the task to another runtime thread
+/// immediately, so server 0's workers could pop work while every
+/// server after it still read `alive == 0`. `required_mask` then
+/// returned 0 and a DEMOTED fill server took queued work off the front
+/// of the FIFO, and `live_mask` did not hold the primary, so that
+/// server's 430 read as UNANIMOUS and the article went terminal
+/// `Missing::Gone` with the server that had the bytes never asked.
+/// Measured 25 Aug 2026 with a 200 ms gap wedged between the two
+/// servers of `nzbfast`'s `plan_route_rig` A/B: 48 of 48 articles lost
+/// on a run whose second server held every one of them. It reached CI
+/// as a flake of that rig under `unit-one-process` load (34 lost, 14
+/// completed).
+///
+/// So: exactly one production birth site, and it is inside
+/// [`deal_shard_plans`], whose own contract
+/// (`shard_plans_are_born_before_any_thread` above) is that the whole
+/// fleet is counted before it returns. Fix a failure here by dealing
+/// through that function, never by relaxing this test - and never by
+/// moving the birth into a spawn loop, whichever path.
+#[test]
+fn every_worker_life_is_born_by_the_one_dealer() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/pool.rs"))
+        .expect("pool.rs must be readable - an unread source is not a passing scan");
+    let dealer = src
+        .find("fn deal_shard_plans(")
+        .expect("the dealer must still be named `deal_shard_plans`");
+    // Item bodies in this file close on a column-zero brace.
+    let end = src[dealer..]
+        .find("\n}\n")
+        .map(|o| dealer + o)
+        .expect("the dealer's body must be findable");
+    let sites: Vec<usize> = src
+        .match_indices("WorkerLife::birth(")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        sites.len(),
+        1,
+        "pool.rs must hold exactly ONE birth site (found {}) - every worker's \
+         life belongs to `deal_shard_plans`, so that `alive` counts the whole \
+         fleet before any worker runs",
+        sites.len()
+    );
+    assert!(
+        (dealer..end).contains(&sites[0]),
+        "the birth site must live inside `deal_shard_plans`, not in a spawn loop"
+    );
+}
+
 /// Shards degraded to zero built runtimes still owe every article a
 /// terminal outcome - the blocking seal is the only seller left.
 #[test]
@@ -1616,7 +1678,7 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         &mut losses,
         &mut bytes,
         started,
@@ -1632,7 +1694,7 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         &mut losses,
         &mut bytes,
         started,
@@ -1660,7 +1722,7 @@ async fn recycle_slow_sheds_after_consecutive_race_losses() {
         &sh2,
         &tx,
         &mut inflight2,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         &mut losses2,
         &mut bytes,
         started,
@@ -1713,7 +1775,7 @@ async fn recycle_slope_redials_a_collapsed_session() {
         &sh,
         &tx,
         &mut inflight,
-        Vec::new(),
+        PooledBuf::unpooled(Vec::new()),
         &mut losses,
         &mut session_bytes,
         started,
@@ -2241,6 +2303,8 @@ async fn a_mute_parked_connection_does_not_hold_a_finished_run() {
         idle_release_secs: None,
         idle_keep: None,
         max_source_ips: None,
+        address_family: Default::default(),
+        tls_hostname: None,
     };
 
     let mut articles = std::collections::HashMap::new();
@@ -2716,4 +2780,175 @@ fn a_done_deregistration_never_holds_the_inflight_map_into_the_park() {
     parker.join().unwrap();
     doner.join().unwrap();
     assert!(sh.inflight.lock_ok().is_empty(), "the entry was retired");
+}
+
+// --- BufPool gauge accounting and the PooledBuf guard -----------------
+//
+// `BufPool::new_gauged` had no test of any kind before 26 Aug 2026, and
+// its charge/release pairing is the whole reason a missed give is worse
+// than a lost recycle: a lost recycle costs one allocation, a lost
+// release climbs the outstanding gauge for the rest of the run and the
+// memory floor reads it as resident bytes nobody can attribute. These
+// pin the accounting, and the last one pins what the guard buys.
+//
+// Every one of these takes `one_gauge_test_at_a_time()` as its FIRST
+// statement, so it drops LAST: `memgauge`'s `CUR`/`PEAK` are process-
+// global, so under `cargo test` (and the `unit-one-process` job) a
+// neighbour moving the same gauge would be read as this test's own
+// charge. It is the same lock `memgauge`'s own tests take - one of our
+// own would serialize us against nobody.
+
+use crate::memgauge::{Sub, cur, one_gauge_test_at_a_time, reset_for_tests};
+
+#[test]
+fn a_gauged_take_charges_outstanding_and_only_a_pooled_buffer_leaves_the_free_list() {
+    let _g = one_gauge_test_at_a_time();
+    reset_for_tests();
+    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
+
+    // A fresh buffer was never on the free list, so only outstanding moves.
+    let a = pool.take();
+    let cap = a.capacity() as u64;
+    assert_eq!(cur(Sub::RawOut), cap);
+    assert_eq!(cur(Sub::RawFree), 0);
+
+    // Back to the pool: the charge moves from outstanding to the free list.
+    drop(a);
+    assert_eq!(cur(Sub::RawOut), 0);
+    assert_eq!(cur(Sub::RawFree), cap);
+
+    // A POPPED buffer leaves the free list as it becomes outstanding.
+    let b = pool.take();
+    assert_eq!(cur(Sub::RawOut), cap);
+    assert_eq!(cur(Sub::RawFree), 0);
+    drop(b);
+}
+
+#[test]
+fn a_gauged_give_releases_outstanding_before_every_early_return() {
+    let _g = one_gauge_test_at_a_time();
+    reset_for_tests();
+    // max_held 1, so the second give has nowhere to park.
+    let pool = BufPool::new_gauged(1, Sub::OutFree, Sub::OutOut);
+
+    // Over the keep-cap: `give` returns early WITHOUT parking, and the
+    // outstanding release has to have happened before that return.
+    let mut big = pool.take();
+    big.reserve(5 * 1024 * 1024);
+    assert!(big.capacity() > 4 * 1024 * 1024);
+    drop(big);
+    assert_eq!(
+        cur(Sub::OutOut),
+        0,
+        "the oversized early return must not skip the outstanding release"
+    );
+    assert_eq!(
+        cur(Sub::OutFree),
+        0,
+        "an oversized buffer is freed, never parked, so the free list is untouched"
+    );
+
+    // Past max_held: released from outstanding, not added to the free list.
+    let x = pool.take();
+    let y = pool.take();
+    let xc = x.capacity() as u64;
+    drop(x);
+    assert_eq!(cur(Sub::OutFree), xc);
+    drop(y);
+    assert_eq!(
+        cur(Sub::OutOut),
+        0,
+        "a surplus give releases outstanding even though the buffer is dropped"
+    );
+    assert_eq!(
+        cur(Sub::OutFree),
+        xc,
+        "the surplus buffer was dropped, so the free list did not grow"
+    );
+}
+
+#[test]
+fn a_dying_gauged_pool_hands_back_its_whole_free_list() {
+    let _g = one_gauge_test_at_a_time();
+    reset_for_tests();
+    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
+    let a = pool.take();
+    let b = pool.take();
+    let held = a.capacity() as u64 + b.capacity() as u64;
+    drop(a);
+    drop(b);
+    assert_eq!(cur(Sub::RawFree), held);
+    drop(pool);
+    assert_eq!(
+        cur(Sub::RawFree),
+        0,
+        "a job's pool dies with its free list - without this the gauge \
+         carries the dead pool's bytes into the next job forever"
+    );
+}
+
+#[test]
+fn an_ungauged_pool_charges_nothing() {
+    let _g = one_gauge_test_at_a_time();
+    reset_for_tests();
+    let pool = BufPool::new(2);
+    drop(pool.take());
+    let snap = crate::memgauge::snapshot();
+    for s in [Sub::RawFree, Sub::RawOut, Sub::OutFree, Sub::OutOut] {
+        assert_eq!(snap.cur_of(s), 0, "{} moved on an ungauged pool", s.name());
+    }
+}
+
+#[test]
+fn a_guarded_buffer_comes_back_from_an_early_return_and_a_panic() {
+    let _g = one_gauge_test_at_a_time();
+    reset_for_tests();
+    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
+    let cap = {
+        let b = pool.take();
+        b.capacity() as u64
+    };
+
+    // The shape the bare take/give pair could not defend: a consumer
+    // that leaves between the two halves. `?` on a fresh buffer.
+    fn early_return(pool: &BufPool) -> Result<(), ()> {
+        let _b = pool.take();
+        Err(())
+    }
+    assert!(early_return(&pool).is_err());
+    assert_eq!(cur(Sub::RawOut), 0, "an early return returns the buffer");
+    assert_eq!(cur(Sub::RawFree), cap);
+
+    // And an unwind, which no amount of remembering can cover.
+    let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _b = pool.take();
+        panic!("consumer blew up mid-article");
+    }));
+    assert!(hit.is_err());
+    assert_eq!(cur(Sub::RawOut), 0, "an unwind returns the buffer");
+    assert_eq!(cur(Sub::RawFree), cap);
+}
+
+#[test]
+fn into_vec_disarms_the_guard_and_adopt_re_arms_it() {
+    let _g = one_gauge_test_at_a_time();
+    reset_for_tests();
+    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
+    let b = pool.take();
+    let cap = b.capacity() as u64;
+
+    // Handing the bytes down the outcome channel: the guard stops
+    // guarding, and the outstanding charge travels WITH the buffer.
+    let raw = b.into_vec();
+    assert_eq!(cur(Sub::RawOut), cap, "the charge follows the bytes");
+    assert_eq!(cur(Sub::RawFree), 0);
+
+    // The far end re-guards it. `adopt` charges nothing - these bytes
+    // were charged by the `take` that minted them - and its drop is the
+    // one matching release.
+    let readopted = pool.adopt(raw);
+    assert_eq!(cur(Sub::RawOut), cap, "adopt must not double-charge");
+    drop(readopted);
+    assert_eq!(cur(Sub::RawOut), 0);
+    assert_eq!(cur(Sub::RawFree), cap);
 }

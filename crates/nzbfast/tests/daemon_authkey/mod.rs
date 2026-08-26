@@ -422,6 +422,8 @@ async fn add_only_key_answers_extension_probes_but_nothing_more() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rotation_that_cannot_be_persisted_says_so() {
     use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid(2) takes no arguments, touches no memory and
+    // cannot fail; it is unsafe only because it is an extern "C" call.
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("skipped: root writes into a read-only directory anyway");
         return;

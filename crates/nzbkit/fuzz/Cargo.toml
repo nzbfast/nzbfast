@@ -21,6 +21,15 @@ url = "2"
 
 # Detach from the parent workspace: cargo-fuzz builds this crate on its own
 # (nightly + sanitizer), and it must not perturb the main workspace build.
+#
+# cfg-safety-gate: detaching is exactly why this package cannot write
+# `[lints] workspace = true` - the line below makes it its own workspace
+# root, and a root with no `[workspace.lints]` table has nothing to inherit
+# (cargo refuses the key outright). So `undocumented_unsafe_blocks` is not
+# on here, and holding these targets to it would be a rule that does not
+# apply. If a fuzz target ever grows an `unsafe` block, give this package
+# its own `[lints.clippy]` table with that lint denied and delete this
+# waiver - do NOT leave the block unheld. Zero `unsafe` here on 26 Aug 2026.
 [workspace]
 
 [profile.release]
@@ -155,6 +164,13 @@ bench = false
 [[bin]]
 name = "url_authority_diff"
 path = "fuzz_targets/url_authority_diff.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tar_parse"
+path = "fuzz_targets/tar_parse.rs"
 test = false
 doc = false
 bench = false

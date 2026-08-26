@@ -786,7 +786,11 @@ pub(super) fn measure_system(
             }
         }
     })?;
-    let mut v = nzbkit::sysbench::verdict(net, &compute, disk);
+    // The daemon knows its own live setting, not just the shipped
+    // default - a user who turned fast verify off must not be told
+    // their (already-on) ceiling could be raised by turning it on.
+    let fast_verify = d.fast_verify.load(Ordering::Relaxed);
+    let mut v = nzbkit::sysbench::verdict(net, &compute, disk, fast_verify);
     (v.network_host, v.network_conns) = probed;
     // §210 (b): which network is short. Only when the network row IS
     // the limit - that is when the card tells the reader to add

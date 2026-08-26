@@ -320,6 +320,17 @@ välitön: aktiivinen siirto pysähtyy sekunneissa ja jatkuu myöhemmin
 journaalista mitään menettämättä. (Pakota-prioriteetin työt jatkavat lataamista, SABnzbd-tyyliin.)</li>
 <li><b>Päivitysbanneri</b> ilmestyy tähän, kun uusi versio on saatavilla
 (katso <a href="#updates">Päivitykset</a>).</li>
+<li>Jokainen <b>taustatyön siru</b> kertoo, mitä nzbfast tekee juuri nyt -
+indeksointi, metatietojen haku, julkaisusyöte, yhteyksien mittaus,
+seurantalista, listojen synkronointi, valmiiden tiedostojen siirto,
+tietokannan ylläpito. Napsauta jotakin nähdäksesi, mitä voit tehdä: keskeytä
+tai poista käytöstä ne osat, joissa on kytkin, tai siirry suoraan
+seurantalistaan, listalähteisiin tai jonoon. Siirto, ylläpito ja listojen
+synkronointi päättyvät itsestään ja kertovat sen tarjoamatta kytkintä.</li>
+<li><b>Jonon tilanilmaisin</b> avautuu samalla tavalla, ja siinä on
+<b>Keskeytä</b> (antaa jo matkalla olevien artikkeleiden valmistua),
+<b>Keskeytä heti</b> (pudottaa ne ja vapauttaa linjan heti) ja
+<b>Jatka</b>.</li>
 </ul>
 <h3>Nopeus</h3>
 <p>Live-MB/s vierivällä kaaviolla; katkoviivavesileimat merkitsevät tämän istunnon
@@ -353,7 +364,7 @@ joka kertoo mistä työ tuli (valvontakansio, yhdistetty sovellus, API…).
 säilyttää oman kopionsa, joten tämä toimii jokaiselle työlle, vaikka alkuperäinen
 tiedosto olisi jo kauan sitten poissa.</li>
 <li><b>"Miksi tämä on hidas?"</b> Kun työ latautuu, sen edistymispalkin alla oleva rivi kertoo tuomion <em>tästä</em> työstä, ei koneesta: <i>palveluntarjoajasi ovat raja</i>, <i>tämä kone on suorittimensa rajoilla</i>, <i>tallennus ei pysy perässä</i>, ja niin edelleen. Napsauta sitä, niin rivi avautuu todisteisiin: mihin linjasi pystyy, mitä palveluntarjoajat toimittivat, mitä saapuu juuri nyt, ja palvelinkohtainen taulukko, josta rajoitettu palveluntarjoaja näkyy heti. Täydellä nopeudella kulkeva työ ei sano tässä mitään, eikä sellainenkaan, jonka tuomio on vielä muotoutumassa.</li>
-<li>Merkit näyttävät erityistilat: <i>lykätty (hidas)</i>, <i>esihaetaan</i>,
+<li>Merkit näyttävät erityistilat: <i>yritetty, siirretty sivuun</i>, <i>esihaetaan</i>,
 <i>keskeytetty</i> (katso <a href="#performance">Suorituskykytyökalut</a>).</li>
 <li>Burn-down-kaavio seuraa jonossa jäljellä olevaa GB-määrää yhteensä.</li>
 </ul>
@@ -770,15 +781,6 @@ käytös jokaisen päivityksen jälkeen ovat huonoja. Ja iso osa asennuksista on
 näytöttömiä palvelimia ja NAS-laitteita, joissa avainnippua ei ole lainkaan, mikä
 jättäisi kaksi eri tallennuspolkua pidettäväksi oikeina. Yksi hyvin ymmärretty muoto,
 joka käyttäytyy kaikkialla samoin, on toistaiseksi parempi kauppa.</p>
-<p>Kahdelle muulle palvelinkohtaiselle asetukselle ei vielä ole hallintaa
-koontinäytössä: lisää ne käsin kyseisen palvelimen kohtaan tiedostossa
-<code>config.local.json</code> (katso <a href="#files">§17</a>) ja käynnistä
-uudelleen.</p>
-<div class="tblwrap"><table>
-<tr><th>Avain</th><th>Huomioita</th></tr>
-<tr><td><code>bind_ip</code></td><td>Sitoo tämän palvelimen lähtevät yhteydet tiettyyn paikalliseen osoitteeseen, moniyhteyskoneille ja jaetuille VPN-tunneleille. Osoiteperhe valitsee samalla kohdeperheen: v4-sidonta yhdistää palvelimen v4-osoitteeseen.</td></tr>
-<tr><td><code>socks5</code></td><td>Ohjaa tämän palvelimen NNTP-liikenteen SOCKS5-välityspalvelimen kautta: <code>host:port</code> tai <code>user:pass@host:port</code>. Isäntänimen selvittää <em>välityspalvelin</em>, joten paikallista DNS-vuotoa ei synny.</td></tr>
-</table></div>
 <ul>
 <li>Kunkin palvelimen vieressä oleva <b>valintamerkki</b> on sen virtakytkin: merkitty
 tarkoittaa, että palvelin on latauspoolissa, merkitsemätön tarkoittaa käytöstä
@@ -994,6 +996,7 @@ ja seurantalista toimii niiden tilien varassa.</div>
 <tr><td>Sisäänoton portit</td><td>JSON-säännöt, jotka suodattavat, mitä indeksiin päätyy: tyypit (peitelty roska pudotetaan oletuksena), vuosi/resoluutio/kieli, kokorajat.</td></tr>
 <tr><td>Skannaa nyt / syväskannaus</td><td>Aja kierros heti; syvyyden kanssa skannaa uudelleen näin monta tuoretta otsaketta.</td></tr>
 <tr><td>OMDb-avain / metatietojen päivitys / pyyhi</td><td>Seinän rikastuksen hallinta (<a href="#wall">§6</a>). Pyyhi rakentaa tietokannan alusta - palautuspolku, jos se koskaan vioittuu.</td></tr>
+<tr><td>Keskeytä metatietojen haku</td><td>Lopettaa nimien, julisteiden ja näyttelijätietojen hakemisen metatietosivustoilta (<a href="#wall">§6</a>), kun itse skannaus jatkuu omalla painollaan. Mikään jo haetuista tiedoista ei katoa; keskeytyksen aikana löytyvät rivit säilyttävät yksinkertaisesti nimen, jolla ne on julkaistu, kunnes kytket tämän takaisin päälle. Kortin ainoa asetus, joka ei koske yhtäkään usenet-palveluntarjoajaa.</td></tr>
 <tr><td>Pre-syöte</td><td><b>Pois päältä, kunnes kytket sen.</b> Moni lataus julkaistaan ilman nimeään, jolloin skannauksella ei ole mitään luettavaa. Julkiset välityskanavat ilmoittavat oikean nimen, ainoa avoin tapa yhdistää tällaiset julkaisut. Kytkeminen pitää yhteyden IRC-verkkoon auki ja kuuntelee: mitään ei koskaan lähetetä eikä tiliä luoda. Vaatii indeksoijan päälle, sillä syöte ilman paikkaa kuulemalleen on vain turhaan auki oleva pistoke.</td></tr>
 <tr><td>Välityspalvelin, Välityskanavat</td><td>IRC-verkko, joka kuljettaa ilmoitukset (isäntä tai isäntä:portti), ja kuunneltavat kanavat pilkuin eroteltuna. Muutos astuu voimaan seuraavalla yhteydellä: kytke syöte pois ja takaisin ottaaksesi sen heti käyttöön.</td></tr>
 <tr><td>Nimeä korrelaatiolla</td><td>Julkiset live-välitykset eivät kuljeta tiedostonimiä, joten useimpia hämärrettyjä julkaisuja ei voi yhdistää suoraan. Ilmoitus kuitenkin naulaa sen, milloin julkaisu ilmestyi ja kuinka suuri se on. Tämä vertaa ilmoitettua aikaa ja kokoa nimettömiin julkaisuihin ja ehdottaa sopivuuden löytyessä oikeaa nimeä Selaa-näkymässä. Ehdotus on merkitty ehdotukseksi, vaatii napsautuksesi eikä koskaan nimeä levyllä olevia tiedostoja uudelleen.</td></tr>
@@ -1094,15 +1097,16 @@ lisäys etenee koskemattomana ja loki kertoo miksi.</p>
 <code>job.started</code>, <code>job.finishing</code>, <code>job.repaired</code>,
 <code>job.completed</code>, <code>job.failed</code>, <code>job.retried</code>
 (automaattinen uudelleenyritys palautti epäonnistuneen latauksen jonoon),
-<code>job.switched</code> (työ jota ei voitu saada valmiiksi korvattiin sitä
+<code>job.requeued</code> (lataus poistui historiasta ja palasi jonoon - uusi yritys tai toistettu kirjastomerkintä), <code>job.switched</code> (työ jota ei voitu saada valmiiksi korvattiin sitä
 varten varatulla vaihtoehtoisella kopiolla), <code>job.replaced</code> (sama lopputulos, mutta mitään kopiota ei
 ollut varattuna, joten korvaava haettiin ja ladattiin) ja
 <code>job.delete_kept</code> (poisto poisti tietueen mutta ei saanut poistettua
 sen tiedostoja), sekä <code>watch.picked</code> (.nzb noudettiin
 valvontakansiosta), <code>nzb.refeed</code> (valmiin latauksen oma NZB-tiedosto lisättiin jonoon keskeytettynä), <code>watchlist.upgraded</code> (seurantalistan päivitys
 onnistui ja korvattu kopio poistettiin),
-<code>queue.idle</code>, <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code> ja <code>quota.reached</code>. Jokainen kantaa
+<code>queue.idle</code>, <code>queue.paused</code> ja <code>queue.resumed</code> (jono pysähtyi tai käynnistyi uudelleen, teki sen kuka tai mikä tahansa), <code>queue.finished_action</code>
+(jonon päättymistoiminto viritettiin, suoritettiin tai peruttiin), <code>giveup.tripped</code>, <code>disk.low</code>,
+<code>storage.slow</code>, <code>quota.reached</code> ja <code>update.available</code> (löytyi uudempi nzbfast-versio). Jokainen kantaa
 <code>schema_version</code>-kentän (nyt 1; uusia avaimia voi ilmestyä ilman
 versiokorotusta - ohita se, mitä et tunne), monotonisen <code>seq</code>-arvon ja
 <code>at</code>-aikaleiman millisekunteina.</p>
@@ -1451,7 +1455,7 @@ SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatt
 <tr><td>Automaatio</td><td><code>watchlist</code>, <code>watchlist_check_now</code>, <code>watch_calendar</code>, <code>feeds</code>, <code>smart_folders</code>, <code>schedule</code></td></tr>
 <tr><td>Diagnostiikka</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-todennus: mikä tahansa käyttäjä, API-avain salasanana)</td></tr>
-<tr><td>Esikatselu / toisto</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-alueet; pysäköidyn kirjastotyön käynnistys tarvitsee <code>?t=</code>-tunnisteen tai avaimen), <code>/m3u/&lt;id&gt;</code> (tarvitsee avaimen; luo tunnisteen), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Esikatselu / toisto</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-alueet; pysäköidyn kirjastotyön käynnistys tarvitsee <code>?t=</code>-tunnisteen tai avaimen), <code>/m3u/&lt;id&gt;</code> (tarvitsee avaimen tai työn oman tunnisteen; luo tunnisteen), <code>/wall</code>, <code>/art/…</code></td></tr>
 </table></div>
 
 <h2 id="files">17 · Tiedostot &amp; sijainnit</h2>

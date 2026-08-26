@@ -1942,7 +1942,22 @@ impl Index {
             ddl: std::cell::Cell::new(false),
             summaries,
             stats_cache: Default::default(),
+            wall_window: Self::wall_window_armed(),
+            cards_total_memo: Default::default(),
+            deadline: Default::default(),
         })
+    }
+
+    /// TODO 300: whether the wall page's window fast path is armed.
+    ///
+    /// On unless `NZBFAST_WALL_WINDOW=0`, which is the kill switch AND the
+    /// lever the before/after measurement rides: the fast path's whole
+    /// contract is "same page, less work", so the only honest way to price
+    /// it on a live-size index is to ask the same binary the same request
+    /// both ways. See `cards::Index::wall_page_keys` and
+    /// `research/WALL-SHOWALL-QUERY-COST-2026-08-26.md`.
+    fn wall_window_armed() -> bool {
+        std::env::var("NZBFAST_WALL_WINDOW").as_deref() != Ok("0")
     }
 
     /// A read-only connection for query handlers, so an interactive
@@ -2013,7 +2028,7 @@ impl Index {
         // No gate and no custom categories: both are ingest-time policy,
         // and ingest cannot happen on a query_only connection. Same for
         // the arrival watch - nothing arrives on a reader.
-        Ok(Index {
+        let ix = Index {
             db,
             gate: None,
             fts,
@@ -2027,7 +2042,16 @@ impl Index {
             ddl: std::cell::Cell::new(false),
             summaries,
             stats_cache: Default::default(),
-        })
+            wall_window: Self::wall_window_armed(),
+            cards_total_memo: Default::default(),
+            deadline: Default::default(),
+        };
+        // Disarmed; the daemon arms it per borrow, because how long an
+        // HTTP worker may hold a pooled reader is its call and not
+        // SQLite's. Read-only connections ONLY - the reasoning is at
+        // `install_query_deadline`.
+        ix.install_query_deadline()?;
+        Ok(ix)
     }
 }
 

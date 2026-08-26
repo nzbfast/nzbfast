@@ -188,12 +188,79 @@ pub struct Job {
     /// M14i metadata-only mode: availability-check instead of downloading;
     /// the NZB in the spool is the library entry, a .strm file the pointer.
     pub library: bool,
+    /// Retention insurance: this row was DEFERRED by the user (added
+    /// paused, or a watchlist grab-deferred add) and the daemon may fetch
+    /// its payload in the background NOW, while the articles are still
+    /// alive, under the `insurance_cap_gb` disk budget. Articles get
+    /// taken down; a post promoted next week completes worse than the
+    /// same post fetched today. The fetch runs `no_extract` (volumes
+    /// materialize on disk, journal intact) and the row goes BACK to the
+    /// queue paused with `fetched` set - never to history - so promotion
+    /// is just an unpause: the normal run resumes from the journal and
+    /// extracts from what is on disk.
+    ///
+    /// Stamped ONLY at add time, and only when the feature is on: a row
+    /// the user pauses mid-queue said "stop", not "fetch anyway". Never
+    /// stamped on a held spare (`held_for`), whose doctrine is the
+    /// opposite - a spare that downloads payload is the one outcome §282
+    /// forbids outright - and never on a library row. Persisted: a
+    /// deferred row is exactly the kind that sits across restarts.
+    pub insurance: bool,
+    /// Failed insurance-fetch attempts this process. Bounded (the picker
+    /// stops at 3) so a dead post cannot be re-fetched forever; NOT
+    /// persisted, so a restart gets a fresh ladder - deliberate, matching
+    /// the auto-retry philosophy of "a restart is a new day".
+    pub insurance_attempts: u32,
     /// A real download of this job has completed (bytes are on disk).
     pub fetched: bool,
     /// User deleted this job while it was DOWNLOADING: the pipeline is
     /// being aborted; park() drops the record instead of filing it in
     /// history (the user said remove, not fail).
     pub tombstone: bool,
+    /// Codex F-06: a relocation transaction is in flight for this job -
+    /// its `out_dir` has been published and the bytes behind that
+    /// publication have not arrived yet. The runner must not start it.
+    ///
+    /// `requeue_category` publishes the new `category`/`out_dir` under
+    /// `add_lock` and then, with every lock released, moves the earlier
+    /// progress into that directory. Between those two moments the
+    /// record is correct, still Queued, and still runnable - so the
+    /// scheduler could snapshot the destination and begin creating and
+    /// fetching there while `move_tree` was merging the old tree into
+    /// the same path. The nastiest ordering is the old
+    /// `.nzbfast.journal` landing first: the runner then resumes from a
+    /// journal describing a state that is still being assembled.
+    ///
+    /// A DEPTH, not a flag, because the fence is cleared by a guard
+    /// (`Relocation`) and two transactions can overlap on one job - two
+    /// `change_cat` requests, or a rename racing a recategorize. A bool
+    /// would let the first one to finish clear a fence the second still
+    /// needs. Zero means nothing is in flight.
+    ///
+    /// Honoured in two places, and it needs both: `pick_job` skips a
+    /// fenced job so the runner moves on to the next one instead of
+    /// spinning on this one, and `start_next` re-reads it in the same
+    /// job-lock critical section that flips the state to Downloading
+    /// and snapshots `out_dir` - which is the only moment that can be
+    /// atomic with the publish.
+    ///
+    /// Each has its own case, and until 25 Aug 2026 the second did not:
+    /// comment the re-read out, leave the skip in, and the whole repo
+    /// stayed green, because the gap it closes is microseconds wide and
+    /// nothing held it open. `daemon_tests::pick_job_skips_a_relocating_
+    /// job` pins the skip; `daemon_relocate::a_recategorize_inside_the_
+    /// pick_to_start_gap_cannot_start_the_job` pins the re-read, through
+    /// the `NZBFAST_TEST_STALL_PICK_MS` hook in `pick_for_start`. A
+    /// third case pins what the fence's LIFETIME buys on the rename
+    /// front, where the guard is bound past `requeue_category`'s return
+    /// so it covers the `name` write too.
+    ///
+    /// NOT persisted, like `tombstone` above and for the same reason: a
+    /// relocation cannot survive the process that was running it, so a
+    /// restored record must never come back fenced. A crash mid-move
+    /// leaves a half-merged tree, which is what it left before this
+    /// field existed.
+    pub relocating: u32,
     /// The delete that tombstoned this active job also asked for its files
     /// (del_files=1). We must NOT remove them from the delete handler - the
     /// pipeline is still writing and would recreate them right after - so
@@ -227,6 +294,19 @@ pub struct Job {
     pub deferred: bool,
     /// Why the watchdog deferred it (shown in the dashboard drawer).
     pub defer_reason: String,
+    /// Unix seconds of the MOST RECENT deferral, 0 if never deferred.
+    ///
+    /// The reason on its own dates itself the moment the job is picked
+    /// up again: `deferred` is scheduling state and is deliberately NOT
+    /// cleared by a run (see the flag above - a job that keeps failing
+    /// must not re-enter the head of the queue every cycle), so a row
+    /// can carry a true verdict about something that happened an hour
+    /// ago with nothing to say so. Measured on the live daemon 26 Aug
+    /// 2026: a job sat Downloading with `deferred` still true from a
+    /// bench 3h earlier. The stamp is what makes the sticky flag
+    /// honest, and it is why the queue row prints "tried <t> ago"
+    /// rather than a bare badge.
+    pub defer_at: u64,
     /// Times deferred - bounded so a job can't churn forever.
     pub defer_count: u32,
     /// Set by the watchdog just before aborting the pipeline: park()
@@ -421,6 +501,37 @@ pub struct Job {
     /// a mid-move kill never strands them elsewhere. Persisted so a
     /// restart re-queues the move instead of forgetting it.
     pub move_pending: bool,
+    /// §296: the files this job has already copied to the completed
+    /// folder while the rest of it was still downloading, as they stood
+    /// when the copy was taken.
+    ///
+    /// Persisted, and it has to be. The originals are still in `out_dir`
+    /// - PAR2 repair reads every present block of every file in the set,
+    /// so a verified file may not leave until the job settles - and this
+    /// list is the ONLY thing that tells the whole-job move which of them
+    /// are already at the destination. Lose it across a restart and the
+    /// move merges over a copy of itself, which `move_tree` resolves by
+    /// publishing the payload a second time as "Episode (2).mkv".
+    /// Persistence NARROWS that window rather than closing it (sweep
+    /// S16): a crash between the publish rename landing and this list's
+    /// store write leaves one copy at the destination that no record
+    /// names, and the move then mints its "(2)" - a known residue, not
+    /// worth an fsync ladder on the publish path.
+    ///
+    /// Emptied by `Daemon::early_reconcile` as the move settles each
+    /// entry - an entry whose destination did not answer stays on the
+    /// record for the move's retry (sweep S7) - and by
+    /// `Daemon::early_take` on a delete or a failure (with
+    /// `earlyfile::early_unlink` doing the disk half).
+    pub early_published: Vec<super::earlyfile::EarlyFile>,
+    /// Destination names §296 REFUSED to publish because the name was
+    /// already occupied when the copy was about to be taken - an earlier
+    /// grab of the same release, already moved. In-memory only, never
+    /// persisted: a restart re-derives the refusal from the same
+    /// `exists()` test, and recording a refused file on
+    /// `early_published` instead would hand reconcile and the delete
+    /// take-back a file this job does not own.
+    pub early_refused: std::collections::HashSet<String>,
     /// How many times this record has crossed between the queue store
     /// and the history store, counting from 0 for a job that has never
     /// crossed. Bumped by [`stamp_move`](super::moveseq::stamp_move) on
@@ -1263,6 +1374,70 @@ pub(crate) struct DupeCollision {
     pub nzo_id: String,
 }
 
+/// Which rows this add is allowed to be a duplicate OF, as
+/// `enqueue_as` hands the question to `add_collision`.
+///
+/// It was a bare `allow_dupe: bool` until 25 Aug 2026, and the bool is
+/// the defect: "forgive the row I am replacing" and "forgive every
+/// live copy there is" are different permissions, and only one caller
+/// ever wanted the second. `hunt_enqueue` passed `true` because the
+/// replacement it queues IS a duplicate of the release that just
+/// failed - true about that ONE row, and it switched BOTH duplicate
+/// arms off against every other row at once, so a hunted copy started
+/// downloading beside a live copy of the same release that the user or
+/// a watchlist had already queued (Codex sweep 24 Aug, F-09).
+///
+/// `Row` is deliberately by NZO ID and not by name or by key: the row
+/// the hunt replaces is a specific record, and every other record that
+/// happens to carry the same identity is exactly what the ladder is
+/// for. The exemption is applied INSIDE each scan rather than to the
+/// collision it returns, so a forgiven row cannot mask a second one
+/// behind it - `dupe_collision` reports the first hit it finds, and
+/// filtering afterwards would drop the whole answer.
+#[derive(Clone, Copy)]
+pub(crate) enum DupeExempt<'a> {
+    /// Nobody. The ordinary duplicate ladder decides this add's fate.
+    Nobody,
+    /// Anybody: the user was ASKED and said yes (the wall's
+    /// confirmation), or this add is an explicit `hold_for` spare whose
+    /// fate the caller has already settled. It suppresses the hold, not
+    /// the key - the job still carries its identity, so everything
+    /// downstream that reasons about duplicates keeps working.
+    Anybody,
+    /// Exactly one row, by nzo id: this add REPLACES that record, so
+    /// colliding with it is the point. Any other collision holds.
+    Row(&'a str),
+}
+
+impl DupeExempt<'_> {
+    /// The wall's asked-and-said-yes as the bool it arrives at
+    /// `enqueue` as. `enqueue` keeps a bool because that is genuinely
+    /// the question its forty-odd call sites are answering; only the
+    /// paths that replace a NAMED row reach for `Row`.
+    pub(crate) fn asked(allow_dupe: bool) -> Self {
+        if allow_dupe {
+            Self::Anybody
+        } else {
+            Self::Nobody
+        }
+    }
+
+    /// Widen to [`Self::Anybody`] when `yes`. The `hold_for` spare's
+    /// road into the same suppression, kept out of `enqueue_as`'s body
+    /// because that function sits on the size gate's ceiling.
+    pub(crate) fn or_anybody(self, yes: bool) -> Self {
+        if yes { Self::Anybody } else { self }
+    }
+
+    /// The one row this add may collide with, if it names one.
+    pub(crate) fn row(&self) -> Option<&str> {
+        match self {
+            Self::Row(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
 /// One "the record went, the files did not" notice.
 ///
 /// A struct rather than the 4-tuple this was, because it grew a fifth
@@ -1345,6 +1520,87 @@ pub(crate) fn is_held_alternative(g: &Job) -> bool {
     g.paused && g.priority == DUPE_PRIORITY
 }
 
+/// The sidecar that remembers an enqueued job's CATEGORY beside its
+/// spool copy: the spool file's own name with `.cat` on the end,
+/// holding the category text and nothing else.
+///
+/// TODO 16g / A12 re-adopts a job whose record never reached disk from
+/// its spool copy alone, and the category lived only in that lost
+/// record - so a recovered job took whatever §218's inference made of
+/// the NZB, and a release the user filed under one category came back
+/// under another, in a different folder, with no sign anything had
+/// happened. The NZB bytes cannot carry it (they are the poster's, and
+/// byte-identical to what any other adder holds), and the file NAME
+/// cannot either: `recover_orphaned_spool` reads the id and the display
+/// stem out of that name, and a category is free text somebody typed.
+///
+/// A `.nzb.cat` suffix rather than a `.cat` in place of it, so the
+/// recovery scan - which takes `SABnzbd_nzo_nzbfast*.nzb` and nothing
+/// else - cannot mistake a sidecar for an orphan of its own.
+pub(crate) fn spool_cat_path(nzb: &Path) -> PathBuf {
+    let mut p = nzb.to_path_buf().into_os_string();
+    p.push(".cat");
+    PathBuf::from(p)
+}
+
+/// Record `category` beside a spool copy just written. See
+/// [`spool_cat_path`].
+///
+/// Best-effort and silent, exactly like the queue save this stands in
+/// for: what it protects against IS a disk that will not take a write,
+/// so a failure here has nothing left to report to and costs the
+/// inference rather than the job. An empty category writes nothing -
+/// there is no choice to remember, and recovery infers as it always
+/// did.
+pub(crate) fn save_spool_category(nzb: &Path, category: &str) {
+    if category.is_empty() {
+        return;
+    }
+    let _ = crate::persist::write_atomic(&spool_cat_path(nzb), category.as_bytes());
+}
+
+/// Write an accepted job's spool copy and the category beside it.
+///
+/// The copy is written ATOMICALLY because a resume re-parses it and it
+/// must never be torn; the sidecar is best-effort, because losing it
+/// costs the inference and not the job (see [`save_spool_category`]).
+/// One call rather than two at the enqueue site so the two cannot drift
+/// apart - a copy written without its category is exactly the state
+/// TODO 16g's recovery cannot tell from an add that chose none.
+///
+/// The category handed here is the SETTLED one: §218 has inferred one
+/// for an add that named none, a Smart Folder rule has had its say, and
+/// the pre-queue hook has had its rewrite. That value is what the record
+/// about to be built holds, and this sidecar is the only copy of it that
+/// outlives a run whose queue saves never landed.
+pub(crate) fn write_spool_copy(nzb: &Path, bytes: &[u8], category: &str) -> std::io::Result<()> {
+    crate::persist::write_atomic(nzb, bytes)?;
+    save_spool_category(nzb, category);
+    Ok(())
+}
+
+/// The category recorded beside a spool copy, or empty when there is
+/// none - an add that chose no category, a copy written before this
+/// sidecar existed, or a write the disk refused.
+///
+/// The first line only, trimmed and bounded: this is a file on disk in
+/// a directory the daemon does not own exclusively, and everything past
+/// the first line is something nobody wrote deliberately. The value
+/// then goes through the same untrusted-`cat=` sanitizing every add
+/// takes, so this is a bound on size and shape and not the escape
+/// check.
+pub(crate) fn spool_category(nzb: &Path) -> String {
+    std::fs::read_to_string(spool_cat_path(nzb))
+        .unwrap_or_default()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(128)
+        .collect()
+}
+
 /// Rename a spool copy out of the shape `recover_orphaned_spool`
 /// adopts, returning the new path.
 ///
@@ -1365,7 +1621,12 @@ pub(crate) fn mask_spool_path(nzb: &Path, suffix: &str) -> Option<PathBuf> {
     masked.push(suffix);
     let masked = PathBuf::from(masked);
     match std::fs::rename(nzb, &masked) {
-        Ok(()) => Some(masked),
+        Ok(()) => {
+            // Nothing will ever adopt the masked copy, so its recorded
+            // category has no reader left.
+            let _ = std::fs::remove_file(spool_cat_path(nzb));
+            Some(masked)
+        }
         Err(e) => {
             warn!(
                 target: "queue",
@@ -1391,6 +1652,14 @@ pub(crate) fn mask_spool_path(nzb: &Path, suffix: &str) -> Option<PathBuf> {
 /// which is exactly why swallowing the error was invisible for as long
 /// as it was.
 pub(crate) fn drop_spool(nzb: &Path) {
+    // The category sidecar belongs to the copy, not to the record, so
+    // it goes whenever the copy does - including on the set-aside paths
+    // below, where what is left behind must not be adoptable anyway. In
+    // the one case where all three resorts fail and the copy IS adopted
+    // again, the recovery infers a category exactly as it did before
+    // this sidecar existed; the resurrection itself is the defect there,
+    // and `drop_spool` already warns about it.
+    let _ = std::fs::remove_file(spool_cat_path(nzb));
     match std::fs::remove_file(nzb) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1451,6 +1720,54 @@ pub(crate) fn hold_or_drop_spool(
             .push(nzb.to_path_buf());
     } else {
         drop_spool(nzb);
+    }
+}
+
+/// The spool half of a NON-ACTIVE record's history-less delete, where
+/// the files half may be deferred to `park()`.
+///
+/// Sweep 9, finding 2. `hold_or_drop_spool` above answers "this
+/// request is about to try the files, so hold the NZB back in case the
+/// removal is refused" - and that is the wrong question for a
+/// Finishing (`lane`) or `finalizing` record. Neither is `active`, so
+/// both take the non-active spool arm, and both then defer their files
+/// to `park()`, which runs long after `note_kept_files` has drained the
+/// hold and unlinked the copy as leftover from a removal that had not
+/// yet been attempted. Park's own refusal was left offering a path that
+/// no longer exists: `spend_deferred_delete` reads `nzb_path` and hands
+/// it to `note_delete_kept`, so the user who asked to delete the files,
+/// was refused, and went looking for "download it again" found the
+/// offer naming nothing.
+///
+/// So where PARK owns the removal, park owns the spool too - masked out
+/// of the adoptable `SABnzbd_nzo_nzbfast*.nzb` shape here exactly as the
+/// Downloading arm does, so a kill in that window cannot have the
+/// cancelled release re-adopted either, and unlinked by park when the
+/// notice does not claim it.
+///
+/// `lane` is the caller's own `state == Finishing`, and the test below
+/// mirrors the deferral branch each caller runs a few lines later, so
+/// the two cannot part. The SIDECAR-drain arm is deliberately not this
+/// case: its removal waits on the prefetch wind-down rather than on
+/// park, and `remove_after_sidecar_drain` says in as many words that it
+/// has no NZB to offer.
+///
+/// Shared by both facades for the reason `hold_or_drop_spool` states:
+/// the JSON-RPC delete was a hand-copy of the REST one that never got
+/// the active-job fix, so which client type the user had configured
+/// decided whether the bug was reachable.
+pub(crate) fn park_or_drop_spool(
+    g: &mut Job,
+    del_files: bool,
+    lane: bool,
+    held: &mut std::collections::HashMap<PathBuf, Vec<PathBuf>>,
+) {
+    if del_files && (lane || g.finalizing) && g.delete_status.is_empty() {
+        if let Some(masked) = mask_spool_path(&g.nzb_path, ".deleting") {
+            g.nzb_path = masked;
+        }
+    } else {
+        hold_or_drop_spool(del_files, &g.out_dir, &g.nzb_path, held);
     }
 }
 
@@ -2191,7 +2508,7 @@ pub(super) use job_wire::{job_from_json, job_json};
 #[path = "job_fail.rs"]
 mod job_fail;
 pub(crate) use crate::failkind::{
-    FailKind, RETRY_WHY_PROPAGATION, RETRY_WHY_TRANSPORT, disk_full_failure,
+    FailKind, RETRY_WHY_PROPAGATION, RETRY_WHY_TRANSPORT, another_copy_can_help, disk_full_failure,
     disk_full_mid_download, fail_action, fail_hint, fail_kind, fail_kind_token,
 };
 pub(super) use job_fail::{auto_retry_eligible, merge_notify_tokens, post_job_plan};
@@ -2228,6 +2545,10 @@ pub(super) use job_publish::{recover_interrupted_publishes, same_dir};
 #[cfg(test)]
 #[path = "job_tests.rs"]
 mod job_tests;
+
+#[cfg(test)]
+#[path = "job_wire_tests.rs"]
+mod job_wire_tests;
 
 #[cfg(all(test, unix))]
 #[path = "job_finalize_marker_tests.rs"]

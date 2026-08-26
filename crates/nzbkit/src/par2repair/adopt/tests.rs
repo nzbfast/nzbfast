@@ -84,10 +84,10 @@ fn scan_candidate_serial(
     let total = len + bs as u64 - 1;
     'stream: while i < total {
         let n = if i < len {
-            let want = buf.len().min((len - i) as usize);
+            let want = crate::disk::chunk_len(len - i, buf.len());
             f.read(&mut buf[..want]).expect("candidate reads")
         } else {
-            let want = buf.len().min((total - i) as usize);
+            let want = crate::disk::chunk_len(total - i, buf.len());
             buf[..want].fill(0);
             want
         };
@@ -355,7 +355,7 @@ fn parallel_sliding_scan_reproduces_the_serial_adoption_decisions() {
             let mut want: HashMap<usize, AdoptSrc> = HashMap::new();
             sliding_scan_serial(&cands, &indices, &targets, &missing_set, bs, &mut want);
             let mut got: HashMap<usize, AdoptSrc> = HashMap::new();
-            sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut got).unwrap();
+            sliding_scan(&cands, &indices, 0..0, &targets, &missing_set, bs, &mut got).unwrap();
             assert_eq!(
                 fmt_adopted(&want),
                 fmt_adopted(&got),
@@ -409,7 +409,7 @@ fn every_worker_racing_for_the_same_slices_still_yields_the_first_slot() {
     );
     for _ in 0..6 {
         let mut got: HashMap<usize, AdoptSrc> = HashMap::new();
-        sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut got).unwrap();
+        sliding_scan(&cands, &indices, 0..0, &targets, &missing_set, bs, &mut got).unwrap();
         assert_eq!(fmt_adopted(&want), fmt_adopted(&got));
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -442,7 +442,7 @@ fn a_pre_adopted_slice_is_never_re_sourced_by_the_parallel_scan() {
     let mut want = seed_adopted.clone();
     sliding_scan_serial(&cands, &indices, &targets, &missing_set, bs, &mut want);
     let mut got = seed_adopted.clone();
-    sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut got).unwrap();
+    sliding_scan(&cands, &indices, 0..0, &targets, &missing_set, bs, &mut got).unwrap();
     assert_eq!(fmt_adopted(&want), fmt_adopted(&got));
     for (g, s) in &seed_adopted {
         assert_eq!(got[g].cand, s.cand, "slice {g} was re-sourced");
@@ -463,7 +463,7 @@ fn the_parallel_scan_is_byte_identical_run_to_run() {
     let mut first: Option<Vec<(usize, usize, u64)>> = None;
     for _ in 0..8 {
         let mut got: HashMap<usize, AdoptSrc> = HashMap::new();
-        sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut got).unwrap();
+        sliding_scan(&cands, &indices, 0..0, &targets, &missing_set, bs, &mut got).unwrap();
         let s = fmt_adopted(&got);
         match &first {
             None => first = Some(s),
@@ -485,9 +485,58 @@ fn a_missing_candidate_still_fails_the_scan() {
     let missing_set: HashSet<usize> = (0..total).collect();
     let indices: Vec<usize> = (0..cands.len()).collect();
     let mut got: HashMap<usize, AdoptSrc> = HashMap::new();
-    let err = sliding_scan(&cands, &indices, &targets, &missing_set, bs, &mut got)
+    let err = sliding_scan(&cands, &indices, 0..0, &targets, &missing_set, bs, &mut got)
         .expect_err("an unreadable candidate is an error, not a silent skip");
     assert!(matches!(err, RepairError::Io(_)), "{err:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same vanished file, this time inside the donor range: the slot
+/// is dropped and the scan carries on, and the surviving candidates
+/// still adopt everything they hold - the file-level half of §293's
+/// "a racing cleanup degrades to no-donation, never to a failed
+/// repair" (sweep S3: only the directory-level half existed, so a
+/// donor file deleted between the walk and the read failed the whole
+/// repair through `slot.transpose()?`).
+#[test]
+fn a_vanished_donor_candidate_is_dropped_not_fatal() {
+    let dir = tmpdir("donor-gone");
+    let bs = 64;
+    let mut rng = Rng(0x1234_5678_9ABC_DEF1);
+    let (targets, contents) = make_targets(&mut rng, &dir, bs, 3);
+    // Candidates carry only the first two targets' bytes: the third's
+    // slices are findable nowhere, so the merge can never early-exit on
+    // full coverage - the vanished slot's error is always reached, and
+    // this test cannot pass on the strength of the fold's own
+    // drop-after-coverage behaviour.
+    let mut cands = make_candidates(&mut rng, &dir, bs, &targets[..2], &contents[..2], 2);
+    // What the donor walk saw, deleted before the scan reads it - the
+    // exact path shape of the race, minus the timing.
+    cands.push((dir.join("donor").join("not-there"), 4096));
+    let total: usize = targets.iter().map(|t| t.n_slices).sum();
+    let missing_set: HashSet<usize> = (0..total).collect();
+    let indices: Vec<usize> = (0..cands.len()).collect();
+    // What the readable candidates alone would decide.
+    let readable: Vec<usize> = (0..cands.len() - 1).collect();
+    let mut want: HashMap<usize, AdoptSrc> = HashMap::new();
+    sliding_scan_serial(&cands, &readable, &targets, &missing_set, bs, &mut want);
+    let mut got: HashMap<usize, AdoptSrc> = HashMap::new();
+    sliding_scan(
+        &cands,
+        &indices,
+        cands.len() - 1..cands.len(),
+        &targets,
+        &missing_set,
+        bs,
+        &mut got,
+    )
+    .expect("a vanished donor file must not fail the scan");
+    assert_eq!(
+        fmt_adopted(&want),
+        fmt_adopted(&got),
+        "the surviving candidates' decisions must be untouched"
+    );
+    assert!(!got.is_empty(), "the corpus must actually adopt something");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

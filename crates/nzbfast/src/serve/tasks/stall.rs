@@ -252,15 +252,126 @@ struct Watched {
     draining: bool,
 }
 
+/// How long a defer lets the fleet wind itself down before it takes the
+/// line back by force. One watchdog tick (`window / 6`, clamped, default
+/// 5 s) - the same beat the loop already judges on, so the escalation
+/// has always landed by the time the next verdict is formed.
+///
+/// It is a constant rather than a read of the live tick because the tick
+/// shrinks to 1 s under a short `NZBFAST_DEFER_WINDOW_SECS`, and a 1 s
+/// grace cuts off a fleet that is winding down perfectly well (the
+/// 400 ms/article row below).
+///
+/// **The number, measured 26 Aug 2026** (mock fleet, 4 connections,
+/// window 3, the daemon's adaptive timeouts; `abort()` against `drain()`
+/// at the same instant; "kept" is sessions still the provider's
+/// afterwards, out of 4):
+///
+/// | the fleet the verdict finds       | abort  | drain    | kept abort -> drain |
+/// |-----------------------------------|--------|----------|---------------------|
+/// | fast, deep pipelines (60 ms/art)  | 7 ms   |   129 ms | 0 -> 4              |
+/// | every answer a 430 (post is gone) | 8 ms   |   131 ms | 0 -> 4              |
+/// | slow but answering (400 ms/art)   | 151 ms | 1,185 ms | 0 -> 4              |
+/// | slow but answering (1.5 s/art)    | 152 ms | 4,084 ms | 0 -> 4              |
+/// | idle but for one wedged body      | 151 ms | 9,577 ms | 3 -> 3              |
+/// | wholly wedged, all mid-body       | 151 ms | 9,575 ms | 0 -> 0              |
+///
+/// Two facts decide the shape. A drain keeps the WHOLE fleet whenever
+/// the server is answering - and an abort keeps none of it, because
+/// those workers are mid-body and a socket with an unread response is
+/// reusable by nobody. And a drain buys exactly NOTHING against a peer
+/// that has stopped answering, while costing the pre-byte budget's
+/// ceiling (10 s) to find that out. So the verb is a drain and the
+/// grace is what stops the second row of that pair from holding the
+/// queue: 5 s clears every measured fleet that was answering and halves
+/// the wedge.
+const DEFER_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl Watched {
-    /// Abort the judged run - the defer verdict's teeth.
+    /// Wind the judged run down - the defer verdict's teeth.
     fn stop(&self) {
-        if let Some(f) = &self.abort {
-            f.store(true, Ordering::Relaxed);
+        self.stop_within(DEFER_DRAIN_GRACE);
+    }
+
+    /// [`Watched::stop`] with the grace named, so a test can drive the
+    /// escalation without sitting out [`DEFER_DRAIN_GRACE`].
+    ///
+    /// **Why a defer drains rather than aborts.** A defer means "move
+    /// this job to the back of the queue and come back to it", which is
+    /// a pause/resume and not a stop - and `8cda45132` could only reach
+    /// half of the fleet it strands. That commit made an abort PARK a
+    /// drained session, which is the whole population of the capacity
+    /// arm below (its workers are idle by definition: the server has
+    /// nothing fetchable). It is NONE of the population of the
+    /// `share >= 0.90` arm, whose top server is busy and fast by the
+    /// arm's own predicate, so its workers are mid-body and exit through
+    /// the read side with an unread response on the wire - correctly
+    /// quit, and nothing inside the pool can change that. This is every
+    /// arm's verb, and the two post-is-gone arms are on the same side of
+    /// it as the busy one rather than with the capacity arm: a dead post
+    /// answers 430 as fast as the pool can ask, so those pipelines drain
+    /// in about the time one refusal takes (the second row below). The
+    /// only way
+    /// to keep those sessions is to let the responses LAND, which is
+    /// what `drain()` is: admit no new articles, finish and journal what
+    /// is in flight, and every worker then reaches the pool's own reuse
+    /// point and parks. The in-flight bodies are journaled instead of
+    /// discarded and re-fetched when the job comes round again.
+    ///
+    /// **Why it is bounded.** A drain deliberately sends no `finished`,
+    /// so a fleet whose peer has stopped answering waits out the
+    /// per-article pre-byte ladder before it can retire - measured at
+    /// 9.6 s, for zero sessions kept. `DEFER_DRAIN_GRACE` carries that
+    /// measurement; past it this escalates to the abort, which is
+    /// exactly what a defer did before.
+    ///
+    /// **What the escalation may and may not touch.** `abort()` answers
+    /// false once the pool has dropped its `Shared`, and that is
+    /// precisely "the drain finished" - so a fleet that wound down
+    /// inside the grace is never touched. It also cannot reach a
+    /// SUCCESSOR: both handles are clones of the judged run's own (the
+    /// hub slots hold an `Arc` per run and `install_seek` replaces them),
+    /// so a late escalation is inert rather than aimed at the next job.
+    ///
+    /// The engine's abort flag is set only WITH the escalation. On the
+    /// ordinary path the run ends on the drain's own bail instead
+    /// ("paused (drained in-flight; queue kept for resume)"), which is
+    /// the same `Err` the demote arm keys on - `postproc` asks
+    /// `res.is_err() && j.demote`, and `park` clears the message when it
+    /// re-queues - so the defer lands exactly as it did before.
+    fn stop_within(&self, grace: std::time::Duration) {
+        let Some(ctl) = self.queue_ctl.clone() else {
+            // No pool handle for this run: the flag is the only teeth
+            // there are, and it is what a defer has always set.
+            if let Some(f) = &self.abort {
+                f.store(true, Ordering::Relaxed);
+            }
+            return;
+        };
+        if ctl.is_draining() {
+            // Already winding down - a second verdict on the same run
+            // (or the user's own graceful pause) must not arm a second
+            // escalation behind the first.
+            return;
         }
-        if let Some(c) = &self.queue_ctl {
-            c.abort();
+        if !ctl.drain() {
+            // The run beat the verdict to the line. Set the flag anyway:
+            // `park` is what decides a demotion actually happened, and
+            // it already knows how to drop a stale one.
+            if let Some(f) = &self.abort {
+                f.store(true, Ordering::Relaxed);
+            }
+            return;
         }
+        let abort = self.abort.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            if ctl.abort()
+                && let Some(f) = &abort
+            {
+                f.store(true, Ordering::Relaxed);
+            }
+        });
     }
 }
 
@@ -452,6 +563,176 @@ fn observe_transfer_and_outages(
     }
 }
 
+/// Is there another job this queue could be running instead?
+///
+/// The whole justification for every demotion below: setting a job
+/// aside costs the queue nothing when something else can run, and costs
+/// it a restart when nothing can. Deliberately the same test in all
+/// four arms - a Queued job that is neither paused nor already
+/// deferred - so no arm can be more or less willing to demote than its
+/// siblings for a reason nobody wrote down.
+fn others_waiting(d: &Daemon) -> bool {
+    d.queue.lock_ok().iter().any(|j| {
+        let g = j.lock_ok();
+        g.state == JobState::Queued && !g.paused && !g.deferred
+    })
+}
+
+/// What the EARLY post-is-gone arm (TODO 306) has to see before it will
+/// speak: the same verdict as its windowed sibling, read over the job's
+/// WHOLE RUN instead of over one rolling window.
+struct GoneEvidence {
+    /// Articles answered "no such article" since this job started,
+    /// summed across every server.
+    misses: u64,
+    /// Servers that have themselves answered at least one of them.
+    probed: usize,
+}
+
+/// Run-cumulative evidence that no configured server carries this post.
+///
+/// # Why this exists beside a windowed arm that already works
+///
+/// The windowed post-is-gone arm below is correct and measured, and it
+/// cannot fire inside about 69 seconds: `warmup` (45 s) plus a rolling
+/// window at least 80% full (24 s of a 30 s window). The 14 Aug 2026
+/// incident it was written for was ten minutes long and clears that
+/// comfortably. **Everything shorter it cannot help at all** - and a
+/// dead post of a few thousand articles on a normal line grinds itself
+/// out in tens of seconds while holding the entire queue for all of
+/// them. Measured 26 Aug 2026 (`research/QUEUE-PROGRESS-UNDER-FAULT-2026-08-26.md`
+/// finding F4): a 1200-article post refused at a transatlantic refusal
+/// cost held three healthy jobs for its whole 16.7 s run, `set aside
+/// never`, against a 1.0 s control - sixteen times, with the mechanism
+/// present, correct and simply not yet armed. The same row at
+/// compressed thresholds is released at 5.4 s by the windowed arm.
+///
+/// # Why the answer is evidence and not a smaller clock
+///
+/// Lowering `warmup` would move every arm, and the warmup earns its
+/// keep for the other two: a job whose fleet is still dialling, or
+/// whose first megabyte is slow, must not be benched for it. What is
+/// different about THIS arm is that its evidence does not improve with
+/// time. A job that has answered nothing but refusals for its entire
+/// life is not a job that needs warming up, and waiting another 45
+/// seconds only buys more of the same answer.
+///
+/// So the gates here are all statements about the RUN, and each one is
+/// strictly stronger than what the windowed arm asks:
+///
+/// 1. **Not one byte, ever.** The windowed arm allows a job that
+///    fetched half a release and only then hit a dead patch; this one
+///    does not. Every server's cumulative `bytes` must be zero, which
+///    is the single condition that rules out "the tail of an otherwise
+///    healthy job" outright - the case the 64-refusal floor was written
+///    to clear.
+/// 2. **Nothing unprobed.** Every server must either have answered a
+///    refusal ITSELF, or be granting no connection at all right now
+///    (`down_since`), which is the outage arm's territory and cannot
+///    supply anything either way. A server that is up and simply has
+///    not been asked yet might be the one that has the post, so its
+///    silence stands the verdict down rather than being counted as
+///    agreement.
+/// 3. **A floor of authoritative answers** (the caller's
+///    `gone_min_misses`), so a handful of 430s is never a verdict.
+///
+/// # What it cannot see, stated rather than papered over
+///
+/// There is no live in-flight gauge: `articles_tried` is bumped at
+/// dispatch and `articles_missing` at the response, so on a pipelined
+/// fleet the two differ by whatever is on the wire and "nothing is in
+/// flight" is not a question these counters can answer. The caller
+/// answers it the way `slowstore.rs` answers its own - by CONFIRMING
+/// before acting. It arms on one tick and fires on a later one, and an
+/// in-flight body landing in between moves `bytes` off zero and stands
+/// the whole thing down. That bounds the exposure to one tick rather
+/// than pretending to a certainty the gauges do not carry.
+///
+/// Two shapes degrade rather than misfiring, and both fall back to the
+/// windowed arm at its old 69 seconds, which is the safe direction:
+///
+/// * A server the pool never dials at all and that never records itself
+///   down keeps condition 2 unsatisfied forever.
+/// * A PARTIAL takedown - some of the post arrives and the rest is
+///   refused - fails condition 1 by construction, and that is the price
+///   of firing with no warmup. Measured 26 Aug 2026 on round A's S6
+///   row: unchanged at both threshold sets, still holding the queue for
+///   its whole 11.6 s run at the shipped ones. Covering it means
+///   shortening the FLATLINE window rather than removing a warmup,
+///   which is a different risk decision and is TODO 306's own remaining
+///   box. Do NOT reach for [`StallTracker`] to shorten it: this
+///   module's header says why action stays out of that scope.
+fn gone_evidence(live: &nzbkit::pool::LiveStats) -> Option<GoneEvidence> {
+    let (mut misses, mut probed) = (0u64, 0usize);
+    for s in live.servers.iter() {
+        if s.bytes.load(Ordering::Relaxed) > 0 {
+            return None;
+        }
+        let m = s.articles_missing.load(Ordering::Relaxed);
+        if m > 0 {
+            misses += m;
+            probed += 1;
+        } else if s.down_since.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+    }
+    (probed > 0).then_some(GoneEvidence { misses, probed })
+}
+
+/// TODO 306's early post-is-gone arm: the same verdict as the windowed
+/// twin in [`spawn_slow_job_watchdog`], reached off the RUN rather than
+/// off a rolling window, so it is bounded by its own confirmation
+/// rather than by a 69-second clock. Returns the defer reason when it
+/// fires, having already consumed its arming latch.
+///
+/// [`gone_evidence`] carries the whole argument for why reading the run
+/// is sound HERE and would not be for the other two arms - do not lift
+/// the elapsed-time gate off them on the strength of this one.
+///
+/// Everything past the evidence is the windowed arm's own list,
+/// unchanged: the feature on, the demotion budget, a sidecar that is
+/// only borrowing, and somewhere for the queue to go next.
+///
+/// **Arm on one tick, fire on the next.** `armed` holds the refusal
+/// count at the arming instant and the fire requires MORE to have
+/// landed since, so what is confirmed is that the fleet is still
+/// actively being told "no such article" - a pool that has gone quiet
+/// instead is the outage arm's shape, or a job about to end on its own,
+/// and neither is this arm's to judge. A tick whose evidence fails
+/// clears the latch, so the confirmation is always over an unbroken
+/// stretch.
+fn early_gone_defer(
+    d: &Arc<Daemon>,
+    live: &nzbkit::pool::LiveStats,
+    armed: &mut Option<u64>,
+    gone_min_misses: u64,
+    defer_count: u32,
+) -> Option<String> {
+    let Some(e) = gone_evidence(live).filter(|e| e.misses >= gone_min_misses) else {
+        *armed = None;
+        return None;
+    };
+    let Some(armed_at) = *armed else {
+        *armed = Some(e.misses);
+        return None;
+    };
+    if e.misses <= armed_at
+        || !d.auto_defer.load(Ordering::Relaxed)
+        || defer_count >= 3
+        || !d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
+        || !others_waiting(d)
+    {
+        return None;
+    }
+    *armed = None;
+    Some(format!(
+        "not a byte has arrived since this job started and every one of the {} \
+         article(s) answered so far came back missing, on all {} server(s) that \
+         could be asked - no configured server carries this post right now",
+        e.misses, e.probed
+    ))
+}
+
 /// Slow-job watchdog (auto-defer + idle-server prefetch): a queue
 /// shouldn't sit behind one job whose articles live only on one slow
 /// server. Over a rolling window of per-server byte deltas:
@@ -515,6 +796,14 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
         let mut attempted: std::collections::HashSet<String> = Default::default();
         // Once per active job: "every idle server has refused auth".
         let mut refusal_noted = false;
+        // TODO 306's early post-is-gone arm, armed on one tick and
+        // fired on a later one: the run-cumulative refusal count as it
+        // stood when the evidence first held. `None` = not armed, and
+        // any tick whose evidence fails clears it, so the confirmation
+        // is always over an unbroken stretch. See [`gone_evidence`] for
+        // why confirming is the honest substitute for an in-flight
+        // gauge the pool does not publish.
+        let mut gone_armed: Option<u64> = None;
         // Transfer-stall episodes: one log line when the active fetch
         // moves no bytes for NZBFAST_STALL_LOG_SECS (default 10), one
         // when it clears - so "send me the log" captures a flatline
@@ -534,6 +823,13 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(tick)).await;
             observe_transfer_and_outages(&d, &mut stall, &mut outage_noted);
+            // Retention insurance: an in-flight background fetch stands
+            // down the moment a real job becomes runnable. Before the
+            // auto_defer/auto_prefetch gate below on purpose - yielding
+            // is part of the insurance feature's own not-hinder
+            // contract, not of either tuner's - and one atomic load
+            // when the feature is off.
+            crate::serve::insurance::insurance_yields_to_arrivals(&d);
             if !d.auto_defer.load(Ordering::Relaxed) && !d.auto_prefetch.load(Ordering::Relaxed) {
                 win.clear();
                 continue;
@@ -583,6 +879,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 win.clear();
                 attempted.clear();
                 refusal_noted = false;
+                gone_armed = None;
                 cur = Some(id.clone());
             }
             let (snap, tried_now, missing_now) = {
@@ -600,6 +897,30 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 continue;
             }
             let now = Instant::now();
+
+            // ---- The post is gone, before any window can say so
+            // (TODO 306). Deliberately BEFORE the window bookkeeping
+            // and the `span < window * 0.8` bail below, which is the
+            // gate that makes the shipped regime unreachable for a
+            // short job. See [`early_gone_defer`].
+            if let Some(reason) = early_gone_defer(
+                &d,
+                &w.pool_live,
+                &mut gone_armed,
+                gone_min_misses,
+                defer_count,
+            ) {
+                {
+                    let mut g = job.lock_ok();
+                    g.demote = true;
+                    g.defer_reason = reason.clone();
+                }
+                info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
+                w.stop();
+                win.clear();
+                continue;
+            }
+
             win.push_back((now, snap, tried_now, missing_now));
             while win
                 .front()
@@ -670,31 +991,26 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 && now.duration_since(t0).as_secs() >= warmup
                 && defer_count < 3
                 && d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
+                && others_waiting(&d)
                 && let Some(o) = server_outages(&d)
                     .into_iter()
                     .find(|o| o.secs >= span as u64 && o.secs >= server_down_secs())
             {
-                let others_waiting = d.queue.lock_ok().iter().any(|j| {
-                    let g = j.lock_ok();
-                    g.state == JobState::Queued && !g.paused && !g.deferred
-                });
-                if others_waiting {
-                    let reason = format!(
-                        "{} has had no usable connection for {}s ({}) and nothing \
-                         has arrived for {:.0}s - the articles this job still needs \
-                         are only on that server",
-                        o.host, o.secs, o.kind, span
-                    );
-                    {
-                        let mut g = job.lock_ok();
-                        g.demote = true;
-                        g.defer_reason = reason.clone();
-                    }
-                    info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-                    w.stop();
-                    win.clear();
-                    continue;
+                let reason = format!(
+                    "{} has had no usable connection for {}s ({}) and nothing \
+                     has arrived for {:.0}s - the articles this job still needs \
+                     are only on that server",
+                    o.host, o.secs, o.kind, span
+                );
+                {
+                    let mut g = job.lock_ok();
+                    g.demote = true;
+                    g.defer_reason = reason.clone();
                 }
+                info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
+                w.stop();
+                win.clear();
+                continue;
             }
             // ---- The post is gone: servers healthy, every answer a 430.
             //
@@ -734,27 +1050,22 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 && now.duration_since(t0).as_secs() >= warmup
                 && defer_count < 3
                 && d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
+                && others_waiting(&d)
             {
-                let others_waiting = d.queue.lock_ok().iter().any(|j| {
-                    let g = j.lock_ok();
-                    g.state == JobState::Queued && !g.paused && !g.deferred
-                });
-                if others_waiting {
-                    let reason = format!(
-                        "every one of the {missing_delta} article(s) answered in the \
-                         last {span:.0}s came back missing and not a byte arrived - \
-                         no configured server carries this post right now"
-                    );
-                    {
-                        let mut g = job.lock_ok();
-                        g.demote = true;
-                        g.defer_reason = reason.clone();
-                    }
-                    info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-                    w.stop();
-                    win.clear();
-                    continue;
+                let reason = format!(
+                    "every one of the {missing_delta} article(s) answered in the \
+                     last {span:.0}s came back missing and not a byte arrived - \
+                     no configured server carries this post right now"
+                );
+                {
+                    let mut g = job.lock_ok();
+                    g.demote = true;
+                    g.defer_reason = reason.clone();
                 }
+                info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
+                w.stop();
+                win.clear();
+                continue;
             }
             // A wholly stalled job is the pool's retry logic's
             // problem, and a single-server setup has nothing to
@@ -885,11 +1196,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
             if defer_count >= 3 || idle_sidecar {
                 continue;
             }
-            let others_waiting = d.queue.lock_ok().iter().any(|j| {
-                let g = j.lock_ok();
-                g.state == JobState::Queued && !g.paused && !g.deferred
-            });
-            if !others_waiting {
+            if !others_waiting(&d) {
                 continue;
             }
             let (top_host, top_bytes) = deltas.iter().max_by_key(|(_, b)| *b).cloned().unwrap();
@@ -918,3 +1225,165 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
         }
     });
 }
+
+#[cfg(test)]
+mod stop_verb_tests {
+    use super::*;
+    use nzbkit::mock::{Chaos, MockServer, make_file_articles};
+    use nzbkit::pool::{ArticleReq, PoolConfig, QueueControl, fetch_all_multi_ctl};
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    /// A `Watched` with only the two handles `stop_within` touches -
+    /// everything else on it belongs to the JUDGEMENT, and these tests
+    /// are about the verdict's teeth rather than about reaching it.
+    fn watched_over(
+        abort: Option<Arc<AtomicBool>>,
+        queue_ctl: Option<Arc<QueueControl>>,
+    ) -> Watched {
+        Watched {
+            id: "SABnzbd_nzo_stopverb".into(),
+            t0: Instant::now(),
+            pool_live: nzbkit::pool::LiveStats::for_servers(&[]),
+            abort,
+            queue_ctl,
+            draining: false,
+        }
+    }
+
+    /// A run with no pool handle - and a run whose pool has already gone
+    /// - keep the teeth a defer has always had. Both are the fall-back
+    /// arms of `stop_within`, and both must still set the engine flag,
+    /// because it is the only thing left that can end the run.
+    #[test]
+    fn a_defer_with_no_live_pool_still_sets_the_engine_flag() {
+        let flag = Arc::new(AtomicBool::new(false));
+        watched_over(Some(flag.clone()), None).stop_within(Duration::from_millis(10));
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "with no queue handle the flag is the only teeth there are"
+        );
+
+        let flag = Arc::new(AtomicBool::new(false));
+        // A default `QueueControl` holds a dead `Weak`, which is exactly
+        // the shape of a run that beat the verdict to the line.
+        let gone = Arc::new(QueueControl::default());
+        assert!(!gone.drain(), "the fixture must be a run that is over");
+        watched_over(Some(flag.clone()), Some(gone)).stop_within(Duration::from_millis(10));
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "a run that has already ended still gets the flag - `park` is \
+             what decides whether the demotion happened"
+        );
+    }
+
+    /// The verdict's verb, driven against a REAL fleet: a defer winds the
+    /// pool down rather than killing it, and escalates at the grace.
+    ///
+    /// Two phases on one rig, because the claim is that the escalation
+    /// is a BOUND and not the verb. Phase 1 is a fleet whose server has
+    /// stopped answering - the shape a drain cannot finish, measured at
+    /// 9.6 s of pre-byte ladder for zero sessions kept - and the grace
+    /// is what takes the line back. Phase 2 is a fleet that is
+    /// answering, where the drain completes well inside the grace and
+    /// the escalation must find nothing left to abort: `QueueControl`
+    /// answers false once the pool has dropped its `Shared`, and that is
+    /// the whole of what stops a late escalation reaching a successor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_defer_drains_the_fleet_and_escalates_only_at_the_grace() {
+        async fn rig(delay_ms: u64) -> (Arc<QueueControl>, tokio::task::JoinHandle<()>) {
+            let mut articles = std::collections::HashMap::new();
+            let payload: Vec<u8> = (0..64_000u32).map(|i| i as u8).collect();
+            for i in 0..40 {
+                make_file_articles(
+                    &format!("d{i}.bin"),
+                    &payload,
+                    64_000,
+                    &format!("d{i}"),
+                    &mut articles,
+                );
+            }
+            let ids: Vec<ArticleReq> = articles
+                .keys()
+                .map(|k| ArticleReq::fresh(k.as_str()))
+                .collect();
+            let srv = MockServer::start(
+                articles,
+                Chaos {
+                    delay_ms,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let mut sc = srv.server_config();
+            sc.connections = 2;
+            let cfg = PoolConfig {
+                connections: 2,
+                window: 2,
+                ramp_delay: Duration::from_millis(0),
+                adaptive_timeout: true,
+                ..Default::default()
+            };
+            let ctl = Arc::new(QueueControl::default());
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let ctl_fetch = ctl.clone();
+            let run = tokio::spawn(async move {
+                let servers = vec![(sc, cfg)];
+                let collect = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                let _ = fetch_all_multi_ctl(&servers, ids, tx, Some(&ctl_fetch)).await;
+                let _ = collect.await;
+                // Hold the mock until the run is over, or its listener
+                // dies under the fleet and the rig measures a dead peer
+                // instead of the verb.
+                drop(srv);
+            });
+            // Let the fleet dial and fill its pipelines.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            (ctl, run)
+        }
+
+        // Phase 1: the server has stopped answering. The drain cannot
+        // finish, so the grace is what ends the run.
+        let (ctl, run) = rig(60_000).await;
+        let flag = Arc::new(AtomicBool::new(false));
+        watched_over(Some(flag.clone()), Some(ctl.clone())).stop_within(Duration::from_millis(300));
+        assert!(
+            ctl.is_draining(),
+            "a defer's verb is the drain - the abort is only its bound"
+        );
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "and the engine flag belongs to the escalation, not to the verdict"
+        );
+        tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the grace must take the line back from a wedged fleet")
+            .expect("the run task");
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "the escalation sets the flag on the way past, exactly as a \
+             defer did before it drained first"
+        );
+
+        // Phase 2: the server is answering. The drain finishes long
+        // before the grace, so the escalation must be inert.
+        let (ctl, run) = rig(30).await;
+        let flag = Arc::new(AtomicBool::new(false));
+        watched_over(Some(flag.clone()), Some(ctl.clone())).stop_within(Duration::from_secs(3));
+        tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("a drained fleet must wind down on its own")
+            .expect("the run task");
+        // Past the grace, with the run long gone.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !flag.load(Ordering::Relaxed),
+            "a fleet that wound down inside the grace is never aborted - \
+             that is what keeps a late escalation off a successor's run"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "stall_gone_tests.rs"]
+mod stall_gone_tests;

@@ -362,6 +362,48 @@ impl Daemon {
         self.move_dest_root(cat).is_some()
     }
 
+    /// Where a job whose payload is currently at `cur` (its `out_dir`,
+    /// or whatever a rename left it as) will land under the destination
+    /// root for `cat`. `None` = no destination is configured, which is
+    /// the feature being off for this category.
+    ///
+    /// Lifted out of [`Self::relocate_completed`] so §296's early
+    /// per-file publish computes the SAME path the whole-job move will,
+    /// rather than a second derivation of it. That is the discipline
+    /// [`Self::move_dest_root`] already documents one level up - a lane
+    /// keyed off a root the move does not use is a lane keyed off the
+    /// wrong device - and the failure here is sharper: a file published
+    /// to a directory the move never visits is a payload split across
+    /// two folders with nothing to say so.
+    pub(super) fn move_dest_for(&self, cur: &std::path::Path, cat: &str) -> Option<PathBuf> {
+        // A per-category override IS that category's root, so the
+        // category component is not repeated inside it - which is what
+        // `from_cat` is for below.
+        let (root, from_cat) = self.move_dest_root(cat)?;
+        // Mirror the layout under the destination: the path relative to
+        // the download root already carries category/Show/Season NN. If
+        // the job predates a live out_dir swap, fall back to
+        // category + folder name.
+        let mut rel = cur
+            .strip_prefix(self.out_dir())
+            .map(|r| r.to_path_buf())
+            .unwrap_or_else(|_| {
+                let base = PathBuf::from(cur.file_name().unwrap_or_default());
+                if cat.is_empty() {
+                    base
+                } else {
+                    PathBuf::from(cat).join(base)
+                }
+            });
+        if from_cat
+            && !cat.is_empty()
+            && let Ok(r) = rel.strip_prefix(cat)
+        {
+            rel = r.to_path_buf();
+        }
+        Some(root.join(&rel))
+    }
+
     /// The mover's byte budget right now, in bytes/second. None = no
     /// cap. Read per pacing decision, so a mode change or a download
     /// starting mid-copy takes effect within one chunk.
@@ -460,6 +502,12 @@ impl Daemon {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
         }
+        // §296: settle whatever this job already published file by file
+        // BEFORE the move walks the directory - `relocate_completed`
+        // counts the source to tell a split from a clean failure, and a
+        // file that is already at the destination must not be counted,
+        // moved, or merged over.
+        self.early_reconcile(job);
         let (moved, split, failed) = self.relocate_completed(&out_dir, &cat, None);
         let mut j = job.lock_ok();
         j.move_pending = false;
@@ -470,6 +518,26 @@ impl Daemon {
         };
         self.settle_move_attempt(&mut j);
         if let Some(dest) = &moved {
+            // §296 sweep S7: reconcile leaves an entry on the record
+            // when its destination did not answer, so the retry can
+            // settle it - but this attempt's move then SUCCEEDED, so
+            // the merge has already resolved any meeting at the
+            // destination and there is no retry coming. A record that
+            // outlives the move it existed for is stale, and spending
+            // it later (a delete's take-back) would unlink files the
+            // move now owns. At worst the copies it named survive as
+            // visible byte-identical duplicates, which is the safe
+            // direction against removing a file that is now the only
+            // one.
+            if !j.early_published.is_empty() {
+                warn!(
+                    target: "move",
+                    "early: {} unsettled record(s) dropped - the move landed \
+                     around them",
+                    j.early_published.len()
+                );
+                j.early_published.clear();
+            }
             j.filed = j.tv_sort && is_season_dir(dest);
             j.out_dir = dest.clone();
             drop(j);
@@ -637,33 +705,11 @@ impl Daemon {
         // A per-category override IS that category's root, so the
         // category component is not repeated inside it - which is what
         // `from_cat` is for below.
-        let Some((root, from_cat)) = self.move_dest_root(cat) else {
+        let cur = renamed.clone().unwrap_or_else(|| out_dir.to_path_buf());
+        let Some(dest) = self.move_dest_for(&cur, cat) else {
             // The one legitimately silent decline: the feature is off.
             return (renamed, None, None);
         };
-        let cur = renamed.clone().unwrap_or_else(|| out_dir.to_path_buf());
-        // Mirror the layout under the destination: the path relative to
-        // the download root already carries category/Show/Season NN. If
-        // the job predates a live out_dir swap, fall back to
-        // category + folder name.
-        let mut rel = cur
-            .strip_prefix(self.out_dir())
-            .map(|r| r.to_path_buf())
-            .unwrap_or_else(|_| {
-                let base = PathBuf::from(cur.file_name().unwrap_or_default());
-                if cat.is_empty() {
-                    base
-                } else {
-                    PathBuf::from(cat).join(base)
-                }
-            });
-        if from_cat
-            && !cat.is_empty()
-            && let Ok(r) = rel.strip_prefix(cat)
-        {
-            rel = r.to_path_buf();
-        }
-        let dest = root.join(&rel);
         // Byte equality is not path identity. A destination that ALIASES
         // the job's current folder - a case variant on APFS or NTFS, a
         // symlinked parent, a trailing-dot or "." component - compared

@@ -13,6 +13,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// they arrive differently - both come through application(_:open:).
     private var pendingLinks: [String] = []
     private var stackReady = false
+    /// Did THIS app spawn the engine now running, as opposed to attaching
+    /// to one that was already up? Set from every `StartResult`.
+    ///
+    /// Not `Daemon.spawnedByUs`, which answers the same question for the
+    /// engine's own bookkeeping and is cleared BY the termination handler
+    /// as the child dies. `engineGone` needs the question answered about
+    /// the generation, and a probe that lands in the gap between that
+    /// handler and the `childDied` hop behind it would read the freshly
+    /// cleared flag, call an attached engine's death, and put a second
+    /// alert behind the one already coming.
+    private var engineIsOurs = false
     private var quitting = false
     private let quitWatchdog = QuitWatchdog()
     private let statusItem = StatusItemController()
@@ -34,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         statusItem.onOpenWindow = { [weak self] in self?.showMainWindow() }
         statusItem.onOpenBrowser = { [weak self] in self?.openInBrowser() }
         statusItem.onOpenDownloads = { [weak self] in self?.openDownloads() }
+        statusItem.onEngineGone = { [weak self] why in self?.engineGone(why) }
         statusItem.applyPreferences()
 
         daemon.onUnexpectedExit = { [weak self] tail in
@@ -65,8 +77,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func startStack() async {
         windowController.setOverlay(visible: true)
-        switch await daemon.start() {
+        let started = await daemon.start()
+        switch started {
         case .attached, .spawned:
+            if case .spawned = started { engineIsOurs = true } else { engineIsOurs = false }
             stackReady = true
             statusItem.setStackReady(true)
             // dashboardURL, not baseURL: only now is the port confirmed to
@@ -100,13 +114,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private func childDied(_ tail: String) {
+        engineStopped(
+            message: "nzbfast stopped unexpectedly",
+            detail: "Last log lines:\n\(tail)")
+    }
+
+    /// The listener on our port stopped being the engine we proved, and
+    /// no child of ours died to say so.
+    ///
+    /// This is the ATTACHED case, and it is the only death this app could
+    /// not see. A child has a `terminationHandler`; an engine we attached
+    /// to has no child, so until 26 Aug 2026 its death was invisible and
+    /// the wrapper went on posting the master API key at the freed port
+    /// every 3 to 5 seconds, with the embedded dashboard doing the same
+    /// once a second in an `X-Api-Key` header (both measured against a
+    /// recording listener). `Daemon.recheckListener` is what notices, and
+    /// it has already dropped the key by the time this runs; what is left
+    /// is the part only this delegate can do - stop the poll, unload the
+    /// page that holds the key of its own, and tell the user.
+    ///
+    /// A child of ours is NOT handled here even when a probe fails first.
+    /// `Process.terminationHandler` is the authority on a child and it
+    /// arrives on its own; a probe can also fail against a child that is
+    /// alive and merely wedged, and calling that death would raise an
+    /// alert over a running engine. The test is `engineIsOurs`, which is
+    /// this delegate's own record of the last `StartResult` - see there
+    /// for why `Daemon.spawnedByUs` is the wrong one to read here.
+    private func engineGone(_ why: Daemon.ProbeVerdict) {
+        guard !quitting, stackReady, !engineIsOurs else { return }
+        let port = daemon.port
+        let detail: String
+        switch why {
+        case .stranger:
+            detail = """
+                Another program is answering on port \(port), so nzbfast \
+                has stopped talking to it. Restart starts a fresh engine.
+                """
+        default:
+            detail = """
+                The engine on port \(port) stopped answering. This app \
+                attached to an engine that was already running rather than \
+                starting one, so there is no log here from the run that \
+                ended. Restart starts a fresh engine.
+                """
+        }
+        engineStopped(message: "nzbfast stopped", detail: detail)
+    }
+
+    /// The engine is gone: stop everything that was still talking to its
+    /// port, then offer a restart. Shared by the child's termination
+    /// handler and by `engineGone`, so the two cannot drift into two
+    /// different ideas of what a stopped engine looks like.
+    private func engineStopped(message: String, detail: String) {
         guard !quitting else { return }
         stackReady = false
         statusItem.setStackReady(false)
         windowController.setOverlay(visible: true, text: "nzbfast stopped")
+        // Not just covered - unloaded. The page polls once a second with
+        // the API key in a header, and the port it is polling is free the
+        // moment the engine dies. See `blankDashboard`.
+        windowController.blankDashboard()
         let alert = NSAlert()
-        alert.messageText = "nzbfast stopped unexpectedly"
-        alert.informativeText = "Last log lines:\n\(tail)"
+        alert.messageText = message
+        alert.informativeText = detail
         alert.addButton(withTitle: "Restart")
         alert.addButton(withTitle: "Quit")
         let choice = alert.runModal()
@@ -116,9 +186,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard !quitting else { return }
         if choice == .alertFirstButtonReturn {
             Task {
-                if case .failed(let why) = await daemon.restart() {
+                let restarted = await daemon.restart()
+                if case .failed(let why) = restarted {
                     self.windowController.setOverlay(visible: true, text: why)
                 } else {
+                    if case .spawned = restarted {
+                        self.engineIsOurs = true
+                    } else {
+                        self.engineIsOurs = false
+                    }
                     self.stackReady = true
                     self.statusItem.setStackReady(true)
                     self.windowController.showDashboard(self.daemon.dashboardURL)

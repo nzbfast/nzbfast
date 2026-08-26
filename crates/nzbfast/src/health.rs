@@ -46,6 +46,15 @@ pub(crate) const SAMPLE_K: usize = 8;
 pub(crate) const SAMPLE_K_LARGE: usize = 16;
 /// Jobs at or above this take [`SAMPLE_K_LARGE`].
 pub(crate) const LARGE_JOB_BYTES: u64 = 20_000_000_000;
+/// §294: the LOSS-RATE sample, run once when the first burst lands
+/// anything but green. Eight STATs answer "is this post gone"; they
+/// cannot answer "is the damage inside what the recovery set covers",
+/// because the Wilson interval on 8 draws spans most of the axis.
+/// Sixty-four narrows it enough for [`score_completable`] to separate
+/// repairable from short (the corpus test in this file measures the
+/// difference), and it still costs one connectionful of STATs on an
+/// idle daemon, only ever on a post that already looks troubled.
+pub(crate) const ESCALATE_K: usize = 64;
 
 /// Probes one job may ever run: the one at enqueue, and one re-check if
 /// it is still sitting in the queue an hour later (a post that was
@@ -91,6 +100,50 @@ impl Bucket {
             "green" => Some(Bucket::Green),
             "amber" => Some(Bucket::Amber),
             "red" => Some(Bucket::Red),
+            _ => None,
+        }
+    }
+}
+
+/// §294: the joint answer to the question the two colors never ask -
+/// "will this job COMPLETE" - computed by [`score_completable`] from
+/// the sampled loss rate against the recovery capacity the NZB
+/// declares. ADVISORY everywhere, exactly like the buckets: nothing
+/// may fail or skip a job on this value (`post_health_fail` stays the
+/// only fail gate, §138's public commitment).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Completable {
+    /// No sampled payload loss: the download does not need repair to
+    /// finish, whatever state the recovery set is in.
+    Yes,
+    /// Sampled loss, and the declared recovery covers even the
+    /// pessimistic end of it.
+    WithRecovery,
+    /// The confidence interval straddles the line - the sample cannot
+    /// separate "repairable" from "short".
+    Doubtful,
+    /// Even the OPTIMISTIC end of the sampled loss exceeds what the
+    /// recovery set can fund: this download fails, and it is knowable
+    /// before the first payload byte.
+    No,
+}
+
+impl Completable {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Completable::Yes => "yes",
+            Completable::WithRecovery => "with-recovery",
+            Completable::Doubtful => "doubtful",
+            Completable::No => "no",
+        }
+    }
+
+    pub(crate) fn from_str(s: &str) -> Option<Completable> {
+        match s {
+            "yes" => Some(Completable::Yes),
+            "with-recovery" => Some(Completable::WithRecovery),
+            "doubtful" => Some(Completable::Doubtful),
+            "no" => Some(Completable::No),
             _ => None,
         }
     }
@@ -182,6 +235,11 @@ pub(crate) struct PostHealth {
     /// change what all three mean. `None` until the prober has an
     /// answer, and forever on a post that carries no PAR2 at all.
     pub recovery: Option<RecoveryHealth>,
+    /// §294: the joint verdict, or `None` on a record from before it
+    /// existed (or scored by something that could not compute it).
+    /// Always rebuilt by the prober alongside the buckets; see
+    /// [`score_completable`].
+    pub completable: Option<Completable>,
 }
 
 /// TODO §282 item 1: what pre-flight learned about a job's PAR2
@@ -269,6 +327,28 @@ impl RecoveryHealth {
             && self.sampled > 0
             && self.absent == self.sampled
     }
+}
+
+/// §295: where a held spare's probed health puts it in the PROMOTION
+/// order - lower is promoted first. Worst of the payload and recovery
+/// buckets, because a spare whose recovery set is dead fails exactly
+/// like one whose payload is (that is §282's founding incident).
+///
+/// Green 0, unprobed 1, Amber 2, Red 3. Unprobed sits ABOVE amber on
+/// purpose: amber is probed evidence that sampled articles are missing
+/// somewhere, unprobed is no evidence at all, and promotion is choosing
+/// where to spend a full download - known trouble ranks behind not
+/// knowing. Only the ORDER matters here; nothing may fail or skip a
+/// spare on this number (an all-red ladder still promotes its least-red
+/// rung, which is the pre-§295 behaviour for every band tie).
+pub(crate) fn promote_band(h: Option<&PostHealth>) -> u32 {
+    let Some(h) = h else { return 1 };
+    let of = |b: Bucket| match b {
+        Bucket::Green => 0,
+        Bucket::Amber => 2,
+        Bucket::Red => 3,
+    };
+    of(h.bucket).max(h.recovery.as_ref().map_or(0, |r| of(r.bucket)))
 }
 
 impl PostHealth {
@@ -504,8 +584,11 @@ pub(crate) fn score(
         // Hung on afterwards by the prober, which is the only caller
         // that has a recovery sample to score. Keeping it out of this
         // signature keeps the payload verdict a function of the payload
-        // evidence and nothing else.
+        // evidence and nothing else. Same story for the §294 joint
+        // verdict: it needs the byte totals and the recovery score,
+        // neither of which is payload evidence.
         recovery: None,
+        completable: None,
     })
 }
 
@@ -723,6 +806,131 @@ pub(crate) fn giveup_reason(h: &PostHealth) -> String {
     )
 }
 
+/// §294: join the sampled loss rate against the recovery capacity the
+/// NZB declares, in BYTES on both sides.
+///
+/// Bytes, deliberately, because it is the only unit both sides speak
+/// before a download: loss is sampled in ARTICLES and repair spends
+/// PAR2 BLOCKS, and the block size is unknowable until a volume has
+/// been fetched and parsed - while every segment and every volume file
+/// declares its bytes in the NZB. The conversion error this accepts is
+/// block-boundary inflation (a lost article can invalidate two blocks
+/// it straddles), and the MARGIN below is what carries it.
+///
+/// The interval does the honest work. `absent/sampled` from a handful
+/// of STATs is a rough estimate, so the verdict uses a Wilson 95%
+/// interval and takes the bound that makes each claim CONSERVATIVE:
+/// `WithRecovery` requires the recovery to cover the PESSIMISTIC end
+/// of the loss, and `No` requires even the OPTIMISTIC end to exceed
+/// it. Everything between is `Doubtful`, which is the sample saying
+/// "escalate or wait", not a hedge. On the k=8 takedown-detector
+/// sample nearly every damaged post reads Doubtful - the escalated
+/// sample (`tasks/health.rs`, §294) is what makes the interval narrow
+/// enough to decide; the corpus test below measures exactly that.
+///
+/// `Yes` asks about the PAYLOAD alone: a post with no sampled loss
+/// completes without repair, whatever state its recovery set is in -
+/// folding a dead recovery set into "will it complete" would repeat
+/// the widening mistake §282 refused.
+///
+/// DELIBERATELY AGE-BLIND, and the decision has been taken twice now
+/// (release-eve sweep S4, settled by 99b1cd62b): the verdict "this
+/// sample projects past recovery" is an honest projection at any age,
+/// so this stays a pure function of the sample and the wire JSON
+/// carries it unchanged. What may NOT ignore the age is any surface
+/// whose COPY asserts loss - the third offer arm waits out
+/// [`GONE_MIN_AGE_DAYS`] in `altcand::terminal_reason`, and the §303
+/// add-dialog line keys its wording off the age-gated `bucket` that
+/// rides beside this verdict. A new consumer of `No` must do the same:
+/// below the propagation bar, absence is a warning and nothing more.
+///
+/// UNSETTLED recovery evidence must not fund a `No` (release-eve sweep
+/// S4 follow-on, 25 Aug 2026). The recovery set can be much YOUNGER
+/// than the payload - a fill can re-post par2 long after it
+/// ([`score_recovery`]'s own age guard, and `RecoverySample.age_days`
+/// exists for exactly this) - so an old damaged payload plus a
+/// still-propagating fill would otherwise read `rec_frac ~ 0` and
+/// verdict `No` on articles nobody can fetch YET. A young-and-absent
+/// sample is epistemically the same state as an unprobed set, which is
+/// already taken at face value: "we cannot yet say the declared bytes
+/// are not there". The face value applies to the `No` decision ONLY,
+/// and asymmetrically on purpose - PROMISING `WithRecovery` off
+/// recovery articles nobody can fetch yet would be the opposite
+/// overclaim - so when the discounted bytes read short but the
+/// face-value bytes would cover the optimistic ask, the honest verdict
+/// is `Doubtful`. When even face value cannot cover it, `No` stands:
+/// the declaration itself is too small, and no amount of settling
+/// fixes that. The state is read off the bucket rather than a fresh
+/// age parameter because with `absent > 0` Amber IS "young"
+/// ([`score_recovery`]'s `unfetchable` route to Amber requires
+/// `absent == 0`), and the bucket was scored from the RECOVERY set's
+/// own age - the payload age gate on the offer (altcand.rs, S4) is a
+/// different guard on a different sample's age.
+pub(crate) fn score_completable(
+    payload: &PostHealth,
+    rec: Option<&RecoveryHealth>,
+    payload_bytes: u64,
+    recovery_bytes: u64,
+) -> Completable {
+    if payload.sampled == 0 || payload_bytes == 0 {
+        return Completable::Doubtful;
+    }
+    if payload.absent == 0 {
+        return Completable::Yes;
+    }
+    let (lo, hi) = wilson_bounds(payload.absent, payload.sampled);
+    // What the recovery set can actually fund: the declared volume
+    // bytes, scaled by the fraction of the RECOVERY sample that is
+    // still present (its own loss rate - §282's incident is precisely
+    // recovery that exists on paper and not on the wire), and by the
+    // packet-overhead haircut. An unprobed recovery set is taken at
+    // face value; `WithRecovery` then rests on the declaration, which
+    // is what the pre-§294 reader assumed implicitly anyway.
+    let rec_frac = match rec {
+        Some(r) if r.sampled > 0 => f64::from(r.present) / f64::from(r.sampled),
+        _ => 1.0,
+    };
+    // ~68 bytes of packet framing per slice plus the duplicated
+    // critical packets: 0.9 is deliberately a haircut, not a model.
+    let usable = recovery_bytes as f64 * rec_frac * 0.9;
+    // Block-boundary inflation: a lost article invalidates every block
+    // it touches, so the pessimistic ask is padded before recovery may
+    // promise to cover it.
+    let need_hi = hi * payload_bytes as f64 * 1.2;
+    let need_lo = lo * payload_bytes as f64;
+    if usable >= need_hi {
+        Completable::WithRecovery
+    } else if usable < need_lo {
+        // The S4 follow-on guard from the header: a young recovery
+        // set's absent articles may simply not have propagated, so
+        // before the discount is allowed to conclude `No`, ask whether
+        // the DECLARED bytes at face value would still fall short. Only
+        // the `No` arm - face value never promises `WithRecovery`.
+        let unsettled = rec.is_some_and(|r| r.absent > 0 && r.bucket == Bucket::Amber);
+        if unsettled && recovery_bytes as f64 * 0.9 >= need_lo {
+            Completable::Doubtful
+        } else {
+            Completable::No
+        }
+    } else {
+        Completable::Doubtful
+    }
+}
+
+/// Wilson 95% interval on a sampled proportion - the standard score
+/// interval, which stays honest at the tiny n this module lives at
+/// (a normal approximation puts negative loss on 0-of-8).
+fn wilson_bounds(hits: u32, n: u32) -> (f64, f64) {
+    let z = 1.96f64;
+    let n = f64::from(n);
+    let p = f64::from(hits) / n;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = (p + z2 / (2.0 * n)) / denom;
+    let half = z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt() / denom;
+    ((center - half).max(0.0), (center + half).min(1.0))
+}
+
 pub(crate) fn health_json(h: &PostHealth) -> serde_json::Value {
     serde_json::json!({
         "bucket": h.bucket.as_str(),
@@ -742,6 +950,9 @@ pub(crate) fn health_json(h: &PostHealth) -> serde_json::Value {
         "checked_at": h.checked_at,
         "probes": h.probes,
         "waived": h.waived,
+        // §294: absent entirely when never computed, so a pre-293
+        // record round-trips byte-identical.
+        "completable": h.completable.map(Completable::as_str),
         // §282: nested rather than flattened, so no consumer of the
         // payload keys can pick a recovery number up by accident.
         "recovery": h.recovery.as_ref().map(|r| serde_json::json!({
@@ -832,6 +1043,10 @@ pub(crate) fn health_from_json(v: &serde_json::Value) -> Option<PostHealth> {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         recovery: v.get("recovery").and_then(recovery_from_json),
+        completable: v
+            .get("completable")
+            .and_then(serde_json::Value::as_str)
+            .and_then(Completable::from_str),
     })
 }
 
@@ -1260,5 +1475,292 @@ mod tests {
             "the recovery verdict must not reach the give-up bar"
         );
         assert!(!h.sinks(), "nor the auto-defer");
+    }
+
+    /// A payload verdict carrying exactly these counts, for driving
+    /// `score_completable` without staging a STAT matrix.
+    fn ph(absent: u32, sampled: u32) -> PostHealth {
+        PostHealth {
+            bucket: if absent == 0 {
+                Bucket::Green
+            } else {
+                Bucket::Red
+            },
+            reason: String::new(),
+            per_server: Vec::new(),
+            sampled,
+            present: sampled - absent,
+            absent,
+            answered: 1,
+            servers: 1,
+            age_days: 30,
+            checked_at: 0,
+            probes: 1,
+            waived: false,
+            recovery: None,
+            completable: None,
+        }
+    }
+
+    /// §294's fixed points: no sampled loss is Yes whatever the
+    /// recovery set looks like, total loss with a thin recovery set is
+    /// No even at the optimistic bound, and an empty sample decides
+    /// nothing.
+    #[test]
+    fn completable_fixed_points() {
+        let gb = 1_000_000_000u64;
+        assert_eq!(
+            score_completable(&ph(0, 64), None, 50 * gb, 0),
+            Completable::Yes
+        );
+        assert_eq!(
+            score_completable(&ph(0, 0), None, 50 * gb, gb),
+            Completable::Doubtful
+        );
+        assert_eq!(
+            score_completable(&ph(64, 64), None, 50 * gb, 2 * gb),
+            Completable::No,
+            "an all-missing sample against 4% recovery is short at ANY bound"
+        );
+        assert_eq!(
+            score_completable(&ph(1, 64), None, 50 * gb, 10 * gb),
+            Completable::WithRecovery,
+            "~1.6% sampled loss under 20% declared recovery is covered even \
+             pessimistically (the Wilson upper bound on 1-of-64 is ~8%)"
+        );
+        // The §282 shape: recovery that exists on paper and not on the
+        // wire. The same damage flips from covered to No when the
+        // recovery sample reports the set absent.
+        let dead_rec = RecoveryHealth {
+            bucket: Bucket::Red,
+            reason: String::new(),
+            per_server: Vec::new(),
+            sampled: 8,
+            present: 0,
+            absent: 8,
+            answered: 1,
+            servers: 1,
+            volumes: 5,
+            fetched: Some(false),
+        };
+        assert_eq!(
+            score_completable(&ph(4, 64), Some(&dead_rec), 50 * gb, 5 * gb),
+            Completable::No,
+            "declared recovery scaled by a dead recovery sample funds nothing"
+        );
+    }
+
+    /// The verdict is deliberately age-blind (see [`score_completable`]'s
+    /// doc): identical evidence scores `No` at any age, and the AGE
+    /// discipline lives on the surfaces - `altcand::terminal_reason`
+    /// waits out the propagation window before offering, and the §303
+    /// add dialog keys its wording off the age-gated bucket. This pins
+    /// the purity so a re-derived in-verdict guard (tried 25 Aug 2026,
+    /// reverted for 99b1cd62b's arm-level design) does not quietly come
+    /// back and break the wire the offer tests stand on.
+    #[test]
+    fn completable_is_age_blind_by_design() {
+        let gb = 1_000_000_000u64;
+        let mut young = ph(64, 64);
+        young.age_days = 0;
+        young.bucket = Bucket::Amber;
+        assert_eq!(
+            score_completable(&young, None, 50 * gb, 2 * gb),
+            Completable::No,
+            "the projection is the same statement at any age; the offer \
+             arm, not this function, waits out propagation"
+        );
+    }
+
+    /// The S4 follow-on (§294): UNSETTLED recovery evidence must not
+    /// fund a `No`. The fixtures go through [`score_recovery`] rather
+    /// than a hand-built struct so the young-and-absent state stays
+    /// what the prober actually lands (Amber with `absent > 0` IS the
+    /// young state - the `unfetchable` route to Amber requires
+    /// `absent == 0`, and the last case pins that conjunction).
+    ///
+    /// The payload throughout is 4-of-64 absent over 50 GB: the Wilson
+    /// optimistic ask (`need_lo`) is ~1.23 GB, the pessimistic one
+    /// (`need_hi`) ~9 GB.
+    #[test]
+    fn a_young_absent_recovery_sample_cannot_fund_a_no() {
+        let gb = 1_000_000_000u64;
+        // Still-propagating fill, sampled all-absent. 5 GB declared
+        // covers the optimistic ask at face value, so the discount may
+        // not conclude `No` - and the interval genuinely cannot tell,
+        // so `Doubtful` is the honest verdict, not a suppression.
+        let young_dead = score_recovery(&[answer("a", &[M, M])], 1, 5, None).unwrap();
+        assert_eq!(young_dead.bucket, Bucket::Amber);
+        assert_eq!(
+            score_completable(&ph(4, 64), Some(&young_dead), 50 * gb, 5 * gb),
+            Completable::Doubtful,
+            "a still-propagating recovery sample is not evidence the declared bytes are gone"
+        );
+        // Face value refuses the `No` and never promises the opposite:
+        // 20 GB declared covers even the pessimistic ask at face value,
+        // and the verdict must still be Doubtful, not WithRecovery -
+        // repair may not be PROMISED off articles nobody can fetch yet.
+        let young_thin = score_recovery(
+            &[answer(
+                "a",
+                &[H, M, M, M, M, M, M, M, M, M, M, M, M, M, M, M],
+            )],
+            1,
+            5,
+            None,
+        )
+        .unwrap();
+        assert_eq!(young_thin.bucket, Bucket::Amber);
+        assert_eq!(
+            score_completable(&ph(4, 64), Some(&young_thin), 50 * gb, 20 * gb),
+            Completable::Doubtful,
+            "face value funds only the refusal of No, never a WithRecovery"
+        );
+        // A declaration too small to cover even the optimistic ask is
+        // `No` at ANY age - settling cannot grow the declared bytes.
+        // This is the case a bare suppress-when-young gate gets wrong,
+        // and why the guard recomputes at face value instead.
+        assert_eq!(
+            score_completable(&ph(4, 64), Some(&young_dead), 50 * gb, gb),
+            Completable::No,
+            "0.9 GB usable against a ~1.23 GB optimistic ask: the declaration itself is short"
+        );
+        // The same shapes SETTLED (past the propagation window, Red):
+        // the §282 verdict stands byte-identical - absent evidence that
+        // propagation no longer excuses funds nothing.
+        let old_dead = score_recovery(&[answer("a", &[M, M])], 400, 5, None).unwrap();
+        assert_eq!(old_dead.bucket, Bucket::Red);
+        assert_eq!(
+            score_completable(&ph(4, 64), Some(&old_dead), 50 * gb, 5 * gb),
+            Completable::No,
+            "an OLD absent recovery sample keeps funding the No"
+        );
+        // And Amber reached the OTHER way - `unfetchable`, absent == 0 -
+        // is not the young-absent state: rec_frac is already 1.0 there,
+        // so the guard must not engage and the plain verdict stands.
+        let unfetchable = score_recovery(&[answer("a", &[H, H])], 400, 5, Some(false)).unwrap();
+        assert_eq!((unfetchable.bucket, unfetchable.absent), (Bucket::Amber, 0));
+        assert_eq!(
+            score_completable(&ph(4, 64), Some(&unfetchable), 50 * gb, gb),
+            Completable::No,
+        );
+    }
+
+    /// §294's A/B, measured over a corpus: the same damaged posts
+    /// judged from the k=8 takedown-detector sample and from the k=64
+    /// escalated sample. Ground truth per scenario is the exact
+    /// arithmetic (missing bytes vs what the recovery slices can fund
+    /// at PAR2's ~0.95 slice efficiency); the sample is a seeded
+    /// binomial draw, so the numbers are reproducible.
+    ///
+    /// A decision is CORRECT when it matches the truth (`No` on a
+    /// doomed post; `Yes`/`WithRecovery` on a repairable one), WRONG
+    /// when it contradicts it, and `Doubtful` is undecided. The first
+    /// cut of this test asserted "never a false kill" and the corpus
+    /// refuted it in one run: `No` rests on a 95% interval, so ~2% of
+    /// repairable draws at k=8 clear even the optimistic bound (13 of
+    /// 1000 measured; 1 of 1000 at k=64). That is what a confidence
+    /// bound MEANS, and the honest claims - the ones this asserts -
+    /// are that escalation multiplies doomed catches, collapses wrong
+    /// calls, and keeps the false-kill rate inside the interval's own
+    /// tail. What it does NOT claim, because the corpus refuted that
+    /// too: a higher overall correct count. At k=8 a low-loss post
+    /// often samples clean and reads a lucky, unfounded `Yes` that
+    /// happens to be right; k=64 sees the loss and answers `Doubtful`.
+    /// Escalation converts confident guessing into honest indecision,
+    /// and that conversion is a cost worth naming, not hiding.
+    /// Measured on this seed: k=8 is 909 correct / 394 wrong / 697
+    /// undecided with 263/1000 doomed caught and 13 false kills; k=64
+    /// is 879 / 8 / 1113 with 607/1000 caught and 1 false kill.
+    #[test]
+    fn the_escalated_sample_separates_repairable_from_short() {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rng = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let payload = 50_000_000_000u64;
+        let trials = 200u32;
+        // (true loss rate, declared recovery as a fraction of payload)
+        let corpus: &[(f64, f64)] = &[
+            (0.02, 0.05),
+            (0.02, 0.15),
+            (0.05, 0.02),
+            (0.05, 0.10),
+            (0.08, 0.05),
+            (0.08, 0.15),
+            (0.12, 0.05),
+            (0.12, 0.20),
+            (0.20, 0.10),
+            (0.35, 0.10),
+        ];
+        // [leg] -> (correct, wrong, undecided, doomed caught,
+        //           doomed total, false kills, repairable total)
+        let mut tally = [[0u64; 7]; 2];
+        for &(p, r) in corpus {
+            let recovery = (r * payload as f64) as u64;
+            let doomed = p * payload as f64 > recovery as f64 * 0.95;
+            for _ in 0..trials {
+                for (leg, k) in [(0usize, 8u32), (1, 64)] {
+                    let mut absent = 0u32;
+                    for _ in 0..k {
+                        // 53 uniform bits against the true loss rate.
+                        if ((rng() >> 11) as f64 / (1u64 << 53) as f64) < p {
+                            absent += 1;
+                        }
+                    }
+                    let v = score_completable(&ph(absent, k), None, payload, recovery);
+                    let t = &mut tally[leg];
+                    match v {
+                        Completable::Doubtful => t[2] += 1,
+                        Completable::No if doomed => t[0] += 1,
+                        Completable::No => t[1] += 1,
+                        _ if doomed => t[1] += 1,
+                        _ => t[0] += 1,
+                    }
+                    if doomed {
+                        t[4] += 1;
+                        if v == Completable::No {
+                            t[3] += 1;
+                        }
+                    } else {
+                        t[6] += 1;
+                        if v == Completable::No {
+                            t[5] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        for (leg, k) in [(0usize, 8), (1, 64)] {
+            let t = &tally[leg];
+            println!(
+                "§294 A/B k={k}: correct {} / wrong {} / undecided {} \
+                 (doomed caught {}/{}, false kills {}/{})",
+                t[0], t[1], t[2], t[3], t[4], t[5], t[6]
+            );
+        }
+        assert!(
+            tally[1][3] > tally[0][3],
+            "the escalated sample catches more doomed posts: {} vs {}",
+            tally[1][3],
+            tally[0][3]
+        );
+        assert!(
+            tally[1][1] < tally[0][1],
+            "and makes fewer wrong calls: {} vs {}",
+            tally[1][1],
+            tally[0][1]
+        );
+        // No is a 95%-confidence claim, and the false-kill rate must
+        // stay inside that claim's own tail at the escalated k.
+        assert!(
+            (tally[1][5] as f64) <= tally[1][6] as f64 * 0.025,
+            "k=64 false kills outside the interval's tail: {}/{}",
+            tally[1][5],
+            tally[1][6]
+        );
     }
 }

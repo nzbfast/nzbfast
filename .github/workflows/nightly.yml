@@ -145,12 +145,36 @@ jobs:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test daemon
+      # THE HALF THAT MAKES A GREEN SUITE MEAN SOMETHING, and in this job
+      # it has to be repeated after EVERY suite rather than run once at
+      # the end. `[profile.ci.junit]` writes ONE path, so each suite here
+      # OVERWRITES the report the last one left: a check at the foot of
+      # this job would read the ffi step's report and nothing else, and
+      # the six suites in front of it - the daemon-spawning ones, where a
+      # wedge is most likely - would be exactly as unwatched as they were
+      # before this gate existed.
+      #
+      # What it refuses: a test whose FIRST attempt was killed at the
+      # ceiling and whose SECOND passed. nextest treats a TIMEOUT as an
+      # ordinary failure and retries it, so that run is reported "N passed
+      # (1 flaky)" at exit 0 - which is how a 4,666-second deadlock came
+      # out of CI green on 23 Aug 2026. `!cancelled()` rather than
+      # `success()`: a suite that is red for another reason can still
+      # carry a wedged attempt, and its own verdict names the panic.
+      - name: wedge check - daemon
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
       - name: e2e suite
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test e2e
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - e2e
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
       # The other half of ci-private's exclusion list. That job runs
       # `--workspace` minus seven names; three of them (daemon, e2e,
       # leak_soak) already had a home here, and these four did not have
@@ -185,40 +209,64 @@ jobs:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbkit --locked --features heavy-tests --test conn_tuner
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - conn_tuner
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
       - name: elapsed-time suite - index_size_cap
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test index_size_cap
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - index_size_cap
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
       - name: elapsed-time suite - http_wedge
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test http_wedge
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - http_wedge
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
       - name: elapsed-time suite - queue_soak
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test queue_soak
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - queue_soak
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
       # The FFI contract on the host, moved here from the push path on
       # 23 Aug 2026. ci-private's archive step used to take
       # `--workspace`, which is the only thing that pulls in
-      # crates/nzbfast-ffi, and these two tests came along for the ride
+      # crates/nzbfast-ffi, and these tests came along for the ride
       # - but the ride cost the push path 1,774 duplicate nzbfast tests,
       # 2.23 GB of cached target/ and a 637 MB iOS staticlib no CI job
       # links, because `--workspace` overrides the `default-members`
       # line that exists to keep the `ffi` feature off. The long note at
       # that step has the measurements.
       #
-      # These two are worth keeping SOMEWHERE and this is the right
-      # somewhere: at 24.4 s and 32.5 s they were the two slowest tests
-      # in the whole non-heavy set, they start and stop a real in-process
-      # daemon and bind a real port, and they are the host rehearsal for
-      # an acceptance the iOS Simulator harness re-proves on-target
-      # (research/SPIKE-IOS-STATICLIB-2026-08-05.md). The clippy gates in
+      # They are worth keeping SOMEWHERE and this is the right
+      # somewhere: at 24.4 s and 32.5 s cycle.rs and reclaim.rs were the
+      # two slowest tests in the whole non-heavy set, they start and stop
+      # a real in-process daemon and bind a real port, and they are the
+      # host rehearsal for an acceptance the iOS Simulator harness
+      # re-proves on-target
+      # (research/SPIKE-IOS-STATICLIB-2026-08-05.md). `-p nzbfast-ffi`
+      # takes the whole crate, so a test added there needs no edit here:
+      # stop_bound.rs (TODO 307 item 3, 26 Aug 2026, ~0.6 s) arrived that
+      # way and pins the bound on nzbfast_stop. The clippy gates in
       # ci-private still COMPILE and `-D warnings` lint this crate on
       # every push, so a build break in it is still same-day; what moved
       # here is only the running.
@@ -226,13 +274,18 @@ jobs:
       # `-p nzbfast-ffi` and nothing else, so this step and this step
       # alone pays for the ffi feature unification - the four suites
       # above build `-p nzbfast`, whose feature set this does not touch.
-      # armv7-cross below reaches these two as well, under qemu on a
-      # cross target; that is a second sample, not this one.
+      # armv7-cross below reaches the same set under qemu on a cross
+      # target; that is a second sample, not this one.
       - name: ffi contract on the host
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           NZBFAST_NO_ENRICH: "1"
         run: cargo nextest run --profile ci -p nzbfast-ffi --locked
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - ffi contract
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
 
   # ===================================================================
   # ONE PROCESS PER TARGET, SERIAL. TODO 270 items 2, 3 and 4.
@@ -871,6 +924,22 @@ jobs:
         env:
           NZBFAST_NO_ENRICH: "1"
         run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test daemon
+      # The junit half - see the long note in `long-suites` above. Windows
+      # gets it for the same reason it gets this suite at all: a wedge is
+      # a scheduling defect, and this is the one platform's scheduler
+      # nobody on this fleet can reproduce by hand.
+      # `!cancelled()` alone, NOT `&& steps.build.outcome == 'success'`
+      # the way the long-suites checks are written: this job's build step
+      # carries no `id`, so that reference would resolve to null, the
+      # condition would be false on every run, and this check would never
+      # fire. Caught by reading the step ids rather than by copying the
+      # sibling - which is how a gate that never runs gets shipped.
+      - name: wedge check - daemon
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          $py tools/wedge-gate.py --junit target/nextest
 
   # ===================================================================
   # THE SAME HOLE, ON WINDOWS. TODO 270 item 1.
@@ -1074,6 +1143,23 @@ jobs:
         # that prints nothing for two and a half hours is indistinguishable
         # from a hung one.
         run: cargo nextest run --profile ci --release -p nzbfast --locked --features heavy-tests --test leak_soak --run-ignored only --no-capture
+      # The junit half - see the long note in `long-suites` above. The
+      # soak is ONE test with a 200-minute ceiling of its own (the
+      # `leak_soak` override in .config/nextest.toml says how that number
+      # was reached), so what this can catch is narrow but is exactly the
+      # case the job cannot otherwise report: a wedge killed at that
+      # ceiling and then PASSED on a retry would be reported green, and
+      # `retries = 0` on that override is the only other thing standing
+      # between that and a silent night.
+      # `!cancelled()` alone, NOT `&& steps.build.outcome == 'success'`
+      # the way the long-suites checks are written: this job's build step
+      # carries no `id`, so that reference would resolve to null, the
+      # condition would be false on every run, and this check would never
+      # fire. Caught by reading the step ids rather than by copying the
+      # sibling - which is how a gate that never runs gets shipped.
+      - name: wedge check - soak
+        if: ${{ !cancelled() }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
       # Uploaded on failure TOO - a red soak's sample series is the whole
       # diagnosis, and it is also what a legitimate new baseline gets
       # re-recorded from.

@@ -658,6 +658,8 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig {
                 tail_fanout: true,
@@ -813,6 +815,8 @@ async fn queue_control_exports_the_tail_latch() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig::default(),
         )
@@ -864,6 +868,8 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig {
                 hedge,
@@ -1035,6 +1041,8 @@ fn bound_guard_server(host: &str, tail_fanout: bool) -> (ServerConfig, PoolConfi
             idle_release_secs: None,
             idle_keep: None,
             max_source_ips: None,
+            address_family: Default::default(),
+            tls_hostname: None,
         },
         PoolConfig {
             hedge: true,
@@ -1421,6 +1429,8 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
                 idle_release_secs: None,
                 idle_keep: None,
                 max_source_ips: None,
+                address_family: Default::default(),
+                tls_hostname: None,
             },
             PoolConfig {
                 ttfb_hedge: on,
@@ -2711,5 +2721,182 @@ async fn the_peak_arrivals_knob_restores_the_first_wave_clump() {
         peak >= 500_000,
         "peak_arrivals off, no ramp: the per-body clump should over-read the \
          400 KB/s line by ~1.7x, got a trained peak of {peak} B/s - the arm is not an arm"
+    );
+}
+
+/// TODO 112, the socket half: what the fleet HANDS BACK when the live
+/// target is lowered under it.
+///
+/// `a_live_target_change_parks_and_wakes_workers` above pins the
+/// `connected` gauge - the workers park and wake. It says nothing about
+/// where their SESSIONS went, and until 26 Aug 2026 they were quit: the
+/// shed was the last exit in this pool that closed a connection it had
+/// just proved drained (`inflight.is_empty()` is the guard, which is the
+/// reuse point's own safety argument). This pins that they are parked
+/// instead, and that the provider still has them.
+///
+/// The reasoning, and the live-daemon measurement that says this arm's
+/// real-world population is empty today, is at the shed in
+/// `session_loop`. What makes parking right rather than merely harmless
+/// is the raise in phase 3: TODO 277 spawns surplus slots PARKED so a
+/// raise lands without a dial, and a shed that quit its socket made the
+/// same shed/raise cycle cost a dial, a TLS handshake and an AUTHINFO
+/// every time. `accepted` is the assertion that carries that - the
+/// fleet re-reaches 3 connections without the far end accepting a
+/// fifth.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shed_for_a_lowered_target_parks_its_session_rather_than_quitting_it() {
+    let data: Vec<u8> = (0..3_000_000u32).map(|i| i as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("shed.bin", &data, 20_000, "sh", &mut articles);
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let srv = crate::mock::MockServer::start(
+        articles,
+        crate::mock::Chaos {
+            throttle: crate::mock::Throttle {
+                per_conn_bps: 150_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let warm = crate::warmpool::WarmPool::new(Duration::from_secs(60), 8);
+    let target = ConnTarget::new(4);
+    let (sc, mut cfg) = payout_server(&srv, 4, PoolConfig::default());
+    cfg.live_target = Some(target.clone());
+    cfg.warm = Some(warm.clone());
+    let servers = vec![(sc, cfg)];
+    let live = LiveStats::for_servers(&servers);
+    let servers: Vec<(ServerConfig, PoolConfig)> = servers
+        .into_iter()
+        .map(|(s, mut c)| {
+            c.live = Some(live.clone());
+            (s, c)
+        })
+        .collect();
+    let (tx, mut rx) = mpsc::channel(64);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        while let Some(o) = rx.recv().await {
+            if matches!(o, FetchOutcome::Done { .. }) {
+                done += 1;
+            }
+        }
+        done
+    });
+    let wait_conns = |want: usize| {
+        let live = live.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                let got = live.servers[0].connected.load(Ordering::Relaxed);
+                if got == want {
+                    return;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "connected stuck at {got}, wanted {want}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    wait_conns(4).await;
+    let dialled = srv.accepted.load(Ordering::Relaxed);
+    assert_eq!(dialled, 4, "the fleet must be up before the target moves");
+    // Lower the target: three workers drain their windows and shed.
+    target.set(1);
+    wait_conns(1).await;
+    // The shed hands the socket to the warm pool. Give the three parks a
+    // beat to land - `connected` comes down as the guard drops, which is
+    // the statement BEFORE the park's own await.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while warm.idle_count().await < 3 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        warm.idle_count().await,
+        3,
+        "a shed connection is drained by its own guard, so it belongs in \
+         the warm pool, not on the floor"
+    );
+    assert_eq!(
+        srv.accepted.load(Ordering::Relaxed),
+        dialled,
+        "and nothing redialled on the way down"
+    );
+    // Raise it again: the parked sessions are what the fleet comes back
+    // on, so the far end accepts nothing new.
+    target.set(3);
+    wait_conns(3).await;
+    assert_eq!(
+        srv.accepted.load(Ordering::Relaxed),
+        dialled,
+        "the raise must land on the parked sessions - that is what TODO \
+         277 parks surplus slots for, and what quitting them cost"
+    );
+    tokio::time::timeout(Duration::from_secs(60), fetch)
+        .await
+        .expect("run hung across the shed and the raise")
+        .unwrap();
+    assert_eq!(collect.await.unwrap(), segs.len());
+}
+
+/// §96.5, and the other half of the shed's answer: a worker leaving
+/// because the prepaid BLOCK is spent quits its session, and must go on
+/// quitting it.
+///
+/// This is the one case where parking a drained connection is wrong, and
+/// the module already says so at the loop-top bow-out: the worker leaves
+/// "before it can dial (or keep) a session the account can no longer pay
+/// for". `over_budget` latches for the whole run, and the daemon's
+/// runner rules a host whose block spend has reached its size out of the
+/// NEXT job's pool outright - so a session parked here is a provider
+/// slot held for a job that will never take it.
+///
+/// A budget far below the post's size makes every worker shed on this
+/// arm rather than on a target (there is no `live_target` here at all),
+/// and the run then ends with the server dark.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shed_for_a_spent_prepaid_block_quits_its_session() {
+    let data: Vec<u8> = (0..2_000_000u32).map(|i| i as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("blk.bin", &data, 20_000, "bk", &mut articles);
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let srv = crate::mock::MockServer::start(articles, crate::mock::Chaos::default()).await;
+    let warm = crate::warmpool::WarmPool::new(Duration::from_secs(60), 8);
+    let (sc, mut cfg) = payout_server(&srv, 4, PoolConfig::default());
+    cfg.warm = Some(warm.clone());
+    // Spent inside the first handful of articles, with the rest of the
+    // post still queued - so every worker leaves on the budget arm and
+    // none of them reaches the queue-dry park.
+    cfg.budget_bytes = Some(100_000);
+    let (tx, mut rx) = mpsc::channel(256);
+    let collect = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        fetch_all_multi(&[(sc, cfg)], ids, tx),
+    )
+    .await
+    .expect("a run that spends its block must still return");
+    collect.await.unwrap();
+    assert_eq!(
+        warm.idle_count().await,
+        0,
+        "a spent block is the one exit that must NOT hand its session \
+         on: nothing is coming back for it, and it holds an account slot \
+         until max_idle reaps it"
+    );
+    assert!(
+        !segs.is_empty(),
+        "the fixture must actually have articles to leave unfetched"
     );
 }

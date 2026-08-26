@@ -29,8 +29,16 @@ impl Daemon {
             .iter()
             .filter_map(|j| {
                 let g = j.lock_ok();
-                (g.state == JobState::Failed && g.auto_retry_at.is_some_and(|t| t <= now))
-                    .then(|| (g.nzo_id.clone(), g.name.clone()))
+                // `alt_to_name` is the belt: item 14 stamps it on a row
+                // something has replaced, and a replaced record must not
+                // come back through the queue and download the same
+                // release beside its replacement. The doors that stamp it
+                // disarm the row themselves; this is what keeps a future
+                // one from having to remember.
+                (g.state == JobState::Failed
+                    && g.alt_to_name.is_empty()
+                    && g.auto_retry_at.is_some_and(|t| t <= now))
+                .then(|| (g.nzo_id.clone(), g.name.clone()))
             })
             .collect();
         for (id, name) in due {
@@ -452,7 +460,7 @@ impl Daemon {
         // own - `commit_to_queue` holds the ordering and the reasons for
         // it, shared with the library-stream activation that moves a
         // record the same way.
-        self.commit_to_queue(nzo_id, seq, "retrying");
+        self.commit_to_queue(nzo_id, seq, moveseq::Requeue::Retry);
         true
     }
 }

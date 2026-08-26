@@ -24,6 +24,10 @@ use super::*;
 fn background_io_restores_the_thread_policy() {
     // Own thread: the assertion is about THIS thread's policy, and the
     // test harness's threads are shared.
+    // SAFETY: every call in this closure is a getiopolicy_np /
+    // setiopolicy_np pair taking three ints and touching no memory, and
+    // each acts on the calling thread - which is this freshly spawned
+    // one, owned entirely by the test.
     std::thread::spawn(|| unsafe {
         let before = iopol::getiopolicy_np(iopol::IOPOL_TYPE_DISK, iopol::IOPOL_SCOPE_THREAD);
         let prev = before;
@@ -151,6 +155,150 @@ fn first_stage_drains_a_predecessors_leftovers() {
     assert!(
         eventually(|| !leftover.exists() && !staging.exists()),
         "the leftover must go with the freshly staged file"
+    );
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+/// The staging root is DRAINED, not the folder it happens to share a
+/// name with - and never through a symlink.
+///
+/// `.nzbfast-trash` is a fixed name in the user's own downloads folder,
+/// which a NAS share, a sync client, a container bind-mount or a second
+/// application can all write to. The first-touch drain used to send
+/// EVERY entry it found there straight to `remove_user_file`: unrelated
+/// files were adopted as our garbage and moved to the user's Trash, or
+/// hard-unlinked outright whenever the cleanup setting said Delete (the
+/// worker re-reads that flag per file at disposal time, so an ordinary
+/// Settings change between staging and disposal is enough). And
+/// `create_dir_all` answers Ok for an existing `is_dir()` path, which
+/// FOLLOWS symlinks, so a link at that name carried the whole thing into
+/// somebody else's directory.
+#[test]
+fn the_drain_takes_only_what_this_module_staged() {
+    let _steady = trash_globals_steady();
+    let parent = std::env::temp_dir().join(format!("defer-adopt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    let job = parent.join("job");
+    std::fs::create_dir_all(&job).unwrap();
+    let staging = trash_staging_dir(&job).unwrap();
+    std::fs::create_dir_all(&staging).unwrap();
+
+    // Somebody else's file, and somebody else's folder, already sitting
+    // in the staging root.
+    let sentinel = staging.join("users-photo.jpg");
+    std::fs::write(&sentinel, b"mine").unwrap();
+    let sentinel_dir = staging.join("someone-elses-folder");
+    std::fs::create_dir_all(sentinel_dir.join("inner")).unwrap();
+    // ...and one real leftover of ours, which MUST still be drained.
+    let ours = staging.join("99999-0-stranded.nfo");
+    std::fs::write(&ours, b"x").unwrap();
+
+    let f = job.join("junk.nfo");
+    std::fs::write(&f, b"x").unwrap();
+    deferred_trash::stage(&f, &staging).unwrap();
+
+    assert!(
+        eventually(|| !ours.exists()),
+        "our own leftover is still drained"
+    );
+    assert!(sentinel.exists(), "an unrelated FILE must survive");
+    assert!(sentinel_dir.exists(), "an unrelated FOLDER must survive");
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+/// A symlink at the staging root is REFUSED, so nothing is renamed into
+/// it and nothing on the other side of it is enumerated.
+///
+/// `stage`'s contract is that any Err means "park unavailable" and the
+/// caller deletes inline instead, which is the behaviour that predates
+/// the staging folder entirely - so refusing here costs nothing.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_staging_root_is_refused() {
+    let _steady = trash_globals_steady();
+    let parent = std::env::temp_dir().join(format!("defer-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    let job = parent.join("job");
+    let elsewhere = parent.join("elsewhere");
+    std::fs::create_dir_all(&job).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let sentinel = elsewhere.join("users-photo.jpg");
+    std::fs::write(&sentinel, b"mine").unwrap();
+
+    let staging = trash_staging_dir(&job).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+
+    let f = job.join("junk.nfo");
+    std::fs::write(&f, b"x").unwrap();
+    assert!(
+        deferred_trash::stage(&f, &staging).is_err(),
+        "a symlinked root must not be adopted"
+    );
+    assert!(f.exists(), "and the caller's file is left for it to delete");
+    assert!(sentinel.exists(), "nothing through the link was touched");
+    assert!(
+        std::fs::read_dir(&elsewhere).unwrap().count() == 1,
+        "and nothing was renamed into it either"
+    );
+    let _ = std::fs::remove_file(&staging);
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+/// A REFUSED disposal must be retried inside this process, not at the
+/// next restart.
+///
+/// `SEEN` latches a staging root at its first stage, and every later
+/// stage into it sends only its own file - so a file the disposal
+/// refused sat in `.nzbfast-trash` beside the user's downloads with
+/// nothing to ask about it again. `first_stage_drains_a_predecessors_leftovers`
+/// covers the restart; this covers the day that never comes.
+///
+/// The refusal is forced the one way a test can force one without a
+/// broken Trash: a staged entry that is a NON-EMPTY DIRECTORY, which
+/// `remove_file` cannot take (EPERM on macOS, EISDIR on Linux).
+#[test]
+fn a_refused_disposal_is_retried_by_the_next_stage() {
+    let _steady = trash_globals_steady();
+    let parent = std::env::temp_dir().join(format!("defer-refused-{}", std::process::id()));
+    let job = parent.join("job");
+    std::fs::create_dir_all(&job).unwrap();
+    let staging = trash_staging_dir(&job).unwrap();
+    std::fs::create_dir_all(&staging).unwrap();
+
+    // A leftover the worker cannot dispose of, in the shape a crashed
+    // predecessor leaves behind.
+    let stuck = staging.join("99999-0-stuck.nfo");
+    std::fs::create_dir_all(stuck.join("inner")).unwrap();
+
+    // First stage: drains the root, disposes of its own file, and is
+    // refused by the leftover.
+    let first = job.join("one.par2");
+    std::fs::write(&first, b"x").unwrap();
+    deferred_trash::stage(&first, &staging).unwrap();
+    assert!(
+        eventually(|| {
+            std::fs::read_dir(&staging)
+                .map(Iterator::count)
+                .unwrap_or(0)
+                == 1
+                && stuck.exists()
+        }),
+        "the refused leftover is all that should be left in the staging folder"
+    );
+
+    // Whatever was refusing it clears (here: the same name becomes an
+    // ordinary file, since `remove_file` refuses a directory whether or
+    // not it is empty). Nothing re-lists the folder on its own, so the
+    // retry has to ride the next stage.
+    std::fs::remove_dir_all(&stuck).unwrap();
+    std::fs::write(&stuck, b"x").unwrap();
+    let second = job.join("two.par2");
+    std::fs::write(&second, b"x").unwrap();
+    deferred_trash::stage(&second, &staging).unwrap();
+    assert!(
+        eventually(|| !staging.exists()),
+        "the second stage must re-drain the root it was refused in, \
+         so the leftover goes and the empty folder is pruned"
     );
     let _ = std::fs::remove_dir_all(&parent);
 }

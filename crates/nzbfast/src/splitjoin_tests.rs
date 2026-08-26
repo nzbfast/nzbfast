@@ -3,7 +3,7 @@
 //! gate classifies these as test code).
 
 use super::*;
-use crate::unpack::{NestOutcome, extract_one_level};
+use crate::unpack::{NestOutcome, extract_nested, extract_one_level};
 
 fn split_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("nzbfast-splitjoin-{tag}-{}", std::process::id()));
@@ -918,4 +918,55 @@ fn an_unstaged_container_is_never_certified_as_the_payload() {
         rescue_verdict(true, true, Some(NestOutcome::ZipGap), true),
         NestOutcome::ZipGap
     );
+}
+
+/// The reachability finding TODO 299 asked for, pinned end to end: a
+/// plain split set reaches the cleanup sweep with a CLEAN, successful
+/// nested pass in front of it - no failure of any kind.
+///
+/// `extract_nested_why` seeds its recursion with directories that gained
+/// a new EXTRACTABLE ARCHIVE, plus the ones that already held one. A
+/// subdirectory holding nothing but headless parts is neither, so the
+/// join arm never runs there and the pass reports `Produced` - a job that
+/// completes. `keep_media_only` then sweeps top level AND one directory
+/// down, which is where the parts are.
+///
+/// Both halves are asserted, because both are load-bearing: the pass must
+/// leave the set alone (it is not this arm's to join from up there), and
+/// the sweep must then spare it. Before `split_part_set` the second half
+/// deleted all three parts and the job still reported Completed.
+#[test]
+fn a_plain_split_in_a_subfolder_survives_a_clean_nested_pass_and_the_sweep() {
+    let _steady = crate::smart::trash_globals_steady();
+    let dir = split_dir("subfolder-reach");
+    // The video that arms the sweep - here it stands for whatever the
+    // outer archive delivered beside the folder it wrote.
+    std::fs::write(dir.join("Movie.mkv"), vec![0u8; 8192]).unwrap();
+    let sub = dir.join("Extras");
+    std::fs::create_dir_all(&sub).unwrap();
+    let total = payload(300_000);
+    let parts = write_parts(&sub, "Bonus.mkv", &total, 120_000);
+    assert_eq!(parts.len(), 3);
+
+    assert_eq!(
+        extract_nested(&dir, None, 0).unwrap(),
+        NestOutcome::Produced,
+        "a clean pass - nothing here failed, and that is the point"
+    );
+    for p in &parts {
+        assert!(
+            p.exists(),
+            "{} was not joined from the level above",
+            p.display()
+        );
+    }
+    crate::smart::keep_media_only(&dir);
+    for p in &parts {
+        assert!(
+            p.exists(),
+            "{} is a part of the only copy of that payload",
+            p.display()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

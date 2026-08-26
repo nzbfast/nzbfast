@@ -484,6 +484,49 @@ jobs:
         run: |
           tools/one-process-roster.py --selftest
           tools/one-process-roster.py
+  wedge-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-wedge-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The CONFIG half of the wedge gate. Its other half reads junit.xml
+      # and runs inside the test jobs below, where it can redden the shard
+      # that saw the wedge; this one needs no build and holds the ceiling
+      # machinery in .config/nextest.toml live. The two are useless apart:
+      # with no ceiling nothing can ever time out, so a junit check alone
+      # would be a green line about a question nothing asked. Also a job in
+      # size-gate.yml, which runs on every branch push. Private repo only,
+      # like the gates above.
+      - name: wedge gate
+        run: |
+          tools/wedge-gate.py --selftest
+          tools/wedge-gate.py
+  packaging-tests-roster:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ci-packaging-tests-roster-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # size-gate.yml's `packaging-gates` job runs eleven packaging/tests
+      # scripts, and until it landed five of them were steps in pr-check.yml
+      # alone - a public-repo pull-request gate that never fires here - while
+      # six ran in no workflow at all. This holds every script in that
+      # directory to a `run:` step that can actually fire on this
+      # repository, or to a waiver at its own site that says why not. It
+      # resolves the step rather than grepping for the path, because a grep
+      # finds these paths inside comments. Also a job in size-gate.yml, which
+      # runs on every branch push. Private repo only, like the gates above.
+      - name: packaging tests roster
+        run: |
+          tools/packaging-tests-roster.py --selftest
+          tools/packaging-tests-roster.py
   flatpak-pin-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -898,12 +941,19 @@ jobs:
       # stop at the first row it sees and it reports a green one forever.
       # Neither looks like a broken script, and neither is a roster that
       # has quietly stopped covering a job - that one reports the job it
-      # forgot as green forever. The twenty-two frozen-JSON cases drive
-      # every direction, plus both matrix folds, plus the roster held
-      # against this file, plus the failing-STEP extraction - including
-      # the trap that a GREEN job can carry a `failure` step, because
+      # forgot as green forever. The thirty frozen-JSON cases drive every
+      # direction, plus both matrix folds, plus the roster held against
+      # this file, plus the failing-STEP extraction - including the trap
+      # that a GREEN job can carry a `failure` step, because
       # windows-build, windows-clippy and windows-arm64 each open with a
-      # `continue-on-error` Defender-exclusion step.
+      # `continue-on-error` Defender-exclusion step - plus the tip-skew
+      # and queue-stall arms added 26 Aug 2026 (written up in
+      # CI-VERDICT-STALE-QUEUE-2026-08-26.md, in the private notes tree -
+      # cited without its directory on purpose: this file SHIPS, and
+      # publish-public.sh refuses an export naming that tree): a verdict
+      # off a sha behind the tip, or a tip nothing has run for yet, reads
+      # as UNKNOWN rather than as the OK this script used to print for
+      # it, without ever turning the exit code red on a stalled queue.
       - name: ci verdict
         env:
           # The script resolves the repo from GITHUB_REPOSITORY, which
@@ -1479,6 +1529,18 @@ jobs:
       - name: iface threshold gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: tools/iface-excess-gate.py --selftest && tools/iface-excess-gate.py
+      # A per-leg scan that scopes itself on the raw byte offset rather
+      # than through rig_stall_ofs. A byte count is not an identity: the
+      # nzbfast arm's log is truncated per leg, so on leg 2 the mark is
+      # the previous leg's size against a fresh file, and once the new
+      # log grows past it the scan skips the first N bytes of the CURRENT
+      # leg - the fleet header and the connection-cap lines. The leg then
+      # loses conns_held=, sharded= and WARN=conn_capped and reads exactly
+      # like a clean one. Same wrapper-under-tools arrangement and same
+      # private-vocabulary reason as the gate above.
+      - name: stall mark identity gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/stall-mark-gate.py --selftest && tools/stall-mark-gate.py
       # `libc::getrusage` and friends do not exist on Windows, and between
       # 21 and 23 Aug 2026 that one trio held windows-build AND
       # windows-clippy red on main for two days across four fix commits in
@@ -1581,6 +1643,63 @@ jobs:
       - name: test global gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: tools/test-global-gate.py --selftest && tools/test-global-gate.py
+      # A lifecycle event kind the dashboard's `handleLifeEvents` does not
+      # name is dropped in SILENCE - the chain has no fallthrough arm, so
+      # nothing throws, nothing logs, and the emit test, the catalogues and
+      # every gate above stay green. `job.switched` and `job.replaced` were
+      # emitted to every webhook subscriber and dropped by every open
+      # dashboard for about four hours on 24 Aug 2026, found by a person
+      # reading the page. The gate does NOT demand an arm for everything:
+      # seven of the 23 kinds are STATES the queue payload already renders
+      # (three progress transitions, four banners), and each carries a
+      # waiver AT ITS EMIT SITE naming the surface that carries it instead -
+      # a frozen list of kind names in the script would be the very thing it
+      # replaces. A second arm holds the same census to the lifecycle
+      # section of docs/MANUAL.html, which is a webhook subscriber's only
+      # roster of what there is to filter on. Also a job in size-gate.yml,
+      # which runs on every branch push. Private repo only, like the gates
+      # above.
+      - name: event arm gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/event-arm-gate.py --selftest && tools/event-arm-gate.py
+      # A call, in the dashboard's inline JavaScript, to a name that is a
+      # local of some OTHER function - a guaranteed ReferenceError on a path
+      # nothing here executes. `saveInterests` shipped one: every `put` in
+      # web/dashboard.html is a const local to a different function, so
+      # `put('s_index_groups', ...)` threw on the SUCCESS path and took the
+      # poll and the "Saved" toast with it, which is how a save that WORKED
+      # came to look like one that did nothing. `node --check` is syntax
+      # only and passed; the five other gates that open that file each scan
+      # for one construct; and CodeQL cannot see this class at ALL - its
+      # JavaScript pack has no undeclared-variable query, and the two near
+      # neighbours are both the inverse defect (an accidental GLOBAL, which
+      # needs a write). Also a job in size-gate.yml, which runs on every
+      # branch push. Private repo only, like the gates above.
+      - name: js scope gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/js-scope-gate.py --selftest && tools/js-scope-gate.py
+      # The pollution bisect's selftest, and it is here rather than only in
+      # size-gate.yml because of what it pins. Two properties of LIBTEST
+      # make its search sound - `--exact` takes many positional filters,
+      # and libtest sorts the filtered set by name before running it, so
+      # under `--test-threads=1` only a test that sorts BEFORE the victim
+      # can have polluted it. That pin compiles a three-test fixture with
+      # `rustc`, and it SKIPS itself with a printed note when no rustc is
+      # on PATH - which is every build-free runner, size-gate.yml's copy
+      # of this step included. So the pin only ever means anything in a
+      # job with a toolchain, and the thing that can invalidate it is a
+      # toolchain bump, which lands here. `steps.toolchain.outcome` for
+      # that reason and not `checkout`, unlike the gates above.
+      #
+      # It is wired at all because nothing ran it: on 25 Aug 2026 every
+      # appearance of `tools/pollution-bisect.py` in any workflow was
+      # inside an `echo "::error ...` telling a human what to run - four
+      # jobs' annotations, this job's own among them - so it read as wired
+      # to a grep and had never executed. tools/selftest-roster.py is the
+      # gate that says so; see its header.
+      - name: pollution bisect selftest
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        run: tools/pollution-bisect.py --selftest
       - name: clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         # No escapes: every warning blocks. The categories still allowed
@@ -1907,6 +2026,39 @@ jobs:
             --workspace-remap "$GITHUB_WORKSPACE" \
             --partition count:${{ matrix.shard }}/4 \
             -E "$NT_EXCLUDE"
+      # THE HALF THAT MAKES A GREEN SUITE MEAN SOMETHING. nextest treats a
+      # per-test TIMEOUT as an ordinary failure and RETRIES it, so a test
+      # that wedges once and passes on the second attempt is reported
+      # "N passed (1 flaky)" at exit 0 - which is how a 4,666-second
+      # deadlock came out of CI green on 23 Aug 2026. The step above cannot
+      # see that; the report it wrote can. `[profile.ci.junit]` has been
+      # writing junit.xml since the profile existed and, measured 25 Aug
+      # 2026, nothing had ever read it.
+      #
+      # `!cancelled()` rather than `success()`, deliberately: a shard that
+      # is red for some OTHER reason can still carry a wedged attempt, and
+      # the run's own verdict names the panic rather than the timeout. A
+      # cancelled shard has no report worth reading and would refuse.
+      #
+      # The argument is a DIRECTORY, not target/nextest/ci/junit.xml: the
+      # profile is a path component, so naming the file would hard-code a
+      # path every caller has to keep in step. An empty directory REFUSES -
+      # a shard whose suite wrote no report must never read as clean.
+      #
+      # WHY THAT PATH IS THE RIGHT ONE, and it is derived rather than
+      # assumed. Measured 25 Aug 2026 with a real archive: nextest's store
+      # directory follows the target dir BAKED INTO THE ARCHIVE, not
+      # `--extract-to` - an archive built here and extracted somewhere else
+      # entirely wrote its junit.xml back under the BUILD workspace. That
+      # would be a trap, except that the step two above this one ASSERTS
+      # `github.workspace == needs.check.outputs.workspace`, so on any
+      # runner that gets this far the archive's baked target dir IS
+      # `$GITHUB_WORKSPACE/target`. The same assert that stops 1,300 tests
+      # dying NotFound is what makes this path correct; if it is ever
+      # relaxed, this line has to move with it.
+      - name: wedge gate (shard ${{ matrix.shard }}/4)
+        if: ${{ !cancelled() }}
+        run: python3 tools/wedge-gate.py --junit "$GITHUB_WORKSPACE/target/nextest"
   # ===================================================================
   # THE ONE-PROCESS UNIT SUITE. The same binaries `linux-tests` runs,
   # run the OTHER way: one process per test BINARY instead of one per
@@ -2482,6 +2634,19 @@ jobs:
             --workspace-remap "$GITHUB_WORKSPACE" \
             --partition count:${{ matrix.shard }}/6 \
             -E "$NT_EXCLUDE"
+      # The junit half, exactly as the Linux shards run it - see the long
+      # note at that step for why a green suite is not enough on its own.
+      # Windows gets it for the same reason it gets the suites at all: a
+      # wedge is a scheduling defect, and the one platform whose scheduler
+      # nobody here can reproduce is this one. `py=python3 ... || py=python`
+      # is this repo's Windows idiom - the image ships both spellings and
+      # only one of them is always on PATH under git bash.
+      - name: wedge gate (shard ${{ matrix.shard }}/6)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          py=python3; command -v $py >/dev/null 2>&1 || py=python
+          $py tools/wedge-gate.py --junit "$GITHUB_WORKSPACE/target/nextest"
 
   # The clippy gate that CANNOT run on Linux. Until this step existed,
   # clippy ran in exactly two jobs - `check` above and pr-check's

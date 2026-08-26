@@ -147,6 +147,22 @@ impl Charge {
         sub(self.sub_of, self.n);
         self.n = 0;
     }
+
+    /// The charged bytes have gone somewhere this scope cannot follow -
+    /// down a channel, into another thread's hands - and whoever holds
+    /// them now owns the release. Stops guarding WITHOUT releasing, so
+    /// the charge survives the guard.
+    ///
+    /// Consuming, and the only way out that is not a release: every
+    /// other path off a `Charge` (an early return, a `?`, an unwind)
+    /// releases, which is the safe direction. Forgetting to call this
+    /// makes the gauge read a little LOW - the far end releases a charge
+    /// this scope already gave back, and `sub` saturates - which is the
+    /// error this module's `sub` doc says to prefer over a gauge that
+    /// climbs and never comes down.
+    pub fn hand_off(mut self) {
+        self.n = 0;
+    }
 }
 
 impl Drop for Charge {
@@ -389,6 +405,23 @@ pub fn recent_peak_attributions() -> Vec<JobPeak> {
     RECENT.lock_ok().iter().cloned().collect()
 }
 
+/// Test-only serializer for the process-global gauges. `CUR`/`PEAK` are
+/// one array for the whole process, so two tests that move a gauge and
+/// then assert on it read each other's writes the moment they land on
+/// different threads of one process - which nextest hides by giving
+/// every test its own process, so only `cargo test` (and the
+/// `unit-one-process` job) would ever flake. Exported rather than
+/// module-private because the gauge has callers outside this file that
+/// tests drive: `pool::bufpool` charges `RawOut`/`RawFree` on every
+/// take and give, and its characterization tests take THIS lock, not
+/// one of their own - a lock of their own would serialize them against
+/// nobody. Take it as the test's FIRST statement so it drops LAST.
+#[cfg(test)]
+pub(crate) fn one_gauge_test_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+    static CENSUS: Mutex<()> = Mutex::new(());
+    CENSUS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Test-only: zero every gauge and forget the peak attribution.
 #[cfg(test)]
 pub fn reset_for_tests() {
@@ -405,15 +438,9 @@ pub fn reset_for_tests() {
 mod tests {
     use super::*;
 
-    // Process-global counters: serialize the tests that touch them so
-    // plain `cargo test` (threads in one process) cannot interleave.
-    // See the filename-fallback census note: nextest hides this race by
-    // giving every test its own process, so only cargo test would flake.
-    static CENSUS: Mutex<()> = Mutex::new(());
-
     #[test]
     fn add_sub_tracks_current_and_peak() {
-        let _g = CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = one_gauge_test_at_a_time();
         reset_for_tests();
         add(Sub::RawFree, 800);
         add(Sub::RawFree, 800);
@@ -428,7 +455,7 @@ mod tests {
 
     #[test]
     fn over_release_saturates_instead_of_wrapping() {
-        let _g = CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = one_gauge_test_at_a_time();
         reset_for_tests();
         add(Sub::OutOut, 100);
         // A pooled buffer that grew while outstanding releases more than
@@ -440,7 +467,7 @@ mod tests {
 
     #[test]
     fn set_at_least_keeps_the_biggest_figure() {
-        let _g = CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = one_gauge_test_at_a_time();
         reset_for_tests();
         set_at_least(Sub::JobMeta, 500);
         set_at_least(Sub::JobMeta, 200);
@@ -453,7 +480,7 @@ mod tests {
     /// and the process-wide reader follows whichever was installed last.
     #[test]
     fn peak_records_are_per_job() {
-        let _g = CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = one_gauge_test_at_a_time();
         reset_for_tests();
         let a = Arc::new(PeakRecord::new());
         let b = Arc::new(PeakRecord::new());
@@ -482,7 +509,7 @@ mod tests {
     /// older job's post-processing tail, in start order.
     #[test]
     fn live_registry_holds_every_overlapping_job() {
-        let _g = CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = one_gauge_test_at_a_time();
         reset_for_tests();
         let a = Arc::new(PeakRecord::new());
         let b = Arc::new(PeakRecord::new());
@@ -510,7 +537,7 @@ mod tests {
     /// dropping the record retires the row.
     #[test]
     fn a_dropped_record_falls_out_of_the_registry() {
-        let _g = CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = one_gauge_test_at_a_time();
         reset_for_tests();
         let gone = Arc::new(PeakRecord::new());
         register_peak_record(7, "nzo_gone", &gone);
@@ -529,7 +556,7 @@ mod tests {
     /// not kept (it would spend a slot to report nothing).
     #[test]
     fn recent_ring_keeps_the_last_finished_jobs() {
-        let _g = CENSUS.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = one_gauge_test_at_a_time();
         reset_for_tests();
         assert!(recent_peak_attributions().is_empty(), "nothing has run");
 

@@ -430,6 +430,52 @@ fn pick_job_priority_desc_then_fifo() {
     });
 }
 
+/// Codex F-06: `pick_job`'s half of the relocation fence.
+///
+/// The daemon test `a_relocating_job_cannot_be_started_into_its_
+/// destination` proves the fence end to end but cannot say WHICH arm
+/// carries it - the gap between the pick and the flip is microseconds
+/// and no hook holds it open, so either arm alone passes it. This pins
+/// the skip, which is the arm that stops the runner spinning on a
+/// fenced job for the whole of a large move: the fenced job must be
+/// passed OVER for a runnable one, not merely refused.
+#[test]
+fn pick_job_skips_a_relocating_job() {
+    with_daemon("pickreloc", |d| {
+        {
+            let mut q = d.queue.lock_ok();
+            let moving = jv("mv", "being-relocated", serde_json::json!({"priority": 5}));
+            moving.lock_ok().relocating = 1;
+            q.push_back(moving);
+            q.push_back(jv("ok", "runnable", serde_json::json!({"priority": 0})));
+        }
+        // The fenced job outranks the other one by four priority
+        // levels, so a picker that merely deprioritised it would still
+        // hand it back here.
+        let got = d.pick_job(false).expect("pick");
+        assert_eq!(
+            got.lock_ok().nzo_id,
+            "ok",
+            "the relocating job was started into a destination still being assembled"
+        );
+
+        // ...and with nothing else runnable the answer is None, not the
+        // fenced job: `start_next` answers Ended, so a picker that kept
+        // returning this row would spin for the whole move.
+        d.queue.lock_ok().retain(|j| j.lock_ok().nzo_id == "mv");
+        assert!(d.pick_job(false).is_none());
+
+        // The fence LIFTS. A job that can never start again would pass
+        // both assertions above.
+        d.queue.lock_ok()[0].lock_ok().relocating = 0;
+        assert_eq!(
+            d.pick_job(false).expect("pick").lock_ok().nzo_id,
+            "mv",
+            "the fence never lifted"
+        );
+    });
+}
+
 #[test]
 fn priority_write_moves_the_row_to_its_run_position() {
     with_daemon("priomove", |d| {
@@ -832,6 +878,8 @@ fn job_suffix_is_empty_with_auto_rename_off() {
 fn enabled_indexers_counts_only_enabled_and_drives_the_tri_state() {
     with_daemon("tristate", |d| {
         let mk = |name: &str, enabled: bool| crate::newznab::IndexerConfig {
+            kind: Default::default(),
+            nzbindex: Default::default(),
             name: name.into(),
             url: "http://indexer.test".into(),
             apikey: String::new(),
@@ -867,6 +915,8 @@ fn enabled_indexers_counts_only_enabled_and_drives_the_tri_state() {
 fn scoreboard_reference_prefers_the_named_account_and_never_falls_through() {
     with_daemon("sbref", |d| {
         let mk = |name: &str, enabled: bool| crate::newznab::IndexerConfig {
+            kind: Default::default(),
+            nzbindex: Default::default(),
             name: name.into(),
             url: "https://geek.test".into(),
             apikey: "k1".into(),
@@ -919,6 +969,8 @@ fn scoreboard_reference_prefers_the_named_account_and_never_falls_through() {
 fn corr_confirm_source_state_tells_the_four_states_apart() {
     with_daemon("ccfstate", |d| {
         let mk = |name: &str, enabled: bool| crate::newznab::IndexerConfig {
+            kind: Default::default(),
+            nzbindex: Default::default(),
             name: name.into(),
             url: "https://geek.test".into(),
             apikey: "k1".into(),
@@ -1674,6 +1726,8 @@ fn an_indexer_confirmed_suggestion_becomes_a_proven_name() {
         });
 
         d.indexers.lock_ok().push(crate::newznab::IndexerConfig {
+            kind: Default::default(),
+            nzbindex: Default::default(),
             name: "mock".into(),
             url: format!("http://127.0.0.1:{port}"),
             apikey: "k".into(),

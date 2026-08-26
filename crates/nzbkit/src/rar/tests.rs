@@ -1566,3 +1566,35 @@ fn a_mapper_built_at_the_stub_length_maps_the_archive_behind_it() {
         assert!(matches!(bare.blocker, Some(MapBlocker::NotRar)));
     }
 }
+
+/// A span at the very top of the address space is DROPPED, not a panic
+/// and not a wrap.
+///
+/// `stash`'s two additions used to be plain `+` on operands that come
+/// straight off the wire, so a hostile post reached them: a `.rar.NNN`
+/// split whose part 1 declares `=ybegin size=<u64 max>` hands
+/// `split_target` a logical offset of `u64::MAX`, and the mapper is fed
+/// it directly. Debug builds panicked in the extract path from a
+/// downloaded article; release builds (no `overflow-checks`) wrapped
+/// silently and dropped the span anyway, which is the behaviour this
+/// pins on EVERY profile.
+#[test]
+fn a_span_at_the_top_of_the_address_space_is_dropped_not_a_panic() {
+    // The split path's shape: no volume size known, offset at the top.
+    let mut m = VolumeMapper::with_password_at(0, None, 0);
+    assert!(
+        !m.feed(u64::MAX, &[0u8; 100]),
+        "nothing can be mapped there"
+    );
+
+    // And the win_base half: a base already at the top saturates its
+    // window end instead of overflowing it.
+    let mut m = VolumeMapper::with_password_at(0, None, u64::MAX - 1);
+    assert!(!m.feed(u64::MAX - 1, &[0u8; 8]));
+
+    // The control: an ordinary span at the bottom of the address space
+    // still reaches the window and moves the cursor, so the saturation
+    // changed nothing for any input that was not already overflowing.
+    let mut m = VolumeMapper::new(64);
+    assert!(m.feed(0, &[0u8; 8]), "an ordinary span still lands");
+}

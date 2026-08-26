@@ -1,0 +1,186 @@
+# rig-selftest - the bench rig library's own selftest, in CI.
+#
+# WHAT IT HOLDS. One shared shell library is deployed to every bench box and
+# sourced by every LEG driver. Its guards are what stop a contaminated leg's
+# numbers being published: the stall signatures, the fleet census, the
+# byte-column policy, the line cap, the shaping interlock, and the per-leg
+# stall mark. A zsh selftest beside it drives all of that against canned
+# fixtures and stubbed privileged calls, and it is the ONLY check anywhere
+# that reads the library.
+#
+# Until 26 Aug 2026 no workflow ran it. The single mention of it under
+# .github/ was a COMMENT in size-gate.yml saying exactly that, which is a
+# mention rather than an invocation - the precise shape the packaging-test
+# roster gate exists to refuse one directory over. The house rule had you run
+# it on the bench box after a deploy, which is long after the push: the same
+# position the generated-driver check sat in while its subject rotted twice,
+# once two whole guards behind its parent and once the other way, where the
+# documented remedy would have deleted a live hook.
+#
+# ---------------------------------------------------------------------
+# WHY ITS OWN FILE, AND NOT A JOB IN size-gate.yml
+#
+# size-gate.yml is where the cheap gates live BECAUSE it runs on every branch
+# push, which is the property that puts a red on the author's push instead of
+# on the next lane's. Its header earns that placement with one argument: no
+# build, no toolchain, no cargo cache, so "checkout plus the script is the
+# whole job". A macOS runner falsifies that sentence, and worse, that
+# workflow's `on: push: paths:` list is a UNION covering `**/*.rs`, `**/*.py`,
+# `**/*.sh` and `*.md`, so a job added there would spin a macOS runner on very
+# nearly every push in the repo.
+#
+# ci-private.yml is main-only and would still catch most of it, but on a main
+# taking a push every ~90 seconds a job there is routinely queued or
+# superseded, and its verdict sits behind ~18 minutes of toolchain and unit
+# suites. An 18 second shell selftest does not belong behind that.
+#
+# So: a dedicated workflow, on every branch, with a NATIVE path filter. The
+# cost objection to the every-branch placement evaporates once the trigger is
+# scoped - this spends macOS runner minutes only on a push that touched a file
+# the selftest actually reads. Same argument, and the same shape, as
+# macapp.yml, which is this repo's precedent for "its own workflow, native
+# path filter, macOS runner".
+#
+# ---------------------------------------------------------------------
+# WHY macOS, AND WHY THE FILTER SPELLS NO DIRECTORY
+#
+# The selftest is macOS-ONLY by construction: `stat -f %z`, `md5 -q`, and it
+# stubs the privileged shaping calls with output captured from a real box.
+# That is precisely why the STRUCTURAL half of the stall-mark work became a
+# portable python gate in size-gate.yml instead, and the division is measured
+# rather than asserted - a signature function rewritten to return a constant
+# is caught by this selftest ALONE and is invisible to that gate.
+#
+# The driver tree is private to this repo and is never exported, so its path
+# is private vocabulary that the leak check refuses in any file listed in
+# PUBLIC_MANIFEST. This file ships to the public repo verbatim, so it may not
+# spell that path - measured, not assumed: a probe workflow naming it was
+# refused with "PRIVATE VOCABULARY IN A FILE THAT SHIPS PUBLICLY", on the
+# `paths:` line as well as the `run:` one. Hence a wrapper under tools/, which
+# is private but for the two entries the manifest names, and hence a filter
+# written as `**/`-anchored globs. Same arrangement as the generated-driver,
+# interface-excess and stall-mark gates.
+#
+# ---------------------------------------------------------------------
+# THE FILTER IS A LIST, AND A LIST IS HELD TO THE SELFTEST
+#
+# A path-filtered gate is only as good as its list, and this one names
+# fourteen files. Nothing about a list stops the fifteenth being read by a
+# selftest that no longer triggers on it - so the wrapper's `--paths` arm
+# derives the file set from the selftest ITSELF and refuses a name no pattern
+# here matches. That arm is build-free and runs in size-gate.yml on every
+# push, so adding a driver the selftest replays reddens on the AUTHOR's push
+# rather than leaving this job quietly un-triggered.
+#
+# One arm of the selftest is deliberately outside that set and the wrapper's
+# header says so: the threshold scan globs EVERY driver in the directory and
+# keeps the five that print the interface-excess warning. Covering that would
+# mean `**/*.sh` here, which restores the every-push trigger this design
+# exists to avoid, and it would buy nothing - that arm delegates to the
+# interface-excess gate, which size-gate.yml already runs on every push
+# through the very pattern in question. The wrapper asserts that delegate is
+# still reachable, so the belt cannot go missing in silence.
+#
+# ---------------------------------------------------------------------
+# EXIT 0 IS NOT THE VERDICT
+#
+# Several of the selftest's sections SKIP rather than fail when a driver is
+# absent, which is right on a deploy directory holding three files and wrong
+# here, where the whole tree is checked out: a job that skipped every section
+# would exit 0 having checked nothing. So the wrapper floors the sections and
+# the checks it saw, refuses ANY skip, and refuses a run with no closing line.
+# Measured 26 Aug 2026 against a pristine `git archive origin/main` export:
+# 47 sections, 285 checks, 0 skips, 0 failures, 17.5 s - identical to the dev
+# Mac, so nothing here depends on a box's private driver copies.
+
+name: rig-selftest
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - '**/rig-lib.sh'
+      - '**/rig-lib-selftest.zsh'
+      - '**/rig-recut.sh'
+      - '**/bench2*.sh'
+      - '**/benchq.sh'
+      - '**/byteprobe.sh'
+      - '**/mkbench2*.py'
+      - '**/holdsladder.sh'
+      - '**/diskshape.sh'
+      - '**/encroute.sh'
+      - '**/lowline208.sh'
+      - '**/miami3.sh'
+      - 'tools/rig-selftest-gate.py'
+      - '**/nic-media-flip.sh'
+      - '.github/workflows/rig-selftest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rig-selftest:
+    # Private repo only, unlike macapp.yml. That one needs no guard because
+    # everything it compiles ships wholesale; this one drives a private
+    # wrapper over a private tree, neither of which exists on the public repo.
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    concurrency:
+      group: rig-selftest-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a runner image bump
+      # rather than against the diff. The selftest is zsh and leans on BSD
+      # `stat` and `md5`.
+      - name: shell versions
+        run: zsh --version && stat -f %z /etc/hosts && md5 -q /etc/hosts
+
+      # `--selftest` first, the same reason every gate in size-gate.yml runs
+      # its own: what this wrapper protects against is a matcher that has
+      # quietly stopped matching, and that reads as a clean tree forever.
+      - name: rig selftest
+        run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --run
+
+  nic-flip-selftest:
+    # The other macOS-targeted shell selftest on this fleet, and the one with
+    # the most riding on it: the script it belongs to changes a remote Mac's
+    # ethernet link speed, and the three ways the naive version loses the box
+    # until somebody drives to it are exactly what its selftest pins. It shims
+    # every privileged call - the network tool, the interface query, the reach
+    # test and the reboot - so it needs no NIC, no sudo and no box, and it is
+    # hermetic under a temp directory. 13 cases, ~92 s, almost all of it the
+    # link-settle waits the auto-rollback is built around.
+    #
+    # Here rather than in size-gate.yml for the same two reasons as the job
+    # above: that workflow is build-free by design and its filter is a union
+    # that fires on very nearly every push. `on: push: paths:` is per
+    # WORKFLOW, not per job, so this also spins on a rig-library push and the
+    # rig selftest spins on a flip-script push - the same trade macapp.yml
+    # takes deliberately, and the alternative is a third workflow file
+    # repeating the placement argument a third time.
+    #
+    # macOS rather than ubuntu on purpose: the tool it drives is macOS-only,
+    # so a green ubuntu run would be green about a shimmed world that does not
+    # resemble the one it ships into.
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    concurrency:
+      group: nic-flip-selftest-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      #
+      # Through the wrapper, not by naming the script: this file ships to the
+      # public repo verbatim and that path is private vocabulary the leak
+      # check refuses there. Measured, not assumed - a `run:` naming it
+      # directly was refused before it could be committed. The wrapper floors
+      # the cases and refuses a run with no closing line, for the reason the
+      # job above does: every case here is a way to lose a remote box, and a
+      # run that reached none of them exits 0.
+      - name: nic media flip selftest
+        run: tools/rig-selftest-gate.py --selftest && tools/rig-selftest-gate.py --run-nic

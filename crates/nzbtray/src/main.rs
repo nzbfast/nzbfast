@@ -108,9 +108,13 @@ mod app {
 
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const RUN_VALUE: &str = "nzbfast";
+    /// The floor of the port scan. `probe_body` owns it so the scan and
+    /// the second-instance hand-off's last-resort candidate cannot drift
+    /// apart - see `probe_body::handoff_candidates`.
+    use crate::probe_body::BASE_PORT;
+
     /// Ports to try above the base before giving up (50 is far beyond
     /// any realistic collision pile-up on a desktop).
-    const BASE_PORT: u16 = 6789;
     const SCAN_SPAN: u16 = 50;
 
     fn w(s: &str) -> Vec<u16> {
@@ -129,6 +133,20 @@ mod app {
         /// (see [`refresh_tip`]). None = never, so the first hover of
         /// the session always asks.
         tip_at: Option<Instant>,
+        /// The running verdict on the listener, for a tray that ATTACHED
+        /// to an engine rather than spawning one. See [`ListenerWatch`].
+        watch: ListenerWatch,
+        /// When the listener was last challenged (see [`recheck_listener`]).
+        probed_at: Instant,
+        /// A keyed call came back with nothing, so challenge the listener
+        /// on the next tick rather than waiting out the cadence.
+        ///
+        /// The probe is not run at the call site on purpose: the tooltip
+        /// refresh runs ON the message pump and holds itself to
+        /// [`TIP_TIMEOUT_MS`] for that reason, and a probe can take four
+        /// times that. The timer is one second away and off the hover
+        /// path.
+        probe_now: bool,
         data_dir: PathBuf,
         out_dir: PathBuf,
         exe_dir: PathBuf,
@@ -237,7 +255,9 @@ mod app {
         if tls { b.tls_config(loopback_tls()) } else { b }.build()
     }
 
-    use crate::probe_body::{dash_url, keyed_url, origin, query_value, tls_for};
+    use crate::probe_body::{
+        ListenerWatch, Verdict, dash_url, keyed_url, origin, query_value, tls_for,
+    };
 
     /// GET an API mode; None on any transport/JSON failure.
     fn api_get(port: u16, data_dir: &Path, mode: &str, timeout_ms: u64) -> Option<Value> {
@@ -270,18 +290,12 @@ mod app {
         serde_json::from_str(&body).ok()
     }
 
-    enum Probe {
-        Nzbfast,
-        Other,
-        Free,
-    }
-
     /// What lives on 127.0.0.1:port? Connection refused = free; a body
     /// `probe_body::is_nzbfast` recognises (the version answer OR the
     /// daemon's own auth refusal) is one of ours; anything else is a
     /// stranger. Sent WITHOUT the API key - see `probe_body::is_nzbfast`.
     ///
-    /// A reply shape is not identity, though, and `Probe::Nzbfast` means
+    /// A reply shape is not identity, though, and an attachable verdict means
     /// attach-and-then-hand-over-the-API-key. So when `runtime.json` names
     /// THIS port, the listener must also prove it holds that file's
     /// per-start token (`probe_body::proof_matches`): any local account can
@@ -297,10 +311,10 @@ mod app {
     /// GET with an alert and a close, which reads as a transport failure,
     /// so the tray called its own healthy engine a stranger and refused
     /// to attach. Only that miss costs a second request.
-    fn probe(port: u16, data_dir: &Path) -> Probe {
+    fn probe(port: u16, data_dir: &Path) -> Verdict {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_err() {
-            return Probe::Free;
+            return Verdict::Free;
         }
         let rt = crate::probe_body::runtime(data_dir).filter(|r| r.port == port);
         let nonce = crate::probe_body::probe_nonce();
@@ -319,25 +333,48 @@ mod app {
             Some(r) => ask(r.tls),
             None => ask(false).or_else(|| ask(true)),
         };
-        let Some(body) = body else {
-            return Probe::Other;
-        };
-        if !crate::probe_body::is_nzbfast(&body) {
-            return Probe::Other;
-        }
         // Proof is mandatory whenever runtime.json names this port - see
         // `probe_body::identity_ok`. It used to be waived for a reply that
-        // simply omitted `hs_proof`, which any impostor can do.
-        if crate::probe_body::identity_ok(&body, rt.as_ref().map(|r| r.token.as_str()), &nonce) {
-            // Proven only when a runtime.json token was actually
-            // challenged. The legacy `None` arm attaches but must not
-            // carry the stored key (Codex sweep 10 Aug M10); a spawn we
-            // performed ourselves overrides this at the spawn site.
-            crate::probe_body::record_identity_proven(rt.is_some());
-            Probe::Nzbfast
-        } else {
-            Probe::Other
+        // simply omitted `hs_proof`, which any impostor can do. The whole
+        // decision table lives in `probe_body::classify`, which a host
+        // test can drive; only the socket work is up here.
+        let verdict = crate::probe_body::classify(
+            true,
+            body.as_deref(),
+            rt.as_ref().map(|r| r.token.as_str()),
+            &nonce,
+        );
+        // This ARMS and never disarms, and the distinction is
+        // load-bearing: `probe` is the attach scan's primitive and walks
+        // up to fifty candidate PORTS, so a stranger on one of them must
+        // not strip the proof we hold for another. `recheck_listener` is
+        // the port-scoped caller that may clear.
+        if verdict.attachable() {
+            crate::probe_body::record_identity_proven(verdict.proves_identity());
         }
+        verdict
+    }
+
+    /// Ask the listener on the CURRENT port to prove itself again, and
+    /// forget the proof if it cannot.
+    ///
+    /// The counterpart of the note in `probe`: this one is scoped to a
+    /// single port by construction, so it is the only place a failed
+    /// challenge may disarm. It carries no key and a fresh nonce, so
+    /// running it against a stranger teaches the stranger nothing, and a
+    /// success re-arms by itself - which is what makes clearing on a
+    /// SILENCE affordable at all. Without a way back, one transient
+    /// timeout would strip the key from a healthy attached engine for
+    /// the rest of the session.
+    ///
+    /// The caller decides what a verdict is worth (see `ListenerWatch`);
+    /// this only decides what the tray may still put on the wire.
+    fn recheck_listener(port: u16, data_dir: &Path) -> Verdict {
+        let verdict = probe(port, data_dir);
+        if !verdict.attachable() {
+            crate::probe_body::record_identity_proven(false);
+        }
+        verdict
     }
 
     /// The proof token every keyed URL needs, establishing it when this
@@ -575,7 +612,7 @@ mod app {
         let _ = agent(5000, tls).post(&url).send_string("");
         let t0 = Instant::now();
         while t0.elapsed() < Duration::from_secs(40) {
-            if matches!(probe(port, data_dir), Probe::Free) {
+            if probe(port, data_dir) == Verdict::Free {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -584,15 +621,32 @@ mod app {
     }
 
     fn ensure_daemon(exe_dir: &Path, data_dir: &Path, out_dir: &Path) -> (u16, Option<Child>) {
-        // Persisted port first (the attach contract), then the scan range.
+        // TWO QUESTIONS, TWO ORDERS, and they are not the same question.
+        //
+        // "Is an engine already up?" is answered by `handoff_candidates`,
+        // which puts `runtime.json` FIRST because that is the only file
+        // the daemon itself writes and it records the port the listener
+        // actually GOT. This scan used to start from `load_port`, where
+        // `settings.json` deliberately wins - and `settings.json` records
+        // what the daemon was ASKED for. When the two disagree (the
+        // configured port was taken, so a previous `ensure_daemon`
+        // scanned past it) the running engine is on the runtime port,
+        // 6789 reads Free, and the tray STARTS A SECOND `serve` on the
+        // same data dir: two engines over one spool, one index and one
+        // watch folder. The NZB handoff path has always probed
+        // `runtime.json` first for exactly this reason - the tray mutex
+        // serialises trays, not a tray against a leftover engine.
+        //
+        // "Where should a daemon be started?" is still `load_port` then
+        // the scan range, unchanged: the daemon applies `settings.json`
+        // over the `--port` we pass, so spawning at a stale runtime port
+        // would start an engine that binds somewhere else and leave the
+        // tray polling a port nothing is on.
         let saved = crate::probe_body::load_port(data_dir);
-        let candidates = saved
-            .into_iter()
-            .chain((BASE_PORT..BASE_PORT + SCAN_SPAN).filter(|p| Some(*p) != saved));
         let mut spawn_at = None;
-        for p in candidates {
+        for p in crate::probe_body::handoff_candidates(data_dir) {
             match probe(p, data_dir) {
-                Probe::Nzbfast => {
+                v if v.attachable() => {
                     // §98: an engine that outlives the tray also outlives
                     // an UPGRADE - a winget/Scoop/zip upgrade replaces the
                     // exes without running the installer's --quit step, so
@@ -611,11 +665,38 @@ mod app {
                     }
                     return (p, None); // attach - not ours to manage
                 }
-                Probe::Free => {
-                    spawn_at = Some(p);
-                    break;
+                // Free, silent or a stranger: this candidate is not our
+                // engine. Keep asking the others rather than claiming the
+                // port - the spawn scan below is what decides where to START.
+                _ => continue,
+            }
+        }
+        let candidates = saved
+            .into_iter()
+            .chain((BASE_PORT..BASE_PORT + SCAN_SPAN).filter(|p| Some(*p) != saved));
+        if spawn_at.is_none() {
+            for p in candidates {
+                match probe(p, data_dir) {
+                    // Already checked above for the ports handoff_candidates
+                    // names, and a live engine on any OTHER port is one this
+                    // tray may still attach to rather than spawn beside.
+                    v if v.attachable() => {
+                        if upgrade_restart_if_older(p, data_dir) {
+                            spawn_at = Some(p);
+                            break;
+                        }
+                        return (p, None);
+                    }
+                    Verdict::Free => {
+                        spawn_at = Some(p);
+                        break;
+                    }
+                    // A stranger, or a port that accepted the connection and
+                    // then said nothing: not somewhere to START an engine.
+                    // (The attachable verdicts are taken by the guard above;
+                    // the compiler cannot see that, hence the wildcard.)
+                    _ => continue,
                 }
-                Probe::Other => continue,
             }
         }
         let Some(port) = spawn_at else {
@@ -643,7 +724,7 @@ mod app {
         let t0 = Instant::now();
         let mut child = child;
         while t0.elapsed() < Duration::from_secs(15) {
-            if matches!(probe(port, data_dir), Probe::Nzbfast) {
+            if probe(port, data_dir).attachable() {
                 // Our own child on a port we just found free: identity
                 // is established by the spawn itself, even if its
                 // runtime.json write has not landed yet when the first
@@ -670,21 +751,125 @@ mod app {
         std::process::exit(1);
     }
 
+    /// How long a second instance waits for the first one's daemon
+    /// before giving up on the hand-off.
+    ///
+    /// Sized off `ensure_daemon`'s OWN worst case rather than picked: on
+    /// the upgrade path `upgrade_restart_if_older` waits up to 40 s for
+    /// the old daemon to free the port, and the spawn that follows polls
+    /// for a further 15 s, with the candidate scan ahead of both. This
+    /// budget was 45 s until 25 Aug 2026, which is less than those two
+    /// documented waits added together - so a first instance doing
+    /// exactly what it is supposed to do could outlast the second one's
+    /// patience, and the hand-off failed on a healthy upgrade. Keep this
+    /// comfortably above 40 + 15 if either of those moves.
+    const HANDOFF_WAIT: Duration = Duration::from_secs(90);
+
+    /// The port a second instance should hand its work to, waiting for
+    /// the first one to get there. The tray holding the single-instance
+    /// mutex takes it BEFORE `ensure_daemon`, and `save_port` runs only
+    /// after all of that returns. So a one-shot read of a persisted port
+    /// is wrong in two ways during that window: the file may not exist
+    /// at all on a first run, or may still name a port nothing is
+    /// listening on, and the hand-off is refused at once and the .nzb
+    /// dropped with an error box.
+    ///
+    /// Two things make this work, and both are load-bearing. Every
+    /// candidate is RE-READ on each pass, which is what lets us pick up
+    /// a non-BASE port the other instance writes only at the end, when
+    /// something else already holds 6789. And the candidates are
+    /// `probe_body::handoff_candidates`, not `load_port` - that function
+    /// answers "where should a daemon be started", so `settings.json`
+    /// wins it, and `settings.json` names the port the daemon was ASKED
+    /// for. `runtime.json` names the one it BOUND. Polling only the
+    /// former meant that a configured port held by a stranger sent this
+    /// loop to the wrong socket for the whole budget while the daemon
+    /// answered on another, permanently rather than as a race.
+    ///
+    /// Every candidate goes through `probe`, so a guess that is wrong is
+    /// merely a guess: only a listener that identifies as nzbfast (and
+    /// proves it holds `runtime.json`'s per-start token, when that file
+    /// names the port) is ever returned. Returns None when nothing did,
+    /// and the caller must then hand over NOTHING - see the call site.
+    fn wait_for_running_port(data_dir: &Path) -> Option<u16> {
+        let t0 = Instant::now();
+        loop {
+            for port in crate::probe_body::handoff_candidates(data_dir) {
+                if probe(port, data_dir).attachable() {
+                    return Some(port);
+                }
+            }
+            if t0.elapsed() >= HANDOFF_WAIT {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// The daemon's own ceiling on a whole-NZB POST (`API_BODY_MAX`).
+    ///
+    /// Checked HERE, against the file's metadata, rather than only there:
+    /// this wrapper used to read the whole file into memory and then copy
+    /// it into a second buffer, so a file association pointed at a very
+    /// large or sparse `.nzb` could take the tray to twice the file's
+    /// size and be killed for it - before the daemon's cap ever had a
+    /// chance to refuse the upload.
+    const NZB_POST_MAX: u64 = 256 << 20;
+
     /// Multipart POST of one .nzb to addfile. Returns the queued name.
     fn post_nzb(port: u16, data_dir: &Path, path: &Path) -> Result<String, String> {
-        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let size = std::fs::metadata(path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?
+            .len();
+        if size > NZB_POST_MAX {
+            return Err(format!(
+                "{} is {} MB - too large for an NZB (the limit is {} MB)",
+                path.display(),
+                size / (1 << 20),
+                NZB_POST_MAX / (1 << 20)
+            ));
+        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "job.nzb".into());
-        let boundary = "nzbtray9f4c2b7e";
-        let mut body = Vec::with_capacity(bytes.len() + 512);
+        // ONE buffer: the header, then the file read straight in after
+        // it, then the trailer. The old shape read the file into `bytes`
+        // and then copied it into `body`, which is 2x the file resident
+        // at the copy for no reason.
+        let mut body = Vec::with_capacity(size as usize + 512);
+        // A boundary the PAYLOAD cannot forge. It was the fixed literal
+        // `nzbtray9f4c2b7e`, and `for_each_split` looks for `--<boundary>`
+        // anywhere in the body with no line anchoring - so a .nzb whose
+        // metadata or subject text carried that marker split the body
+        // where the poster chose. Everything after such a part is parsed
+        // as another form field, and `handle_api` merges non-file fields
+        // into the request parameters, on a call already carrying the
+        // full API key. Derived per call, then CHECKED against the bytes,
+        // which is the half that makes it correct.
+        let boundary = crate::probe_body::unique_boundary(path, size);
         let _ = write!(
             body,
             "--{boundary}\r\nContent-Disposition: form-data; name=\"nzbfile\"; \
              filename=\"{name}\"\r\nContent-Type: application/x-nzb\r\n\r\n"
         );
-        body.extend_from_slice(&bytes);
+        {
+            use std::io::Read;
+            let mut f =
+                std::fs::File::open(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+            f.read_to_end(&mut body)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+        }
+        let head = body.len() - size as usize;
+        if crate::probe_body::find_bytes(&body[head..], format!("--{boundary}").as_bytes())
+            .is_some()
+        {
+            return Err(format!(
+                "{} contains the upload delimiter - refusing rather than \
+                 sending a body it could split",
+                path.display()
+            ));
+        }
         let _ = write!(body, "\r\n--{boundary}--\r\n");
         let tls = tls_for(port, data_dir);
         let url = keyed_url(
@@ -823,7 +1008,7 @@ mod app {
     /// Both halves are cooperative - nothing here terminates a process.
     fn legacy_shutdown(data_dir: &Path) {
         if let Some(port) = crate::probe_body::load_port(data_dir)
-            && matches!(probe(port, data_dir), Probe::Nzbfast)
+            && probe(port, data_dir).attachable()
         {
             let tls = tls_for(port, data_dir);
             let url = keyed_url(
@@ -834,7 +1019,7 @@ mod app {
             let _ = agent(2000, tls).post(&url).send_string("");
             let t0 = Instant::now();
             while t0.elapsed() < Duration::from_secs(8) {
-                if matches!(probe(port, data_dir), Probe::Free) {
+                if probe(port, data_dir) == Verdict::Free {
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -1030,17 +1215,25 @@ mod app {
             return;
         };
         let q = api_get(port, &data_dir, "queue", TIP_TIMEOUT_MS);
-        if let Some(p) = q
+        let paused = q
             .as_ref()
             .and_then(|v| v.pointer("/queue/paused"))
-            .and_then(Value::as_bool)
-        {
-            APP.with(|a| {
-                if let Some(app) = a.borrow_mut().as_mut() {
+            .and_then(Value::as_bool);
+        APP.with(|a| {
+            if let Some(app) = a.borrow_mut().as_mut() {
+                if let Some(p) = paused {
                     app.paused = p;
                 }
-            });
-        }
+                // Nothing came back from a port we hold a proof for.
+                // That is the arm that catches a real death promptly,
+                // and it only fires while the user is at the tray -
+                // which is also the only time this tray puts the key on
+                // the wire at all. The cadence in the timer covers the
+                // rest, including a listener that answers this call
+                // convincingly and is not ours.
+                app.probe_now |= q.is_none();
+            }
+        });
         let tip = q
             .as_ref()
             .and_then(|v| {
@@ -1069,7 +1262,7 @@ mod app {
     // ---- menu ---------------------------------------------------------
 
     fn show_menu(hwnd: HWND) {
-        let (port, data_dir, owner, child_dead, paused, queue) = APP.with(|a| {
+        let (port, data_dir, engine_gone, paused, queue) = APP.with(|a| {
             let mut a = a.borrow_mut();
             let app = a.as_mut().unwrap();
             // Refresh the pause state while the user is mid-click; a slow
@@ -1080,14 +1273,19 @@ mod app {
             {
                 app.paused = p;
             }
-            (
-                app.port,
-                app.data_dir.clone(),
-                app.owner,
-                app.child_dead,
-                app.paused,
-                q,
-            )
+            // Same evidence the tooltip refresh takes, and for the same
+            // reason: a right-click is the other moment this tray puts
+            // the key on the wire.
+            app.probe_now |= q.is_none();
+            // Restart is offered for a child that died AND for an
+            // attached listener the watch has called gone - see
+            // `ListenerWatch::engine_gone`. The `owner` half is what
+            // keeps a live child's menu clean; the attached half had no
+            // way to draw this item at all before 26 Aug 2026, so a
+            // balloon telling the user to restart would have named a
+            // menu item that was not there.
+            let gone = (app.owner && app.child_dead) || app.watch.engine_gone();
+            (app.port, app.data_dir.clone(), gone, app.paused, q)
         });
         // The speed-limit rows come off the SAME body as the pause label
         // above - one request for the whole menu, and the checkmark and
@@ -1153,7 +1351,7 @@ mod app {
                 MF_STRING | if autostart_enabled() { MF_CHECKED } else { 0 },
             );
             add(m, ID_MANUAL, "User Manual", MF_STRING);
-            if owner && child_dead {
+            if engine_gone {
                 AppendMenuW(m, MF_SEPARATOR, 0, std::ptr::null());
                 add(m, ID_RESTART, "Restart nzbfast", MF_STRING);
             }
@@ -1252,13 +1450,53 @@ mod app {
         refresh_tip(hwnd, true);
     }
 
+    /// Start a replacement engine after the current one died.
+    ///
+    /// RE-RESOLVES THE PORT, and that is not tidiness. `App.port` is
+    /// written once, when `ensure_daemon` returned at startup, and never
+    /// again - while the port the NEXT daemon binds comes from
+    /// `settings.json`, which the dashboard can change at any time and
+    /// which the engine applies over the `--port` we pass it. Restarting
+    /// on the remembered port therefore started a child that bound
+    /// somewhere else: the child stayed alive, so the death UI never
+    /// came back, while every tray action - the dashboard link, the
+    /// speed limit, the shutdown POST - addressed a port nothing was
+    /// listening on. Same two questions `ensure_daemon` separates, and
+    /// the same answer to the second one: `load_port` (settings first),
+    /// then the scan range.
+    ///
+    /// It also clears the listener proof. The engine that proved itself
+    /// is gone; a fresh listener on the same port is a different
+    /// generation and has to prove itself again before this tray will
+    /// hand it the API key. The readiness probe in the child watcher
+    /// re-establishes it exactly as `ensure_daemon` does.
     fn restart_daemon(hwnd: HWND) {
         APP.with(|a| {
             let mut a = a.borrow_mut();
             let app = a.as_mut().unwrap();
-            if let Some(c) = spawn_daemon(&app.exe_dir, &app.data_dir, &app.out_dir, app.port) {
+            let saved = crate::probe_body::load_port(&app.data_dir);
+            let port = saved
+                .into_iter()
+                .chain((BASE_PORT..BASE_PORT + SCAN_SPAN).filter(|p| Some(*p) != saved))
+                .find(|p| probe(*p, &app.data_dir) == Verdict::Free)
+                .unwrap_or(app.port);
+            crate::probe_body::record_identity_proven(false);
+            if let Some(c) = spawn_daemon(&app.exe_dir, &app.data_dir, &app.out_dir, port) {
                 app.child = Some(c);
                 app.child_dead = false;
+                // A tray that ATTACHED reaches this now (the Restart item
+                // is drawn for it once the listener is called gone), and
+                // from here on the engine IS ours: this flag is what puts
+                // Restart back if the new child dies, and what lets Quit
+                // stop it. It stayed false through every restart until
+                // 26 Aug 2026, which cost nothing only because an
+                // attached tray could not restart at all.
+                app.owner = true;
+                app.watch.restarted();
+                app.probe_now = false;
+                app.probed_at = Instant::now();
+                app.port = port;
+                save_port(&app.data_dir, port);
                 balloon(hwnd, "nzbfast", "Restarting the download engine…");
             } else {
                 balloon(
@@ -1268,6 +1506,110 @@ mod app {
                 );
             }
         });
+    }
+
+    /// Challenge the listener an ATTACHED tray is talking to, and act on
+    /// what it says.
+    ///
+    /// THE CLOCK. The Mac wrapper rides the poll its menu bar already
+    /// runs; this tray has no such poll - `refresh_tip` is driven by
+    /// WM_MOUSEMOVE plus `TIP_MIN_GAP`, so a user who never goes near
+    /// the tray icon never runs it, and a re-proof riding it would never
+    /// fire. What the tray does have is the one-second `TIMER_CHILD`
+    /// watchdog, running for the app's life and already the place a
+    /// child's proof is re-armed. So this is not a second timer either:
+    /// it is the same tick, spending one keyless loopback GET per
+    /// `ListenerWatch::GAP`.
+    ///
+    /// TWO ARMS, because they see different things. `probe_now` is set
+    /// by a keyed call that got nothing back, which is what a real death
+    /// looks like from here and is worth acting on at once. The cadence
+    /// covers what that arm cannot see: a listener that answers a keyed
+    /// call convincingly and cannot answer the keyless challenge -
+    /// rehearsed 26 Aug 2026, where a plausible `mode=queue` answer came
+    /// back from a squatter that had no `hs_proof` to give.
+    ///
+    /// ATTACHED ONLY. A child of ours is watched by `try_wait` in the
+    /// same tick, which is the authority on its death and arrives on its
+    /// own; a probe can also come back silent against a child that is
+    /// alive and merely wedged, and calling that a death would balloon
+    /// over a running engine. The test is `child.is_some()` and NOT
+    /// `owner`, which records how the engine was FIRST obtained.
+    ///
+    /// STATED COSTS, both measured rather than reasoned. The probe runs
+    /// ON the message pump, like everything else this window does, so a
+    /// dead or wedged port holds the tray for up to `probe`'s own budget
+    /// - 250 ms to connect plus 900 ms per ask, and a legacy daemon with
+    /// no `runtime.json` costs two asks. That is once per `GAP`, and the
+    /// child re-arm above has carried the same exposure since it landed.
+    /// A refused connect, which is what a DEAD port gives, is free:
+    /// 200 loopback connects to a closed port measured 11.4 ms in total
+    /// on this fleet's dev box, 162 us worst. And a daemon that is
+    /// merely ADOPTED answers every keyed call with a 403, which `ureq`
+    /// reports as an error, so `probe_now` is set on each of them - one
+    /// extra keyless GET per user action against an engine that is
+    /// already refusing them. `record` folds `Adopted` in as a live
+    /// listener, so that engine is never called gone.
+    fn recheck_attached(hwnd: HWND) {
+        let due = APP.with(|a| {
+            let mut a = a.borrow_mut();
+            let app = a.as_mut()?;
+            if app.child.is_some() {
+                return None;
+            }
+            let due = app.probe_now || app.probed_at.elapsed() >= app.watch.gap();
+            // Stamped before the request, not after - the same rule
+            // `refresh_tip` follows, and here it also keeps a slow probe
+            // from being restarted by the tick behind it.
+            due.then(|| {
+                app.probe_now = false;
+                app.probed_at = Instant::now();
+                (app.port, app.data_dir.clone())
+            })
+        });
+        let Some((port, data_dir)) = due else {
+            return;
+        };
+        // The key is already off the wire by the time this returns, on
+        // any verdict but an attachable one. What the watch decides is
+        // the louder half: whether to say so.
+        let verdict = recheck_listener(port, &data_dir);
+        let Some(why) = APP.with(|a| {
+            a.borrow_mut()
+                .as_mut()
+                .and_then(|app| app.watch.record(verdict))
+        }) else {
+            return;
+        };
+        let text = match why {
+            Verdict::Stranger => format!(
+                "Another program is answering on port {port}, so nzbfast has stopped talking to it. Right-click the tray icon → Restart nzbfast."
+            ),
+            _ => format!(
+                "The engine on port {port} stopped answering. This tray attached to an engine it did not start, so there is no log here from the run that ended. Right-click the tray icon → Restart nzbfast."
+            ),
+        };
+        // Into daemon.log as well as onto the desktop, for the reason
+        // `log_note` exists: a balloon is gone in ten seconds and an
+        // engine this tray did not start writes nothing of its own about
+        // having stopped.
+        log_note(
+            &data_dir,
+            &match why {
+                Verdict::Stranger => format!(
+                    "the listener on port {port} answered but is not the engine we proved - key withheld"
+                ),
+                _ => format!(
+                    "the attached engine on port {port} stopped answering the keyless challenge - key withheld"
+                ),
+            },
+        );
+        // A balloon and not a message box. `message_box` is modal and
+        // this runs on the message pump from a REPEATING timer, so a
+        // dialog here would freeze the tray behind it; the child-death
+        // arm makes the same choice for the same reason, and reserves
+        // the modal for the one death that is never worth retrying.
+        balloon(hwnd, "nzbfast stopped", &text);
     }
 
     /// Graceful stop per the shared spec: POST mode=shutdown, give the
@@ -1368,11 +1710,47 @@ mod app {
                         match app.child.as_mut().map(|c| c.try_wait()) {
                             Some(Ok(Some(status))) => {
                                 app.child_dead = true;
+                                // The proof described the process that just
+                                // died, and the port outlives it. Nothing
+                                // cleared it here until 26 Aug 2026, so a
+                                // hover after a child death handed the master
+                                // key to whatever had taken the port - the
+                                // same leak as the attached case below, on the
+                                // one death this tray could already see. The
+                                // re-arm arm below is guarded on `child_dead`,
+                                // so this stands until `restart_daemon`.
+                                crate::probe_body::record_identity_proven(false);
                                 Some(status)
                             }
                             _ => None,
                         }
                     });
+                    // A restart cleared the listener proof, because the
+                    // engine that had proved itself was gone. Re-arm it
+                    // once the replacement answers on the port we
+                    // resolved for it - the same test `ensure_daemon`
+                    // makes after its own spawn, and for the same
+                    // reason: a child WE started, on a port we had just
+                    // found free, is identified by the spawn itself.
+                    // Done here rather than inside `restart_daemon`
+                    // because that runs on the UI thread and the engine
+                    // takes seconds to open its index and bind.
+                    if died.is_none() {
+                        let need = APP.with(|a| {
+                            let app = a.borrow();
+                            let app = app.as_ref().unwrap();
+                            (!app.child_dead
+                                && app.child.is_some()
+                                && crate::probe_body::identity_proof().is_none())
+                            .then(|| (app.port, app.data_dir.clone()))
+                        });
+                        if let Some((port, dir)) = need
+                            && probe(port, &dir).attachable()
+                        {
+                            crate::probe_body::record_identity_proven(true);
+                        }
+                        recheck_attached(hwnd);
+                    }
                     if let Some(status) = died {
                         // Stamp the death and its exit status into the
                         // log FIRST: a native crash said nothing to
@@ -1530,7 +1908,40 @@ mod app {
                 w("Local\\nzbfast-tray-single").as_ptr(),
             );
             if GetLastError() == ERROR_ALREADY_EXISTS {
-                let port = crate::probe_body::load_port(&data_dir).unwrap_or(BASE_PORT);
+                // Wait for the first instance to have a daemon listening
+                // before handing anything over - it may still be inside
+                // ensure_daemon, and the persisted port is written only
+                // after that. See `wait_for_running_port`.
+                //
+                // NOTHING ANSWERING MEANS WE HAND OVER NOTHING. This
+                // branch used to fall back to `load_port` or, failing
+                // that, to 6789, and post there anyway - after the wait
+                // above had just spent its whole budget establishing
+                // that no nzbfast is on any port we know to try. That
+                // guess has exactly two outcomes and neither is the one
+                // it was written for: the socket is dead, and the user
+                // gets an error naming their file for a reason that has
+                // nothing to do with it; or a STRANGER holds it, and the
+                // .nzb body is posted into somebody else's listener. The
+                // mutex proves that a tray started, never that a
+                // hand-off endpoint exists, so "not ready" has to be
+                // sayable. The key is not at risk either way - `proof`
+                // only mints one against a listener that answered the
+                // token challenge - but the file is, and so is the
+                // user's understanding of what just happened.
+                let Some(port) = wait_for_running_port(&data_dir) else {
+                    message_box(
+                        &format!(
+                            "nzbfast is starting up and hasn't answered yet, so nothing \
+                             was handed to it.\n\nNothing has been queued or lost. Wait \
+                             for the nzbfast tray icon to appear, then try again.\n\nLast \
+                             log lines:\n{}",
+                            log_tail(&data_dir, 20)
+                        ),
+                        MB_ICONERROR,
+                    );
+                    return;
+                };
                 // The identity proof is per-PROCESS and this is a fresh
                 // process: the tray holding the mutex proved the daemon
                 // at its own startup, but that proof lives over there.
@@ -1615,6 +2026,9 @@ mod app {
                 child_dead: false,
                 paused: false,
                 tip_at: None,
+                watch: ListenerWatch::new(),
+                probed_at: Instant::now(),
+                probe_now: false,
                 data_dir: data_dir.clone(),
                 out_dir,
                 exe_dir,

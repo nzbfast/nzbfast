@@ -377,6 +377,22 @@ pub(super) fn set_index_paused(
     })
 }
 
+/// Stop or restart the metadata lanes. No wake to send: those lanes poll
+/// (`Daemon::park_metadata_lanes`), so resuming costs at most one park
+/// interval, which is invisible next to the provider round-trips that
+/// follow it.
+pub(super) fn set_enrich_paused(
+    d: &Arc<Daemon>,
+    _name: &str,
+    v: &str,
+) -> std::result::Result<(bool, Value), String> {
+    Ok({
+        let on = v == "1" || v.eq_ignore_ascii_case("true");
+        d.enrich_paused.store(on, Ordering::Relaxed);
+        (true, json!(on))
+    })
+}
+
 #[cfg(feature = "indexer")]
 pub(super) fn set_index_enabled(
     d: &Arc<Daemon>,

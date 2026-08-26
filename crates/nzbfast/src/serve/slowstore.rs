@@ -772,6 +772,10 @@ pub(super) fn engage(d: &Arc<Daemon>, ev: &Evidence, path: &Path, probe: &Probe)
     // §129 4a: on the schema this speed pause is its own kind -
     // storage.slow, not disk.low - because a machine consumer must not
     // have to parse the message to tell space from speed.
+    // event-arm-gate: a STATE, not a moment - the header's pause pill
+    // and the drawer's storagePauseBlock draw it from the queue payload
+    // (`pause_source === 'storage'` plus `q.storage_pause`), with the
+    // write stalls behind the verdict. §129 1b finding (b) is the rule.
     d.life_emit(
         "storage.slow",
         json!({
@@ -807,6 +811,9 @@ pub(super) fn release(d: &Arc<Daemon>, why: &str) {
         // that sets no source (the offline transition, the shutdown
         // wind-down) cannot inherit "storage" and be mistaken for ours.
         *d.pause_source.lock_ok() = "user";
+        // Direct write, so the edge is owed by hand. AFTER the source
+        // is reset and with the lock dropped: the announce reads it.
+        crate::serve::announce_pause(d);
     }
     // Unconditional: the handover case does not lift anything, but it
     // still drops the `storage_pause` block off the payload.

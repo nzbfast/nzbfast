@@ -67,8 +67,32 @@ impl Daemon {
         allow_dupe: bool,
     ) -> Result<Enqueued> {
         self.enqueue_as(
-            None, nzb_bytes, name, category, priority, pp, password, origin, allow_dupe, None,
+            None,
+            nzb_bytes,
+            name,
+            category,
+            priority,
+            pp,
+            password,
+            origin,
+            DupeExempt::asked(allow_dupe),
+            None,
         )
+    }
+
+    /// The queue id for a new add: the caller's own when it gave one,
+    /// else the next off the counter. Minted `SABnzbd_nzo_nzbfast{n}`
+    /// from a plain counter, so one id is routinely a strict PREFIX of
+    /// another - the reason a test must never substring-search a payload
+    /// for one (`tools/payload-id-gate.py` holds that rule).
+    fn mint_nzo_id(&self, id: Option<&str>) -> String {
+        match id {
+            Some(id) => id.to_string(),
+            None => format!(
+                "SABnzbd_nzo_nzbfast{}",
+                self.next_id.fetch_add(1, Ordering::Relaxed)
+            ),
+        }
     }
 
     /// `enqueue` with the id chosen by the caller, and with the option of
@@ -106,16 +130,10 @@ impl Daemon {
         pp: Option<i64>,
         password: Option<&str>,
         origin: &str,
-        allow_dupe: bool,
+        exempt: DupeExempt<'_>,
         hold_for: Option<&str>,
     ) -> Result<Enqueued> {
-        let nzo_id = match id {
-            Some(id) => id.to_string(),
-            None => format!(
-                "SABnzbd_nzo_nzbfast{}",
-                self.next_id.fetch_add(1, Ordering::Relaxed)
-            ),
-        };
+        let nzo_id = self.mint_nzo_id(id);
         let nzb = nzbkit::nzb::Nzb::parse(nzb_bytes)?;
         let AddIdentity {
             mut stem,
@@ -150,7 +168,8 @@ impl Daemon {
             .spool
             .join(format!("{nzo_id}-{}.nzb", safe_spool_stem(&stem)));
         // Atomic: a resume re-parses this file; it must never be torn.
-        crate::persist::write_atomic(&spool_path, nzb_bytes)?;
+        // The category is settled by here and is recorded beside it.
+        write_spool_copy(&spool_path, nzb_bytes, &category)?;
         // §129 2b: the category's default priority fills an add that
         // did not name one (-100, SAB's "default"). An explicit
         // priority - including -2 add-paused - always wins.
@@ -200,16 +219,13 @@ impl Daemon {
         // (paused, Duplicate priority). It auto-promotes if the original
         // fails; PROPERs always download.
         //
-        // `allow_dupe` is the user having been ASKED and said yes (the
-        // wall's confirmation). It suppresses the hold, not the key: the
-        // job still carries its identity, so everything downstream that
-        // reasons about duplicates keeps working.
+        // WHICH rows this add may be a duplicate OF is `exempt`, whose
+        // three answers - and why the narrow one exists (§290, Codex
+        // F-09) - are set out on [`DupeExempt`]. A `hold_for` spare
+        // forgives everything: the caller has settled that row's fate.
         let key = dupe_key(&stem);
-        let collision = if allow_dupe || hold_for.is_some() {
-            None
-        } else {
-            self.dupe_collision(&stem)
-        };
+        let exempt = exempt.or_anybody(hold_for.is_some());
+        let collision = self.add_collision(&stem, &nzb, total_bytes, exempt);
         // The user's delete has now been answered: this release is back.
         // Spending the mark here, rather than letting it sit out its
         // window, is what keeps the identity protected afterwards - a
@@ -296,6 +312,7 @@ impl Daemon {
         // when there is a spare in the first place, so an ordinary add
         // pays nothing for it.
         let spare_spool = hold_for.map(|_| spool_path.clone());
+        let library = self.library_cats.lock_ok().contains(&category);
         let job = Arc::new(Mutex::new(Job {
             origin: origin.to_string(),
             nzo_id: nzo_id.clone(),
@@ -336,15 +353,13 @@ impl Daemon {
             media_rejudge: false,
             retries: 0,
             dupe_key: key,
-            // WHICH row this one is an alternative OF - see `Job::held_for`.
-            held_for: collision
-                .as_ref()
-                .map(|c| c.nzo_id.clone())
-                .or_else(|| hold_for.map(str::to_string))
-                .unwrap_or_default(),
-            library: self.library_cats.lock_ok().contains(&category),
+            held_for: held_for_of(collision.as_ref(), hold_for),
+            library,
+            insurance: self.insurance_at_add(priority, duplicate || hold_for.is_some(), library),
+            insurance_attempts: 0,
             fetched: false,
             tombstone: false,
+            relocating: 0,
             del_on_drop: false,
             delete_status: String::new(),
             suspended: false,
@@ -352,6 +367,7 @@ impl Daemon {
             elapsed_secs: 0.0,
             deferred: false,
             defer_reason: String::new(),
+            defer_at: 0,
             defer_count: 0,
             demote: false,
             bad_blocks: None,
@@ -375,6 +391,8 @@ impl Daemon {
             move_failed: String::new(),
             move_attempts: 0,
             move_pending: false,
+            early_published: Vec::new(),
+            early_refused: Default::default(),
             // A fresh job has never crossed between the two stores.
             move_seq: 0,
             archive_shape: String::new(),
@@ -548,6 +566,8 @@ impl Daemon {
                         g.priority = enqueue_priority(priority, false);
                         g.paused = priority == -2;
                         g.held_for.clear();
+                        // No longer held: the add-time insurance stamp applies.
+                        g.insurance = self.insurance_at_add(priority, false, g.library);
                     }
                     info!(
                         target: "queue",
@@ -910,4 +930,17 @@ impl Daemon {
             reject: hook_reject,
         }
     }
+}
+
+/// WHICH row a new job is an alternative OF - see `Job::held_for`.
+///
+/// A free function only because `enqueue_as` sits on the size gate's
+/// ceiling and this is the one part of its Job literal with a body
+/// rather than a value. The collision the dupe check just found wins;
+/// an explicit `hold_for=` on the add is the fallback.
+fn held_for_of(collision: Option<&DupeCollision>, hold_for: Option<&str>) -> String {
+    collision
+        .map(|c| c.nzo_id.clone())
+        .or_else(|| hold_for.map(str::to_string))
+        .unwrap_or_default()
 }
