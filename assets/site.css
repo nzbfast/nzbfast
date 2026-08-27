@@ -171,6 +171,9 @@ tbody tr:hover{background:color-mix(in srgb,var(--card2) 70%,transparent)}
 .tag.now{color:var(--ok)}
 .tag.soon{color:var(--warn)}
 .tag.plan{color:var(--dim)}
+/* A shipped-but-young platform. Its own class rather than .soon,
+   which means not-yet-available: the Android APK IS downloadable. */
+.tag.beta{color:var(--warn)}
 code,kbd{font:13px var(--mono);background:var(--card2);border:1px solid var(--line);border-radius:0;padding:2px 7px}
 pre.cmd{background:var(--card2);border:1px solid var(--line);border-radius:0;padding:14px 16px;overflow-x:auto;font:13.5px/1.6 var(--mono)}
 
