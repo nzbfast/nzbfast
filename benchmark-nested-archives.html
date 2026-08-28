@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nested archives: which downloaders deliver the file - nzbfast</title>
+<meta name="description" content="Seven Usenet downloaders over ten nested archive shapes: which deliver the file with no help, and the time, disk and processor each costs including any manual repair left behind.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128190;</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  :root{
+    --paper:#ffffff; --ink:#0b0b0b; --ink2:#565656; --ink3:#7d7d7d;
+    --rule:#d9d9d9; --rule2:#eeeeee; --wash:#f5f5f5; --wash2:#e4e4e4;
+    --sans:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+       font-size:16px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1120px;margin:0 auto;padding:60px 32px 96px;
+        display:flex;flex-direction:column;gap:52px}
+  @media(max-width:640px){.wrap{padding:36px 16px 60px;gap:40px}}
+  header{display:flex;flex-direction:column;gap:14px;
+         border-bottom:2px solid var(--ink);padding-bottom:20px}
+  h1{margin:0;font-size:33px;line-height:1.15;font-weight:600;
+     letter-spacing:-.015em;text-wrap:balance}
+  .sub{margin:0;color:var(--ink2);font-size:15px;max-width:76ch}
+  .meta{font-family:var(--mono);font-size:12.5px;color:var(--ink3);
+        display:flex;flex-wrap:wrap;gap:6px 22px}
+  section{display:flex;flex-direction:column;gap:13px}
+  h2{margin:0;font-size:12px;font-weight:600;letter-spacing:.13em;
+     text-transform:uppercase;color:var(--ink2)}
+  .lede{margin:0;max-width:76ch;font-size:15.5px}
+  .note{margin:0;max-width:80ch;color:var(--ink2);font-size:14px}
+  .callout{border:1px solid var(--ink);padding:18px 20px;
+           display:flex;flex-direction:column;gap:10px;max-width:82ch}
+  .callout h3{margin:0;font-size:15px;font-weight:600}
+  .callout p{margin:0;font-size:14.5px;color:var(--ink2)}
+  .callout strong{color:var(--ink)}
+  .dir{font-family:var(--mono);font-size:11.5px;color:var(--ink3);
+       text-transform:none;letter-spacing:0;font-weight:400}
+  .scroll{overflow-x:auto;border-top:1px solid var(--ink);border-bottom:1px solid var(--ink)}
+  table{border-collapse:collapse;width:100%;font-size:13.5px}
+  th,td{padding:8px 11px;text-align:left;vertical-align:top;border-bottom:1px solid var(--rule2)}
+  thead th{background:var(--wash);font-weight:600;font-size:11.5px;letter-spacing:.04em;
+           white-space:nowrap;border-bottom:1px solid var(--rule)}
+  tbody tr:last-child th,tbody tr:last-child td{border-bottom:none}
+  th[scope=row]{font-weight:500;white-space:nowrap;padding-right:16px}
+  .shape{font-family:var(--mono);font-size:12px;color:var(--ink2);white-space:nowrap}
+  td{font-variant-numeric:tabular-nums}
+  .num td:not(:first-child),.num thead th:not(:first-child){text-align:right}
+  .num td{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+  td.g{font-family:var(--mono);font-size:12px;white-space:nowrap}
+  .auto{font-weight:600}
+  .man{color:var(--ink2)}
+  .fail{color:var(--ink3)}
+  .inv{font-family:var(--mono);font-size:12px;color:var(--ink3);white-space:nowrap}
+  .plus{color:var(--ink3)}
+  .dag{color:var(--ink3);margin-left:2px}
+  tr.tot th,tr.tot td{border-top:1px solid var(--ink);font-weight:600;background:var(--wash)}
+  .tests{display:flex;flex-direction:column;border-top:1px solid var(--ink);
+          border-bottom:1px solid var(--ink)}
+  .test{display:grid;grid-template-columns:150px minmax(0,1fr);gap:0 28px;
+        padding:16px 0;border-bottom:1px solid var(--rule2)}
+  .test:last-child{border-bottom:none}
+  .trail{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+  .tn{font-size:15px;font-weight:600;white-space:nowrap}
+  .tbody{display:flex;flex-direction:column;gap:6px;max-width:86ch}
+  .tshape{margin:0;font-family:var(--mono);font-size:12.5px;color:var(--ink2)}
+  .twhat{margin:0;font-size:14.5px}
+  .twhy{margin:0;font-size:14.5px;color:var(--ink2)}
+  .twhy .lbl{color:var(--ink);font-weight:600}
+  .tev{margin:0;font-size:13px;color:var(--ink3)}
+  @media(max-width:620px){.test{grid-template-columns:1fr;gap:8px}
+    .trail{flex-direction:row;align-items:center;gap:10px}}
+  .tag{display:inline-block;font-family:var(--mono);font-size:10.5px;
+       text-transform:uppercase;letter-spacing:.06em;border:1px solid var(--ink3);
+       padding:1px 6px;margin-bottom:4px;white-space:nowrap}
+  .evnote{display:block;color:var(--ink2);font-size:12.5px}
+  figure{margin:0;display:flex;flex-direction:column;gap:8px}
+  figcaption{font-size:14px;font-weight:600;display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+  .chart{width:100%;height:auto;overflow:visible}
+  .chart .ba{fill:#0b0b0b}
+  .chart .bb{fill:#b4b4b4;stroke:#0b0b0b;stroke-width:.6}
+  .chart .bc{fill:#ffffff;stroke:#0b0b0b;stroke-width:.6}
+  .chart .cl{font:500 12px var(--sans);fill:#0b0b0b;text-anchor:end}
+  .chart .cv{font:500 11.5px var(--mono);fill:#565656}
+  .chart .ck{font:400 11px var(--sans);fill:#565656}
+  .chart .cn{font:400 10.5px var(--sans);fill:#7d7d7d}
+  .chart .brk{fill:none;stroke:#ffffff;stroke-width:2.4}
+  dl.defs{margin:0;display:grid;grid-template-columns:auto 1fr;gap:8px 18px;
+          max-width:82ch;font-size:15px}
+  dl.defs dt{font-weight:600;white-space:nowrap}
+  dl.defs dd{margin:0;color:var(--ink2)}
+  @media(max-width:560px){dl.defs{grid-template-columns:1fr;gap:2px 0}
+    dl.defs dd{margin-bottom:10px}}
+  ul.facts{margin:0;padding-left:20px;max-width:82ch;display:flex;
+           flex-direction:column;gap:7px;color:var(--ink2);font-size:14.5px}
+  ul.facts strong{color:var(--ink);font-weight:600}
+  code{font-family:var(--mono);font-size:.92em;color:var(--ink)}
+  footer{border-top:1px solid var(--rule);padding-top:16px;color:var(--ink3);
+         font-size:13px;max-width:84ch}
+</style>
+</head>
+<body>
+
+
+<div class="wrap">
+<header>
+  <h1>Nested archives: which downloaders deliver the file, and what it costs</h1>
+  <p class="sub">Seven downloaders over ten archive shapes. Each is graded on whether the
+  file arrives byte-correct with nobody touching it, and measured for the time, disk and
+  processor it takes to get there, including any manual work left behind.</p>
+  <p class="meta"><span>27 August 2026</span><span>M3 Ultra desktop, macOS</span>
+  <span>Local article server</span><span>Median of three passes</span><span>Draft</span></p>
+</header>
+
+<section>
+  <div class="callout">
+    <h3>These are capability tests, not speed tests</h3>
+    <p>Each test asks whether a downloader can turn a post into the finished file on its
+    own. The payloads are small and are served from memory over a local connection, with
+    no provider and no network in the path, so <strong>nothing here is limited by download
+    speed</strong> and the absolute times are far shorter than the same shapes would take
+    in the real world.</p>
+    <p>What carries across, and what does not:
+    <strong>whether a shape needs manual work at all is a property of the shape and the
+    downloader</strong>, not of file size or line speed, so those results transfer
+    directly. Disk and processor figures scale with payload size, and the ratios between
+    downloaders should hold. Elapsed time transfers least: against a real provider the
+    download would dominate, so treat the seconds below as a comparison between
+    downloaders doing identical work, never as a prediction of how long a real job takes.</p>
+  </div>
+</section>
+
+<section>
+  <h2>What each result means</h2>
+  <dl class="defs">
+    <dt>No help needed</dt><dd>Every file named in the post arrived under the downloader's output directory with a matching SHA-256, with nothing done by hand.</dd>
+    <dt>Manual passes</dt><dd>The downloader stopped early and left archives behind. The file was then produced by running the standard tools by hand, and the count is how many rounds of repair-and-extract that took.</dd>
+    <dt>Never delivered</dt><dd>The file could not be produced, even after the manual passes. Times and costs for these are the point at which the attempt was abandoned, not the cost of doing the work.</dd>
+  </dl>
+  <p class="note">Grading reads the bytes on disk, never a downloader's own report of
+  success. A file counts as delivered if its exact content appears anywhere in the output,
+  so a downloader that renames what it extracts is not penalised for it.</p>
+</section>
+
+<section>
+  <h2>The ten tests</h2>
+  <div class="tests"><article class="test"><div class="trail"><span class="tn">Test 1</span><span class="tag">Field shape</span></div><div class="tbody"><p class="tshape">Store RAR volumes + PAR2 &rarr; file</p><p class="twhat">One store-mode RAR set with a posted PAR2 recovery set. No nesting.</p><p class="twhy"><span class="lbl">Why it matters.</span> The plain shape. A baseline every client is expected to finish.</p><p class="tev">Routinely posted.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 2</span><span class="tag">Obfuscation</span></div><div class="tbody"><p class="tshape">Store RAR + PAR2 &rarr; store RAR &rarr; file</p><p class="twhat">A store RAR wrapped inside another store RAR.</p><p class="twhy"><span class="lbl">Why it matters.</span> Wrapping hides the real filename until the outer layer is opened, so the post gives away less about what it contains.</p><p class="tev">Wrapping of this kind is used to keep a post from revealing what it holds.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 3</span><span class="tag">Obfuscation</span></div><div class="tbody"><p class="tshape">Store RAR + PAR2 &rarr; compressed RAR &rarr; file</p><p class="twhat">The same wrapper, but the inner archive is compressed rather than stored.</p><p class="twhy"><span class="lbl">Why it matters.</span> The inner layer has to be decompressed, not merely unwrapped.</p><p class="tev">Wrapping of this kind is used to keep a post from revealing what it holds.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 4</span><span class="tag">Structural</span></div><div class="tbody"><p class="tshape">Store RAR + PAR2 &rarr; 7z (LZMA2) &rarr; file</p><p class="twhat">A 7z archive inside a RAR set.</p><p class="twhy"><span class="lbl">Why it matters.</span> The format changes between layers, so one chain needs both engines.</p><p class="tev">Built to isolate one capability. Not claimed to be a common posting shape.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 5</span><span class="tag">Field shape</span></div><div class="tbody"><p class="tshape">Healthy RAR + PAR2 &rarr; damaged RAR + its own PAR2 &rarr; file</p><p class="twhat">The posted set is intact. The archive inside it is corrupt, and its own PAR2 recovery set is packed alongside it.</p><p class="twhy"><span class="lbl">Why it matters.</span> A bad source or a partial re-post. The repair is needed on content that only exists once the outer archive has been opened.</p><p class="tev">Routinely posted.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 6</span><span class="tag">Obfuscation</span></div><div class="tbody"><p class="tshape">Store RAR + PAR2 &rarr; store RAR &times;4 &rarr; file</p><p class="twhat">A five-level ladder with a separate file at every level.</p><p class="twhy"><span class="lbl">Why it matters.</span> Deep wrapping, with content at each level, so reaching only the deepest file is not enough.</p><p class="tev">Wrapping of this kind is used to keep a post from revealing what it holds.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 7</span><span class="tag">Structural</span></div><div class="tbody"><p class="tshape">Store RAR + PAR2 &rarr; 7z &rarr; store RAR &rarr; file</p><p class="twhat">Three layers alternating between formats.</p><p class="twhy"><span class="lbl">Why it matters.</span> Format switching part-way down a chain.</p><p class="tev">Built to isolate one capability. Not claimed to be a common posting shape.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 8</span><span class="tag">Structural</span></div><div class="tbody"><p class="tshape">Damaged at all three layers, each with its own recovery data</p><p class="twhat">Every layer is corrupt. The outer has PAR2, the middle has its own PAR2 packed alongside, the innermost carries a RAR recovery record.</p><p class="twhy"><span class="lbl">Why it matters.</span> The full recovery chain. Each repair has to succeed before the next layer can be opened at all, and the three layers need three different tools.</p><p class="tev">Built to isolate one capability. Not claimed to be a common posting shape.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 9</span><span class="tag">Field shape</span></div><div class="tbody"><p class="tshape">PAR2 at 100% only; the archive volumes are never delivered</p><p class="twhat">All four archive volumes are listed in the post and none arrives. Only a complete PAR2 set does.</p><p class="twhy"><span class="lbl">Why it matters.</span> A post whose articles are gone but whose recovery data survives. The archives have to be rebuilt from parity alone.</p><p class="tev">Routinely posted.</p></div></article>
+<article class="test"><div class="trail"><span class="tn">Test 10</span><span class="tag">Synthetic</span></div><div class="tbody"><p class="tshape">Three encrypted layers, each password carried by the layer above</p><p class="twhat">Three password-protected layers. The first password is posted beside the volumes; each layer then contains the next one's password.</p><p class="twhy"><span class="lbl">Why it matters.</span> A password chain that has to be walked, one layer at a time. No client is given a password.</p><p class="tev">Constructed for this test. Our own sampling of current obfuscated posts found no password carried with the post, so this placement is not typical of the field.</p></div></article>
+</div>
+  <p class="note">Payloads are random data generated and archived locally, so the corpus
+  contains no third-party material and can be rebuilt from its generator.</p>
+</section>
+
+<section>
+  <h2>Did the downloader deliver the file <span class="dir">&mdash; fewer manual passes is better</span></h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th scope="col">Test</th><th scope="col">NZBGet 26.3</th><th scope="col">NZBGet 27.0-testing</th><th scope="col">SABnzbd 5.1.2</th><th scope="col">nzbfast 1.2.4</th><th scope="col">rustnzb 1.4.5</th><th scope="col">Weaver 0.7.8</th><th scope="col">Weaver 0.8.3</th></tr></thead>
+      <tbody><tr><th scope="row">Test 1</th><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td></tr>
+<tr><th scope="row">Test 2</th><td class="g man">1 manual pass</td><td class="g man">1 manual pass</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td></tr>
+<tr><th scope="row">Test 3</th><td class="g man">1 manual pass</td><td class="g man">1 manual pass</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td></tr>
+<tr><th scope="row">Test 4</th><td class="g man">1 manual pass</td><td class="g man">1 manual pass</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td></tr>
+<tr><th scope="row">Test 5</th><td class="g man">1 manual pass</td><td class="g man">1 manual pass</td><td class="g man">1 manual pass</td><td class="g auto">No help needed</td><td class="g man">1 manual pass</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td></tr>
+<tr><th scope="row">Test 6</th><td class="g man">4 manual passes</td><td class="g man">4 manual passes</td><td class="g man">2 manual passes</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td></tr>
+<tr><th scope="row">Test 7</th><td class="g man">2 manual passes</td><td class="g man">2 manual passes</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td></tr>
+<tr><th scope="row">Test 8</th><td class="g man">3 manual passes</td><td class="g man">3 manual passes</td><td class="g man">3 manual passes</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td><td class="g fail">Never delivered</td></tr>
+<tr><th scope="row">Test 9</th><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g auto">No help needed</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g auto">No help needed</td></tr>
+<tr><th scope="row">Test 10</th><td class="g man">3 manual passes</td><td class="g man">3 manual passes</td><td class="g fail">Never delivered</td><td class="g auto">No help needed</td><td class="g fail">Never delivered</td><td class="g man">3 manual passes</td><td class="g man">3 manual passes</td></tr>
+<tr class="tot"><th scope="row">Delivered with no help</th><td class="g">2 of 10</td><td class="g">2 of 10</td><td class="g">5 of 10</td><td class="g">10 of 10</td><td class="g">7 of 10</td><td class="g">1 of 10</td><td class="g">2 of 10</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Summary <span class="dir">&mdash; more in the first column is better, more in the last is worse</span></h2>
+  <div class="scroll">
+    <table class="num">
+      <thead><tr><th scope="col">Downloader</th><th scope="col">Delivered with no help</th><th scope="col">Needed manual passes</th><th scope="col">Never delivered</th></tr></thead>
+      <tbody><tr><th scope="row">NZBGet 26.3</th><td>2</td><td>8</td><td>0</td></tr><tr><th scope="row">NZBGet 27.0-testing</th><td>2</td><td>8</td><td>0</td></tr><tr><th scope="row">SABnzbd 5.1.2</th><td>5</td><td>3</td><td>2</td></tr><tr><th scope="row">nzbfast 1.2.4</th><td>10</td><td>0</td><td>0</td></tr><tr><th scope="row">rustnzb 1.4.5</th><td>7</td><td>1</td><td>2</td></tr><tr><th scope="row">Weaver 0.7.8</th><td>1</td><td>1</td><td>8</td></tr><tr><th scope="row">Weaver 0.8.3</th><td>2</td><td>1</td><td>7</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Charts</h2>
+  <figure><figcaption>How each test ended <span class="dir">more black is better. All ten tests, all seven downloaders.</span></figcaption><svg viewBox="0 0 660 244" role="img" aria-label="How each test ended" class="chart"><text x="158" y="19" class="cl">NZBGet 26.3</text><rect x="168.0" y="6" width="90.4" height="16" class="ba"/><rect x="258.4" y="6" width="361.6" height="16" class="bb"/><text x="158" y="49" class="cl">NZBGet 27.0-testing</text><rect x="168.0" y="36" width="90.4" height="16" class="ba"/><rect x="258.4" y="36" width="361.6" height="16" class="bb"/><text x="158" y="79" class="cl">SABnzbd 5.1.2</text><rect x="168.0" y="66" width="226.0" height="16" class="ba"/><rect x="394.0" y="66" width="135.6" height="16" class="bb"/><rect x="529.6" y="66" width="90.4" height="16" class="bc"/><text x="158" y="109" class="cl">nzbfast 1.2.4</text><rect x="168.0" y="96" width="452.0" height="16" class="ba"/><text x="158" y="139" class="cl">rustnzb 1.4.5</text><rect x="168.0" y="126" width="316.4" height="16" class="ba"/><rect x="484.4" y="126" width="45.2" height="16" class="bb"/><rect x="529.6" y="126" width="90.4" height="16" class="bc"/><text x="158" y="169" class="cl">Weaver 0.7.8</text><rect x="168.0" y="156" width="45.2" height="16" class="ba"/><rect x="213.2" y="156" width="45.2" height="16" class="bb"/><rect x="258.4" y="156" width="361.6" height="16" class="bc"/><text x="158" y="199" class="cl">Weaver 0.8.3</text><rect x="168.0" y="186" width="90.4" height="16" class="ba"/><rect x="258.4" y="186" width="45.2" height="16" class="bb"/><rect x="303.6" y="186" width="316.4" height="16" class="bc"/><g transform="translate(168,228)"><rect x="0" y="0" width="11" height="11" class="ba"/><text x="16" y="10" class="ck">delivered with no help</text><rect x="170" y="0" width="11" height="11" class="bb"/><text x="186" y="10" class="ck">delivered after manual passes</text><rect x="386" y="0" width="11" height="11" class="bc"/><text x="402" y="10" class="ck">never delivered</text><text x="512" y="10" class="ck">tests</text></g></svg></figure><figure><figcaption>Time to a usable file, on identical work <span class="dir">lower is better. The 7 tests every downloader shown here delivered.</span></figcaption><svg viewBox="0 0 660 184" role="img" aria-label="Time to a usable file, on identical work" class="chart"><text x="158" y="19" class="cl">NZBGet 26.3</text><rect x="168.0" y="6" width="224.0" height="16" class="ba"/><rect x="392.0" y="6" width="140.2" height="16" class="bb"/><text x="538.2" y="19" class="cv">51.2</text><text x="158" y="49" class="cl">NZBGet 27.0-testing</text><rect x="168.0" y="36" width="224.0" height="16" class="ba"/><rect x="392.0" y="36" width="141.8" height="16" class="bb"/><text x="539.9" y="49" class="cv">51.5</text><text x="158" y="79" class="cl">SABnzbd 5.1.2</text><rect x="168.0" y="66" width="246.9" height="16" class="ba"/><rect x="414.9" y="66" width="125.1" height="16" class="bb"/><text x="546.0" y="79" class="cv">52.3</text><text x="158" y="109" class="cl">nzbfast 1.2.4</text><rect x="168.0" y="96" width="73.4" height="16" class="ba"/><text x="247.4" y="109" class="cv">10.3</text><text x="158" y="139" class="cl">rustnzb 1.4.5</text><rect x="168.0" y="126" width="174.6" height="16" class="ba"/><rect x="342.6" y="126" width="122.8" height="16" class="bb"/><text x="471.4" y="139" class="cv">41.8</text><g transform="translate(168,168)"><rect x="0" y="0" width="11" height="11" class="ba"/><text x="16" y="10" class="ck">downloader</text><rect x="94" y="0" width="11" height="11" class="bb"/><text x="110" y="10" class="ck">manual passes</text><text x="207" y="10" class="ck">seconds</text></g></svg></figure><figure><figcaption>Data written to disk, on identical work <span class="dir">lower is better. The 7 tests every downloader shown here delivered.</span></figcaption><svg viewBox="0 0 660 184" role="img" aria-label="Data written to disk, on identical work" class="chart"><text x="158" y="19" class="cl">NZBGet 26.3</text><rect x="168.0" y="6" width="198.2" height="16" class="ba"/><rect x="366.2" y="6" width="145.7" height="16" class="bb"/><text x="517.8" y="19" class="cv">29.8</text><text x="158" y="49" class="cl">NZBGet 27.0-testing</text><rect x="168.0" y="36" width="197.9" height="16" class="ba"/><rect x="365.9" y="36" width="147.9" height="16" class="bb"/><text x="519.7" y="49" class="cv">30.0</text><text x="158" y="79" class="cl">SABnzbd 5.1.2</text><rect x="168.0" y="66" width="324.1" height="16" class="ba"/><rect x="492.1" y="66" width="47.9" height="16" class="bb"/><text x="546.0" y="79" class="cv">32.3</text><text x="158" y="109" class="cl">nzbfast 1.2.4</text><rect x="168.0" y="96" width="134.7" height="16" class="ba"/><text x="308.7" y="109" class="cv">11.7</text><text x="158" y="139" class="cl">rustnzb 1.4.5</text><rect x="168.0" y="126" width="285.8" height="16" class="ba"/><rect x="453.8" y="126" width="34.1" height="16" class="bb"/><text x="493.9" y="139" class="cv">27.8</text><g transform="translate(168,168)"><rect x="0" y="0" width="11" height="11" class="ba"/><text x="16" y="10" class="ck">downloader</text><rect x="94" y="0" width="11" height="11" class="bb"/><text x="110" y="10" class="ck">manual passes</text><text x="207" y="10" class="ck">GB</text></g></svg></figure><p class="note">Those two charts cover <strong>Test 1, Test 2, Test 3, Test 4, Test 5, Test 6, Test 7</strong>, the largest set of tests every downloader shown in them delivered, so the bars measure identical work. Not shown, because they could not deliver enough of that set to compare: Weaver 0.7.8 delivered 1 of these 7; Weaver 0.8.3 delivered 1 of these 7. A downloader that finishes little accumulates little time and little disk, so plotting it here would give it the shortest bars on the chart.</p>
+
+</section>
+
+<section>
+  <h2>Time, split into downloader and manual work <span class="dir">&mdash; lower is better, seconds</span></h2>
+  <p class="lede">The first figure is the downloader's own run. The second, where present,
+  is the manual repair and extraction needed afterwards to produce the file.</p>
+  <div class="scroll">
+    <table class="num">
+      <thead><tr><th scope="col">Test</th><th scope="col">NZBGet 26.3</th><th scope="col">NZBGet 27.0-testing</th><th scope="col">SABnzbd 5.1.2</th><th scope="col">nzbfast 1.2.4</th><th scope="col">rustnzb 1.4.5</th><th scope="col">Weaver 0.7.8</th><th scope="col">Weaver 0.8.3</th></tr></thead>
+      <tbody><tr><th scope="row">Test 1</th><td>4.2</td><td>4.2</td><td>4.1</td><td>0.7</td><td>4.1</td><td>2.1</td><td>2.1</td></tr>
+<tr><th scope="row">Test 2</th><td>4.2 <span class="plus">+0.3</span></td><td>4.2 <span class="plus">+0.3</span></td><td>6.1</td><td>0.7</td><td>4.1</td><td class="inv">gave up at 6.1</td><td class="inv">gave up at 2.1</td></tr>
+<tr><th scope="row">Test 3</th><td>4.2 <span class="plus">+0.3</span></td><td>4.2 <span class="plus">+0.3</span></td><td>6.1</td><td>0.7</td><td>4.1</td><td class="inv">gave up at 6.1</td><td class="inv">gave up at 2.1</td></tr>
+<tr><th scope="row">Test 4</th><td>4.2 <span class="plus">+0.4</span></td><td>4.2 <span class="plus">+0.4</span></td><td>6.1</td><td>2.2</td><td>4.1</td><td class="inv">gave up at 6.1</td><td class="inv">gave up at 4.1</td></tr>
+<tr><th scope="row">Test 5</th><td>6.3 <span class="plus">+17.3</span></td><td>6.2 <span class="plus">+17.5</span></td><td>6.1 <span class="plus">+17.3</span></td><td>4.5</td><td>4.1 <span class="plus">+17.3</span></td><td class="inv">gave up at 6.1</td><td class="inv">gave up at 2.1</td></tr>
+<tr><th scope="row">Test 6</th><td>4.2 <span class="plus">+1.1</span></td><td>4.2 <span class="plus">+1.1</span></td><td>2.0 <span class="plus">+0.3</span></td><td>0.6</td><td>2.1</td><td class="inv">gave up at 6.2</td><td class="inv">gave up at 2.1</td></tr>
+<tr><th scope="row">Test 7</th><td>4.2 <span class="plus">+0.4</span></td><td>4.2 <span class="plus">+0.4</span></td><td>4.1</td><td>1.0</td><td>2.1</td><td class="inv">gave up at 6.2</td><td class="inv">gave up at 2.1</td></tr>
+<tr><th scope="row">Test 8</th><td>6.2 <span class="plus">+12.2</span></td><td>6.2 <span class="plus">+12.3</span></td><td>2.1 <span class="plus">+12.3</span></td><td>2.2</td><td class="inv">gave up at 2.1</td><td class="inv">gave up at 99.1</td><td class="inv">gave up at 240</td></tr>
+<tr><th scope="row">Test 9</th><td>6.2</td><td>6.2</td><td class="inv">gave up at 2.1</td><td>2.9</td><td>47.5</td><td class="inv">gave up at 2.1</td><td>4.1</td></tr>
+<tr><th scope="row">Test 10</th><td>2.2 <span class="plus">+4.6</span></td><td>2.2 <span class="plus">+4.6</span></td><td class="inv">gave up at 301</td><td>0.6</td><td class="inv">gave up at 2.1</td><td>609 <span class="plus">+4.6</span></td><td>38.6 <span class="plus">+4.6</span></td></tr>
+</tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Total time to a usable file <span class="dir">&mdash; lower is better, seconds</span></h2>
+  <div class="scroll">
+    <table class="num">
+      <thead><tr><th scope="col">Test</th><th scope="col">NZBGet 26.3</th><th scope="col">NZBGet 27.0-testing</th><th scope="col">SABnzbd 5.1.2</th><th scope="col">nzbfast 1.2.4</th><th scope="col">rustnzb 1.4.5</th><th scope="col">Weaver 0.7.8</th><th scope="col">Weaver 0.8.3</th></tr></thead>
+      <tbody><tr><th scope="row">Test 1</th><td>4.2</td><td>4.2</td><td>4.1</td><td>0.7</td><td>4.1</td><td>2.1</td><td>2.1</td></tr>
+<tr><th scope="row">Test 2</th><td>4.5</td><td>4.5</td><td>6.1</td><td>0.7</td><td>4.1</td><td class="inv">not delivered</td><td class="inv">not delivered</td></tr>
+<tr><th scope="row">Test 3</th><td>4.5</td><td>4.5</td><td>6.1</td><td>0.7</td><td>4.1</td><td class="inv">not delivered</td><td class="inv">not delivered</td></tr>
+<tr><th scope="row">Test 4</th><td>4.6</td><td>4.6</td><td>6.1</td><td>2.2</td><td>4.1</td><td class="inv">not delivered</td><td class="inv">not delivered</td></tr>
+<tr><th scope="row">Test 5</th><td>23.5</td><td>23.8</td><td>23.4</td><td>4.5</td><td>21.4</td><td class="inv">not delivered</td><td class="inv">not delivered</td></tr>
+<tr><th scope="row">Test 6</th><td>5.3</td><td>5.3</td><td>2.4</td><td>0.6</td><td>2.1</td><td class="inv">not delivered</td><td class="inv">not delivered</td></tr>
+<tr><th scope="row">Test 7</th><td>4.6</td><td>4.6</td><td>4.1</td><td>1.0</td><td>2.1</td><td class="inv">not delivered</td><td class="inv">not delivered</td></tr>
+<tr><th scope="row">Test 8</th><td>18.4</td><td>18.5</td><td>14.3</td><td>2.2</td><td class="inv">not delivered</td><td class="inv">not delivered</td><td class="inv">not delivered</td></tr>
+<tr><th scope="row">Test 9</th><td>6.2</td><td>6.2</td><td class="inv">not delivered</td><td>2.9</td><td>47.5</td><td class="inv">not delivered</td><td>4.1</td></tr>
+<tr><th scope="row">Test 10</th><td>6.8</td><td>6.8</td><td class="inv">not delivered</td><td>0.7</td><td class="inv">not delivered</td><td>614</td><td>43.3</td></tr>
+</tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Total data written to disk <span class="dir">&mdash; lower is better, GB</span></h2>
+  <p class="lede">Physical bytes written by the downloader and by any manual passes
+  together. This is what the disk actually had to absorb, including intermediate files
+  that were written and later removed.</p>
+  <div class="scroll">
+    <table class="num">
+      <thead><tr><th scope="col">Test</th><th scope="col">NZBGet 26.3</th><th scope="col">NZBGet 27.0-testing</th><th scope="col">SABnzbd 5.1.2</th><th scope="col">nzbfast 1.2.4</th><th scope="col">rustnzb 1.4.5</th><th scope="col">Weaver 0.7.8</th><th scope="col">Weaver 0.8.3</th></tr></thead>
+      <tbody><tr><th scope="row">Test 1</th><td>3.00</td><td>2.99</td><td>3.52</td><td>1.50</td><td>3.11</td><td>3.01</td><td>3.01</td></tr>
+<tr><th scope="row">Test 2</th><td>4.42</td><td>4.37</td><td>4.97</td><td>1.50</td><td>4.63</td><td class="inv">4.50<span class="dag">&dagger;</span></td><td class="inv">4.50<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 3</th><td>4.39</td><td>4.39</td><td>4.94</td><td>1.50</td><td>4.54</td><td class="inv">4.50<span class="dag">&dagger;</span></td><td class="inv">4.50<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 4</th><td>4.43</td><td>4.36</td><td>4.96</td><td>1.50</td><td>4.56</td><td class="inv">4.50<span class="dag">&dagger;</span></td><td class="inv">4.50<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 5</th><td>6.20</td><td>6.21</td><td>8.19</td><td>4.65</td><td>7.89</td><td class="inv">4.81<span class="dag">&dagger;</span></td><td class="inv">4.81<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 6</th><td>5.10</td><td>5.38</td><td>3.72</td><td>0.52</td><td>1.99</td><td class="inv">1.53<span class="dag">&dagger;</span></td><td class="inv">1.53<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 7</th><td>2.27</td><td>2.30</td><td>1.96</td><td>0.51</td><td>1.03</td><td class="inv">1.50<span class="dag">&dagger;</span></td><td class="inv">1.50<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 8</th><td>3.96</td><td>3.92</td><td>4.33</td><td>2.00</td><td class="inv">0.50<span class="dag">&dagger;</span></td><td class="inv">1.73<span class="dag">&dagger;</span></td><td class="inv">11.10<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 9</th><td>1.06</td><td>1.05</td><td class="inv">0.02<span class="dag">&dagger;</span></td><td>0.77</td><td>0.85</td><td class="inv">0.38<span class="dag">&dagger;</span></td><td>1.13</td></tr>
+<tr><th scope="row">Test 10</th><td>2.42</td><td>2.37</td><td class="inv">3.85<span class="dag">&dagger;</span></td><td>1.16</td><td class="inv">0.41<span class="dag">&dagger;</span></td><td>2.40</td><td>2.37</td></tr>
+</tbody>
+    </table>
+  </div>
+  <p class="note">&dagger; the file was never produced, so this is what the attempt cost
+  before it was abandoned.</p>
+</section>
+
+<section>
+  <h2>Peak free space needed <span class="dir">&mdash; lower is better, GB</span></h2>
+  <p class="lede">The largest the working set ever became at one moment, which is the free
+  space a job actually requires.</p>
+  <div class="scroll">
+    <table class="num">
+      <thead><tr><th scope="col">Test</th><th scope="col">NZBGet 26.3</th><th scope="col">NZBGet 27.0-testing</th><th scope="col">SABnzbd 5.1.2</th><th scope="col">nzbfast 1.2.4</th><th scope="col">rustnzb 1.4.5</th><th scope="col">Weaver 0.7.8</th><th scope="col">Weaver 0.8.3</th></tr></thead>
+      <tbody><tr><th scope="row">Test 1</th><td>3.02</td><td>3.02</td><td>3.01</td><td>1.50</td><td>3.20</td><td>3.00</td><td>3.00</td></tr>
+<tr><th scope="row">Test 2</th><td>3.01</td><td>3.01</td><td>3.01</td><td>1.50</td><td>4.73</td><td class="inv">4.50<span class="dag">&dagger;</span></td><td class="inv">4.50<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 3</th><td>3.01</td><td>3.01</td><td>3.00</td><td>1.50</td><td>4.65</td><td class="inv">4.50<span class="dag">&dagger;</span></td><td class="inv">4.50<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 4</th><td>3.01</td><td>3.01</td><td>3.00</td><td>1.50</td><td>4.73</td><td class="inv">3.00<span class="dag">&dagger;</span></td><td class="inv">3.00<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 5</th><td>4.66</td><td>4.66</td><td>4.66</td><td>3.10</td><td>5.04</td><td class="inv">3.30<span class="dag">&dagger;</span></td><td class="inv">3.30<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 6</th><td>2.56</td><td>2.56</td><td>1.52</td><td>0.51</td><td>2.98</td><td class="inv">1.52<span class="dag">&dagger;</span></td><td class="inv">1.02<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 7</th><td>1.50</td><td>1.50</td><td>1.00</td><td>0.50</td><td>1.97</td><td class="inv">1.00<span class="dag">&dagger;</span></td><td class="inv">1.00<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 8</th><td>2.09</td><td>2.09</td><td>2.09</td><td>1.28</td><td class="inv">0.87<span class="dag">&dagger;</span></td><td class="inv">0.98<span class="dag">&dagger;</span></td><td class="inv">3.36<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 9</th><td>1.12</td><td>1.05</td><td class="inv">0.03<span class="dag">&dagger;</span></td><td>0.75</td><td>1.10</td><td class="inv">0.38<span class="dag">&dagger;</span></td><td>1.09</td></tr>
+<tr><th scope="row">Test 10</th><td>1.51</td><td>1.51</td><td class="inv">1.14<span class="dag">&dagger;</span></td><td>1.10</td><td class="inv">0.41<span class="dag">&dagger;</span></td><td>1.51</td><td>1.51</td></tr>
+</tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Peak memory <span class="dir">&mdash; lower is better, GB</span></h2>
+  <div class="scroll">
+    <table class="num">
+      <thead><tr><th scope="col">Test</th><th scope="col">NZBGet 26.3</th><th scope="col">NZBGet 27.0-testing</th><th scope="col">SABnzbd 5.1.2</th><th scope="col">nzbfast 1.2.4</th><th scope="col">rustnzb 1.4.5</th><th scope="col">Weaver 0.7.8</th><th scope="col">Weaver 0.8.3</th></tr></thead>
+      <tbody><tr><th scope="row">Test 1</th><td>0.14</td><td>0.14</td><td>1.65</td><td>0.08</td><td>0.05</td><td>0.48</td><td>0.49</td></tr>
+<tr><th scope="row">Test 2</th><td>0.14</td><td>0.13</td><td>1.64</td><td>0.08</td><td>0.05</td><td class="inv">0.48<span class="dag">&dagger;</span></td><td class="inv">0.47<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 3</th><td>0.14</td><td>0.14</td><td>1.63</td><td>0.07</td><td>0.05</td><td class="inv">0.49<span class="dag">&dagger;</span></td><td class="inv">0.48<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 4</th><td>0.14</td><td>0.13</td><td>1.72</td><td>4.32</td><td>0.12</td><td class="inv">0.49<span class="dag">&dagger;</span></td><td class="inv">0.49<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 5</th><td>0.15</td><td>0.16</td><td>1.67</td><td>0.32</td><td>0.06</td><td class="inv">0.51<span class="dag">&dagger;</span></td><td class="inv">0.48<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 6</th><td>0.13</td><td>0.14</td><td>1.04</td><td>0.09</td><td>0.05</td><td class="inv">0.33<span class="dag">&dagger;</span></td><td class="inv">0.29<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 7</th><td>0.14</td><td>0.13</td><td>1.10</td><td>1.25</td><td>0.05</td><td class="inv">0.30<span class="dag">&dagger;</span></td><td class="inv">0.28<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 8</th><td>0.14</td><td>0.16</td><td>0.99</td><td>0.30</td><td class="inv">0.04<span class="dag">&dagger;</span></td><td class="inv">0.48<span class="dag">&dagger;</span></td><td class="inv">0.46<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 9</th><td>0.60</td><td>0.61</td><td class="inv">0.16<span class="dag">&dagger;</span></td><td>1.29</td><td>1.28</td><td class="inv">0.36<span class="dag">&dagger;</span></td><td>0.43</td></tr>
+<tr><th scope="row">Test 10</th><td>0.12</td><td>0.12</td><td class="inv">0.68<span class="dag">&dagger;</span></td><td>0.16</td><td class="inv">0.04<span class="dag">&dagger;</span></td><td>0.24</td><td>0.26</td></tr>
+</tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Total processor time <span class="dir">&mdash; lower is better, seconds</span></h2>
+  <p class="lede">Processor seconds used by the downloader and by any manual passes
+  together. Independent of how many cores the machine has.</p>
+  <div class="scroll">
+    <table class="num">
+      <thead><tr><th scope="col">Test</th><th scope="col">NZBGet 26.3</th><th scope="col">NZBGet 27.0-testing</th><th scope="col">SABnzbd 5.1.2</th><th scope="col">nzbfast 1.2.4</th><th scope="col">rustnzb 1.4.5</th><th scope="col">Weaver 0.7.8</th><th scope="col">Weaver 0.8.3</th></tr></thead>
+      <tbody><tr><th scope="row">Test 1</th><td>3.0</td><td>3.0</td><td>3.4</td><td>1.2</td><td>14.1</td><td>2.0</td><td>1.6</td></tr>
+<tr><th scope="row">Test 2</th><td>4.2</td><td>4.1</td><td>3.9</td><td>1.4</td><td>13.9</td><td class="inv">2.8<span class="dag">&dagger;</span></td><td class="inv">2.1<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 3</th><td>4.1</td><td>4.0</td><td>3.9</td><td>1.4</td><td>14.0</td><td class="inv">2.8<span class="dag">&dagger;</span></td><td class="inv">2.1<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 4</th><td>4.3</td><td>4.3</td><td>4.2</td><td>2.7</td><td>14.0</td><td class="inv">3.8<span class="dag">&dagger;</span></td><td class="inv">3.2<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 5</th><td>24.9</td><td>25.2</td><td>25.7</td><td>6.3</td><td>36.2</td><td class="inv">3.0<span class="dag">&dagger;</span></td><td class="inv">2.3<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 6</th><td>2.8</td><td>2.9</td><td>2.7</td><td>0.7</td><td>4.8</td><td class="inv">1.1<span class="dag">&dagger;</span></td><td class="inv">0.9<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 7</th><td>2.0</td><td>1.8</td><td>2.0</td><td>1.0</td><td>4.6</td><td class="inv">1.4<span class="dag">&dagger;</span></td><td class="inv">1.3<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 8</th><td>17.6</td><td>17.7</td><td>18.8</td><td>6.5</td><td class="inv">4.2<span class="dag">&dagger;</span></td><td class="inv">281<span class="dag">&dagger;</span></td><td class="inv">247<span class="dag">&dagger;</span></td></tr>
+<tr><th scope="row">Test 9</th><td>30.2</td><td>30.2</td><td class="inv">1.3<span class="dag">&dagger;</span></td><td>41.2</td><td>890</td><td class="inv">1.6<span class="dag">&dagger;</span></td><td>8.5</td></tr>
+<tr><th scope="row">Test 10</th><td>8.9</td><td>8.8</td><td class="inv">21.3<span class="dag">&dagger;</span></td><td>0.8</td><td class="inv">3.1<span class="dag">&dagger;</span></td><td>822</td><td>135</td></tr>
+</tbody>
+    </table>
+  </div>
+  <p class="note">&dagger; the file was never produced. These are the cost of abandoning
+  the job, not of completing it, and are not comparable with the rest of the column. The
+  same mark is used in the disk tables above.</p>
+</section>
+
+<section>
+  <h2>Method</h2>
+  <ul class="facts">
+    <li><strong>No provider is involved.</strong> Every article is served from memory over a
+    local connection, so results do not depend on a Usenet account, a provider's retention
+    or a network path.</li>
+    <li><strong>Each downloader is configured to its documented best</strong>, not to its
+    shipped defaults where those are slower.</li>
+    <li><strong>No downloader is given a password.</strong> On Test 10 the first password is
+    posted beside the archive volumes, so the chain is available to anything that looks
+    for it.</li>
+    <li><strong>The manual passes use standard tools only</strong> and do only what a person
+    could: repair with PAR2, apply a RAR recovery record, extract, and read a password from
+    a file that was posted in the clear. They never re-download and never use knowledge of
+    the expected result to decide what to do.</li>
+    <li><strong>The manual passes run for every downloader</strong>, including those that
+    finished on their own, where they find nothing to do. Post-processing only the ones that
+    struggled would not be a comparison.</li>
+    <li><strong>Every figure is the median of three independent passes.</strong> Timing on
+    this machine varies by around a quarter between repeats of the same work, so a single
+    reading is not a measurement.</li>
+    <li><strong>Every downloader ran as native code</strong>, confirmed by sampling each
+    running process throughout. None ran under emulation.</li>
+  </ul>
+</section>
+
+<footer>
+  nzbfast 1.2.4 &middot; NZBGet 26.3 and 27.0-testing-20260827 &middot; SABnzbd 5.1.2 &middot;
+  rustnzb 1.4.5 &middot; Weaver 0.7.8 and 0.8.3.
+  rustnzb 1.4.5 and Weaver 0.8.3 are built from source because their projects publish no
+  macOS binary for those versions; every other one is the published build.
+</footer>
+</div>
+
+</body>
+</html>
