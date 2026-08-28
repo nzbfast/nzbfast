@@ -17,7 +17,7 @@ rars = { path = "../../vendor/rars", features = ["parallel"] }
 # Native 7z extraction (Apache-2.0, pure Rust - keeps the zero-external-tools
 # stance). Decode-only: no `compress` encoder, no wasm; aes256/bzip2/ppmd
 # cover the encrypted + non-LZMA methods real posts use.
-sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
 anyhow = "1"
 # `env` backs `--config`'s NZBFAST_CONFIG fallback: the container sets that
 # variable for the daemon, and without it a `docker exec … import-sab` wrote
@@ -190,7 +190,7 @@ rcgen = { version = "0.14.9", default-features = false, features = ["crypto", "p
 # Dev-only on purpose: resolver 2 does not unify dev-dependency features
 # into a normal build, so `cargo build` still links the decode-only
 # configuration declared above and the shipped binary gains no encoder.
-sevenz-rust2 = { version = "0.21", default-features = false, features = [
+sevenz-rust2 = { version = "0.22", default-features = false, features = [
     "aes256",
     "bzip2",
     "ppmd",
