@@ -699,6 +699,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Publications emboîtées &middot; mesuré le 28 août 2026</p>
+    <h2>Dix façons d'emballer une publication, et qui atteint vraiment le fichier</h2>
+    <p>Une grande partie de ce qui est publié est délibérément difficile à ouvrir. Le vrai nom de fichier est enfoui dans une deuxième archive, parfois une troisième, parfois dans un format différent à chaque niveau, afin que la publication révèle le moins possible de ce qu'elle contient. À cela s'ajoutent les publications endommagées : les articles expirent, les envois arrivent incomplets, et les données de récupération doivent être utilisées avant de pouvoir extraire quoi que ce soit. Un client parcourt cette chaîne pour vous, ou bien il vous remet un dossier d'archives et s'arrête.</p>
+    <p>Nous avons donc construit dix formes qui isolent exactement cela, confronté chaque client actuel à ces formes, puis fait ce que les comparatifs omettent habituellement : là où un client s'est arrêté trop tôt, nous avons terminé le travail à la main avec les outils standard et <b>chronométré cela aussi</b>. Un client qui abandonne vite paraît rapide jusqu'à ce que l'on compte le travail qu'il vous laisse.</p>
+    <div class="tblwrap"><table>
+      <tr><th>dix formes emballées et endommagées</th><th class="num">terminé seul</th><th class="num">seulement après réparation manuelle</th><th class="num">n'a jamais atteint le fichier</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 sur 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 sur 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 sur 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 sur 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 sur 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast est le seul à terminer les dix sans aide.</b> NZBGet atteint aussi le fichier sur chaque forme, mais il lui faut 16 séries de réparation et d'extraction manuelles sur huit d'entre elles. SABnzbd en termine cinq sans aide et deux restent inaccessibles même à la main. Weaver atteint le fichier sur deux.</p>
+    <p>Le schéma n'a rien d'aléatoire. Les formes que nzbfast parcourt et que les autres ne parcourent pas sont les formes emballées et les formes endommagées : une archive dans une archive, un changement de format en cours de chaîne, un enchaînement à cinq niveaux, et surtout une archive qui arrive corrompue avec ses propres données de récupération jointes. Sur cette dernière, quatre clients extraient parfaitement l'ensemble extérieur, vous remettent l'archive défectueuse accompagnée du jeu de récupération qui la réparerait, et s'arrêtent.</p>
+    <p>Là où les clients accomplissent le même travail, l'écart de coût est net. Voici les sept formes que les quatre clients principaux atteignent, réparation manuelle comprise :</p>
+    <div class="tblwrap"><table>
+      <tr><th>les sept formes atteintes par les quatre</th><th class="num">délai jusqu'à un fichier utilisable</th><th class="num">écrit sur le disque</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>Quatre à cinq fois plus rapide, pour moins de la moitié des octets écrits. Le chiffre du disque est celui qui compte encore après le téléchargement : chaque gigaoctet de cette colonne est un gigaoctet que votre disque a dû absorber, et les clients qui passent par une zone de transit écrivent la charge utile, la relisent et la réécrivent.</p>
+    <p><b>Là où nous ne sommes pas devant, et pourquoi il faut le dire.</b> Sur quatre des dix formes, un concurrent écrit moins d'octets que nzbfast <i>pendant le téléchargement lui-même</i>. À chaque fois, c'est parce qu'il en a fait moins : sur la forme à archive interne corrompue, NZBGet écrit 3,29&nbsp;GB contre nos 4,65, puis sa passe de réparation en écrit 2,91 de plus, pour finir à 6,20&nbsp;GB contre nos 4,65. Sur les autres, le client qui a le moins écrit est un client qui n'a jamais atteint le fichier. Un petit chiffre de disque n'est pas toujours une économie.</p>
+    <p><b>Ce sont des tests de capacité, pas des tests de vitesse.</b> Les charges utiles sont petites et servies depuis la mémoire sur une connexion locale, sans fournisseur ni réseau sur le trajet : rien ici n'est limité par le débit de téléchargement et les secondes absolues sont bien plus courtes que ce que les mêmes formes prendraient dans le monde réel. Le fait qu'une forme exige ou non un travail manuel est une propriété de la forme et du client, et se transpose directement. Les secondes comparent des clients effectuant un travail identique, elles ne prédisent pas la durée d'une vraie tâche.</p>
+    <p>Les résultats complets par forme, la description de chaque forme et la méthode se trouvent sur la <a href="benchmark-nested-archives.html">page de données des archives emboîtées</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Pourquoi c’est important</p>

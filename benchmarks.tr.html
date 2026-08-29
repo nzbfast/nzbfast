@@ -723,6 +723,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">İç içe gönderiler &middot; 28 Ağustos 2026 tarihinde ölçüldü</p>
+    <h2>Bir gönderiyi paketlemenin on yolu ve dosyaya gerçekten kim ulaşıyor</h2>
+    <p>Yayımlananların çoğu bilerek açılması zor hâle getirilir. Gerçek dosya adı ikinci bir arşivin, bazen üçüncüsünün içine gömülür, bazen her katmanda başka bir biçimde durur; böylece gönderi içeriği hakkında olabildiğince az şey ele verir. Üstüne bir de gönderiler hasarlı ulaşır: makaleler süresi dolup düşer, yüklemeler eksik iner ve hiçbir şey açılmadan önce kurtarma verisinin kullanılması gerekir. Bir indirici ya bu zinciri sizin için baştan sona yürür ya da elinize bir klasör dolusu arşiv verip durur.</p>
+    <p>Bu yüzden tam olarak bunu yalıtan on biçim kurduk, güncel her istemciyi bunlara karşı yarıştırdık ve sonra karşılaştırmaların genelde atladığı şeyi yaptık: bir istemci erken durduğunda işi standart araçlarla elle bitirdik ve <b>onun da süresini tuttuk</b>. Çabuk pes eden bir istemci, size bıraktığı iş sayılana kadar hızlı görünür.</p>
+    <div class="tblwrap"><table>
+      <tr><th>on paketlenmiş ve hasarlı biçim</th><th class="num">kendi başına bitirdi</th><th class="num">ancak elle onarımdan sonra</th><th class="num">dosyaya hiç ulaşamadı</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">10 üzerinden 2</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">10 üzerinden 5</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 üzerinden 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">10 üzerinden 7</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">10 üzerinden 1</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>Onunu da yardımsız bitiren tek istemci nzbfast.</b> NZBGet de her biçimde dosyaya ulaşıyor, ama bunların sekizinde 16 tur elle onarım ve açma gerekiyor. SABnzbd beşini yardımsız bitiriyor, ikisine elle bile ulaşılamıyor. Weaver dosyaya ikisinde ulaşıyor.</p>
+    <p>Bu örüntü rastlantı değil. nzbfast'in geçtiği, diğerlerinin geçemediği biçimler paketlenmiş ve hasarlı olanlar: arşiv içinde arşiv, zincirin ortasında biçim değişimi, beş katmanlı bir zincir ve hepsinden önemlisi kendi kurtarma verisiyle birlikte bozuk gelen bir arşiv. Bu sonuncusunda dört istemci dıştaki kümeyi kusursuz açıyor, bozuk arşivi onu onaracak kurtarma kümesiyle birlikte elinize verip duruyor.</p>
+    <p>İstemcilerin aynı işi bitirdiği yerde fark küçük değil. Aşağıdakiler, yaygın dört istemcinin de ulaştığı yedi biçim; her birinin ihtiyaç duyduğu elle onarım dâhil:</p>
+    <div class="tblwrap"><table>
+      <tr><th>dördünün de ulaştığı yedi biçim</th><th class="num">kullanılabilir dosyaya kadar geçen süre</th><th class="num">diske yazılan</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>Dört ila beş kat daha hızlı ve yazılan baytın yarısından azıyla. Disk rakamı indirmeden sonra da önemini koruyan rakamdır: o sütundaki her gigabayt, diskinizin kabul etmek zorunda kaldığı bir gigabayttır; işi ara belleğe alan istemciler içeriği yazar, geri okur ve yeniden yazar.</p>
+    <p><b>Önde olmadığımız yerler ve bunu söylemeye neden değer.</b> On biçimin dördünde bir rakip <i>indirmenin kendisi sırasında</i> nzbfast'ten daha az bayt yazıyor. Her seferinde daha azını yaptığı için: bozuk iç arşiv biçiminde NZBGet bizim 4,65 değerimize karşılık 3,29&nbsp;GB yazıyor, ardından onarım turu 2,91 daha yazıyor ve bizim 4,65 değerimize karşılık 6,20&nbsp;GB ile bitiriyor. Diğerlerinde en az yazan istemci, dosyaya hiç ulaşamamış olandır. Küçük bir disk rakamı her zaman tutumluluk değildir.</p>
+    <p><b>Bunlar yetenek testleridir, hız testleri değil.</b> İçerikler küçüktür ve yerel bir bağlantı üzerinden bellekten sunulur; yolda ne sağlayıcı ne de ağ vardır, dolayısıyla buradaki hiçbir şey indirme hızıyla sınırlı değildir ve mutlak saniyeler aynı biçimlerin gerçek dünyada alacağı süreden çok daha kısadır. Bir biçimin elle iş gerektirip gerektirmediği, biçimin ve istemcinin bir özelliğidir ve doğrudan aktarılır. Saniyeler, aynı işi yapan istemcileri karşılaştırır; gerçek bir işin ne kadar süreceğini öngörmez.</p>
+    <p>Biçim başına tüm sonuçlar, her biçimin ne olduğu ve yöntem <a href="benchmark-nested-archives.html">iç içe arşivler veri sayfasında</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Neden önemli</p>

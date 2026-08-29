@@ -701,6 +701,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Verschachtelte Beiträge &middot; gemessen am 28. August 2026</p>
+    <h2>Zehn Arten, einen Beitrag zu verpacken, und wer die Datei wirklich erreicht</h2>
+    <p>Vieles, was veröffentlicht wird, ist absichtlich schwer zu öffnen. Der echte Dateiname steckt in einem zweiten Archiv, manchmal einem dritten, manchmal auf jeder Ebene in einem anderen Format, damit der Beitrag so wenig wie möglich über seinen Inhalt verrät. Hinzu kommt, dass Beiträge beschädigt ankommen: Artikel verfallen, Uploads landen unvollständig, und die Wiederherstellungsdaten müssen benutzt werden, bevor überhaupt etwas entpackt werden kann. Ein Downloader geht diese Kette für Sie durch, oder er übergibt Ihnen einen Ordner voller Archive und hört auf.</p>
+    <p>Wir haben deshalb zehn Formen gebaut, die genau das isolieren, jeden aktuellen Client dagegen antreten lassen und dann getan, was Vergleichstests sonst auslassen: Wo ein Client zu früh aufhörte, haben wir die Arbeit von Hand mit den Standardwerkzeugen beendet und <b>auch das gemessen</b>. Ein Client, der schnell aufgibt, wirkt schnell, bis man die Arbeit zählt, die er Ihnen hinterlässt.</p>
+    <div class="tblwrap"><table>
+      <tr><th>zehn verpackte und beschädigte Formen</th><th class="num">allein fertiggestellt</th><th class="num">erst nach manueller Reparatur</th><th class="num">Datei nie erreicht</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 von 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 von 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 von 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 von 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 von 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast ist der Einzige, der alle zehn ohne Hilfe schafft.</b> NZBGet erreicht die Datei ebenfalls bei jeder Form, braucht dafür aber 16 Durchgänge manueller Reparatur und Entpackung bei acht davon. SABnzbd schafft fünf ohne Hilfe, zwei bleiben auch von Hand unerreichbar. Weaver erreicht die Datei bei zweien.</p>
+    <p>Das Muster ist nicht zufällig. Die Formen, die nzbfast durchläuft und die anderen nicht, sind die verpackten und die beschädigten: ein Archiv im Archiv, ein Formatwechsel auf halbem Weg, eine fünfstufige Kette und vor allem ein Archiv, das beschädigt ankommt und seine eigenen Wiederherstellungsdaten mitbringt. Bei Letzterem entpacken vier Clients den äußeren Satz einwandfrei, übergeben Ihnen das defekte Archiv samt dem Wiederherstellungssatz, der es reparieren würde, und hören auf.</p>
+    <p>Wo Clients dieselbe Arbeit erledigen, ist der Abstand deutlich. Dies sind die sieben Formen, die alle vier verbreiteten Clients erreichen, einschließlich der jeweils nötigen manuellen Reparatur:</p>
+    <div class="tblwrap"><table>
+      <tr><th>die sieben von allen vier erreichten Formen</th><th class="num">Zeit bis zur nutzbaren Datei</th><th class="num">auf die Festplatte geschrieben</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>Vier- bis fünfmal schneller, bei weniger als der Hälfte der geschriebenen Bytes. Der Festplattenwert ist der, der nach dem Download weiter zählt: Jedes Gigabyte in dieser Spalte ist ein Gigabyte, das Ihr Laufwerk aufnehmen musste, und die Clients, die den Auftrag zwischenspeichern, schreiben die Nutzdaten heraus, lesen sie zurück und schreiben sie erneut.</p>
+    <p><b>Wo wir nicht vorn liegen, und warum das gesagt gehört.</b> Bei vier der zehn Formen schreibt ein Mitbewerber <i>während des Downloads selbst</i> weniger Bytes als nzbfast. Jedes Mal, weil er weniger getan hat: Bei der Form mit beschädigtem Innenarchiv schreibt NZBGet 3,29&nbsp;GB gegenüber unseren 4,65, dann schreibt sein Reparaturdurchgang weitere 2,91 und endet bei 6,20&nbsp;GB gegenüber unseren 4,65. Bei den übrigen ist der Client, der am wenigsten geschrieben hat, einer, der die Datei nie erreicht hat. Ein kleiner Festplattenwert ist nicht immer Sparsamkeit.</p>
+    <p><b>Das sind Fähigkeitstests, keine Geschwindigkeitstests.</b> Die Nutzdaten sind klein und werden aus dem Arbeitsspeicher über eine lokale Verbindung geliefert, ohne Provider und ohne Netzwerk dazwischen. Nichts hier wird durch die Downloadgeschwindigkeit begrenzt, und die absoluten Sekunden sind weit kürzer, als dieselben Formen in der Praxis brauchen würden. Ob eine Form überhaupt Handarbeit erfordert, ist eine Eigenschaft der Form und des Clients und lässt sich direkt übertragen. Die Sekunden vergleichen Clients bei identischer Arbeit, sie sagen nicht voraus, wie lange ein echter Auftrag dauert.</p>
+    <p>Vollständige Ergebnisse je Form, die Beschreibung jeder Form und die Methode finden Sie auf der <a href="benchmark-nested-archives.html">Datenseite zu verschachtelten Archiven</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Warum es zählt</p>

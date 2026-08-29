@@ -691,6 +691,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Indlejrede opslag &middot; målt den 28. august 2026</p>
+    <h2>Ti måder at pakke et opslag ind på, og hvem der faktisk når filen</h2>
+    <p>Meget af det, der bliver lagt op, er bevidst svært at åbne. Det rigtige filnavn ligger begravet i et andet arkiv, undertiden et tredje, undertiden i et andet format på hvert niveau, så opslaget røber så lidt som muligt om, hvad det indeholder. Dertil kommer, at opslag ankommer beskadigede: artikler udløber, uploads lander ufuldstændige, og genoprettelsesdataene skal bruges, før noget som helst kan pakkes ud. En downloader går kæden igennem for dig, eller også rækker den dig en mappe med arkiver og stopper.</p>
+    <p>Vi byggede derfor ti former, der isolerer præcis det, lod hver aktuel klient møde dem og gjorde så det, sammenligninger normalt springer over: hvor en klient stoppede for tidligt, gjorde vi arbejdet færdigt i hånden med standardværktøjerne og <b>tog tid på det også</b>. En klient, der giver op hurtigt, ser hurtig ud, indtil man tæller det arbejde, den efterlader til dig.</p>
+    <div class="tblwrap"><table>
+      <tr><th>ti indpakkede og beskadigede former</th><th class="num">klarede det selv</th><th class="num">først efter manuel reparation</th><th class="num">nåede aldrig filen</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 af 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 af 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 af 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 af 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 af 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast er den eneste, der klarer alle ti uden hjælp.</b> NZBGet når også filen i hver form, men har brug for 16 runder manuel reparation og udpakning i otte af dem. SABnzbd klarer fem på egen hånd, og to er uopnåelige selv i hånden. Weaver når filen i to.</p>
+    <p>Mønstret er ikke tilfældigt. De former, nzbfast kommer igennem, og de andre ikke, er de indpakkede og de beskadigede: et arkiv i et arkiv, et formatskift midtvejs, en kæde i fem niveauer og frem for alt et arkiv, der ankommer ødelagt med sine egne genoprettelsesdata ved siden af. På den sidste pakker fire klienter det ydre sæt fejlfrit ud, rækker dig det ødelagte arkiv sammen med det genoprettelsessæt, der ville reparere det, og stopper.</p>
+    <p>Hvor klienterne udfører det samme arbejde, er forskellen stor. Dette er de syv former, som alle fire udbredte klienter når, inklusive den manuelle reparation, hver enkelt havde brug for:</p>
+    <div class="tblwrap"><table>
+      <tr><th>de syv former, som alle fire når</th><th class="num">tid til en brugbar fil</th><th class="num">skrevet til disken</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>Fire til fem gange hurtigere, på under halvdelen af de skrevne byte. Disktallet er det, der bliver ved med at betyde noget efter downloaden: hver gigabyte i den kolonne er en gigabyte, din disk har måttet tage imod, og de klienter, der bruger et mellemlager, skriver indholdet ud, læser det tilbage og skriver det igen.</p>
+    <p><b>Hvor vi ikke er foran, og hvorfor det er værd at sige.</b> På fire af de ti former skriver en konkurrent færre byte end nzbfast <i>under selve downloaden</i>. Hver gang fordi den gjorde mindre: på formen med beskadiget inderarkiv skriver NZBGet 3,29&nbsp;GB mod vores 4,65, og derefter skriver dens reparationsrunde yderligere 2,91 og ender på 6,20&nbsp;GB mod vores 4,65. På de øvrige er den klient, der skrev mindst, en, der aldrig nåede filen. Et lavt disktal er ikke altid nøjsomhed.</p>
+    <p><b>Dette er kapacitetstest, ikke hastighedstest.</b> Indholdet er lille og serveres fra hukommelsen over en lokal forbindelse, uden udbyder og uden netværk undervejs, så intet her begrænses af downloadhastigheden, og de absolutte sekunder er langt kortere, end de samme former ville tage i virkeligheden. Om en form overhovedet kræver håndarbejde er en egenskab ved formen og klienten og kan overføres direkte. Sekunderne sammenligner klienter, der udfører identisk arbejde; de forudsiger ikke, hvor lang tid en rigtig opgave tager.</p>
+    <p>Fuldstændige resultater pr. form, hvad hver form er, og metoden findes på <a href="benchmark-nested-archives.html">datasiden om indlejrede arkiver</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Hvorfor det betyder noget</p>

@@ -695,6 +695,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Post annidati &middot; misurato il 28 agosto 2026</p>
+    <h2>Dieci modi di impacchettare un post, e chi arriva davvero al file</h2>
+    <p>Molto di ciò che viene pubblicato è deliberatamente difficile da aprire. Il nome reale del file è sepolto dentro un secondo archivio, a volte un terzo, a volte in un formato diverso a ogni livello, così che il post riveli il meno possibile di ciò che contiene. A questo si aggiungono i post danneggiati: gli articoli scadono, i caricamenti arrivano incompleti e i dati di recupero vanno usati prima di poter estrarre qualsiasi cosa. Un client percorre quella catena per voi, oppure vi consegna una cartella di archivi e si ferma.</p>
+    <p>Abbiamo quindi costruito dieci forme che isolano esattamente questo, messo alla prova ogni client attuale e poi fatto ciò che i confronti di solito saltano: dove un client si è fermato in anticipo, abbiamo completato il lavoro a mano con gli strumenti standard e <b>cronometrato anche quello</b>. Un client che si arrende in fretta sembra veloce finché non si conta il lavoro che vi lascia.</p>
+    <div class="tblwrap"><table>
+      <tr><th>dieci forme impacchettate e danneggiate</th><th class="num">completato da solo</th><th class="num">solo dopo riparazione manuale</th><th class="num">file mai raggiunto</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 su 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 su 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 su 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 su 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 su 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast è l'unico a completare tutte e dieci senza aiuto.</b> Anche NZBGet raggiunge il file su ogni forma, ma richiede 16 cicli di riparazione ed estrazione manuali su otto di esse. SABnzbd ne completa cinque da solo e due restano irraggiungibili anche a mano. Weaver raggiunge il file su due.</p>
+    <p>Lo schema non è casuale. Le forme che nzbfast percorre e le altre no sono quelle impacchettate e quelle danneggiate: un archivio dentro un archivio, un cambio di formato a metà catena, una catena a cinque livelli e soprattutto un archivio che arriva corrotto con i propri dati di recupero accanto. Su quest'ultima quattro client estraggono perfettamente l'insieme esterno, vi consegnano l'archivio difettoso insieme al set di recupero che lo riparerebbe, e si fermano.</p>
+    <p>Dove i client svolgono lo stesso lavoro, il divario non è ravvicinato. Queste sono le sette forme raggiunte da tutti e quattro i client principali, contando la riparazione manuale necessaria a ciascuno:</p>
+    <div class="tblwrap"><table>
+      <tr><th>le sette forme raggiunte da tutti e quattro</th><th class="num">tempo per un file utilizzabile</th><th class="num">scritto su disco</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>Da quattro a cinque volte più rapido, con meno della metà dei byte scritti. Il dato del disco è quello che continua a contare dopo il download: ogni gigabyte in quella colonna è un gigabyte che il vostro disco ha dovuto assorbire, e i client che usano un'area di transito scrivono il contenuto, lo rileggono e lo riscrivono.</p>
+    <p><b>Dove non siamo in testa, e perché vale la pena dirlo.</b> Su quattro delle dieci forme un concorrente scrive meno byte di nzbfast <i>durante il download stesso</i>. Ogni volta perché ha fatto meno: sulla forma con archivio interno corrotto NZBGet scrive 3,29&nbsp;GB contro i nostri 4,65, poi la sua passata di riparazione ne scrive altri 2,91, chiudendo a 6,20&nbsp;GB contro i nostri 4,65. Sulle altre, il client che ha scritto meno è uno che non ha mai raggiunto il file. Un numero basso sul disco non è sempre parsimonia.</p>
+    <p><b>Questi sono test di capacità, non test di velocità.</b> I contenuti sono piccoli e vengono serviti dalla memoria su una connessione locale, senza provider né rete nel percorso: nulla qui è limitato dalla velocità di download e i secondi assoluti sono molto più brevi di quanto le stesse forme richiederebbero nel mondo reale. Se una forma richieda o meno lavoro manuale è una proprietà della forma e del client, e si trasferisce direttamente. I secondi confrontano client che svolgono un lavoro identico, non prevedono quanto durerà un compito reale.</p>
+    <p>I risultati completi per forma, la descrizione di ogni forma e il metodo sono nella <a href="benchmark-nested-archives.html">pagina dati sugli archivi annidati</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Perché conta</p>

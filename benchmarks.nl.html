@@ -688,6 +688,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Geneste berichten &middot; gemeten op 28 augustus 2026</p>
+    <h2>Tien manieren om een bericht te verpakken, en wie het bestand echt bereikt</h2>
+    <p>Veel van wat er wordt geplaatst is met opzet moeilijk te openen. De echte bestandsnaam zit verstopt in een tweede archief, soms een derde, soms op elk niveau in een ander formaat, zodat het bericht zo weinig mogelijk prijsgeeft over de inhoud. Daar komt bij dat berichten beschadigd aankomen: artikelen verlopen, uploads komen onvolledig binnen en de herstelgegevens moeten worden gebruikt voordat er iets uitgepakt kan worden. Een downloader loopt die keten voor u af, of hij geeft u een map vol archieven en stopt.</p>
+    <p>We hebben daarom tien vormen gebouwd die precies dat isoleren, elke actuele client ertegen laten uitkomen en vervolgens gedaan wat vergelijkingen meestal overslaan: waar een client vroegtijdig stopte, hebben we het werk met de hand afgemaakt met de standaardgereedschappen en <b>dat ook geklokt</b>. Een client die snel opgeeft lijkt snel, tot je het werk meetelt dat hij bij jou achterlaat.</p>
+    <div class="tblwrap"><table>
+      <tr><th>tien verpakte en beschadigde vormen</th><th class="num">zelfstandig voltooid</th><th class="num">pas na handmatig herstel</th><th class="num">bestand nooit bereikt</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 van 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 van 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 van 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 van 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 van 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast is de enige die alle tien zonder hulp afmaakt.</b> NZBGet bereikt het bestand ook bij elke vorm, maar heeft daarvoor 16 rondes handmatig herstellen en uitpakken nodig bij acht ervan. SABnzbd voltooit er vijf zonder hulp en twee blijven zelfs met de hand onbereikbaar. Weaver bereikt het bestand bij twee.</p>
+    <p>Het patroon is niet willekeurig. De vormen die nzbfast wel aflegt en de anderen niet, zijn de verpakte en de beschadigde: een archief in een archief, een formaatwissel halverwege, een keten van vijf niveaus en vooral een archief dat beschadigd aankomt met zijn eigen herstelgegevens ernaast. Bij die laatste pakken vier clients de buitenste set foutloos uit, geven u het defecte archief samen met de herstelset die het zou repareren, en stoppen.</p>
+    <p>Waar clients hetzelfde werk afmaken, is het verschil groot. Dit zijn de zeven vormen die alle vier de gangbare clients bereiken, inclusief het handmatige herstel dat elk nodig had:</p>
+    <div class="tblwrap"><table>
+      <tr><th>de zeven vormen die alle vier bereiken</th><th class="num">tijd tot een bruikbaar bestand</th><th class="num">naar schijf geschreven</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>Vier tot vijf keer sneller, met minder dan de helft van de geschreven bytes. Het schijfcijfer is het cijfer dat na het downloaden blijft tellen: elke gigabyte in die kolom is een gigabyte die uw schijf heeft moeten verwerken, en de clients die het werk tussentijds opslaan schrijven de inhoud weg, lezen die terug en schrijven die opnieuw.</p>
+    <p><b>Waar we niet voorop lopen, en waarom dat gezegd moet worden.</b> Bij vier van de tien vormen schrijft een concurrent <i>tijdens het downloaden zelf</i> minder bytes dan nzbfast. Steeds omdat hij minder deed: bij de vorm met een beschadigd binnenarchief schrijft NZBGet 3,29&nbsp;GB tegenover onze 4,65, waarna zijn herstelronde er nog 2,91 bij schrijft en op 6,20&nbsp;GB eindigt tegenover onze 4,65. Bij de andere is de client die het minst schreef er een die het bestand nooit bereikte. Een laag schijfcijfer is niet altijd zuinigheid.</p>
+    <p><b>Dit zijn capaciteitstests, geen snelheidstests.</b> De inhoud is klein en wordt vanuit het geheugen over een lokale verbinding geleverd, zonder provider en zonder netwerk ertussen, dus niets hier wordt begrensd door de downloadsnelheid en de absolute seconden zijn veel korter dan dezelfde vormen in de praktijk zouden kosten. Of een vorm überhaupt handwerk vergt, is een eigenschap van de vorm en de client en laat zich rechtstreeks vertalen. De seconden vergelijken clients die identiek werk doen; ze voorspellen niet hoe lang een echte taak duurt.</p>
+    <p>Volledige resultaten per vorm, wat elke vorm is en de methode staan op de <a href="benchmark-nested-archives.html">gegevenspagina over geneste archieven</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Waarom het ertoe doet</p>

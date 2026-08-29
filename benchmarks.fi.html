@@ -364,6 +364,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Sisäkkäiset julkaisut &middot; mitattu 28. elokuuta 2026</p>
+    <h2>Kymmenen tapaa paketoida julkaisu, ja kuka todella pääsee tiedostoon</h2>
+    <p>Suuri osa julkaistusta on tarkoituksella vaikeaa avata. Todellinen tiedostonimi on haudattu toisen arkiston sisään, joskus kolmannen, joskus eri muodossa joka tasolla, jotta julkaisu paljastaisi mahdollisimman vähän sisällöstään. Lisäksi julkaisut saapuvat vaurioituneina: artikkelit vanhenevat, lähetykset saapuvat vaillinaisina, ja palautustietoja on käytettävä ennen kuin mitään voi purkaa. Lataaja joko kulkee tämän ketjun puolestasi tai ojentaa sinulle kansiollisen arkistoja ja pysähtyy.</p>
+    <p>Rakensimme siksi kymmenen muotoa, jotka eristävät juuri tämän, panimme jokaisen nykyisen asiakasohjelman niitä vastaan ja teimme sitten sen, minkä vertailut yleensä ohittavat: siellä missä ohjelma pysähtyi liian aikaisin, viimeistelimme työn käsin vakiotyökaluilla ja <b>otimme siitäkin ajan</b>. Nopeasti luovuttava ohjelma näyttää nopealta, kunnes lasketaan se työ, jonka se jättää sinulle.</p>
+    <div class="tblwrap"><table>
+      <tr><th>kymmenen paketoitua ja vaurioitunutta muotoa</th><th class="num">valmis omin voimin</th><th class="num">vasta käsin korjaamisen jälkeen</th><th class="num">ei päässyt tiedostoon</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 / 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 / 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 / 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 / 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 / 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast on ainoa, joka selvittää kaikki kymmenen ilman apua.</b> Myös NZBGet pääsee tiedostoon jokaisessa muodossa, mutta tarvitsee 16 kierrosta käsin tehtyä korjausta ja purkua kahdeksassa niistä. SABnzbd selvittää viisi omin voimin, ja kaksi jää saavuttamattomiin käsinkin. Weaver pääsee tiedostoon kahdessa.</p>
+    <p>Kuvio ei ole sattumaa. Ne muodot, jotka nzbfast läpäisee ja muut eivät, ovat paketoidut ja vaurioituneet: arkisto arkiston sisällä, muodon vaihdos kesken ketjun, viisitasoinen ketju ja ennen kaikkea arkisto, joka saapuu rikkinäisenä omat palautustietonsa mukanaan. Viimeksi mainitussa neljä ohjelmaa purkaa ulomman joukon moitteettomasti, ojentaa sinulle rikkinäisen arkiston yhdessä sen korjaavan palautusjoukon kanssa, ja pysähtyy.</p>
+    <p>Siellä missä ohjelmat tekevät saman työn, ero ei ole pieni. Nämä ovat ne seitsemän muotoa, jotka kaikki neljä yleistä ohjelmaa saavuttavat, kunkin tarvitsema käsin tehty korjaus mukaan laskettuna:</p>
+    <div class="tblwrap"><table>
+      <tr><th>ne seitsemän muotoa, jotka kaikki neljä saavuttavat</th><th class="num">aika käyttökelpoiseen tiedostoon</th><th class="num">levylle kirjoitettu</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>Neljä tai viisi kertaa nopeampi, alle puolella kirjoitetuista tavuista. Levyluku on se, jolla on merkitystä vielä latauksen jälkeen: jokainen sarakkeen gigatavu on gigatavu, jonka levysi on joutunut ottamaan vastaan, ja välivarastointia käyttävät ohjelmat kirjoittavat sisällön ulos, lukevat sen takaisin ja kirjoittavat sen uudelleen.</p>
+    <p><b>Missä emme ole edellä, ja miksi se kannattaa sanoa.</b> Neljässä kymmenestä muodosta kilpailija kirjoittaa vähemmän tavuja kuin nzbfast <i>itse latauksen aikana</i>. Joka kerta siksi, että se teki vähemmän: vaurioituneen sisäarkiston muodossa NZBGet kirjoittaa 3,29&nbsp;GB meidän 4,65 vastaan, ja sitten sen korjauskierros kirjoittaa vielä 2,91 lisää päätyen 6,20&nbsp;GB:hen meidän 4,65 vastaan. Muissa vähiten kirjoittanut ohjelma on sellainen, joka ei koskaan päässyt tiedostoon. Pieni levyluku ei aina ole säästäväisyyttä.</p>
+    <p><b>Nämä ovat kyvykkyystestejä, eivät nopeustestejä.</b> Sisällöt ovat pieniä ja ne tarjoillaan muistista paikallisen yhteyden yli, ilman palveluntarjoajaa ja ilman verkkoa välissä, joten mikään tässä ei rajoitu latausnopeuteen ja absoluuttiset sekunnit ovat paljon lyhyempiä kuin samat muodot veisivät todellisuudessa. Se, vaatiiko muoto lainkaan käsityötä, on muodon ja ohjelman ominaisuus ja siirtyy sellaisenaan. Sekunnit vertaavat ohjelmia, jotka tekevät identtistä työtä; ne eivät ennusta, kauanko todellinen työ kestää.</p>
+    <p>Täydelliset muotokohtaiset tulokset, kunkin muodon kuvaus ja menetelmä ovat <a href="benchmark-nested-archives.html">sisäkkäisten arkistojen datasivulla</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Miksi tällä on väliä</p>

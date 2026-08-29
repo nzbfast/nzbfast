@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sonarr, Radarr &amp; Prowlarr - nzbfast</title>
+<meta name="description" content="Point Sonarr, Radarr and Prowlarr at nzbfast: it speaks the SABnzbd API and the NZBGet JSON-RPC API, and can serve as a Newznab indexer too. Setup, category mapping and troubleshooting.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+<style>
+  .steps{list-style:none;counter-reset:s;padding:0;margin:0}
+  .steps>li{position:relative;padding:0 0 22px 46px;margin:0}
+  .steps>li::before{counter-increment:s;content:counter(s);position:absolute;inset-inline-start:0;top:-2px;
+    width:30px;height:30px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:14px;
+    background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
+  .steps>li:not(:last-child)::after{content:"";position:absolute;inset-inline-start:14px;top:32px;bottom:6px;width:2px;
+    background:var(--line)}
+  .steps h3{margin:2px 0 8px;font-size:16px}
+  .steps p,.steps ul{color:var(--dim);font-size:14.5px}
+  .tbl{overflow-x:auto;margin:14px 0;border:1px solid var(--line);border-radius:12px}
+  .tbl table{min-width:480px}
+  .lead-guide{color:var(--dim);font-size:16px;max-width:720px;margin:0 0 8px}
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <a class="logo" href="index.html"><span class="bolt">⚡</span> nzbfast</a>
+  <nav>
+    <a href="index.html" class="home">Home</a>
+    <a href="features.html">Features</a>
+    <a href="indexer.html">Indexer</a>
+    <a href="benchmarks.html">Benchmarks</a>
+    <a href="explained.html">Explained</a>
+    <a href="MANUAL.html">Docs</a>
+    <a href="https://github.com/nzbfast/nzbfast" title="Source repository">GitHub</a>
+    <a class="cta" href="download.html">Download</a>
+  </nav>
+</div></header>
+
+<div class="hero wrap" style="padding-bottom:6px">
+  <h1>nzbfast with <em>Sonarr &amp; Radarr</em></h1>
+  <p class="sub">nzbfast speaks the SABnzbd API natively, so the *arrs treat it as SABnzbd with no
+  plugins, no patches and no shim. It speaks NZBGet's JSON-RPC API too, and it can act as their
+  indexer. Add it as a download client and you are done in about a minute.</p>
+</div>
+
+<section style="padding-top:20px">
+  <div class="wrap">
+    <p class="lead-guide">There are two ways to connect, and you only need one. <b>Add nzbfast as a
+    SABnzbd download client</b> is the route to take unless you have a reason not to: it is the
+    better-covered of the two APIs and it is what the rest of this page assumes.</p>
+    <div class="callout"><b>You need two things.</b> The address of your nzbfast machine
+    (<code>http://your-host:6789</code>) and your API key. The key is in the dashboard under
+    <b>Settings → Security</b>, behind a reveal. On an install that has not downloaded anything yet
+    the Welcome card also hands you the address with a Copy button beside it.</div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>As a download client <span class="note" style="font-weight:400">· about a minute</span></h2>
+    <ol class="steps">
+      <li><h3>Open the download client settings</h3>
+        <p>In Sonarr or Radarr: <b>Settings → Download Clients</b>, press <b>+</b>, and choose
+        <b>SABnzbd</b> from the list. Not "Usenet Blackhole", and not NZBGet unless you are
+        deliberately taking the other route below.</p></li>
+      <li><h3>Fill in four fields</h3>
+        <div class="tbl"><table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td><b>Host</b></td><td>the machine nzbfast runs on, e.g. <code>192.168.1.10</code>. Use <code>localhost</code> only if the *arr runs on the same machine, and see the Docker note below if either side is in a container.</td></tr>
+            <tr><td><b>Port</b></td><td><code>6789</code>, unless you changed it.</td></tr>
+            <tr><td><b>API Key</b></td><td>your full API key from Settings → Security.</td></tr>
+            <tr><td><b>Category</b></td><td><code>tv</code> in Sonarr, <code>movies</code> in Radarr. See the mapping below.</td></tr>
+          </tbody>
+        </table></div>
+        <p>Leave Username and Password empty. nzbfast authenticates on the API key alone.</p></li>
+      <li><h3>Press Test</h3>
+        <p>You want a green tick. If it goes red, the message is the useful part and the
+        troubleshooting section at the foot of this page names the two you are most likely to see.
+        Then <b>Save</b>.</p></li>
+    </ol>
+    <div class="callout"><b>In Docker?</b> A container cannot reach <code>localhost</code> on its
+    host. If the *arr is containerised and nzbfast is not, use the host's LAN address, or
+    <code>host.docker.internal</code> on Docker Desktop. If both are containers on one Docker
+    network, use nzbfast's container name.</div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Categories, and where files land</h2>
+    <p class="lead-guide">The category you type into the *arr is passed straight through, and nzbfast
+    files the finished download in a folder named after it, under your completed folder. This is the
+    same arrangement SABnzbd uses, so an existing Remote Path Mapping keeps working.</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Set in</th><th>Category</th><th>Finished download lands in</th></tr></thead>
+      <tbody>
+        <tr><td>Sonarr</td><td><code>tv</code></td><td><code>&lt;completed&gt;/tv/&lt;release name&gt;</code></td></tr>
+        <tr><td>Radarr</td><td><code>movies</code></td><td><code>&lt;completed&gt;/movies/&lt;release name&gt;</code></td></tr>
+        <tr><td>Lidarr</td><td><code>music</code></td><td><code>&lt;completed&gt;/music/&lt;release name&gt;</code></td></tr>
+        <tr><td>Readarr</td><td><code>books</code></td><td><code>&lt;completed&gt;/books/&lt;release name&gt;</code></td></tr>
+        <tr><td>anything else</td><td>your own name</td><td><code>&lt;completed&gt;/&lt;name&gt;/&lt;release name&gt;</code></td></tr>
+      </tbody>
+    </table></div>
+    <p class="lead-guide">You do not have to create these first. A category the daemon has not seen
+    is accepted and its folder made on the spot, and the *arr's own category dropdown is filled from
+    whatever nzbfast reports.</p>
+    <div class="callout"><b>The folder name is not always the release name.</b> When nzbfast
+    recognises a film it may file it under a tidied name instead. That is safe for the *arrs, which
+    match a finished download by its job id and read the real path back from nzbfast rather than
+    guessing it. It is worth knowing about if you point some other tool at the completed folder and
+    expect the release name.</div>
+
+    <h3 style="margin-top:26px">Newznab category numbers</h3>
+    <p class="lead-guide">These matter only if you also switch the built-in indexer on and let the
+    *arrs search it. nzbfast classifies each release it indexes and answers with the standard
+    Newznab number:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Number</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>2000</code></td><td>Movies</td></tr>
+        <tr><td><code>5000</code></td><td>TV</td></tr>
+        <tr><td><code>4000</code></td><td>PC</td></tr>
+        <tr><td><code>8000</code></td><td>Other. Not <code>7000</code>, which is Books in the standard tree.</td></tr>
+      </tbody>
+    </table></div>
+    <p class="lead-guide">Matching is parent and child, which is what makes this work without any
+    configuration on your side: a release answered as <code>5000</code> is returned for a query
+    scoped to <code>5000</code> and for one scoped to a TV subcategory such as <code>5040</code>,
+    while a movie query does not match it.</p>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>As an indexer, on its own or through Prowlarr</h2>
+    <p class="lead-guide">With the built-in indexer switched on, nzbfast serves Newznab from its own
+    index of the groups you scan. This is an addition to your usual indexers rather than a
+    replacement: it finds what was posted under a real filename, which is a slice of Usenet rather
+    than all of it.</p>
+    <div class="callout"><b>Switch it on first.</b> <b>Settings → Indexing</b> in the dashboard. It
+    is off by default, and while it is off every Newznab query is answered with
+    <code>&lt;error code="101"&gt;</code> rather than an empty list, so a mistake shows up when you
+    add the indexer instead of silently finding nothing for weeks.</div>
+    <ol class="steps">
+      <li><h3>Add a Newznab indexer</h3>
+        <p>In Sonarr, Radarr or Prowlarr: <b>Settings → Indexers</b> → <b>+</b> → <b>Newznab</b>
+        (in Prowlarr, <b>Generic Newznab</b>).</p></li>
+      <li><h3>Fill in three fields</h3>
+        <div class="tbl"><table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td><b>URL</b></td><td><code>http://your-host:6789/newznab</code></td></tr>
+            <tr><td><b>API Path</b></td><td><code>/api</code></td></tr>
+            <tr><td><b>API Key</b></td><td>the same key as above.</td></tr>
+          </tbody>
+        </table></div></li>
+      <li><h3>Test</h3>
+        <p>The test runs a real search. If your index is still empty it will say so rather than pass,
+        which is correct: let a scan finish first, then test again.</p></li>
+    </ol>
+    <p class="lead-guide">Searches work by name or by id. Series take a TVDB, IMDb or TVmaze id and
+    films an IMDb or TMDB id, and the client reads which are supported from the capabilities
+    response. Through Prowlarr, the indexer syncs to Sonarr and Radarr like any other, and NZB
+    downloads are handed back through Prowlarr's own proxy.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>The NZBGet route</h2>
+    <p class="lead-guide">If you would rather connect as NZBGet, nzbfast serves the JSON-RPC API at
+    <code>/jsonrpc</code>. Choose <b>NZBGet</b> in the download client list and fill in the same host
+    and port, with any username you like and <b>your API key as the password</b>. Post-processing
+    parameters, categories and history all behave as the *arrs expect.</p>
+    <div class="callout">Pick one route, not both. Two clients pointed at the same daemon will both
+    report the same downloads and the *arr will not thank you for it.</div>
+  </div>
+</section>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>What has actually been tested</h2>
+    <p class="lead-guide">Every release is certified against real, unmodified clients rather than
+    against a reading of their documentation. The current round, 28 August 2026, ran stock containers
+    with no patches on either side:</p>
+    <div class="tbl"><table>
+      <thead><tr><th>Client</th><th>Version</th><th>Covered</th></tr></thead>
+      <tbody>
+        <tr><td>Sonarr</td><td>4.0.19</td><td>Test dialog, grab, queue, completed pickup, categories, failed download and blocklist, both the SABnzbd and NZBGet routes</td></tr>
+        <tr><td>Radarr</td><td>6.3.0</td><td>Test dialog, grab, queue, completed pickup, categories</td></tr>
+        <tr><td>Prowlarr</td><td>2.5.2</td><td>Indexer test, search, NZB fetch, indexer sync into Sonarr</td></tr>
+      </tbody>
+    </table></div>
+    <p class="lead-guide">Including the whole loop end to end: Sonarr searching automatically, through
+    Prowlarr, against nzbfast's own indexer, grabbing the result through nzbfast as its download
+    client, and filing it under the right category.</p>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>If something is not right</h2>
+    <ul class="plain">
+      <li><b>Test says "API Key Incorrect"</b>: the key reached us and did not match. Copy it again
+      from Settings → Security, whole, with no surrounding space.</li>
+      <li><b>Test says "API Key Required"</b>: no key arrived at all. The field is empty, or a proxy
+      in front of nzbfast is dropping the query string.</li>
+      <li><b>Test cannot connect</b>: nothing answered on that host and port. Check the daemon is
+      running, check the port, and if either side is containerised re-read the Docker note above.
+      A daemon bound to <code>127.0.0.1</code> is reachable only from its own machine.</li>
+      <li><b>Downloads finish but never import</b>: the *arr has to be able to read the completed
+      folder at the path nzbfast reports. If they are on different machines, or in containers with
+      different mounts, that is what Remote Path Mapping is for.</li>
+      <li><b>The indexer test fails with error 101</b>: the built-in indexer is switched off. Settings
+      → Indexing.</li>
+      <li><b>The indexer test says there were no results</b>: it is on, but the index is empty so far.
+      Let a scan run, then test again.</li>
+    </ul>
+    <div class="callout" style="margin-top:22px">The <a href="MANUAL.html">manual</a> has more on both
+    APIs, including the phone remotes, post-processing scripts on the <code>SAB_*</code> contract, and
+    importing an existing SABnzbd or NZBGet configuration in one click.</div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div class="cols">
+    <div>⚡ <b>nzbfast</b> - the one-pass Usenet downloader.</div>
+    <div>
+      <a href="index.html">Home</a> ·
+      <a href="features.html">Features</a> ·
+      <a href="indexer.html">Indexer</a> ·
+      <a href="benchmarks.html">Benchmarks</a> ·
+      <a href="explained.html">Explained</a> ·
+      <a href="download.html">Download</a> ·
+      <a href="https://github.com/nzbfast/nzbfast">GitHub</a>
+    </div>
+  </div>
+  <p class="fine">Free software, GPL-3.0-or-later. PAR2 repair and RAR extraction are native code inside the binary, no bundled third-party tools.</p>
+</div></footer>
+
+</body>
+</html>

@@ -767,6 +767,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Postări imbricate &middot; măsurat la 28 august 2026</p>
+    <h2>Zece feluri de a împacheta o postare și cine ajunge cu adevărat la fișier</h2>
+    <p>Mare parte din ceea ce se publică este anume greu de deschis. Numele real al fișierului este îngropat într-o a doua arhivă, uneori a treia, uneori într-un format diferit la fiecare nivel, astfel încât postarea să dezvăluie cât mai puțin despre ce conține. La asta se adaugă faptul că postările sosesc deteriorate: articolele expiră, încărcările ajung incomplete, iar datele de recuperare trebuie folosite înainte de a putea extrage ceva. Un client fie parcurge acel lanț pentru dumneavoastră, fie vă întinde un dosar plin de arhive și se oprește.</p>
+    <p>Am construit deci zece forme care izolează exact acest lucru, am pus fiecare client actual să le înfrunte și apoi am făcut ceea ce comparațiile sar de obicei: acolo unde un client s-a oprit devreme, am terminat treaba manual cu uneltele obișnuite și <b>am cronometrat și asta</b>. Un client care renunță repede pare rapid până când numeri munca pe care ți-o lasă.</p>
+    <div class="tblwrap"><table>
+      <tr><th>zece forme împachetate și deteriorate</th><th class="num">a terminat singur</th><th class="num">abia după reparare manuală</th><th class="num">nu a ajuns niciodată la fișier</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 din 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 din 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 din 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 din 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 din 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast este singurul care le termină pe toate zece fără ajutor.</b> Și NZBGet ajunge la fișier la fiecare formă, dar are nevoie de 16 runde de reparare și extragere manuală la opt dintre ele. SABnzbd termină cinci de unul singur, iar două rămân inaccesibile chiar și manual. Weaver ajunge la fișier la două.</p>
+    <p>Tiparul nu este întâmplător. Formele pe care nzbfast le parcurge, iar ceilalți nu, sunt cele împachetate și cele deteriorate: o arhivă într-o arhivă, o schimbare de format la jumătatea lanțului, un lanț cu cinci niveluri și, mai ales, o arhivă care sosește coruptă cu propriile date de recuperare alături. La aceasta din urmă, patru clienți extrag setul exterior impecabil, vă întind arhiva defectă împreună cu setul de recuperare care ar repara-o, și se opresc.</p>
+    <p>Acolo unde clienții duc la capăt aceeași muncă, diferența nu este mică. Acestea sunt cele șapte forme la care ajung toți cei patru clienți răspândiți, incluzând repararea manuală de care a avut nevoie fiecare:</p>
+    <div class="tblwrap"><table>
+      <tr><th>cele șapte forme la care ajung toți patru</th><th class="num">timp până la un fișier utilizabil</th><th class="num">scris pe disc</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51,2 s</td><td class="num">29,83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52,3 s</td><td class="num">32,27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10,3 s</td><td class="win num">11,68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41,8 s</td><td class="num">27,75 GB</td></tr>
+    </table></div>
+    <p>De patru până la cinci ori mai rapid, cu sub jumătate din octeții scriși. Cifra discului este cea care contează și după descărcare: fiecare gigabait din acea coloană este un gigabait pe care discul dumneavoastră a trebuit să îl absoarbă, iar clienții care folosesc o zonă intermediară scriu conținutul, îl citesc înapoi și îl scriu din nou.</p>
+    <p><b>Unde nu suntem în față și de ce merită spus.</b> La patru din cele zece forme, un concurent scrie mai puțini octeți decât nzbfast <i>chiar în timpul descărcării</i>. De fiecare dată pentru că a făcut mai puțin: la forma cu arhivă interioară coruptă, NZBGet scrie 3,29&nbsp;GB față de cei 4,65 ai noștri, apoi trecerea sa de reparare mai scrie 2,91, încheind la 6,20&nbsp;GB față de cei 4,65 ai noștri. La celelalte, clientul care a scris cel mai puțin este unul care nu a ajuns niciodată la fișier. O cifră mică pe disc nu înseamnă întotdeauna cumpătare.</p>
+    <p><b>Acestea sunt teste de capabilitate, nu teste de viteză.</b> Conținuturile sunt mici și sunt servite din memorie printr-o conexiune locală, fără furnizor și fără rețea pe traseu, așa că nimic de aici nu este limitat de viteza de descărcare, iar secundele absolute sunt mult mai scurte decât ar dura aceleași forme în lumea reală. Dacă o formă cere sau nu muncă manuală ține de formă și de client și se transferă direct. Secundele compară clienți care fac o muncă identică; ele nu prezic cât durează o sarcină reală.</p>
+    <p>Rezultatele complete pe fiecare formă, ce este fiecare formă și metoda se află pe <a href="benchmark-nested-archives.html">pagina de date despre arhivele imbricate</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">De ce contează</p>

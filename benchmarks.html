@@ -690,6 +690,37 @@
   </div>
 </section>
 
+<section id="shape-nested">
+  <div class="wrap">
+    <p class="kicker">Wrapped posts &middot; measured 28 August 2026</p>
+    <h2>Ten ways a post can be wrapped, and who actually reaches the file</h2>
+    <p>A lot of what gets posted is deliberately hard to open. The real filename is buried inside a second archive, sometimes a third, sometimes in a different format at each level, so the post gives away as little as possible about what it holds. On top of that, posts arrive damaged: articles expire, uploads land incomplete, and the recovery data has to be used before anything can be unpacked. A downloader either walks that chain for you or it hands you a folder of archives and stops.</p>
+    <p>So we built ten shapes that isolate exactly that, raced every current client against them, and then did something benchmarks usually skip: where a client stopped early, we finished the job by hand with the standard tools and <b>timed that too</b>. A client that gives up quickly looks fast until you count the work it left you.</p>
+    <div class="tblwrap"><table>
+      <tr><th>ten wrapped and damaged shapes</th><th class="num">finished on its own</th><th class="num">only after manual repair</th><th class="num">never reached the file</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">2 of 10</td><td class="num">8</td><td class="num">0</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">5 of 10</td><td class="num">3</td><td class="num">2</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10 of 10</td><td class="win num">0</td><td class="win num">0</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">7 of 10</td><td class="num">1</td><td class="num">2</td></tr>
+      <tr><td><b>Weaver 0.7.8</b></td><td class="num">1 of 10</td><td class="num">1</td><td class="num">8</td></tr>
+    </table></div>
+    <p><b>nzbfast is the only one that finishes all ten without help.</b> NZBGet reaches the file on every shape too, but needs 16 rounds of manual repair and extraction across eight of them. SABnzbd finishes five unaided and two are unreachable even by hand. Weaver reaches the file on two.</p>
+    <p>The pattern is not random. The shapes nzbfast walks and the others do not are the wrapped ones and the damaged ones: an archive inside an archive, a format change part-way down, a five-level chain, and above all an archive that arrives corrupt with its own recovery data packed alongside it. On that last one four clients unpack the outer set perfectly, hand you the broken archive together with the recovery set that would fix it, and stop.</p>
+    <p>Where clients finish the same work, the cost is not close. These are the seven shapes all four mainstream clients reach, counting the manual repair each needed:</p>
+    <div class="tblwrap"><table>
+      <tr><th>the seven shapes all four reach</th><th class="num">time to a usable file</th><th class="num">written to disk</th></tr>
+      <tr><td><b>NZBGet 26.3</b></td><td class="num">51.2 s</td><td class="num">29.83 GB</td></tr>
+      <tr><td><b>SABnzbd 5.1.2</b></td><td class="num">52.3 s</td><td class="num">32.27 GB</td></tr>
+      <tr><td><b>nzbfast 1.2.4</b></td><td class="win num">10.3 s</td><td class="win num">11.68 GB</td></tr>
+      <tr><td><b>rustnzb 1.4.5</b></td><td class="num">41.8 s</td><td class="num">27.75 GB</td></tr>
+    </table></div>
+    <p>Four to five times quicker, on under half the bytes written. The disk figure is the one that keeps mattering after the download: every gigabyte in that column is a gigabyte your drive had to absorb, and the clients that stage the job write the payload out, read it back and write it again.</p>
+    <p><b>Where we are not ahead, and why it is worth saying.</b> On four of the ten shapes a rival writes fewer bytes than nzbfast <i>during the download itself</i>. In every case it is because it did less: on the corrupt-inner-archive shape NZBGet writes 3.29&nbsp;GB to our 4.65 and then its repair pass writes another 2.91, finishing at 6.20&nbsp;GB against our 4.65. On the others the client that wrote least is one that never reached the file at all. A small disk number is not always thrift.</p>
+    <p><b>These are capability tests, not speed tests.</b> The payloads are small and are served from memory over a local connection, with no provider and no network in the path, so nothing here is limited by download speed and the absolute seconds are far shorter than the same shapes would take in the real world. Whether a shape needs manual work at all is a property of the shape and the client, and transfers directly. The seconds are a comparison between clients doing identical work, not a prediction of how long a real job takes.</p>
+    <p>Full per-shape results, what each shape is, and the method are on the <a href="benchmark-nested-archives.html">nested-archive data page</a>.</p>
+  </div>
+</section>
+
 <section id="why-it-matters">
   <div class="wrap">
     <p class="kicker">Why it matters</p>
