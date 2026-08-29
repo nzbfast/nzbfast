@@ -6,6 +6,7 @@
 //! The struct itself, [`Feeder`], and the report types stay in the parent
 //! beside their docs.
 
+use super::linalg::{fold_batches, invert_vandermonde};
 use super::*;
 
 /// The one place [`MAX_REPAIR_DIM`] is spelled as a refusal, so the two
@@ -148,8 +149,9 @@ impl Reconstructor {
         let ntt_budget =
             resolve_syndrome_path(path, block_size, n_inputs, missing.len(), &exponents);
         let worker_exponents = exponents.clone();
-        // Capacity 4 (was 1): with M2c.2's parallel readers each sender
-        // carries a BATCH_BYTES/N-sized batch, so a slightly deeper
+        // Capacity 8 (was 1, then 4 - aa3fb30fd deepened it alongside
+        // BATCH_BYTES 32 -> 64 MiB): with M2c.2's parallel readers each
+        // sender carries a BATCH_BYTES/N-sized batch, so a slightly deeper
         // queue keeps disks busy while a batch folds without growing
         // worst-case in-flight memory beyond the old single-feeder cap.
         let (tx, rx) = std::sync::mpsc::sync_channel::<FeedBatch>(8);
@@ -212,11 +214,11 @@ impl Reconstructor {
                 // capacity alone: each try_recv that frees a buffered slot
                 // immediately unblocks a sender, whose message lands in the
                 // buffer and is drained on the next iteration. With
-                // sync_channel(4) and up to 8 feeders that is up to 12
-                // batches merged, not 5. Harmless at typical block sizes
-                // (~48 MB vs the 32 MB BATCH_BYTES design cap), but a feeder
+                // sync_channel(8) and up to 8 feeders that is up to 16
+                // batches merged, not 9. Harmless at typical block sizes
+                // (~128 MB vs the 64 MB BATCH_BYTES design cap), but a feeder
                 // batch is one whole block when block_size is large - a set
-                // with 16 MB blocks holds ~192 MB in the merged batch. The
+                // with 16 MB blocks holds ~256 MB in the merged batch. The
                 // fold is XOR accumulation, so merging and reordering are
                 // exact; this is a memory bound, not a correctness one.
                 while let Ok(more) = rx.try_recv() {
@@ -505,7 +507,7 @@ impl Reconstructor {
             .unwrap_or(512)
             .min(words.max(16));
         let stripes = words.div_ceil(w);
-        let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+        let cores = crate::mem::cpu_workers();
         // Same physical-core rule as fold_parallel on hybrid x86.
         #[cfg(all(target_arch = "x86_64", windows))]
         let cores = physical_cores().map_or(cores, |p| p.min(cores));

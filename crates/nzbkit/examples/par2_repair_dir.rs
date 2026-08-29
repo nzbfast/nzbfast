@@ -53,8 +53,12 @@ fn main() {
                     r.blocks_rebuilt, r.blocks_adopted
                 )
             }
-            nzbkit::par2repair::RepairStatus::Unrepairable { needed, have } => {
-                format!("Unrepairable needed={needed} have={have}")
+            nzbkit::par2repair::RepairStatus::Unrepairable {
+                needed,
+                have,
+                adopted,
+            } => {
+                format!("Unrepairable needed={needed} have={have} adopted={adopted}")
             }
         })
     );

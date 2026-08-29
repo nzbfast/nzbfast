@@ -12,7 +12,8 @@
 //! invented and none must be - the journal IS the durable partial form,
 //! and every sweep already treats a queue row's directory as live.
 //!
-//! What this module owns is the two QUEUE-side decisions:
+//! What this module owns is the QUEUE-side decisions, and what a client
+//! is told about them:
 //!
 //! * [`Daemon::pick_insurance_job`] - which deferred row may fetch,
 //!   asked by the runner only when [`Daemon::pick_job`] found nothing
@@ -24,6 +25,11 @@
 //!   (gracefully, journal intact) the moment a real job becomes
 //!   runnable, so banking a deferred row never holds up a download the
 //!   user actually asked for. Rides the slow-job watchdog's tick.
+//! * [`slot_payload`] / [`insure_arm`] - the surface (TODO 304 stage 2).
+//!   A banked row was indistinguishable from a merely paused one, and a
+//!   post the fetch had given up on said nothing at all, which is the
+//!   news this whole feature exists to deliver early. The refusals both
+//!   halves ask are one list, [`insure_refusal`].
 //!
 //! The fetch itself is the ordinary pipeline: the runner threads
 //! `insurance` through to `get_with_progress` as `no_extract`, and the
@@ -41,7 +47,128 @@ use super::*;
 /// Failed fetch attempts after which the picker leaves a row alone for
 /// the rest of this process. Deliberately process-local (see
 /// [`Job::insurance_attempts`]).
-const INSURANCE_MAX_ATTEMPTS: u32 = 3;
+///
+/// Read by the queue payload too ([`slot_payload`]), so the row can say
+/// it has been retired rather than sitting there looking merely paused -
+/// a post the background fetch has given up on three times is the one
+/// the user most needs to hear about while the articles are still
+/// half-there.
+pub(in crate::serve) const INSURANCE_MAX_ATTEMPTS: u32 = 3;
+
+/// Why this row may never be insured, in the daemon's own words, or None
+/// when it may.
+///
+/// ONE list, asked by the picker's belt below AND by the per-row control
+/// ([`insure_arm`]), so "the daemon will not bank this" and "the button
+/// offers to bank this" cannot drift apart. The strings are English on
+/// the wire like every other API refusal (the SAB-compat contract); the
+/// dashboard translates at the display edge.
+pub(in crate::serve) fn insure_refusal(j: &Job) -> Option<&'static str> {
+    if !j.paused {
+        // Insurance is for a download the user DEFERRED. An unpaused row
+        // is already `pick_job`'s business at its real priority.
+        Some("this download is not paused")
+    } else if j.tombstone {
+        Some("this job is being removed")
+    } else if !j.held_for.is_empty() || j.priority == DUPE_PRIORITY {
+        // A spare that downloads payload is the one outcome §282 forbids
+        // outright, and the button is not an exception to it.
+        Some("a held copy must not download payload")
+    } else if j.library {
+        Some("a library item never downloads payload")
+    } else if j.relocating > 0 {
+        Some("this job is being moved")
+    } else {
+        None
+    }
+}
+
+/// The row's insurance state for the queue payload, or Null on every
+/// ordinary row - which is every row on a queue with the feature off.
+///
+/// Stage 1 left a banked row indistinguishable from a merely paused one:
+/// same "Paused", same 100%, and a fetch running in the background under
+/// a status word that said "Downloading". These five facts are what a
+/// client needs to tell those four states apart, and they are additive
+/// keys the *arrs ignore, like `deferred` and `alt_offer` beside them.
+pub(in crate::serve) fn slot_payload(j: &Job) -> Value {
+    if !j.insurance {
+        return Value::Null;
+    }
+    json!({
+        // The payload is on disk and journalled: promotion is an unpause
+        // that extracts from what is here, not a second download.
+        "banked": j.fetched,
+        // This row's background fetch is on the wire NOW. Downloading +
+        // paused + not suspended is the identity
+        // `insurance_yields_to_arrivals` uses, and it is exact: no
+        // ordinary run is ever paused while Downloading.
+        "fetching": j.paused && !j.suspended && j.state == JobState::Downloading,
+        "attempts": j.insurance_attempts,
+        "retired": j.insurance_attempts >= INSURANCE_MAX_ATTEMPTS,
+        // The daemon's own sentence for the last failure (see
+        // `Job::insurance_note`), empty when there has not been one.
+        "note": j.insurance_note,
+    })
+}
+
+/// The per-row control: insure this row, or stop insuring it.
+///
+/// The add-time stamp is deliberately narrow - a row the user pauses
+/// mid-queue said "stop", not "fetch anyway" - and this is the explicit
+/// statement that narrowness leaves no room for. It overrides the
+/// INFERENCE, never the doctrine: [`insure_refusal`] still refuses a
+/// held spare and a library row, and the cap still has to be on, because
+/// a button that switches a feature on for one row while the budget it
+/// spends is zero would do nothing and say it had.
+///
+/// Turning it OFF winds a fetch that is already running down gracefully
+/// - the same `suspend_matching` call the arrivals yield makes, so the
+/// journal is intact and the bytes already on disk stay - rather than
+/// leaving the errand the user just cancelled running to completion.
+pub(in crate::serve) fn insure_arm(
+    d: &Arc<Daemon>,
+    params: &std::collections::HashMap<String, String>,
+) -> Value {
+    let id = params.get("value").cloned().unwrap_or_default();
+    let on = params.get("value2").map(String::as_str) != Some("0");
+    if on && d.insurance_cap_gb.load(Ordering::Relaxed) == 0 {
+        return json!({"status": false, "error": "no disk budget is set for saving downloads early"});
+    }
+    let job = {
+        let q = d.queue.lock_ok();
+        q.iter().find(|j| j.lock_ok().nzo_id == id).cloned()
+    };
+    let Some(job) = job else {
+        return json!({"status": false, "error": "unknown nzo_id"});
+    };
+    let mut winding_down = false;
+    {
+        let mut g = job.lock_ok();
+        if on {
+            if let Some(why) = insure_refusal(&g) {
+                return json!({"status": false, "error": why});
+            }
+            g.insurance = true;
+            // A fresh ladder: the user asking for this row by name is a
+            // new answer to the question three failed attempts retired.
+            g.insurance_attempts = 0;
+            g.insurance_note.clear();
+        } else {
+            g.insurance = false;
+            winding_down = g.paused && !g.suspended && g.state == JobState::Downloading;
+        }
+    }
+    d.save_queue();
+    if winding_down {
+        info!(
+            target: "insurance",
+            "{id}: no longer insured - winding the background fetch down              (progress kept in the journal)"
+        );
+        d.suspend_matching(true, |g| g.nzo_id == id);
+    }
+    json!({"status": true})
+}
 
 impl Daemon {
     /// The add-time stamp (see [`Job::insurance`]): an add-paused row
@@ -96,16 +223,9 @@ impl Daemon {
             }
             // The belt behind the add-time stamp: nothing here may ever
             // start payload on a held spare, a library row, a row being
-            // relocated, or one the user has since promoted (an unpaused
-            // row is `pick_job`'s business, at its real priority).
-            if !g.paused
-                || g.tombstone
-                || !g.held_for.is_empty()
-                || g.priority == DUPE_PRIORITY
-                || g.library
-                || g.relocating > 0
-                || g.insurance_attempts >= INSURANCE_MAX_ATTEMPTS
-            {
+            // relocated, or one the user has since promoted. One list,
+            // shared with the per-row control - see `insure_refusal`.
+            if insure_refusal(&g).is_some() || g.insurance_attempts >= INSURANCE_MAX_ATTEMPTS {
                 continue;
             }
             let own = if holds_bytes {
@@ -279,6 +399,130 @@ mod tests {
         // as banked AND candidate (900 + 900) it would not.
         let picked = d.pick_insurance_job().expect("the partial resumes");
         assert_eq!(picked.lock_ok().nzo_id, "partial");
+    }
+
+    /// Every row an ordinary queue holds reports NOTHING: the surface is
+    /// silent unless the feature is on and this row is in it.
+    #[test]
+    fn an_ordinary_row_carries_no_insurance_block() {
+        assert_eq!(
+            slot_payload(&row("plain", false, 1_000).lock_ok()),
+            Value::Null
+        );
+    }
+
+    /// The four states stage 1 left indistinguishable, told apart.
+    #[test]
+    fn the_payload_tells_the_four_states_apart() {
+        let waiting = row("waiting", true, 1_000);
+        let v = slot_payload(&waiting.lock_ok());
+        assert_eq!(v["banked"], false);
+        assert_eq!(v["fetching"], false);
+        assert_eq!(v["retired"], false);
+
+        // On the wire NOW: paused + Downloading + not suspended, which
+        // is the identity `insurance_yields_to_arrivals` uses.
+        let fetching = row("fetching", true, 1_000);
+        fetching.lock_ok().state = JobState::Downloading;
+        assert_eq!(slot_payload(&fetching.lock_ok())["fetching"], true);
+        // ...and a WIND-DOWN in flight is not: the row is on its way
+        // back to the queue, and saying "saving this now" through it
+        // would be the one moment the claim is false.
+        fetching.lock_ok().suspended = true;
+        assert_eq!(slot_payload(&fetching.lock_ok())["fetching"], false);
+
+        let banked = row("banked", true, 1_000);
+        banked.lock_ok().fetched = true;
+        assert_eq!(slot_payload(&banked.lock_ok())["banked"], true);
+
+        // Retired, with the daemon's own sentence for why - the count
+        // alone cannot say whether the post is going or a provider was
+        // simply down, which is the whole news this feature carries.
+        let dead = row("dead", true, 1_000);
+        {
+            let mut g = dead.lock_ok();
+            g.insurance_attempts = INSURANCE_MAX_ATTEMPTS;
+            g.insurance_note = "7 missing of 7 segments".into();
+        }
+        let v = slot_payload(&dead.lock_ok());
+        assert_eq!(v["retired"], true);
+        assert_eq!(v["attempts"], INSURANCE_MAX_ATTEMPTS);
+        assert_eq!(v["note"], "7 missing of 7 segments");
+    }
+
+    /// The per-row control is an override of the add-time INFERENCE, not
+    /// of the doctrine: the cap still has to be on, and a held spare is
+    /// still refused - by the same list the picker's belt asks.
+    #[test]
+    fn the_control_overrides_the_stamp_but_not_the_doctrine() {
+        let dir = tmp("arm");
+        let d = test_daemon(&dir);
+        let plain = row("plain", false, 1_000);
+        d.queue.lock_ok().push_back(plain.clone());
+        let ask = |id: &str, on: &str| {
+            let mut p = std::collections::HashMap::new();
+            p.insert("value".to_string(), id.to_string());
+            p.insert("value2".to_string(), on.to_string());
+            insure_arm(&d, &p)
+        };
+
+        // Off: a switch that spends a budget of nothing must not report
+        // success over a fetch that will never happen.
+        assert_eq!(ask("plain", "1")["status"], false);
+        assert!(!plain.lock_ok().insurance);
+
+        d.insurance_cap_gb.store(10, Ordering::Relaxed);
+        assert_eq!(ask("plain", "1")["status"], true);
+        assert!(plain.lock_ok().insurance);
+        assert_eq!(
+            d.pick_insurance_job()
+                .map(|j| j.lock_ok().nzo_id.clone())
+                .as_deref(),
+            Some("plain")
+        );
+
+        // ...and off again, which the picker must honour at once.
+        assert_eq!(ask("plain", "0")["status"], true);
+        assert!(d.pick_insurance_job().is_none());
+
+        // A held spare is refused however it is asked for: §282's one
+        // forbidden outcome is not a default the button may override.
+        let spare = row("spare", false, 1_000);
+        {
+            let mut g = spare.lock_ok();
+            g.held_for = "owner".into();
+            g.priority = DUPE_PRIORITY;
+        }
+        d.queue.lock_ok().push_back(spare.clone());
+        assert_eq!(ask("spare", "1")["status"], false);
+        assert!(!spare.lock_ok().insurance);
+
+        assert_eq!(ask("nobody", "1")["status"], false);
+    }
+
+    /// Asking for a retired row by name is a new answer to the question
+    /// three failed attempts closed: the ladder starts over, and the
+    /// stale reason goes with it.
+    #[test]
+    fn re_insuring_resets_the_retired_ladder() {
+        let dir = tmp("reset");
+        let d = test_daemon(&dir);
+        d.insurance_cap_gb.store(10, Ordering::Relaxed);
+        let dead = row("dead", true, 1_000);
+        {
+            let mut g = dead.lock_ok();
+            g.insurance_attempts = INSURANCE_MAX_ATTEMPTS;
+            g.insurance_note = "7 missing of 7 segments".into();
+        }
+        d.queue.lock_ok().push_back(dead.clone());
+        assert!(d.pick_insurance_job().is_none(), "retired");
+        let mut p = std::collections::HashMap::new();
+        p.insert("value".to_string(), "dead".to_string());
+        p.insert("value2".to_string(), "1".to_string());
+        assert_eq!(insure_arm(&d, &p)["status"], true);
+        assert_eq!(dead.lock_ok().insurance_attempts, 0);
+        assert!(dead.lock_ok().insurance_note.is_empty());
+        assert!(d.pick_insurance_job().is_some());
     }
 
     /// The attempt ladder retires a row the fetch keeps failing on.

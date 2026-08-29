@@ -548,6 +548,16 @@ tavallinen verkko-osoite riittää; Prowlarr-rivi näyttää tältä:
 mitä tuli takaisin, mikä todistaa osoitteen ja avaimen yhdellä napsautuksella.
 Tallennettua avainta ei näytetä enää: kenttä sanoo niin, ja tyhjäksi jättäminen säilyttää
 jo tallennetun avaimen.</p>
+<p><b>nzbindex, ilman tiliä.</b> Asetukset → Hae indeksoijilta →
+<b>+ Lisää indeksoija</b>, ja aseta rivin ensimmäinen kenttä arvoon <code>nzbindex</code>
+tilin nimeämisen sijaan. Se hakee nzbindex.com-sivustolta suoraan sen omalla,
+dokumentoidulla rajapinnalla, avainta ei tarvita, vaikka nzbindex ottaa vastaan senkin,
+korkeampaa rajaa varten omalla puolellaan. Se indeksoi sen, mitä on oikeasti julkaistu,
+eikä valikoitua julkaisulistaa, joten se löytää asioita, joita yllä olevilla tileillä ei
+ole, hinnalla että monissa sen tuloksissa on sekoitettuja nimiä. Lataukset jonottuvat ja
+puretaan silti kuten mikä tahansa muu työ. <b>Vain täydelliset</b>, päällä oletuksena,
+pitää ulkona julkaisut, joista puuttuu osia eivätkä ne voi koskaan valmistua; vieressä
+olevat koon, iän ja keskusteluryhmän kentät rajaavat hakua entisestään.</p>
 <p><b>Hakeminen.</b> Avaa <b>🎬 seinä</b> yläpalkista ja valitse <b>Julkaisut</b>.
 Hakukentän vieressä oleva valikko päättää mistä haku katsoo: <b>Tämä indeksi</b>, eli se
 mitä tämä kone on itse skannannut, <b>Indeksoijat</b> tai <b>Molemmat</b>. Valintasi
@@ -1106,7 +1116,8 @@ valvontakansiosta), <code>nzb.refeed</code> (valmiin latauksen oma NZB-tiedosto 
 onnistui ja korvattu kopio poistettiin),
 <code>queue.idle</code>, <code>queue.paused</code> ja <code>queue.resumed</code> (jono pysähtyi tai käynnistyi uudelleen, teki sen kuka tai mikä tahansa), <code>queue.finished_action</code>
 (jonon päättymistoiminto viritettiin, suoritettiin tai peruttiin), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> ja <code>update.available</code> (löytyi uudempi nzbfast-versio). Jokainen kantaa
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> ja <code>server.block_spent</code> (ennakkoon maksettu lohkotili on viimeisessä 15 prosentissa ostetusta datasta tai on käyttänyt sen kokonaan) ja <code>update.available</code> (löytyi uudempi nzbfast-versio). Jokainen kantaa
 <code>schema_version</code>-kentän (nyt 1; uusia avaimia voi ilmestyä ilman
 versiokorotusta - ohita se, mitä et tunne), monotonisen <code>seq</code>-arvon ja
 <code>at</code>-aikaleiman millisekunteina.</p>
@@ -1268,6 +1279,7 @@ asiakas ei tee töiden välistä limitystä.</li>
 <li><b>Töiden välinen liotus</b>: valmistuneen työn loppupään (varmistus/purku) valmistuessa
 levyllä seuraavan työn lataus omistaa jo linjan.</li>
 </ul>
+<p><b>Kun käytössä on vain yksi palveluntarjoaja</b>, tämä voi havaita vain täysin kuolleen postauksen - siitä ei tule yhtään mitään, joko koska jokainen artikkeli hylätään tai koska palveluntarjoaja yksinkertaisesti lakkaa vastaamasta. Työ, joka on vain hidas mutta vastaanottaa silti jonkin verran tavuja, jätetään rauhaan, koska ei ole toista palveluntarjoajaa, jolle se voitaisiin siirtää. Määritä toinen palveluntarjoaja, niin nzbfast voi myös huomata postauksen, jota yksi palvelin ei enää tarjoa, ja reitittää tai lykkää sitä sen sijaan, että työtä odotettaisiin loppuun.</p>
 <h3 id="oracle">Saatavuusoraakkeli</h3>
 <p>Poistot ovat tärkein syy Usenet-latauksen epäonnistumiseen, ja ne ovat
 ennustettavissa: sama julkaisu katoaa yhdeltä runkoverkolta samalla kun toisella se on
@@ -1456,6 +1468,7 @@ SABnzbd-yhteensopiva, joten olemassa olevat SAB-integraatiot toimivat muuttumatt
 <tr><td>Diagnostiikka</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-todennus: mikä tahansa käyttäjä, API-avain salasanana)</td></tr>
 <tr><td>Esikatselu / toisto</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-alueet; pysäköidyn kirjastotyön käynnistys tarvitsee <code>?t=</code>-tunnisteen tai avaimen), <code>/m3u/&lt;id&gt;</code> (tarvitsee avaimen tai työn oman tunnisteen; luo tunnisteen), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Valvonta</td><td><code>/metrics</code> vastaa Prometheus-tekstimuodossa 0.0.4: latausnopeus, jonon syvyys ja tavut, yhteydet palveluntarjoajaa kohden, katkokset ja artikkelilaskurit, muisti osajärjestelmittäin sekä käyttöaika. Perusyksiköt kauttaaltaan (tavut, sekunnit), joten kojelauta muuntaa eikä mikään saavu valmiiksi pyöristettynä. Vain GET, ja oletuksena tarvitaan täysi API-avain. Aseta <code>metrics_open</code> tarjotaksesi sen ilman avainta, mikä on tavanomainen Prometheus-järjestely: se ei sisällä työn nimiä eikä polkuja, mutta julkaisee jokaisen määritetyn palveluntarjoajan isäntänimen kaikille, jotka yltävät porttiin.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Tiedostot &amp; sijainnit</h2>

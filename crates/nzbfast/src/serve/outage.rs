@@ -79,28 +79,55 @@ pub fn row_outage(
 /// an open stall episode and only past `server_down_secs`) so a job that
 /// is downloading fine never shouts about it.
 pub fn server_outages(d: &Daemon) -> Vec<ServerOutage> {
-    let mut v: Vec<ServerOutage> = d
-        .hub
+    d.hub
         .pool_live
         .lock_ok()
         .as_ref()
-        .map(|l| {
-            l.servers
-                .iter()
-                .filter_map(|s| {
-                    let secs = s.down_secs()?;
-                    let r = s.down_reason.lock_ok().clone()?;
-                    Some(ServerOutage {
-                        host: s.host.clone(),
-                        since_ms: s.down_since.load(Ordering::Relaxed),
-                        secs,
-                        kind: r.kind,
-                        detail: r.detail,
-                    })
-                })
-                .collect()
+        .map(|l| outages_in(l))
+        .unwrap_or_default()
+}
+
+/// [`server_outages`] over a NAMED set of live gauges rather than
+/// whatever the hub holds right now.
+///
+/// The hub's gauges belong to whichever run owns it, and after a
+/// cross-job hand-over (`serve/tasks/worker.rs`) that is the SUCCESSOR
+/// while the predecessor is still draining behind it. Anything asking
+/// "is a server this JOB needs granting no sessions" therefore has to
+/// name the job's own gauges: the successor is downloading happily off
+/// a healthy server and its counters say nothing about the provider the
+/// drainer's last articles are parked on.
+///
+/// TODO 308 is what that costs when it is got wrong. The outage
+/// demotion arm in `tasks/stall.rs` is handed the judged job's gauges
+/// (`Watched::pool_live`, which exists for exactly this) and then
+/// reached past them to the hub, so for a draining predecessor it asked
+/// the successor's fleet whether the predecessor's server was down -
+/// and stood down. Measured 27 Aug 2026 on
+/// `e2e_qprog::W1-refused-plus-dead`: one live server refusing every
+/// article of the head's post plus one unreachable server held ALL FOUR
+/// queued jobs with no terminal row until the pool's own outage ladder
+/// gave up on the dead provider, minutes later.
+///
+/// `server_outages` keeps the hub reading, because its other callers -
+/// the Providers card and the queue row's token - are asking about the
+/// FLEET as the user sees it now, which is the hub's by definition.
+pub fn outages_in(l: &nzbkit::pool::LiveStats) -> Vec<ServerOutage> {
+    let mut v: Vec<ServerOutage> = l
+        .servers
+        .iter()
+        .filter_map(|s| {
+            let secs = s.down_secs()?;
+            let r = s.down_reason.lock_ok().clone()?;
+            Some(ServerOutage {
+                host: s.host.clone(),
+                since_ms: s.down_since.load(Ordering::Relaxed),
+                secs,
+                kind: r.kind,
+                detail: r.detail,
+            })
         })
-        .unwrap_or_default();
+        .collect();
     v.sort_by_key(|o| std::cmp::Reverse(o.secs));
     v
 }

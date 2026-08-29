@@ -72,6 +72,10 @@ pub(super) struct PostprocTicket {
     /// job swaps the hub's slot.
     pub(super) verifier: Option<Arc<nzbkit::live::LiveVerifier>>,
     pub(super) shaper: Option<Arc<nzbkit::extract::Extractor>>,
+    /// TODO 309: which route this run's resume took, snapshotted
+    /// pre-handoff like the two above. `None` where this run replayed
+    /// nothing, which includes every job that was not a resume.
+    pub(super) resume_route: Option<crate::streamhub::ResumeRoute>,
     pub(super) log_mark: u64,
     pub(super) dl_bytes: u64,
     pub(super) dl_secs: f64,
@@ -88,6 +92,12 @@ pub(super) struct PostprocTicket {
     /// mutex, and the runner must never wait on it.
     #[cfg(feature = "indexer")]
     pub(super) oracle_samples: Vec<nzbkit::oracle::Sample>,
+    /// This job's per-provider article/byte/cap facts and its post
+    /// date, read off the pool at network drain. Folded into the
+    /// 30-day quality ledger down in [`run_tail`], once the outcome
+    /// those facts sat under is known.
+    pub(super) prov_facts: Vec<crate::serve::provquality::HostFacts>,
+    pub(super) prov_post_unix: i64,
 }
 
 /// The bounded lane. Width says how many tails may RUN at once; the
@@ -484,9 +494,258 @@ fn file_crashed_tail(
     j.fail_message = crate::with_build(
         "post-processing crashed (internal error) - retry the job to re-run it".to_string(),
     );
+    // Ours, unambiguously: a task on this machine died. `Local` is what
+    // the string classifier's catch-all answers too, and stating it
+    // means the answer no longer rests on the catch-all staying put.
+    j.fail_code = Some(FailKind::Local);
     j.finished_at = Some(Instant::now());
     j.finished_unix = Some(unix_now());
     true
+}
+
+/// The settle manifest, plus the `.par2` sweep that issue #18 holds back
+/// until it is written.
+///
+/// Split out of [`run_tail`] rather than left inline: with the deferred
+/// sweep in it that tail measured 580 lines against
+/// `tools/size-gate.py`'s 500-line function ceiling, and those ceilings
+/// only ever go down. The seam is the natural one - everything here
+/// happens after `finalize_completed_gen` and before the post-job hooks,
+/// and nothing later in the tail reads the verifier or the extractor.
+///
+/// Both snapshots are borrowed rather than moved because the CALLER owns
+/// them: they are THIS job's even after the next job swaps the hub's
+/// slot, which is the whole reason the ticket carries them.
+async fn settle_manifest_and_deferred_par2_sweep(
+    d2: &Arc<Daemon>,
+    job2: &Arc<Mutex<Job>>,
+    verifier: Option<&Arc<nzbkit::live::LiveVerifier>>,
+    shaper: Option<&Arc<nzbkit::extract::Extractor>>,
+    gen0: (u32, u64),
+) {
+    // ISSUE #18: the `.par2` sweep is HELD BACK for the manifest write
+    // below, and this is where it lands instead.
+    //
+    // `par_cleanup` is on by default and used to delete the recovery
+    // files inside `finalize_completed_gen`, which `run_tail` awaits
+    // before it calls this - so a crash, a kill or a power cut between
+    // the two left the payload with no PAR2 on disk AND no manifest,
+    // which is the one state the whole feature exists to prevent.
+    // `job::par2_sweep_deferred` takes `par2` off that function's sweep
+    // list when the manifest is owed, and it is the single predicate
+    // both ends read: a hand-copied condition here would drift into
+    // either double-deleting or never deleting.
+    //
+    // The ORDERING of the manifest write is deliberately NOT changed.
+    // Writing a provisional manifest before cleanup was the other
+    // correction on offer and is wrong: at that point the tail has not
+    // renamed or TV-filed, so the recorded names would be pre-finalize
+    // names in a directory that may not be the final one, and
+    // `write_reconciled`'s carry-forward would merge that bogus manifest
+    // into a shared season folder.
+    //
+    // What this does NOT close, said rather than half-fixed: the
+    // SNIFFED-volume sweep in `get/settle.rs` deletes spent volumes
+    // during the download, long before either of these. It cannot be
+    // deferred to here - settle does not know the final directory and its
+    // sniff is directory-wide - and threading the manifest flag down to
+    // it is more plumbing than the defect justifies, since those are
+    // archive volumes rather than the recovery data a re-check needs.
+    let par2_deferred = super::job::par2_sweep_deferred(d2);
+    // `finalize_completed_gen` runs its sweep for a Completed record and
+    // no other, so the deferred half belongs to exactly that state too -
+    // sweeping a failed job's recovery files here would delete something
+    // the old code never touched. Short-circuited, so the default (no
+    // manifest, so nothing deferred) takes no lock at all.
+    let mut par2_may_sweep = par2_deferred && job2.lock_ok().state == JobState::Completed;
+    // The settle manifest. The parsed PAR2 set is still alive on this
+    // ticket, and this is the LAST moment it is - the Arcs drop with
+    // the tail. Written after finalize so the names on disk are final;
+    // a file the tail renamed is re-matched inside `write_reconciled`
+    // by (length, first-16k MD5) rather than trusted by name. A write
+    // failure is a warning, never a job verdict: the payload is
+    // exactly as verified either way, only the future re-check is
+    // poorer for it.
+    if d2.write_manifest.load(Ordering::Relaxed)
+        && let Some(sets) = verifier
+            .map(|v| v.sets())
+            .filter(|s: &Vec<_>| !s.is_empty())
+    {
+        let (dir, name, sha, done) = {
+            let j = job2.lock_ok();
+            (
+                j.out_dir.clone(),
+                j.name.clone(),
+                j.nzb_sha.clone(),
+                j.state == JobState::Completed,
+            )
+        };
+        if done {
+            let archive = shaper.and_then(|e| e.archive_shape()).is_some();
+            let wrote = tokio::task::spawn_blocking(move || {
+                let mut m = crate::manifest::Manifest::from_sets(&sets, &name, &sha, archive);
+                m.write_reconciled(&dir)
+            })
+            .await;
+            match wrote {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    warn!(target: "queue", "settle manifest not written: {e}");
+                    // KEEP the recovery files. The manifest was owed and
+                    // is not there, so the .par2 set is now the only
+                    // proof of this payload on the disk - deleting it to
+                    // honour a cleanup default would leave the directory
+                    // uncheckable by anything, which is strictly worse
+                    // than leaving clutter a later retry can sweep.
+                    par2_may_sweep = false;
+                }
+                Err(e) => {
+                    warn!(target: "queue", "settle manifest task failed: {e}");
+                    par2_may_sweep = false;
+                }
+            }
+        }
+    }
+    if par2_may_sweep {
+        // Re-asked under ONE hold, after the manifest await above: the
+        // finalize-time sweep this deferral replaced ran inside the
+        // `finalizing` window that `retry` refuses, and this half runs
+        // after that window closed - so a fast retry (the NZBGet delete
+        // verb's re-queue of the SAME Arc, documented below at the
+        // suspended arm) can have taken the record a generation on
+        // while `write_reconciled` hashed the payload. Sweeping ITS
+        // out_dir's recovery files then would delete the very data the
+        // new round needs. Same fence as the counter fold below.
+        let dir = {
+            let j = job2.lock_ok();
+            (Daemon::same_generation(&j, Some(gen0)) && j.state == JobState::Completed)
+                .then(|| j.out_dir.clone())
+        };
+        let Some(dir) = dir else {
+            return;
+        };
+        // Blocking (a directory walk plus deletes, possibly through the
+        // Trash), so it goes to the pool the same way every other
+        // filesystem step on this tail does rather than onto the worker.
+        let swept =
+            tokio::task::spawn_blocking(move || crate::smart::cleanup(&dir, &["par2".to_string()]))
+                .await;
+        match swept {
+            Ok((removed, par2)) => {
+                if removed > 0 {
+                    let mut j = job2.lock_ok();
+                    if Daemon::same_generation(&j, Some(gen0)) {
+                        // Folded into the SAME counters the finalize
+                        // sweep feeds, or the history drawer's cleanup
+                        // line would under-report by exactly the
+                        // recovery files - the half it exists to name.
+                        //
+                        // `cleaned_trash` only when nothing has answered
+                        // it yet: the finalize sweep records it at ITS
+                        // own sweep time because the setting is live, and
+                        // overwriting that with a later reading would
+                        // relabel deletes that already happened.
+                        if j.cleaned_files == 0 {
+                            j.cleaned_trash = crate::smart::delete_to_trash()
+                                && !crate::smart::trash_unresponsive();
+                        }
+                        j.cleaned_files = j.cleaned_files.saturating_add(removed as u32);
+                        j.cleaned_par2 = j.cleaned_par2.saturating_add(par2 as u32);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    target: "cleanup",
+                    "the .par2 sweep held back for the settle manifest did not finish: {e}"
+                );
+            }
+        }
+    }
+}
+
+/// Fold this job's per-provider facts into the 30-day quality ledger,
+/// now that the outcome they sat under is settled.
+///
+/// CALLED FROM THE TAIL and not from network drain, which is where the
+/// facts were READ: "did this job need repair" is a property of the
+/// verifier's final count, and "was it a replacement for a posting that
+/// could not be finished" is a property of the record - neither exists
+/// until the tail's verdict block has run. The oracle fold at the top of
+/// [`run_tail`] takes the same split for the same shape of reason.
+///
+/// A watchdog DEMOTION is not an outcome and is skipped: the job goes
+/// back in the queue and will settle again, so filing it here would
+/// count one release twice and call the first half a provider problem.
+///
+/// Its own function rather than a block in [`run_tail`] because that
+/// function sits within a couple of dozen lines of the size gate's
+/// per-function ceiling, and every feature that lands in the tail from
+/// here on has to do the same.
+fn fold_provider_quality(
+    d: &Arc<Daemon>,
+    job: &Arc<Mutex<Job>>,
+    facts: Vec<crate::serve::provquality::HostFacts>,
+    post_unix: i64,
+    demoted: bool,
+    gen0: (u32, u64),
+) {
+    if demoted || facts.is_empty() {
+        return;
+    }
+    // The record is read into a verdict and the lock dropped BEFORE the
+    // ledger's own mutex is taken: a job lock held across another of the
+    // daemon's mutexes orders the two the opposite way from every other
+    // reader of this record, which is how lock-order bugs are grown.
+    let outcome = {
+        let j = job.lock_ok();
+        // A tombstoned record is the user's own delete arriving while
+        // the tail settled - not an outcome any provider earned, so it
+        // is skipped by the demotion's own argument above. The
+        // suspended, insurance and disk-full arms make the same call by
+        // returning before this fold ever runs; the delete has no arm
+        // of its own, so the skip lives here. And a record that has
+        // left this tail's round (a fast user retry after finalize
+        // filed it) belongs to the round that owns it now: reading its
+        // state here would file a re-queued job as a provider Failed.
+        if j.tombstone || Daemon::record_generation(&j) != gen0 {
+            return;
+        }
+        provquality_outcome(&j)
+    };
+    d.provquality.record(
+        &crate::serve::provquality::JobFacts {
+            hosts: facts,
+            post_unix,
+            outcome,
+        },
+        unix_now(),
+    );
+}
+
+/// How this settled record reads to the quality ledger.
+///
+/// The precedence is stated once, here, and is the one in
+/// [`crate::serve::provquality::Outcome`]'s own doc: a job that arrived
+/// as a REPLACEMENT for a different posting is `Rescued` whatever else
+/// it did, because "a second copy of this release saved it" is the fact
+/// worth counting and it is invisible from the article counters alone.
+/// Below that, a completion whose payload had to be rebuilt is
+/// `Repaired` - `bad_blocks` is the verifier's own final count and is
+/// `None` where nothing verified at all, which is not evidence of
+/// anything and correctly reads as a plain completion.
+fn provquality_outcome(j: &Job) -> crate::serve::provquality::Outcome {
+    use crate::serve::provquality::Outcome;
+    let done = j.state == JobState::Completed;
+    if done && !j.alt_from.is_empty() {
+        Outcome::Rescued
+    } else if !done {
+        Outcome::Failed
+    } else if j.bad_blocks.is_some_and(|b| b > 0) {
+        Outcome::Repaired
+    } else {
+        Outcome::Completed
+    }
 }
 
 /// The tail itself: a verbatim move of the worker's old inline closure
@@ -503,6 +762,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
         fetch,
         verifier,
         shaper,
+        resume_route,
         log_mark,
         dl_bytes,
         dl_secs,
@@ -511,6 +771,8 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
         insurance,
         #[cfg(feature = "indexer")]
         oracle_samples,
+        prov_facts,
+        prov_post_unix,
     } = t;
     let _index_job_guard = index_job_guard;
     // When this tail started, for `Job::postproc_secs`. Taken before
@@ -721,6 +983,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
             match &res {
                 Ok(()) => {
                     j.fetched = true;
+                    j.insurance_note.clear();
                     info!(
                         target: "insurance",
                         "{}: payload banked ({:.2} GB on disk) - extract runs at promotion",
@@ -730,6 +993,12 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
                 }
                 Err(e) => {
                     j.insurance_attempts += 1;
+                    // The same sentence the log line carries, kept on
+                    // the record so the queue row can say it too: a post
+                    // whose articles are already going is the one thing
+                    // the user has to hear about EARLY, and until now
+                    // the ladder retired it in silence.
+                    j.insurance_note = e.to_string();
                     info!(
                         target: "insurance",
                         "{}: background fetch stopped (attempt {}): {e} - progress kept in the journal",
@@ -762,6 +1031,13 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
                 Err(e) => {
                     j.state = JobState::Failed;
                     j.fail_message = e.to_string();
+                    // TODO 307 item 1: the pipeline's own verdict, taken
+                    // off the error rather than read back out of the
+                    // sentence it just wrote. `None` for an error no
+                    // producer classified - an `io::Error` from a move,
+                    // a config fault - and the classifier below then
+                    // answers exactly what it always did.
+                    j.fail_code = crate::failkind::code_of_error(e);
                     // TODO §77: fold the pre-flight sample into
                     // the failure evidence. "It was already
                     // short when you added it" and "it rotted
@@ -775,7 +1051,7 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
                     // key on the opening clause, exactly as the
                     // segment census does in `incomplete_reason`.
                     if let Some(h) = j.health.as_ref()
-                        && crate::serve::fail_kind(&j.fail_message).post_unavailable()
+                        && j.fail_kind().post_unavailable()
                         && let Some(clause) = crate::health::failure_clause(h)
                     {
                         j.fail_message.push_str(&clause);
@@ -842,6 +1118,19 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
             if let Some((_, crc)) = shaper.as_ref().and_then(|e| e.inner_crc()) {
                 j.inner_crc = crc;
             }
+            // TODO 309: which route THIS run's resume took, and
+            // deliberately NOT under the latch rule the two above
+            // share. Their fact is a property of the SET and is
+            // unreadable on a run that mapped nothing, so keeping
+            // an earlier answer is an improvement. The route is a
+            // property of the RUN, sitting beside `downloaded_bytes`
+            // and `elapsed_secs`, which are overwritten every time
+            // for the same reason: a report that showed this run's
+            // figures under the previous run's route would be
+            // describing two different downloads at once. So it is
+            // written unconditionally, `None` included - a retry
+            // that resumed nothing correctly says nothing.
+            j.resume_route = resume_route;
             j.finished_at = Some(Instant::now());
             j.finished_unix = Some(unix_now());
             // A demotion only HAPPENED if the watchdog's abort
@@ -871,6 +1160,14 @@ pub(super) async fn run_tail(d2: Arc<Daemon>, t: PostprocTicket, gen0: (u32, u64
         d2.best_rate_bps.fetch_max(avg, Ordering::Relaxed);
     }
     finalize_completed_gen(&d2, &job2, Some(gen0)).await;
+    // AFTER finalize, deliberately: `settle_locked_failure` inside it
+    // can flip a password-locked Failed record to Completed, and the
+    // quality ledger must file the outcome history will show - not the
+    // one the verdict block wrote a few lines earlier. The fold's own
+    // generation fence covers the await this ordering introduces.
+    fold_provider_quality(&d2, &job2, prov_facts, prov_post_unix, demoted, gen0);
+    settle_manifest_and_deferred_par2_sweep(&d2, &job2, verifier.as_ref(), shaper.as_ref(), gen0)
+        .await;
     // A watchdog demotion is not a completion - no
     // script and no notification; park() requeues it
     // deferred.
@@ -942,6 +1239,71 @@ mod tests {
         f(&d);
         drop(d);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ISSUE #18, both halves against one daemon.
+    ///
+    /// `par_cleanup` is ON by default and deleted the `.par2` files
+    /// inside `finalize_completed_gen`; `write_manifest` is OFF by
+    /// default and runs in [`run_tail`], AFTER that function returns. A
+    /// crash in the window left the payload with no PAR2 and no manifest
+    /// - the one state the manifest exists to prevent. The fix defers
+    /// the deletion past the write, and the two halves are only ever
+    /// right TOGETHER: hold `par2` back and never sweep it and the
+    /// recovery files stay forever; sweep it without holding it back and
+    /// they are deleted twice, the second time from the manifest's own
+    /// directory. So the list and the predicate are pinned here, in the
+    /// module that owns the second half.
+    ///
+    /// The default configuration is asserted FIRST and is what makes
+    /// this a safe fix: `write_manifest` off means nothing is deferred
+    /// and the finalize sweep list is byte-for-byte what it always was.
+    #[test]
+    fn the_par2_sweep_is_deferred_only_while_the_settle_manifest_is_owed() {
+        with_daemon("par2defer", |d| {
+            use crate::serve::job::{finalize_cleanup_exts, par2_sweep_deferred};
+            // The DEFAULT: manifest off, cleanup on. Unchanged.
+            d.write_manifest.store(false, Ordering::Relaxed);
+            d.par_cleanup.store(true, Ordering::Relaxed);
+            assert!(!par2_sweep_deferred(d));
+            assert!(
+                finalize_cleanup_exts(d).iter().any(|x| x == "par2"),
+                "with no manifest owed the finalize sweep still takes the recovery files"
+            );
+
+            // Manifest on: the finalize sweep must NOT take them, and
+            // the tail must know to.
+            d.write_manifest.store(true, Ordering::Relaxed);
+            assert!(par2_sweep_deferred(d));
+            assert!(
+                !finalize_cleanup_exts(d).iter().any(|x| x == "par2"),
+                "the recovery files are the only proof until the manifest lands"
+            );
+
+            // Nobody sweeping par2 at all: the manifest changes nothing,
+            // or turning it on would start deleting recovery data for a
+            // user who asked for it to be kept.
+            d.par_cleanup.store(false, Ordering::Relaxed);
+            assert!(!par2_sweep_deferred(d));
+            assert!(!finalize_cleanup_exts(d).iter().any(|x| x == "par2"));
+
+            // The hand-written entry sits in the identical window, so it
+            // is deferred too - a predicate that only knew about
+            // `par_cleanup` would leave that user in it.
+            d.cleanup_exts.lock_ok().push("par2".to_string());
+            assert!(par2_sweep_deferred(d));
+            assert!(
+                !finalize_cleanup_exts(d).iter().any(|x| x == "par2"),
+                "a par2 the user listed by hand is held back the same way"
+            );
+            d.write_manifest.store(false, Ordering::Relaxed);
+            assert!(finalize_cleanup_exts(d).iter().any(|x| x == "par2"));
+
+            // Everything else on the list is untouched by any of it.
+            d.cleanup_exts.lock_ok().push("nfo".to_string());
+            d.write_manifest.store(true, Ordering::Relaxed);
+            assert!(finalize_cleanup_exts(d).iter().any(|x| x == "nfo"));
+        });
     }
 
     /// The delete arms reach the right job's recovery fetches and only
@@ -1019,6 +1381,7 @@ mod tests {
             fetch: tokio::spawn(async { Ok(()) }),
             verifier: None,
             shaper: None,
+            resume_route: None,
             log_mark: 0,
             dl_bytes: 1_000,
             dl_secs: 1.0,
@@ -1029,6 +1392,10 @@ mod tests {
             // availability ledger to learn.
             #[cfg(feature = "indexer")]
             oracle_samples: Vec::new(),
+            // ...nor for the provider-quality ledger, for the same
+            // reason: no provider took part in this ticket.
+            prov_facts: Vec::new(),
+            prov_post_unix: 0,
         }
     }
 

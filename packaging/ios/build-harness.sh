@@ -12,7 +12,14 @@ cd "$(dirname "$0")/../.."
 TARGET=aarch64-apple-ios-sim
 APP=packaging/ios/NZBFastHarness.app
 
-cargo build --release -p nzbfast-ffi --target $TARGET
+# `--features nzbfast/dashboard` is NOT optional for THIS harness, and
+# it is the one place in packaging/ios that needs it: HarnessApp.swift's
+# whole UI is a WebView pointed at the dashboard the engine serves, and
+# since TODO 281 IO3b (28 Aug 2026) the pages are a default feature the
+# store build drops - so without this the harness opens on a 404. The
+# real app next door correctly builds without them: it is SwiftUI
+# throughout and only ever calls the API.
+cargo build --release -p nzbfast-ffi --features nzbfast/dashboard --target $TARGET
 
 rm -rf "$APP"
 mkdir -p "$APP"

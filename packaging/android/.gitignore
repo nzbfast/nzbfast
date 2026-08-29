@@ -3,3 +3,15 @@ nzbfast-test.apk
 nzbfast-android-arm64
 nzbfast-android-x86_64
 *.idsig
+# build-release-apk.sh's output, and the release-asset scanner's receipt
+# beside it. Never commit an APK: it is a release artifact and it carries
+# the signing certificate.
+out/
+*.apk
+# The Android release keystore belongs to the maintainer and lives
+# outside this repo
+# (~/.config/nzbfast/android-release.jks). These lines are a belt: the
+# key must never be reachable from a clone, and build-release-apk.sh
+# --self-test refuses a tree where one is tracked.
+*.jks
+*.keystore

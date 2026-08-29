@@ -23,12 +23,18 @@ fuzz_target!(|data: &[u8]| {
             assert!(looks, "parsed a non-link: {s:?}");
             assert!(!l.header.is_empty());
             assert!(l.header.chars().count() <= 1024);
-            assert!(!l.title.is_empty(), "a title must always fall back to the header");
+            assert!(
+                !l.title.is_empty(),
+                "a title must always fall back to the header"
+            );
             assert!(l.title.chars().count() <= 512);
             assert!(l.password.chars().count() <= 512);
             assert!(l.groups.len() <= 32);
             for (i, g) in l.groups.iter().enumerate() {
-                assert!(g.contains('.') && !g.is_empty(), "junk group survived: {g:?}");
+                assert!(
+                    g.contains('.') && !g.is_empty(),
+                    "junk group survived: {g:?}"
+                );
                 assert!(!l.groups[..i].contains(g), "duplicate group: {g:?}");
             }
         }

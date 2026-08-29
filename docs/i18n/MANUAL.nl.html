@@ -566,6 +566,17 @@ gewone webadres volstaat; een Prowlarr-regel ziet eruit als
 er terugkwam, waarmee adres en sleutel in één klik bewezen zijn. Een opgeslagen sleutel
 wordt nooit meer getoond: het vak zegt dat, en leeg laten houdt de sleutel die er al
 staat.</p>
+<p><b>nzbindex, zonder account.</b> Instellingen → Zoeken op indexers →
+<b>+ Indexer toevoegen</b>, en zet het eerste veld van de rij op <code>nzbindex</code>
+in plaats van een account te noemen. Het doorzoekt nzbindex.com rechtstreeks via zijn
+eigen, gedocumenteerde API, geen sleutel nodig, al accepteert nzbindex er ook een, voor
+een hogere limiet aan zijn kant. Het indexeert wat er werkelijk geplaatst is in plaats
+van een samengestelde releaselijst, dus het vindt dingen die de accounts hierboven niet
+hebben, tegen de prijs dat veel van zijn resultaten door elkaar gegooide namen dragen.
+Downloads komen alsnog in de wachtrij en worden uitgepakt als elke andere taak.
+<b>Alleen complete</b>, standaard aan, houdt posts buiten waar delen aan ontbreken en
+die nooit af kunnen komen; de velden voor grootte, leeftijd en newsgroup ernaast
+beperken een zoekopdracht verder.</p>
 <p><b>Zoeken.</b> Open <b>🎬 wall</b> in de kopbalk en kies <b>Releases</b>. Het uitklapmenu naast het zoekvak bepaalt waar een zoekopdracht kijkt:
 <b>Deze index</b>, dus wat deze machine zelf gescand heeft, <b>Indexers</b>, of
 <b>Beide</b>. Je keuze wordt onthouden. Je accounts bevragen vraagt om iets in het vak,
@@ -1139,7 +1150,8 @@ volgmap gehaald), <code>nzb.refeed</code> (het eigen NZB-bestand van een voltooi
 en de vervangen kopie is verwijderd),
 <code>queue.idle</code>, <code>queue.paused</code> en <code>queue.resumed</code> (de wachtrij is gestopt of weer gestart, door wie of wat dan ook), <code>queue.finished_action</code>
 (de actie bij het einde van de wachtrij is ingeschakeld, uitgevoerd of geannuleerd), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> en <code>update.available</code> (er is een nieuwere nzbfast-versie gevonden). Elk draagt
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> en <code>server.block_spent</code> (een vooraf betaald blokaccount zit op de laatste 15% van de gekochte data, of heeft alles opgebruikt) en <code>update.available</code> (er is een nieuwere nzbfast-versie gevonden). Elk draagt
 <code>schema_version</code> (nu 1; nieuwe sleutels kunnen verschijnen zonder
 ophoging - negeer wat je niet kent), een monotone <code>seq</code> en een
 <code>at</code>-tijdstempel in milliseconden.</p>
@@ -1303,6 +1315,7 @@ wachtrij. Geen enkele andere client doet taakoverstijgende overlap.</li>
 (verifiëren/uitpakken) op schijf afrondt, heeft de download van de volgende taak de
 lijn al in bezit.</li>
 </ul>
+<p><b>Met slechts één ingestelde provider</b> kan dit alleen een volledig dode post herkennen - er komt helemaal niets van binnen, ofwel omdat elk artikel wordt geweigerd, ofwel omdat de provider gewoon stopt met antwoorden. Een taak die alleen maar traag is maar nog wat bytes ontvangt, wordt met rust gelaten, omdat er geen tweede provider is om hem naartoe te verplaatsen. Stel een tweede provider in en nzbfast kan ook opmerken dat een server een post niet meer heeft en deze omleiden of uitstellen in plaats van de taak uit te zitten.</p>
 <h3 id="oracle">Het beschikbaarheidsorakel</h3>
 <p>Takedowns zijn de belangrijkste reden dat een Usenet-download mislukt, en ze zijn
 voorspelbaar: dezelfde release verdwijnt bij de ene backbone terwijl een andere hem nog
@@ -1492,6 +1505,7 @@ de <b>API-sleutel</b> (volledige controle) en de <b>NZB-sleutel</b> (alleen toev
 <tr><td>Diagnostiek</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: willekeurige gebruiker, API-sleutel als wachtwoord)</td></tr>
 <tr><td>Voorvertoning / afspelen</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; het starten van een geparkeerde bibliotheektaak vereist een <code>?t=</code>-token of de sleutel), <code>/m3u/&lt;id&gt;</code> (vereist de sleutel of het token van de taak zelf; geeft het token uit), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Monitoring</td><td><code>/metrics</code> antwoordt in het Prometheus-tekstformaat 0.0.4: downloadsnelheid, wachtrijdiepte en bytes, verbindingen per provider, storingen en artikeltellingen, geheugen per subsysteem en bedrijfstijd. Overal basiseenheden (bytes, seconden), zodat het dashboard omrekent en niets vooraf afgerond binnenkomt. Alleen GET, en standaard is de volledige API-sleutel nodig. Zet <code>metrics_open</code> om het zonder sleutel te serveren, wat de gebruikelijke Prometheus-opzet is: het bevat geen taaknamen en geen paden, maar publiceert wel de hostnaam van elke ingestelde provider aan iedereen die de poort kan bereiken.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Bestanden &amp; locaties</h2>

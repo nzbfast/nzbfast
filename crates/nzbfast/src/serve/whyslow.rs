@@ -153,6 +153,52 @@ pub(super) enum Layer {
     /// churn, or plain flat delivery. Detail names a host when one
     /// host owns the evidence.
     Provider,
+    /// TODO 312 item 3: OUR OWN fleet cap is the binding constraint -
+    /// the line has headroom, the sockets we opened are each carrying
+    /// less than the cap's own plan assumes, and the cap is holding the
+    /// fleet under what the user configured.
+    ///
+    /// This used to land in [`Layer::Provider`], which is defensible
+    /// and useless: it names something the reader cannot act on while
+    /// saying nothing about the one lever that would fix it. GH #62's
+    /// reporter has two accounts at 50 connections each and gets 25
+    /// sockets, and the only thing anybody could tell them to do was
+    /// turn the rule off with an environment variable.
+    ///
+    /// It is deliberately NOT a claim that the cap is WRONG. The cap is
+    /// a measured rule (`nzbkit::pool::linecap`) and §208 measured what
+    /// happens without it; what this verdict asserts is only that it is
+    /// what is binding right now, with the numbers, so the reader can
+    /// decide.
+    Fleet,
+    /// TODO 312 item 7: OUR OWN STALE MEASUREMENT is the binding
+    /// constraint - an auto-tune knee is holding a server below what it
+    /// would otherwise dial, and nothing has re-measured it since its
+    /// re-probe appointment came and went.
+    ///
+    /// It is neither of the two layers either side of it, which is why
+    /// it is its own. [`Layer::Provider`] covers a provider REFUSING
+    /// sockets (`a_conn_capped_host_is_named`, granted below budget)
+    /// and [`Layer::Fleet`] covers OUR OWN FLEET CAP taking them
+    /// (`configured > cap`). A knee is our own MEASUREMENT of what the
+    /// provider was fastest at, taken once and applied ever since: the
+    /// provider is refusing nothing and the cap is taking nothing.
+    ///
+    /// Folding it into `Fleet` was the tempting move and is the one
+    /// thing that must not happen. That verdict's remedy is the
+    /// connection-budget setting, and on a fleet a knee is holding down
+    /// that setting is INERT - changing it buys exactly nothing. The
+    /// same evidence read as `Provider` before this variant existed,
+    /// which is the failure `Fleet`'s own doc records one level up:
+    /// naming something the reader cannot act on while saying nothing
+    /// about the lever that would fix it. Measured on a 5 Gbit bench
+    /// box, 28 Aug 2026 - rungs of 50, 77 and 100 all ran 32 sockets
+    /// under a 19-day-old knee, and every instrument read clean
+    /// (`research/KNEE-UNDER-FLEET-CAP-2026-08-28.md`).
+    ///
+    /// Detail is the HOST, exactly as `Provider`'s is, so the page can
+    /// compose the sentence and the remedy can land on that server.
+    Knee,
     /// Neither: most of what the run is asking for is not on the
     /// servers. The wire time goes on requests that return nothing,
     /// and no layer of the stack is at fault. See `MISSING_BAR`.
@@ -175,6 +221,8 @@ impl Layer {
             Layer::Cpu => "cpu",
             Layer::Client => "client",
             Layer::Provider => "provider",
+            Layer::Fleet => "fleet",
+            Layer::Knee => "knee",
             Layer::Missing => "missing",
             Layer::Unknown => "unknown",
         }
@@ -193,6 +241,8 @@ impl Layer {
             Layer::Cpu,
             Layer::Client,
             Layer::Provider,
+            Layer::Fleet,
+            Layer::Knee,
             Layer::Missing,
         ]
         .into_iter()
@@ -248,7 +298,286 @@ pub(super) struct Tick {
     /// 0 = unknown. See [`crate::streamhub::StreamHub::post_unix`] -
     /// unknown is NOT "posted just now" and never reads as young here.
     pub post_unix: i64,
+    /// TODO 312 item 3: the fleet cap in FORCE this second, in sockets
+    /// (`nzbkit::pool::LiveStats::line_cap_fleet`); 0 = the rule is off.
+    /// The cap in force and never the seed - the in-run governor moves
+    /// it, and a verdict about a cap the run left behind three rungs ago
+    /// would be about nothing.
+    pub fleet_cap: usize,
+    /// TODO 312 item 3: what the fleet would dial with the cap taking
+    /// nothing out - the `--connections` dial, each account's own
+    /// number and any host cap, all applied. 0 = no claim, which is what
+    /// a pool built by a rig or the CLI reports and which must never
+    /// read as "no sockets configured".
+    pub fleet_configured: usize,
+    /// TODO 312 item 3: is the cap the curve's own number, so the in-run
+    /// governor may still grow it? A cap that is about to fix itself is
+    /// not a binding constraint - see `fleet_bound`.
+    pub fleet_auto: bool,
+    /// TODO 312 item 7: the STALE auto-tune knee holding this fleet
+    /// under its own ceiling, `None` when none is
+    /// (`nzbkit::pool::LiveStats::line_cap_knee`). Fixed when the fleet
+    /// was built, unlike the three above it, which is why the gauge it
+    /// comes from is not an atomic.
+    pub fleet_knee: Option<nzbkit::pool::linecap::FleetKnee>,
+    /// Sockets the DRAINING predecessor still holds during a cross-job
+    /// hand-over, 0 whenever the drain slot is empty (which is nearly
+    /// always, and every rig).
+    ///
+    /// It exists because `achieved_bps` is `Daemon::current_speed_bps`,
+    /// which deliberately ADDS the drainer's bytes so the queue's speed
+    /// readout does not dip at a hand-over boundary. `fleet_bound`
+    /// divides that rate by connected sockets to get a per-socket carry,
+    /// and `servers` below is the SUCCESSOR's fleet alone - so during a
+    /// hand-over the numerator was whole-wire and the denominator was
+    /// not. The carry read high, the implied fleet fell, `implied > cap`
+    /// failed, and a genuinely binding cap went unreported for the whole
+    /// window. Added into the divisor here rather than subtracted from
+    /// the numerator because the hand-over LEASE holds both runs inside
+    /// one job's connection budget, so whole-wire over whole-wire is the
+    /// coherent pair.
+    ///
+    /// Fed ONLY into `fleet_bound`, never into `blocked_pct`: that arm's
+    /// numerator is the successor's own parked-worker milliseconds, so
+    /// widening its denominator would dilute it the other way.
+    pub drain_connected: usize,
     pub servers: Vec<ServerTick>,
+}
+
+/// TODO 312 item 3: the working behind a [`Layer::Fleet`] verdict.
+///
+/// `cap`, `configured` and `auto` are configuration and are refreshed
+/// every tick; `carry_bps` and `implied` are MEASUREMENTS and are only
+/// refreshed on a tick where the supply gate was actually open, so the
+/// panel keeps showing the numbers that produced the published verdict
+/// rather than blinking to zero on the first second the gate shuts.
+/// The verdict itself is majority-held over [`WINDOW`], so those two
+/// clocks already differ.
+#[derive(Clone, Copy, Default)]
+struct FleetEvidence {
+    cap: usize,
+    configured: usize,
+    auto: bool,
+    /// Bytes/s one connected socket is carrying, measured.
+    carry_bps: u64,
+    /// Sockets this line would want at that carry
+    /// (`linecap::sockets_for_carry`), UNCLAMPED. See that function for
+    /// why it is unclamped and why nothing may seed a pool from it.
+    implied: usize,
+}
+
+/// TODO 312 item 7: the working behind a [`Layer::Knee`] verdict.
+///
+/// The same two clocks as [`FleetEvidence`] and for the same reason:
+/// `host`, `at`, `takes` and `age_secs` are CONFIGURATION and are
+/// refreshed every tick, while `carry_bps` and `implied` are
+/// MEASUREMENTS and are only refreshed on a tick where the supply gate
+/// was actually open - so the panel keeps showing the numbers that
+/// produced the published verdict rather than blinking to zero on the
+/// first second the gate shuts.
+#[derive(Clone, Default)]
+struct KneeEvidence {
+    /// The server the reader is being sent to: the stalest knee'd one
+    /// (`linecap::seed_knee`). Empty when no knee is applied.
+    host: String,
+    /// That server's knee - the connection count the measurement
+    /// settled on.
+    at: usize,
+    /// Sockets the stale knees are taking off the fleet, cap included.
+    takes: usize,
+    /// How long ago the named server's knee was measured.
+    age_secs: u64,
+    /// Bytes/s one connected socket is carrying, measured.
+    carry_bps: u64,
+    /// Sockets this line would want at that carry, as
+    /// [`FleetEvidence::implied`].
+    implied: usize,
+}
+
+impl KneeEvidence {
+    /// Refresh the CONFIGURATION half from this tick, leaving the two
+    /// measurements where they are. Clearing to empty when the tick
+    /// carries no knee is deliberate and matches `FleetEvidence`'s
+    /// unconditional assignment of a cap of 0: a fleet with no knee has
+    /// no host to name, and a stale host would send a reader to a
+    /// server that is no longer the story.
+    fn refresh(&mut self, k: Option<&nzbkit::pool::linecap::FleetKnee>) {
+        self.host = k.map(|k| k.host.clone()).unwrap_or_default();
+        self.at = k.map_or(0, |k| k.at);
+        self.takes = k.map_or(0, |k| k.takes);
+        self.age_secs = k.map_or(0, |k| k.age_secs);
+    }
+}
+
+/// Whether OUR OWN fleet cap is what is holding this second, and the
+/// numbers if so. Pure, so the regimes below can be replayed in a test
+/// without a pool.
+///
+/// Five conditions, none of them optional:
+///
+/// * **the rule is on** (`cap > 0`) and **it is taking sockets away**
+///   (`configured > cap`). A cap above what the accounts allow is not
+///   binding anything, and a `configured` of 0 is a pool that made no
+///   claim - a rig, a CLI run - which must read as "cannot say", never
+///   as "you configured nothing".
+/// * **the line has headroom**: achieved under
+///   [`LINE_CAP_SUPPLY_PCT`]% of the anchor. This is
+///   `fleet_for_supply`'s own gate, deliberately the same constant and
+///   not a fourth opinion, and it is what keeps this verdict away from
+///   the LINE-bound regime §208 measured - where more sockets cost wall
+///   and this sentence would be advice to make things worse.
+/// * **the sockets are under the cap's own plan**: carry below
+///   [`LINE_CAP_SOCKET_BPS`]. At or above it the curve's assumption is
+///   holding and the curve owns the answer.
+/// * **more sockets would help**: the fleet the measured carry implies
+///   is bigger than the cap in force.
+/// * **the cap cannot fix itself**: it is either TYPED (the governor is
+///   pinned) or already at [`LINE_CAP_MAX_FLEET`]. An automatic cap
+///   below the ceiling with the gate open is three ticks from raising
+///   itself, and convicting it would be reporting a rule mid-stride.
+///
+/// `dialling` is CONNECTED sockets and not the budget: the budget is
+/// what we intend, and dividing the achieved rate by an intention
+/// over-states nothing in the safe direction - fewer sockets means a
+/// higher measured carry, which means a SMALLER implied fleet and a
+/// gate that shuts sooner.
+///
+/// It is also EVERY socket on the wire, the draining predecessor's
+/// included (`Tick::drain_connected`), because `t.achieved_bps` is
+/// `current_speed_bps` and that figure adds the drainer's bytes on
+/// purpose. Passing the successor's own count alone put a whole-wire
+/// numerator over a part-wire divisor, which inflated the apparent
+/// carry, shrank `implied`, and let a genuinely binding cap fall
+/// through the gate for the length of every hand-over. The shape that
+/// brings it back is any caller passing a count taken from
+/// `Tick::servers` alone.
+///
+/// **The stated limit: this is only ever as good as the anchor**, and
+/// the anchor may be a figure the user TYPED (`linkpeak::Core::effective`
+/// hands back "line" whenever the measured peak is under the declared
+/// line speed). An install that typed 10 Gbit on a 1 Gbit line holds
+/// this gate open for ever and gets told its own cap is binding when it
+/// is not.
+///
+/// Requiring a MEASURED anchor was considered and is WRONG here, which
+/// is worth knowing before anyone tightens it: a measured peak is an
+/// achieved rate, so a fleet the cap is holding down measures its own
+/// cap, and `effective` then returns "line" for exactly the install
+/// this verdict exists for. GH #62's reporter reads "line", not
+/// "measured". The typed anchor is the only independent evidence such
+/// an install has that its line is bigger than what it is getting.
+///
+/// What bounds the damage is that this verdict spends nothing. The
+/// supply arm (`linecap::fleet_for_supply`) already sizes real SOCKETS
+/// off this same typed anchor and is held safe by its clamp; a sentence
+/// with its numbers beside it, under a bar labelled with the anchor's
+/// own provenance, is strictly less than that. And the alternative is
+/// not silence: before this arm existed the identical evidence read as
+/// `Provider`, which is equally wrong on a lying anchor and useless on
+/// an honest one.
+fn fleet_bound(t: &Tick, dialling: usize) -> Option<FleetEvidence> {
+    use nzbkit::pool::linecap::LINE_CAP_MAX_FLEET;
+    if t.fleet_cap == 0 || t.fleet_configured <= t.fleet_cap {
+        return None;
+    }
+    if t.fleet_auto && t.fleet_cap < LINE_CAP_MAX_FLEET {
+        return None;
+    }
+    let (carry_bps, implied) = supply_room(t, dialling)?;
+    (implied > t.fleet_cap).then_some(FleetEvidence {
+        cap: t.fleet_cap,
+        configured: t.fleet_configured,
+        auto: t.fleet_auto,
+        carry_bps,
+        implied,
+    })
+}
+
+/// The MEASUREMENT both socket verdicts rest on: the line has headroom
+/// the sockets are failing to use, one socket is carrying less than the
+/// cap's own plan assumes, and here is the fleet that measured carry
+/// implies for this line. `None` when this second says nothing.
+///
+/// Three of [`fleet_bound`]'s five conditions live here - the two bars
+/// its own doc states at length plus the guards that make the division
+/// meaningful - and the fourth and fifth stay with each caller, because
+/// what `implied` has to exceed is the thing that verdict convicts.
+///
+/// FACTORED OUT rather than copied when [`knee_bound`] joined it (TODO
+/// 312 item 7). Two spellings of one quantity is this repo's most
+/// repeated defect, and the one that would matter here is two verdicts
+/// about the SAME SECOND disagreeing about whether the line had room -
+/// which is not a wrong number on a panel, it is two contradictory
+/// sentences shown to one reader.
+///
+/// Pure, like both its callers, so the regimes can be replayed in a
+/// test without a pool.
+fn supply_room(t: &Tick, dialling: usize) -> Option<(u64, usize)> {
+    use nzbkit::pool::linecap::{LINE_CAP_SOCKET_BPS, LINE_CAP_SUPPLY_PCT, sockets_for_carry};
+    if dialling == 0 || t.anchor_bps == 0 {
+        return None;
+    }
+    let now_bps = t.achieved_bps.max(0.0) as u64;
+    if now_bps.saturating_mul(100) >= t.anchor_bps.saturating_mul(LINE_CAP_SUPPLY_PCT) {
+        return None;
+    }
+    let carry_bps = now_bps / dialling as u64;
+    if carry_bps == 0 || carry_bps >= LINE_CAP_SOCKET_BPS {
+        return None;
+    }
+    Some((carry_bps, sockets_for_carry(t.anchor_bps, carry_bps)))
+}
+
+/// Whether OUR OWN STALE MEASUREMENT is what is holding this second,
+/// and the numbers if so. Pure, like [`fleet_bound`] beside it, so the
+/// regimes below can be replayed in a test without a pool.
+///
+/// Four conditions, and only two of them are written here because the
+/// other two were already decided upstream and must not be asked twice:
+///
+/// * **a stale knee is lowering some server** - `Tick::fleet_knee`.
+///   `conntune::stale_knee` owns every part of that judgement (it
+///   applies, it is past its re-probe appointment, and it is really
+///   taking sockets off what the server would otherwise dial), and
+///   `linecap::seed_knee` owns the fold.
+/// * **the knee, and not the fleet cap, is the lower of the two.** This
+///   is NOT a second comparison here, and that is the point:
+///   `ServerKnee::takes` is measured against the POST-cap ceiling, so
+///   `takes > 0` already IS that statement. Asking `configured` against
+///   `cap` a second time would be a spelling of the same thing that can
+///   disagree with the first. `knee_under_cap_note` states the same
+///   rule for the log line: two sentences claiming to explain one
+///   number is worse than one.
+/// * **the fleet made a claim at all** (`configured > 0`). A pool built
+///   by a rig or the CLI reports 0, which must read as "cannot say" and
+///   never as "you configured nothing" - `fleet_bound`'s own rule.
+/// * **more sockets would help**: the fleet the measured carry implies
+///   is bigger than the ceiling we are dialling under. That comparand
+///   is `fleet_configured`, the knee-included counterfactual, which on
+///   a fleet where the cap is also cutting a DIFFERENT server sits
+///   above what is really dialled - the conservative direction, so the
+///   gate shuts sooner rather than later.
+///
+/// PRECEDENCE IS SETTLED AT THE CALLER, not here. On a single server
+/// this arm and [`fleet_bound`] are mutually exclusive by construction,
+/// but on a mixed fleet - one server under a stale knee, another under
+/// the cap's share - both are TRUE, and `classify` takes the cap first:
+/// it is the bigger and fleet-wide lever, and one number gets one
+/// sentence.
+fn knee_bound(t: &Tick, dialling: usize) -> Option<KneeEvidence> {
+    let k = t.fleet_knee.as_ref()?;
+    if t.fleet_configured == 0 {
+        return None;
+    }
+    let (carry_bps, implied) = supply_room(t, dialling)?;
+    (implied > t.fleet_configured).then(|| KneeEvidence {
+        host: k.host.clone(),
+        at: k.at,
+        takes: k.takes,
+        age_secs: k.age_secs,
+        carry_bps,
+        implied,
+    })
 }
 
 /// Per-server state the window keeps: last cumulative readings plus
@@ -322,6 +651,20 @@ pub(super) struct Core {
     /// §108 option 2: this tick reached the downstream fork with the
     /// breaker not in force, so the volume is the open question.
     disk_question: bool,
+    /// TODO 312 item 3: the fleet cap's working. See [`FleetEvidence`]
+    /// for which of its fields track the tick and which track the last
+    /// tick that had something to measure.
+    fleet: FleetEvidence,
+    /// Whether THIS tick's evidence licenses a [`Layer::Fleet`] vote.
+    /// Kept apart from [`Core::fleet`] because that struct deliberately
+    /// remembers, and a vote must not.
+    fleet_now: bool,
+    /// TODO 312 item 7: the stale knee's working, and the same split of
+    /// clocks. See [`KneeEvidence`].
+    knee: KneeEvidence,
+    /// Whether THIS tick's evidence licenses a [`Layer::Knee`] vote,
+    /// kept apart from [`Core::knee`] for [`Core::fleet_now`]'s reason.
+    knee_now: bool,
 }
 
 impl Core {
@@ -390,6 +733,37 @@ impl Core {
         self.last_blocked_pct = blocked_pct;
         self.last_cpu_pct = t.cpu_pct;
         self.last_post_unix = t.post_unix;
+        // TODO 312 item 3. Configuration is refreshed unconditionally
+        // and the two MEASUREMENTS only when there was something to
+        // measure, so the panel keeps the numbers that produced the
+        // published verdict - see `FleetEvidence`.
+        self.fleet.cap = t.fleet_cap;
+        self.fleet.configured = t.fleet_configured;
+        self.fleet.auto = t.fleet_auto;
+        // WHOLE-WIRE over WHOLE-WIRE. `t.achieved_bps` already carries
+        // the draining predecessor's bytes (`current_speed_bps`), so the
+        // divisor has to carry its sockets too or the per-socket carry
+        // reads high through every hand-over and a binding cap goes
+        // unreported. See `Tick::drain_connected`; `blocked_pct` above
+        // deliberately does NOT get this, its numerator being the
+        // successor's alone.
+        let dialling = fleet_connected + t.drain_connected;
+        let bound = fleet_bound(&t, dialling);
+        self.fleet_now = bound.is_some();
+        if let Some(e) = bound {
+            self.fleet.carry_bps = e.carry_bps;
+            self.fleet.implied = e.implied;
+        }
+        // TODO 312 item 7, the same shape one layer over: our own stale
+        // measurement. The same `dialling` divisor, because the two
+        // verdicts must never disagree about what the wire was doing.
+        self.knee.refresh(t.fleet_knee.as_ref());
+        let kneed = knee_bound(&t, dialling);
+        self.knee_now = kneed.is_some();
+        if let Some(e) = kneed {
+            self.knee.carry_bps = e.carry_bps;
+            self.knee.implied = e.implied;
+        }
 
         // The live envelope estimate: what the fleet delivered on a
         // tick where nothing of ours held it back - no user cap and no
@@ -500,6 +874,39 @@ impl Core {
         let connected: usize = self.servers.values().map(|s| s.connected).sum();
         if connected > 0 && churn as f64 >= (connected as f64) * CHURN_FRACTION {
             return (Layer::Provider, String::new());
+        }
+        // TODO 312 item 3: before blaming the providers for flat
+        // delivery, ask whether we opened the sockets the user gave us.
+        //
+        // PRECEDENCE, and it is the whole of what this placement
+        // decides. It sits AFTER `worst_refusal` and the churn arm
+        // because both of those are the provider actively failing -
+        // opening more sockets into a 481 or into sessions that keep
+        // dying makes things worse, not better - and after `Missing`
+        // for the reason that check already carries: a post full of
+        // holes starves the pool, so every socket reads as
+        // under-carrying and this arm would convict our own cap for the
+        // post's gaps. It sits BEFORE `shaped_host`, which is the arm
+        // that swallowed this case until now: with the fleet held under
+        // what the user configured, naming a host as "the limit" is the
+        // same false claim `MISSING_BAR`'s own comment records making
+        // about Gary's 16 Aug job.
+        if self.fleet_now {
+            return (Layer::Fleet, String::new());
+        }
+        // TODO 312 item 7: and then OUR OWN STALE MEASUREMENT, which is
+        // neither the provider refusing nor the cap taking. It sits
+        // AFTER the cap deliberately: on a single server the two are
+        // mutually exclusive by construction (`ServerKnee::takes` is
+        // measured against the POST-cap ceiling), but on a mixed fleet -
+        // one server under a stale knee, another under the cap's share -
+        // both are true at once, and the cap is the bigger and
+        // fleet-wide lever. It sits BEFORE `shaped_host` for the reason
+        // the arm above it does: with the fleet held under what the user
+        // configured, naming a host as "the limit" is a false claim, and
+        // here it is false about the very server whose knee WE applied.
+        if self.knee_now {
+            return (Layer::Knee, self.knee.host.clone());
         }
         (Layer::Provider, self.shaped_host())
     }
@@ -839,12 +1246,23 @@ pub(super) fn feed(
             .is_some_and(|j| j.lock_ok().state == super::job::JobState::Downloading)
     });
     let (anchor_bps, _) = anchor(d, line_bps);
+    // TODO 312 item 3: the fleet cap's own gauges, read under the SAME
+    // lock as the per-server ones so the cap and the sockets it applies
+    // to can never come from two different instants.
+    let mut fleet_cap = 0usize;
+    let mut fleet_configured = 0usize;
+    let mut fleet_auto = false;
+    let mut fleet_knee = None;
     let servers: Vec<ServerTick> = d
         .hub
         .pool_live
         .lock_ok()
         .as_ref()
         .map(|l| {
+            fleet_cap = l.line_cap_fleet.load(Ordering::Relaxed);
+            fleet_configured = l.line_cap_configured.load(Ordering::Relaxed);
+            fleet_auto = l.line_cap_auto.load(Ordering::Relaxed);
+            fleet_knee = l.line_cap_knee.clone();
             l.servers
                 .iter()
                 .map(|s| ServerTick {
@@ -862,6 +1280,25 @@ pub(super) fn feed(
                 .collect()
         })
         .unwrap_or_default();
+    // The draining predecessor's sockets, for `Tick::drain_connected`.
+    // Taken AFTER the `pool_live` guard above has gone - the way
+    // `Daemon::fire_drain` and `stall::watched` do it, cloning the
+    // handle OUT and letting the slot lock go before touching the pool -
+    // because this runs on the 1 s ticker and must never hold two of the
+    // daemon's locks at once. The two readings are therefore a
+    // hair apart in time, which is the right trade: a socket count that
+    // moved between them changes an implied fleet size by one.
+    let drain_live = d
+        .drain_dl
+        .lock_ok()
+        .as_ref()
+        .and_then(|s| s.pool_live.clone());
+    let drain_connected: usize = drain_live.map_or(0, |l| {
+        l.servers
+            .iter()
+            .map(|s| s.connected.load(Ordering::Relaxed))
+            .sum()
+    });
     let at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|t| t.as_millis() as u64)
@@ -876,6 +1313,11 @@ pub(super) fn feed(
         storage: d.slow_storage.paused(),
         storage_suspect: d.slow_storage.suspect(nzbkit::pool::now_ms()),
         post_unix: d.hub.post_unix.load(Ordering::Relaxed),
+        fleet_cap,
+        fleet_configured,
+        fleet_auto,
+        fleet_knee,
+        drain_connected,
         servers,
     });
     // §108 option 2: publish the question the tick just raised, so the
@@ -1073,6 +1515,44 @@ impl WhySlow {
             "post_unix": c.last_post_unix,
             "missing_pct": (c.fleet_missing().unwrap_or(0.0) * 1000.0).round() / 10.0,
             "missing_backbones": c.missing_backbones(),
+            // TODO 312 item 3: the receipts behind a `fleet` verdict -
+            // the cap in force, what the accounts would have allowed,
+            // the per-socket carry that was measured and the fleet that
+            // carry implies for this line. Always shipped, like the
+            // `missing` block above, so the panel can show the working
+            // whichever arm is talking; the two measurements are 0 until
+            // a tick has had something to measure.
+            "fleet_cap": c.fleet.cap,
+            "fleet_configured": c.fleet.configured,
+            "fleet_auto": c.fleet.auto,
+            "fleet_carry_bps": c.fleet.carry_bps,
+            "fleet_implied": c.fleet.implied,
+            // TODO 312 item 7: the receipts behind a `knee` verdict, on
+            // the same always-shipped rule as the two blocks above -
+            // which server our own auto-tune measured, what it settled
+            // on, how many sockets that is costing the fleet right now,
+            // and how old the measurement is. `knee_host` is shipped in
+            // FULL and separately from `detail`, which carries the same
+            // host trimmed for display: the panel's remedy button hands
+            // it to `landOnServer`, which matches the server list by
+            // exact host and finds nothing if the sentence's tidied
+            // version is passed instead.
+            //
+            // It EMPTIES when the current tick carries no knee, while
+            // the verdict - majority-held over the window - can still
+            // read `knee` for a few more seconds. That is why the page
+            // gates the two remedy buttons on this field rather than on
+            // the layer: offering to open a server's settings for a
+            // knee that is no longer applied is worse than offering
+            // nothing, and the sentence still names the host either
+            // way, because it reads `detail`, which travels with the
+            // held verdict.
+            "knee_host": c.knee.host,
+            "knee_at": c.knee.at,
+            "knee_takes": c.knee.takes,
+            "knee_age_secs": c.knee.age_secs,
+            "knee_carry_bps": c.knee.carry_bps,
+            "knee_implied": c.knee.implied,
             "art_ms": pool_art_ms,
             "hedge_bound_ms": hedge_bound_ms,
             "hardware_bps": hardware_bps,
@@ -1160,1197 +1640,5 @@ pub(in crate::serve) fn verdict_from_json(v: Option<&Value>) -> Option<WhyVerdic
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The rigs' wall clock: a real unix millisecond stamp, not a
-    /// small number. `missing_case` measures the post's age against
-    /// `at_ms`, so a toy epoch would put every plausible post date in
-    /// the future and quietly suppress the arm under test.
-    const T0: u64 = 1_755_000_000_000;
-
-    fn srv(host: &str, connected: usize, budget: usize, bytes: u64, blocked: u64) -> ServerTick {
-        ServerTick {
-            host: host.into(),
-            connected,
-            budget,
-            bytes,
-            blocked_ms: blocked,
-            reconnects: 0,
-            refused: false,
-            tried: 100,
-            missing: 0,
-            art_ms: 0,
-        }
-    }
-
-    /// Drive `n` seconds of a steady regime; cumulative counters
-    /// advance by the per-tick deltas given.
-    struct Rig {
-        core: Core,
-        t: u64,
-        bytes: HashMap<String, u64>,
-        blocked: HashMap<String, u64>,
-        recon: HashMap<String, u64>,
-        /// What slowstore's diagnostic probes are currently saying. A
-        /// field rather than another positional argument: `run` is
-        /// already at the clippy limit, and every existing case wants
-        /// the default (no diagnostic verdict).
-        suspect: bool,
-        /// Per-server (tried, missing) for the article census, when a
-        /// case is about the post rather than the link. Same reasoning
-        /// as `suspect`: every other case wants `srv`'s default of 100
-        /// tried and none missing.
-        miss: Option<(u64, u64)>,
-        /// The running post's date, as `StreamHub::post_unix` publishes
-        /// it. 0 (the default every other case wants) is UNKNOWN, which
-        /// asserts neither propagation nor a takedown.
-        post_unix: i64,
-    }
-
-    impl Rig {
-        fn new() -> Rig {
-            Rig {
-                core: Core::default(),
-                t: T0,
-                bytes: HashMap::new(),
-                blocked: HashMap::new(),
-                recon: HashMap::new(),
-                suspect: false,
-                miss: None,
-                post_unix: 0,
-            }
-        }
-
-        #[expect(clippy::too_many_arguments)]
-        fn run(
-            &mut self,
-            n: usize,
-            bps: f64,
-            throttle: u64,
-            anchor: u64,
-            cpu: f64,
-            storage: bool,
-            // (host, connected, budget, d_bytes, d_blocked, d_recon, refused)
-            servers: &[(&str, usize, usize, u64, u64, u64, bool)],
-        ) {
-            for _ in 0..n {
-                self.t += 1000;
-                let sv = servers
-                    .iter()
-                    .map(|&(h, c, b, db, dbl, dr, refused)| {
-                        let bytes = self.bytes.entry(h.into()).or_default();
-                        *bytes += db;
-                        let blocked = self.blocked.entry(h.into()).or_default();
-                        *blocked += dbl;
-                        let recon = self.recon.entry(h.into()).or_default();
-                        *recon += dr;
-                        let (tried, missing) = self.miss.unwrap_or((100, 0));
-                        ServerTick {
-                            refused,
-                            reconnects: *recon,
-                            tried,
-                            missing,
-                            ..srv(h, c, b, *bytes, *blocked)
-                        }
-                    })
-                    .collect();
-                self.core.tick(Tick {
-                    owner: Some("job1".into()),
-                    at_ms: self.t,
-                    achieved_bps: bps,
-                    throttle_bps: throttle,
-                    anchor_bps: anchor,
-                    cpu_pct: cpu,
-                    storage,
-                    storage_suspect: self.suspect,
-                    post_unix: self.post_unix,
-                    servers: sv,
-                });
-            }
-        }
-    }
-
-    #[test]
-    fn unknown_until_the_window_fills() {
-        let mut r = Rig::new();
-        r.run(
-            MAJORITY - 1,
-            100e6,
-            0,
-            1_000_000_000,
-            20.0,
-            false,
-            &[("a", 8, 8, 100_000_000, 0, 0, false)],
-        );
-        assert_eq!(
-            r.core.verdict().0,
-            Layer::Unknown,
-            "no verdict before a majority"
-        );
-    }
-
-    /// §210 (d). The clamp itself, over the four cases that decide it.
-    #[test]
-    fn the_local_link_caps_the_typed_line_and_nothing_else() {
-        const LINE: u64 = 710 * 125_000;
-        // Gary's shape: a 1200 Mbps Wi-Fi link carries ~660, so 660 is
-        // the mark the graph draws 100% at - and it names the link
-        // rather than calling the LAN a line speed setting.
-        let wifi = 82_500_000;
-        assert_eq!(
-            link_capped((LINE, "line"), Some(wifi)),
-            (wifi, "link"),
-            "the LAN is lower, so the LAN is the ceiling"
-        );
-        // A link that covers the line changes nothing.
-        assert_eq!(
-            link_capped((LINE, "line"), Some(200_000_000)),
-            (LINE, "line")
-        );
-        // A MEASURED anchor is a rate this machine actually sustained -
-        // direct evidence about the whole path, including this hop.
-        // An estimate of one hop may not argue with it.
-        assert_eq!(
-            link_capped((LINE, "measured"), Some(wifi)),
-            (LINE, "measured")
-        );
-        // A tunnel, or an interface the OS would not rate, gives no
-        // ceiling at all: nothing to clamp with.
-        assert_eq!(link_capped((LINE, "line"), None), (LINE, "line"));
-        // And no anchor stays no anchor - never invent one from a link.
-        assert_eq!(link_capped((0, ""), Some(wifi)), (0, ""));
-    }
-
-    /// ...and what the clamp is FOR. Gary's own numbers only move the
-    /// 100% mark (660 of 710 still rides the line bar), so this takes
-    /// the shape that also moves the VERDICT: an 866 Mbps Wi-Fi 5 link
-    /// carries ~476 Mbit under a gigabit line, and a run at that
-    /// ceiling was being blamed on the providers.
-    #[test]
-    fn riding_the_local_link_is_not_a_provider_shortfall() {
-        const LINE: u64 = 1000 * 125_000;
-        let capped = link_capped((LINE, "line"), Some(59_537_500));
-        assert_eq!(capped, (59_537_500, "link"));
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            58e6,
-            0,
-            capped.0,
-            30.0,
-            false,
-            &[("a", 8, 8, 58_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-        // Against the unclamped line the same run reads as a shortfall
-        // the reader can do nothing about, and names a host that is
-        // delivering everything the LAN will carry.
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            58e6,
-            0,
-            LINE,
-            30.0,
-            false,
-            &[("a", 8, 8, 58_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Provider);
-    }
-
-    #[test]
-    fn riding_the_anchor_is_line_speed() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            50.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 900_000, 0, false)],
-        );
-        // Note the huge blocked_ms: a healthy download parks workers.
-        // That must NOT read as a client problem (the §108 lesson).
-        assert_eq!(r.core.verdict().0, Layer::Line);
-    }
-
-    #[test]
-    fn a_binding_cap_is_the_limit() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            99e6,
-            100_000_000,
-            1_000_000_000,
-            20.0,
-            false,
-            &[("a", 8, 8, 99_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Limit);
-    }
-
-    #[test]
-    fn shortfall_with_idle_sockets_is_the_provider() {
-        let mut r = Rig::new();
-        // Half the anchor, workers not parked: upstream.
-        r.run(
-            WINDOW,
-            500e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 500_000_000, 100, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Provider);
-    }
-
-    /// Gary's 16 Aug regime: 44% of the articles are not on the
-    /// servers, so the pool spends its wire time on requests that
-    /// return nothing and the fleet delivers a fraction of the anchor.
-    /// Every other instrument reads this as a shaped or capped
-    /// provider - the sockets ARE idle - and the verdict used to name
-    /// a host that was behaving perfectly.
-    #[test]
-    fn a_post_full_of_holes_is_not_the_provider() {
-        let mut r = Rig::new();
-        r.miss = Some((2253, 982)); // 4506 tried, 1965 missing across two
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("a", 8, 8, 35_000_000, 100, 0, false),
-                ("b", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Missing);
-    }
-
-    /// ...and the same shortfall with an intact post still convicts
-    /// the provider. The layer above must not swallow the case it was
-    /// inserted in front of.
-    #[test]
-    fn a_shortfall_on_an_intact_post_is_still_the_provider() {
-        let mut r = Rig::new();
-        r.miss = Some((2253, 20)); // under 1%
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("a", 8, 8, 35_000_000, 100, 0, false),
-                ("b", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Provider);
-    }
-
-    /// The articles may not be available YET, or may have been taken
-    /// down. A release grabbed the hour it pre'd 430s everywhere while
-    /// the backbones fill in, and from in here that is pixel-for-pixel
-    /// a takedown. The calendar is the only thing that separates them,
-    /// so the young arm says so and nothing else does.
-    #[test]
-    fn a_brand_new_post_full_of_holes_is_still_propagating() {
-        let mut r = Rig::new();
-        r.miss = Some((2253, 982));
-        // Two hours old, against the rig's own wall clock.
-        r.post_unix = (r.t / 1000) as i64 - 2 * 3600;
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
-                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_eq!(r.core.verdict(), (Layer::Missing, "young"));
-    }
-
-    /// The other side of the same regime: old enough that propagation
-    /// is finished, and two independent backbones each saying so. Only
-    /// here may the surface tell a user that waiting will not help.
-    #[test]
-    fn an_old_post_two_backbones_agree_is_gone() {
-        let mut r = Rig::new();
-        r.miss = Some((2253, 982));
-        r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
-                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_eq!(r.core.verdict(), (Layer::Missing, "gone"));
-    }
-
-    /// Five resellers of ONE backbone are one opinion. The same old
-    /// post, the same misses, every server behind the same upstream:
-    /// the shortfall is asserted, the takedown is NOT.
-    #[test]
-    fn one_backbone_however_emphatic_cannot_say_gone() {
-        let mut r = Rig::new();
-        r.miss = Some((2253, 982));
-        r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                // Same brand, two hostnames: `backbone_of` folds them.
-                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
-                ("reader.alpha.com", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_eq!(r.core.verdict(), (Layer::Missing, ""));
-    }
-
-    /// An NZB with no usable date reads as post_unix 0, and 0 is
-    /// UNKNOWN, not "posted this second". Calling it young would
-    /// promise a wait that may never end.
-    #[test]
-    fn an_undated_post_claims_neither_cause() {
-        let mut r = Rig::new();
-        r.miss = Some((2253, 982));
-        r.post_unix = 0;
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
-                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_eq!(r.core.verdict(), (Layer::Missing, ""));
-    }
-
-    /// A post dated in the future - a wrong clock, a mis-stamped NZB -
-    /// is not evidence of freshness. Neither arm may fire on it.
-    #[test]
-    fn a_post_dated_in_the_future_claims_neither_cause() {
-        let mut r = Rig::new();
-        r.miss = Some((2253, 982));
-        r.post_unix = (r.t / 1000) as i64 + 30 * 86_400;
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
-                ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_eq!(r.core.verdict(), (Layer::Missing, ""));
-    }
-
-    /// The boundary itself, walked both sides. `GONE_MIN_AGE_DAYS` is
-    /// where this project already draws the propagation line and this
-    /// surface must not draw a fourth one of its own.
-    #[test]
-    fn the_young_gone_boundary_is_gone_min_age_days() {
-        for (age_secs, want) in [
-            (YOUNG_MAX_SECS - 60, "young"),
-            (YOUNG_MAX_SECS, "gone"),
-            (YOUNG_MAX_SECS + 86_400, "gone"),
-        ] {
-            let mut r = Rig::new();
-            r.miss = Some((2253, 982));
-            r.post_unix = (r.t / 1000) as i64 - age_secs;
-            r.run(
-                WINDOW,
-                70e6,
-                0,
-                1_000_000_000,
-                30.0,
-                false,
-                &[
-                    ("news.alpha.com", 8, 8, 35_000_000, 100, 0, false),
-                    ("news.beta.com", 8, 8, 35_000_000, 100, 0, false),
-                ],
-            );
-            assert_eq!(
-                r.core.verdict(),
-                (Layer::Missing, want),
-                "post {age_secs}s old"
-            );
-        }
-    }
-
-    /// A backbone that saw a handful of requests is not one of the
-    /// independent opinions "gone" needs, even at a 100% miss rate on
-    /// its own tiny sample. Under `BACKBONE_MIN_TRIED` it sits out.
-    #[test]
-    fn a_barely_used_backbone_is_not_a_second_opinion() {
-        let mut r = Rig::new();
-        r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("news.alpha.com", 8, 8, 35_000_000, 100, 0, false)],
-        );
-        // The rig's `miss` is fleet-uniform, so the small server is
-        // built by hand: 4000 tried / 1900 missing on alpha, 10/10 on
-        // the fill host. Fleet-wide that clears MISSING_BAR; the fill
-        // host's own sample does not clear BACKBONE_MIN_TRIED.
-        let mut core = Core::default();
-        for i in 0..WINDOW {
-            core.tick(Tick {
-                owner: Some("job1".into()),
-                at_ms: T0 + (i as u64 + 1) * 1000,
-                achieved_bps: 70e6,
-                throttle_bps: 0,
-                anchor_bps: 1_000_000_000,
-                cpu_pct: 30.0,
-                storage: false,
-                storage_suspect: false,
-                post_unix: (T0 / 1000) as i64 - 9 * 86_400,
-                servers: vec![
-                    ServerTick {
-                        tried: 4000,
-                        missing: 1900,
-                        ..srv("news.alpha.com", 8, 8, 35_000_000 * (i as u64 + 1), 100)
-                    },
-                    ServerTick {
-                        tried: 10,
-                        missing: 10,
-                        ..srv("news.beta.com", 8, 8, 35_000_000 * (i as u64 + 1), 100)
-                    },
-                ],
-            });
-        }
-        assert_eq!(core.verdict(), (Layer::Missing, ""));
-    }
-
-    /// A handful of misses in the first seconds of a run is not a
-    /// verdict about the post: under `MISSING_MIN_TRIED` the rate is
-    /// not read at all, however bad it looks.
-    #[test]
-    fn a_tiny_sample_of_misses_convicts_nothing() {
-        let mut r = Rig::new();
-        r.miss = Some((20, 19)); // 95% missing, 40 articles fleet-wide
-        r.run(
-            WINDOW,
-            70e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("a", 8, 8, 35_000_000, 100, 0, false),
-                ("b", 8, 8, 35_000_000, 100, 0, false),
-            ],
-        );
-        assert_ne!(r.core.verdict().0, Layer::Missing);
-    }
-
-    #[test]
-    fn shortfall_with_parked_workers_and_hot_cpu_is_cpu() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            300e6,
-            0,
-            1_000_000_000,
-            95.0,
-            false,
-            // 8 conns * 1000 ms = 8000 worker-ms; 6000 blocked = 75%.
-            &[("a", 8, 8, 300_000_000, 6000, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Cpu);
-    }
-
-    #[test]
-    fn shortfall_with_parked_workers_and_cool_cpu_is_the_client() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            300e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 300_000_000, 6000, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Client);
-    }
-
-    #[test]
-    fn a_storage_pause_engaging_is_disk() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            50e6,
-            0,
-            1_000_000_000,
-            30.0,
-            true,
-            &[("a", 8, 8, 50_000_000, 7000, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Disk);
-    }
-
-    /// §108 option 2. The volume that is BAD but not bad enough to trip
-    /// the breaker: parked on the write side, delivering a twentieth of
-    /// the line, for as long as you care to watch. The breaker needs
-    /// three quarters of a three-minute window and never fires here, so
-    /// before the diagnostic this read as Client - honest about the
-    /// three candidates, but it sends nobody to look at their drive.
-    #[test]
-    fn a_slow_volume_is_named_before_the_breaker_trips() {
-        let mut r = Rig::new();
-        let regime = |r: &mut Rig| {
-            r.run(
-                WINDOW,
-                50e6,
-                0,
-                1_000_000_000,
-                30.0,
-                false,
-                &[("a", 8, 8, 50_000_000, 7000, 0, false)],
-            )
-        };
-        // No answer yet: the probes have not run, or have come back
-        // fast. We do not guess.
-        regime(&mut r);
-        assert_eq!(
-            r.core.verdict().0,
-            Layer::Client,
-            "with no disk answer the honest verdict is our own pipeline"
-        );
-        assert!(
-            r.core.disk_question,
-            "...and the fork must be ASKING, or no probe ever runs"
-        );
-
-        // slowstore's probes come back slow, twice: now it is the disk,
-        // with no pause anywhere in sight.
-        r.suspect = true;
-        regime(&mut r);
-        assert_eq!(r.core.verdict().0, Layer::Disk);
-        assert!(
-            r.core.disk_question,
-            "the question stays open on a Disk vote - closing it would \
-             stop the probes, stale the answer and flip back to Client"
-        );
-
-        // The volume recovers: a fast probe drops the suspicion and the
-        // verdict goes back to naming us, not the hardware.
-        r.suspect = false;
-        regime(&mut r);
-        assert_eq!(r.core.verdict().0, Layer::Client);
-    }
-
-    /// The question is only asked where an answer would change the
-    /// verdict. Everywhere else, probing a volume would be work for its
-    /// own sake - and this feature's whole licence is that it never
-    /// touches a healthy daemon's disk.
-    #[test]
-    fn the_disk_question_is_asked_only_at_the_fork() {
-        // Riding the line: nothing is slow.
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 900, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-        assert!(!r.core.disk_question, "a healthy line asks nothing");
-
-        // Short of the line, but the sockets could not fill the pipe -
-        // upstream, so the volume is not the question.
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            50e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 50_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Provider);
-        assert!(!r.core.disk_question, "a provider shortfall asks nothing");
-
-        // Downstream, but CPU owns it: a witness already condemned.
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            50e6,
-            0,
-            1_000_000_000,
-            97.0,
-            false,
-            &[("a", 8, 8, 50_000_000, 7000, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Cpu);
-        assert!(!r.core.disk_question, "CPU is its own witness");
-
-        // The breaker is in force: it owns the volume from here, and
-        // its probes are already running on the paused cadence.
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            50e6,
-            0,
-            1_000_000_000,
-            30.0,
-            true,
-            &[("a", 8, 8, 50_000_000, 7000, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Disk);
-        assert!(
-            !r.core.disk_question,
-            "a real pause closes the question - the breaker owns it"
-        );
-    }
-
-    #[test]
-    fn a_refusing_host_is_named() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            400e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("fast.example", 8, 8, 400_000_000, 0, 0, false),
-                ("refusing.example", 0, 8, 0, 0, 0, true),
-            ],
-        );
-        let (l, d) = r.core.verdict();
-        assert_eq!(l, Layer::Provider);
-        assert_eq!(d, "refusing.example");
-    }
-
-    #[test]
-    fn a_conn_capped_host_is_named() {
-        let mut r = Rig::new();
-        // 26 granted of a 32 budget - the Giganews shape.
-        r.run(
-            WINDOW,
-            400e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("capped.example", 20, 32, 40_000_000, 0, 0, false),
-                ("fast.example", 8, 8, 360_000_000, 0, 0, false),
-            ],
-        );
-        let (l, d) = r.core.verdict();
-        assert_eq!(l, Layer::Provider);
-        assert_eq!(d, "capped.example");
-    }
-
-    #[test]
-    fn a_shaped_host_is_convicted_by_relative_rates() {
-        let mut r = Rig::new();
-        // Full budget connected on both; one delivers ~2 MB/s/conn,
-        // the other ~45 MB/s/conn (the measured 8 Aug shape).
-        r.run(
-            WINDOW,
-            420e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("shaped.example", 26, 26, 52_000_000, 0, 0, false),
-                ("fast.example", 8, 8, 360_000_000, 0, 0, false),
-            ],
-        );
-        let (l, d) = r.core.verdict();
-        assert_eq!(l, Layer::Provider);
-        assert_eq!(d, "shaped.example");
-    }
-
-    #[test]
-    fn healthy_spread_convicts_nobody() {
-        let mut r = Rig::new();
-        // Both hosts busy at comparable per-conn rates: provider
-        // verdict, but no host named - the fleet is just full.
-        r.run(
-            WINDOW,
-            500e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[
-                ("a.example", 10, 10, 300_000_000, 0, 0, false),
-                ("b.example", 10, 10, 200_000_000, 0, 0, false),
-            ],
-        );
-        let (l, d) = r.core.verdict();
-        assert_eq!(l, Layer::Provider);
-        assert_eq!(d, "");
-    }
-
-    #[test]
-    fn no_anchor_means_unknown_not_a_guess() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            100e6,
-            0,
-            0,
-            30.0,
-            false,
-            &[("a", 8, 8, 100_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Unknown);
-    }
-
-    #[test]
-    fn a_dead_fleet_with_a_budget_is_the_provider() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            0.0,
-            0,
-            1_000_000_000,
-            5.0,
-            false,
-            &[("a", 0, 8, 0, 0, 0, false)],
-        );
-        let (l, d) = r.core.verdict();
-        assert_eq!(l, Layer::Provider);
-        assert_eq!(d, "a");
-    }
-
-    #[test]
-    fn a_drained_job_in_its_tail_is_not_blamed_on_the_provider() {
-        let mut r = Rig::new();
-        // A healthy run at line speed...
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-        // ...then net-drain: the connections hang up, speed reads
-        // zero, bytes stop advancing. The dead-fleet rule must not
-        // fire - the fleet DELIVERED; it is the tail, not an outage.
-        r.run(
-            WINDOW,
-            0.0,
-            0,
-            1_000_000_000,
-            60.0,
-            false,
-            &[("a", 0, 8, 0, 0, 0, false)],
-        );
-        assert_eq!(
-            r.core.verdict().0,
-            Layer::Unknown,
-            "a finished wire is not provider evidence"
-        );
-    }
-
-    #[test]
-    fn yesterdays_reconnects_do_not_convict_a_drained_fleet() {
-        let mut r = Rig::new();
-        // A healthy run at line speed that weathered a routine redial
-        // every tick - churn while the bytes flow convicts nobody.
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 0, 1, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-        // Net-drain tail: the sockets hang up and nothing redials. The
-        // job-lifetime redial history must not turn the tail into a
-        // Provider verdict - this is the churn counterpart of the
-        // drained-tail guard above, and it regressed on the live rig
-        // when the sum never aged out.
-        r.run(
-            WINDOW,
-            0.0,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 0, 8, 0, 0, 0, false)],
-        );
-        assert_eq!(
-            r.core.verdict().0,
-            Layer::Unknown,
-            "a hung-up fleet's redial history is not evidence"
-        );
-    }
-
-    /// TODO 207: the verdict a finished job carries into history is the
-    /// LONGEST-HELD layer of its run, not the last one before it left
-    /// the wire. A job that was provider-bound for most of an hour and
-    /// spent its final half-minute on a busy CPU was a provider
-    /// problem, and "last verdict" - the cheap option - says the
-    /// opposite of the truth about exactly that job.
-    #[test]
-    fn the_captured_verdict_is_the_longest_held_layer_not_the_last() {
-        let mut r = Rig::new();
-        // Forty seconds shy of the anchor with the pipeline idle: the
-        // sockets could not fill the pipe.
-        r.run(
-            40,
-            500e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 500_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Provider);
-        // ...then the run ends with the machine's own cores pegged and
-        // the workers parked on a full channel, which is a different
-        // layer and IS the last thing that was true.
-        r.run(
-            20,
-            500e6,
-            0,
-            1_000_000_000,
-            95.0,
-            false,
-            &[("a", 8, 8, 500_000_000, 8_000, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Cpu, "the LAST verdict");
-        let v = r.core.summary(r.t).expect("a judged run has a verdict");
-        assert_eq!(v.layer, "provider", "but the longest-held one is kept");
-        assert!(
-            v.held_secs > v.total_secs / 2,
-            "and it carries its own weight: {v:?}"
-        );
-        assert!(
-            (58..=61).contains(&v.total_secs),
-            "the whole observed run, not just the winning span: {v:?}"
-        );
-    }
-
-    /// ...and the honest half of the same rule: `Unknown` is the
-    /// ABSENCE of a verdict, so a run nothing could be said about
-    /// persists nothing at all. Anything else and every fast little
-    /// download in history would carry "still gathering evidence".
-    #[test]
-    fn a_run_nothing_could_judge_persists_no_verdict() {
-        let mut r = Rig::new();
-        // No anchor: "slow" is undefined, so every tick votes Unknown.
-        r.run(
-            30,
-            500e6,
-            0,
-            0,
-            30.0,
-            false,
-            &[("a", 8, 8, 500_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Unknown);
-        assert!(r.core.summary(r.t).is_none());
-        // A verdict that never held a whole second is not one either -
-        // it rounds to "for 0s" on every surface that renders it.
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-        let v = r
-            .core
-            .summary(r.t)
-            .expect("line is a verdict like any other");
-        assert_eq!(v.layer, "line");
-        assert!(r.core.summary(r.core.verdict_since_ms + 999).is_none());
-    }
-
-    /// The capture is ownership-checked, for the same reason the live
-    /// payload is: the core judges whoever owns the wire, so asking it
-    /// about any other job must yield nothing rather than this job's
-    /// verdict filed under somebody else's name.
-    #[test]
-    fn a_capture_for_another_job_is_never_this_ones_verdict() {
-        let w = WhySlow::default();
-        for i in 1..=WINDOW as u64 {
-            w.tick(Tick {
-                owner: Some("job1".into()),
-                at_ms: T0 + i * 1000,
-                achieved_bps: 500e6,
-                throttle_bps: 0,
-                anchor_bps: 1_000_000_000,
-                cpu_pct: 30.0,
-                storage: false,
-                storage_suspect: false,
-                post_unix: 0,
-                servers: vec![srv("a", 8, 8, 500_000_000 * i, 0)],
-            });
-        }
-        let at = T0 + WINDOW as u64 * 1000;
-        assert!(w.capture("job2", at).is_none(), "not job2's verdict");
-        assert_eq!(
-            w.capture("job1", at).map(|v| v.layer),
-            Some("provider".to_string())
-        );
-    }
-
-    /// The persisted form, both ways. The reading half is where TODO
-    /// 207's absence rule lives, so every shape that is not a verdict
-    /// this build understands has to come back as no verdict.
-    #[test]
-    fn the_verdict_wire_form_round_trips_and_refuses_everything_else() {
-        let v = WhyVerdict {
-            layer: "provider".into(),
-            detail: "news.example.invalid".into(),
-            held_secs: 640,
-            total_secs: 900,
-        };
-        assert_eq!(verdict_from_json(Some(&verdict_json(&v))), Some(v));
-        assert!(verdict_from_json(None).is_none());
-        for bad in [
-            json!({}),
-            json!({"layer": "unknown"}),
-            json!({"layer": "line "}),
-            json!({"detail": "news.example.invalid"}),
-        ] {
-            assert!(verdict_from_json(Some(&bad)).is_none(), "{bad}");
-        }
-        // ...and a verdict missing only its numbers is still a verdict:
-        // the layer is the claim, the seconds are its weight.
-        assert_eq!(
-            verdict_from_json(Some(&json!({"layer": "line"}))).map(|v| v.held_secs),
-            Some(0)
-        );
-    }
-
-    #[test]
-    fn owner_change_resets_everything() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            500e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 500_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Provider);
-        // New owner: one tick under the new job must not inherit the
-        // old evidence.
-        r.core.tick(Tick {
-            owner: Some("job2".into()),
-            at_ms: r.t + 1000,
-            achieved_bps: 500e6,
-            throttle_bps: 0,
-            anchor_bps: 1_000_000_000,
-            cpu_pct: 30.0,
-            storage: false,
-            storage_suspect: false,
-            post_unix: 0,
-            servers: vec![srv("a", 8, 8, 500_000_000, 0)],
-        });
-        assert_eq!(r.core.verdict().0, Layer::Unknown);
-        assert!(r.core.timeline.is_empty());
-    }
-
-    #[test]
-    fn a_flap_cannot_flip_the_verdict() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-        // Five slow seconds inside a line-speed run: not a majority,
-        // verdict holds.
-        r.run(
-            5,
-            300e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 300_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-    }
-
-    #[test]
-    fn evidence_that_stays_split_falls_to_unknown() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.verdict().0, Layer::Line);
-        // Alternate line-speed and half-speed seconds indefinitely:
-        // neither layer can hold a majority, and past the transition
-        // allowance the stale verdict must yield to Unknown rather
-        // than keep asserting a regime the window no longer shows.
-        for _ in 0..WINDOW {
-            r.run(
-                1,
-                950e6,
-                0,
-                1_000_000_000,
-                30.0,
-                false,
-                &[("a", 8, 8, 950_000_000, 0, 0, false)],
-            );
-            r.run(
-                1,
-                300e6,
-                0,
-                1_000_000_000,
-                30.0,
-                false,
-                &[("a", 8, 8, 300_000_000, 0, 0, false)],
-            );
-        }
-        assert_eq!(r.core.verdict().0, Layer::Unknown);
-    }
-
-    #[test]
-    fn the_timeline_records_each_regime_change_once() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            950e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 950_000_000, 0, 0, false)],
-        );
-        r.run(
-            WINDOW,
-            300e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 300_000_000, 0, 0, false)],
-        );
-        let layers: Vec<Layer> = r.core.timeline.iter().map(|c| c.layer).collect();
-        assert_eq!(layers, vec![Layer::Line, Layer::Provider]);
-    }
-
-    #[test]
-    fn envelope_tracks_only_uncapped_unblocked_ticks() {
-        let mut r = Rig::new();
-        // Capped ticks must not set the envelope.
-        r.run(
-            WINDOW,
-            100e6,
-            100_000_000,
-            1_000_000_000,
-            20.0,
-            false,
-            &[("a", 8, 8, 100_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.envelope_bps, 0);
-        // Uncapped: the best delivery becomes the envelope estimate.
-        r.run(
-            5,
-            600e6,
-            0,
-            1_000_000_000,
-            20.0,
-            false,
-            &[("a", 8, 8, 600_000_000, 0, 0, false)],
-        );
-        assert_eq!(r.core.envelope_bps, 600_000_000);
-    }
-
-    #[test]
-    fn counter_restart_is_forgiven() {
-        let mut r = Rig::new();
-        r.run(
-            WINDOW,
-            500e6,
-            0,
-            1_000_000_000,
-            30.0,
-            false,
-            &[("a", 8, 8, 500_000_000, 0, 0, false)],
-        );
-        // The pool restarted: cumulative bytes fall. One tick with a
-        // smaller reading must not underflow or convict anyone.
-        r.core.tick(Tick {
-            owner: Some("job1".into()),
-            at_ms: r.t + 1000,
-            achieved_bps: 500e6,
-            throttle_bps: 0,
-            anchor_bps: 1_000_000_000,
-            cpu_pct: 30.0,
-            storage: false,
-            storage_suspect: false,
-            post_unix: 0,
-            servers: vec![srv("a", 8, 8, 1000, 0)],
-        });
-        assert_eq!(
-            r.core.verdict().0,
-            Layer::Provider,
-            "verdict survives the restart"
-        );
-    }
-}
+#[path = "whyslow_tests.rs"]
+mod tests;

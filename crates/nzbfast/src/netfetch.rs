@@ -59,6 +59,39 @@ pub(crate) fn is_forbidden_fetch_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// The daemon-API reading of [`is_forbidden_fetch_ip`]: link-local is a
+/// legitimate `--host`, the metadata endpoints inside it are not.
+///
+/// A `--host` names a machine the USER owns, and two real topologies
+/// live in ranges the fetch guard refuses wholesale: a direct-cabled
+/// LAN with no DHCP self-assigns 169.254/16 (mDNS then resolves
+/// `nas.local` into it), and an IPv6 host always answers on fe80::/10.
+/// The old `TcpStream::connect` submit reached both, so refusing them
+/// here is a regression with no override. The cloud-metadata endpoints
+/// that live inside 169.254/16 are carved out BY ADDRESS and stay
+/// refused; everything outside link-local keeps the fetch guard's
+/// answer, the v6 IMDS block (fd00:ec2::/32) included.
+pub(crate) fn is_forbidden_daemon_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+    match ip {
+        IpAddr::V4(a) if a.is_link_local() => {
+            // AWS/GCP/Azure IMDS, and the AWS ECS credentials endpoint.
+            a == Ipv4Addr::new(169, 254, 169, 254) || a == Ipv4Addr::new(169, 254, 170, 2)
+        }
+        IpAddr::V6(a) => {
+            if let Some(v4) = a.to_ipv4_mapped() {
+                return is_forbidden_daemon_ip(IpAddr::V4(v4));
+            }
+            // fe80::/10 carries no metadata service.
+            if (a.segments()[0] & 0xffc0) == 0xfe80 {
+                return false;
+            }
+            is_forbidden_fetch_ip(ip)
+        }
+        _ => is_forbidden_fetch_ip(ip),
+    }
+}
+
 /// Is this address INSIDE the user's own network - the class
 /// [`is_forbidden_fetch_ip`] deliberately lets through because a
 /// self-hosted app's normal indexer lives there?
@@ -218,6 +251,31 @@ impl ureq::Resolver for SsrfGuardResolver {
             ));
         }
         if addrs.iter().any(|a| is_forbidden_fetch_ip(a.ip())) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("refusing to fetch an internal address ({netloc})"),
+            ));
+        }
+        Ok(addrs)
+    }
+}
+
+/// [`SsrfGuardResolver`] with the daemon-API carve-out
+/// ([`is_forbidden_daemon_ip`]): link-local is reachable, its metadata
+/// endpoints are not. Only [`daemon_api_agent`] installs it - the
+/// enrich and user-URL agents keep the full guard.
+pub(crate) struct DaemonApiResolver;
+impl ureq::Resolver for DaemonApiResolver {
+    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        use std::net::ToSocketAddrs;
+        let addrs: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
+        if addrs.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no address",
+            ));
+        }
+        if addrs.iter().any(|a| is_forbidden_daemon_ip(a.ip())) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!("refusing to fetch an internal address ({netloc})"),
@@ -404,6 +462,42 @@ pub(crate) fn origin_bound_agent(
 pub(crate) fn shared_enrich_agent() -> ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| ssrf_safe_agent(4, 30)).clone()
+}
+
+/// The agent the CLI uses to talk to a running nzbfast daemon
+/// (`nzbfast stream`), and the only client path that speaks to OUR OWN
+/// API rather than to a third party.
+///
+/// It exists so `--host` can name an `https://` base at all: a daemon
+/// started with `--tls-cert`/`--tls-key` serves one listener and one
+/// scheme, so a plaintext-only client cannot reach it by any spelling.
+///
+/// Three choices, none of them the builder's defaults:
+///
+/// - **nzbkit's shared TLS config**, not ureq's webpki-only one, for the
+///   reason the SMTP sender already gives: the trust anchors are exactly
+///   the download path's, so `NZBFAST_EXTRA_CA=<cert.pem>` reaches here
+///   too. That matters more here than anywhere, because the pair the
+///   `serve --tls-cert` help tells a user to make is SELF-SIGNED, and
+///   without the extra anchor the very setup we document is unreachable.
+/// - **No redirects.** The request carries `X-Api-Key`, and ureq
+///   forwards a custom header across a redirect - including one to
+///   another host. A daemon has no reason to redirect its own `/api`, so
+///   a 3xx is reported rather than followed, and the key never leaves
+///   the host the user named.
+/// - **The daemon-API SSRF resolver**, which permits loopback, RFC1918,
+///   CGNAT and link-local (a NAS, an auto-IP LAN with no DHCP,
+///   Tailscale - every real `--host`) and refuses the cloud-metadata
+///   endpoints by address ([`is_forbidden_daemon_ip`]). A `--host` is
+///   typically typed by a script, and this costs a legitimate one
+///   nothing.
+pub(crate) fn daemon_api_agent(timeout_secs: u64) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .resolver(DaemonApiResolver)
+        .redirects(0)
+        .tls_config(nzbkit::nntp::shared_tls_client_config())
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .build()
 }
 
 /// Cut every URL in a message down to `scheme://host`, dropping userinfo,

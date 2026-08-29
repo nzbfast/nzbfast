@@ -21,7 +21,17 @@ use super::*;
 /// and `unknown` are excluded for the same reason the queue row's
 /// verdict chip excludes them: one is not a shortfall and the other is
 /// not a verdict.
-const SHORTFALL: [&str; 6] = ["provider", "cpu", "client", "disk", "limit", "missing"];
+///
+/// This IS that chip's list, and must stay it: `web/dashboard.html`
+/// carries the same eight tokens twice (the row's verdict clause and
+/// the history drawer's row), and a layer in one list and not the other
+/// is a verdict the page shows and this suite reads as "not a
+/// shortfall". `fleet` and `knee` joined on 28 Aug 2026 - the first was
+/// missed when TODO 312 item 3 added it, and item 7 found the gap while
+/// adding the second.
+const SHORTFALL: [&str; 8] = [
+    "provider", "cpu", "client", "disk", "limit", "missing", "fleet", "knee",
+];
 
 /// A mock server slow enough that the core has time to reach a verdict.
 ///
@@ -324,6 +334,309 @@ async fn a_history_record_from_before_the_field_reads_as_absent() {
     })
     .await
     .unwrap();
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// TODO 312 items 1+3, closing the coverage hole they shipped with:
+/// the `fleet` verdict produced END TO END on a running daemon - the
+/// setting seeds the pool's gauges, `whyslow::feed` reads them off
+/// `pool_live`, `classify` reaches the fleet arm, the majority window
+/// publishes it, and the queue payload carries the four receipts. The
+/// unit tests in serve/whyslow.rs pin the decision core in both
+/// directions; nothing before this drove the whole chain.
+///
+/// The rig HAS to be a slow mock rather than a plain mockserve run,
+/// and that was measured rather than assumed: loopback at full speed parks the
+/// workers on the decode channel, `blocked_pct` reads ~100% and
+/// `classify` correctly answers `client` one arm ABOVE the fleet check
+/// - with every fleet number already in its firing range. A 400 ms
+/// per-BODY delay keeps each socket under-carrying (well below
+/// `LINE_CAP_SOCKET_BPS`) while the declared 1 Gbit line has headroom,
+/// which is GH #62's regime and this arm's trigger.
+///
+/// The numbers: `line_cap_fleet` typed at 2 (typed = `line_cap_auto`
+/// false, so the "cap can still fix itself" gate stays open and the
+/// governor is pinned) against an account offering 4, so the cap is
+/// taking sockets away; the two sockets carry ~100 KB/s against a
+/// 125 MB/s anchor, so the supply gate is open and the implied fleet
+/// dwarfs the cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fleet_verdict_is_produced_end_to_end_on_a_running_daemon() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-why312-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // 400 articles behind a 400 ms per-BODY delay over the 2 sockets
+    // the cap allows is ~80 s on the wire: the verdict needs twelve
+    // one-second Fleet votes before it publishes, and the job must
+    // still own the wire when the payload is read.
+    let data = payload(400 * 20_000, 7);
+    let mut articles = HashMap::new();
+    let segs = make_file_articles("fleet.bin", &data, 20_000, "fl", &mut articles);
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            delay_ms: 400,
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"x\" date=\"0\" subject=\"&quot;fleet.bin&quot; yEnc (1/400)\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+    );
+    for (id, bytes, num) in &segs {
+        xml.push_str(&format!(
+            "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false,\"connections\":4}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    // The declared line speed is the anchor (linkpeak) - without one
+    // "slow" is undefined and the core votes `unknown` forever. The
+    // typed fleet of 2 is what `get::fleet_knobs::line_cap_plan` reads
+    // at job build and what seeds the pool's `line_cap_fleet` gauge.
+    std::fs::write(
+        dir.join("settings.json"),
+        "{\"line_speed\": 125000000, \"line_cap_fleet\": 2, \"index_enabled\": false}",
+    )
+    .unwrap();
+    let build = |port: u16| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("4");
+        c
+    };
+    let d = serve(&dir, &build).await;
+    let port = d.port;
+    tokio::task::spawn_blocking(move || {
+        let id = upload(port, &xml);
+        // Poll until the published verdict IS the fleet layer - votes
+        // bank at one a second, so this converges in roughly fifteen
+        // seconds and the wire holds for eighty.
+        for _ in 0..450 {
+            let q = http(port, "/api?mode=queue&output=json", None);
+            let v: serde_json::Value = serde_json::from_str(&q).unwrap();
+            let w = &v["queue"]["whyslow"];
+            if w["layer"].as_str() == Some("fleet") {
+                assert_eq!(w["nzo_id"].as_str(), Some(id.as_str()), "{q}");
+                // The four receipts the panel renders, exactly as the
+                // gauges seeded them: the cap in force, what the
+                // account would have dialled, and that the cap is
+                // TYPED rather than the curve's own number.
+                assert_eq!(w["fleet_cap"].as_u64(), Some(2), "{q}");
+                assert_eq!(w["fleet_configured"].as_u64(), Some(4), "{q}");
+                assert_eq!(w["fleet_auto"].as_bool(), Some(false), "{q}");
+                // ...and the two measurements: a per-socket carry was
+                // really measured on a supply-gate-open tick, and the
+                // fleet it implies exceeds the cap it convicts.
+                let carry = w["fleet_carry_bps"].as_u64().unwrap();
+                assert!(carry > 0, "a fleet verdict with no measured carry: {q}");
+                let implied = w["fleet_implied"].as_u64().unwrap();
+                assert!(implied > 2, "the implied fleet must exceed the cap: {q}");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        panic!("the fleet verdict never reached the queue payload");
+    })
+    .await
+    .unwrap();
+
+    // Close the daemon, keeping its log for whatever fails below.
+    let _log = d.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `conntune::SCHEMA`, which the test binary cannot name directly: these
+/// suites link the BINARY, not the library, so the crate's own modules
+/// are out of reach. Kept as one function with the constant's name in it
+/// so a bump has something to grep for rather than a bare 2 in a JSON
+/// literal.
+fn nzbfast_schema() -> u32 {
+    2
+}
+
+/// TODO 312 item 7: the `knee` verdict, end to end on a running daemon.
+///
+/// The sibling above drives a TYPED fleet cap and convicts it. This one
+/// drives OUR OWN STALE MEASUREMENT and must convict that instead, on a
+/// second where the cap is provably not what binds: the fleet cap is
+/// left at the curve's own floor, well above the two sockets a knee of
+/// 2 allows, so `fleet_bound`'s `configured > cap` is FALSE throughout.
+/// Before this verdict existed the same second read as `provider` -
+/// our own auto-tune blamed on the provider it had measured.
+///
+/// The knee is written into `conntune.json` eight days back, one day
+/// past `conntune::STALE_SECS`. That is the whole point: a knee inside
+/// its re-probe appointment is a measurement the prober stands by and
+/// `conntune::stale_knee` deliberately reports nothing for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_knee_verdict_is_produced_end_to_end_on_a_running_daemon() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-why312k-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Same arithmetic as the fleet leg: 400 articles behind a 400 ms
+    // per-BODY delay over the two sockets the knee allows is ~80 s on
+    // the wire, and the verdict needs twelve one-second votes before it
+    // publishes.
+    let data = payload(400 * 20_000, 11);
+    let mut articles = HashMap::new();
+    let segs = make_file_articles("knee.bin", &data, 20_000, "kn", &mut articles);
+    let srv = MockServer::start(
+        articles,
+        Chaos {
+            delay_ms: 400,
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let mut xml = String::from(
+        "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"x\" date=\"0\" subject=\"&quot;knee.bin&quot; yEnc (1/400)\">\n    <groups><group>g</group></groups>\n    <segments>\n",
+    );
+    for (id, bytes, num) in &segs {
+        xml.push_str(&format!(
+            "      <segment bytes=\"{bytes}\" number=\"{num}\">{id}</segment>\n"
+        ));
+    }
+    xml.push_str("    </segments>\n  </file>\n</nzb>\n");
+
+    let cfg = dir.join("config.json");
+    let host = srv.addr.ip().to_string();
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{host}\",\"port\":{},\"tls\":false,\"connections\":8}}]}}",
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    // No `line_cap_fleet`: the curve's own floor is far above the two
+    // sockets this knee leaves, so the cap takes nothing and only the
+    // knee can be what binds. The declared line speed is the anchor -
+    // without one "slow" is undefined and the core votes `unknown`.
+    std::fs::write(
+        dir.join("settings.json"),
+        "{\"line_speed\": 125000000, \"index_enabled\": false}",
+    )
+    .unwrap();
+    let checked = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 8 * 86_400;
+    // `v` and `limit` are LOAD-BEARING on the daemon path and are what
+    // separate this fixture from the pure `get::fleet` one, which never
+    // starts a daemon. `serve/tasks/tuner.rs` runs
+    // `conntune::reopen_for_install` at startup, and that sweep RETIRES
+    // every pre-v2 entry (suspect, `checked: 0`) and also reopens a knee
+    // measured under a ceiling the user has since raised. Without the
+    // schema stamp and a `limit` equal to today's ceiling the knee is
+    // retired before the first job builds, the fleet dials all eight
+    // sockets, and the verdict under test can never form.
+    std::fs::write(
+        dir.join("conntune.json"),
+        format!(
+            "{{\"{host}\":{{\"connections\":2,\"granted\":2,\"asked\":8,\"gbps\":0.01,\"checked\":{checked},\"source\":\"manual\",\"limit\":8,\"v\":{}}}}}",
+            nzbfast_schema()
+        ),
+    )
+    .unwrap();
+    let build = |port: u16| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            // The bench arms select the fleet cap and live tuning from
+            // the environment and outrank every file this fixture
+            // writes; under one of those shells it is not the
+            // configuration under test.
+            .env_remove("NZBFAST_LINE_CAP")
+            .env_remove("NZBFAST_LIVE_TUNE")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--connections")
+            .arg("8");
+        c
+    };
+    let d = serve(&dir, &build).await;
+    let port = d.port;
+    tokio::task::spawn_blocking(move || {
+        let id = upload(port, &xml);
+        for _ in 0..450 {
+            let q = http(port, "/api?mode=queue&output=json", None);
+            let v: serde_json::Value = serde_json::from_str(&q).unwrap();
+            let w = &v["queue"]["whyslow"];
+            if w["layer"].as_str() == Some("knee") {
+                assert_eq!(w["nzo_id"].as_str(), Some(id.as_str()), "{q}");
+                // The detail and `knee_host` are the same host by two
+                // routes: the sentence takes the first, the remedy
+                // button hands the second to `landOnServer`, which
+                // matches the server list by EXACT host.
+                assert_eq!(w["detail"].as_str(), Some(host.as_str()), "{q}");
+                assert_eq!(w["knee_host"].as_str(), Some(host.as_str()), "{q}");
+                // The receipts, exactly as the fixture seeded them: the
+                // knee itself, the six sockets it costs against the
+                // account's eight, and an age past the re-probe
+                // appointment.
+                assert_eq!(w["knee_at"].as_u64(), Some(2), "{q}");
+                assert_eq!(w["knee_takes"].as_u64(), Some(6), "{q}");
+                let age = w["knee_age_secs"].as_u64().unwrap();
+                assert!(age >= 7 * 86_400, "the knee must read as stale: {q}");
+                // ...and the two measurements, taken on a tick where
+                // the supply gate was open.
+                let carry = w["knee_carry_bps"].as_u64().unwrap();
+                assert!(carry > 0, "a knee verdict with no measured carry: {q}");
+                let implied = w["knee_implied"].as_u64().unwrap();
+                assert!(implied > 2, "the implied fleet must exceed the knee: {q}");
+                // The cap is provably NOT what binds, which is what
+                // separates this verdict from its sibling: the fleet
+                // the accounts would dial is at or under the cap in
+                // force, so `fleet_bound` cannot have fired.
+                let cap = w["fleet_cap"].as_u64().unwrap();
+                let configured = w["fleet_configured"].as_u64().unwrap();
+                assert!(
+                    cap == 0 || configured <= cap,
+                    "the cap must take nothing here, or this is the fleet verdict's case: {q}"
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        panic!("the knee verdict never reached the queue payload");
+    })
+    .await
+    .unwrap();
+
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
     let _ = std::fs::remove_dir_all(&dir);

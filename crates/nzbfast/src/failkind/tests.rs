@@ -49,7 +49,7 @@ use super::{
     FailKind, another_copy_can_help, disk_full_failure, disk_full_mid_download, fail_action,
     fail_hint, fail_kind, fail_kind_of, fail_kind_token, kind_of_code,
 };
-use crate::diag::{LossCauses, incomplete_reason, with_build};
+use crate::diag::{LossCauses, incomplete_verdict, with_build};
 use nzbkit::fail::FailCode;
 
 /// A `LossCauses` with nothing wrong, to spread over.
@@ -64,6 +64,7 @@ fn quiet() -> LossCauses<'static> {
     LossCauses {
         missing_430: 0,
         takedown_430: 0,
+        unasked_430: 0,
         retention_excluded: 0,
         transport_failed: 0,
         missing_430_recovery: 0,
@@ -155,12 +156,39 @@ fn assert_verdict(msg: &str, want: Verdict) {
 mod producers {
     use super::*;
 
+    /// `incomplete_verdict`'s sentence, with the kind the producer
+    /// DECLARED asserted against the kind the sentence classifies to.
+    ///
+    /// TODO 307 item 1's job-level carry made the census state its
+    /// classification in the same statement that writes the words, and
+    /// the daemon now reads the stated one. That buys nothing if the two
+    /// can quietly part company - so every row in this module goes
+    /// through here, and a producer that reworded an opening without
+    /// moving its declared kind (or moved the kind without the words)
+    /// reddens on the row it changed rather than handing the daemon and
+    /// the drawer two different answers about one failure.
+    ///
+    /// It is the same argument this module was founded on, one layer in:
+    /// `matrix` catches a moved RULE, the rows below catch a moved
+    /// SENTENCE, and this catches the two disagreeing.
+    #[track_caller]
+    fn declared(incomplete: usize, derrs: u64, causes: &LossCauses) -> String {
+        let (kind, msg) = incomplete_verdict(incomplete, derrs, causes);
+        assert_eq!(
+            kind,
+            fail_kind(&msg),
+            "the kind the producer declared is not the kind its own sentence \
+             classifies to: {msg}"
+        );
+        msg
+    }
+
     /// The plain missing-segments opening: the commonest failure there
     /// is, and the one whose kind decides whether a healthy release is
     /// reported dead.
     #[test]
     fn a_plain_short_download_is_missing_articles_and_offers_retry() {
-        let msg = incomplete_reason(
+        let msg = declared(
             3,
             0,
             &LossCauses {
@@ -198,7 +226,7 @@ mod producers {
     /// is what files a takedown report against a healthy post.
     #[test]
     fn a_stalled_pool_is_transport_and_is_never_reportable() {
-        let msg = incomplete_reason(
+        let msg = declared(
             94,
             0,
             &LossCauses {
@@ -234,7 +262,7 @@ mod producers {
     /// failure and no server ever said 430.
     #[test]
     fn an_all_transport_loss_is_transport_too() {
-        let msg = incomplete_reason(
+        let msg = declared(
             2,
             0,
             &LossCauses {
@@ -262,7 +290,7 @@ mod producers {
     /// nothing carries only spends the same minutes proving it again.
     #[test]
     fn a_wholly_absent_post_is_gone_and_is_not_retried() {
-        let msg = incomplete_reason(
+        let msg = declared(
             5,
             0,
             &LossCauses {
@@ -302,7 +330,7 @@ mod producers {
     /// `shortpost` hint is what turns the folder button into a search.
     #[test]
     fn a_short_post_is_local_but_the_hint_offers_a_search() {
-        let msg = incomplete_reason(
+        let msg = declared(
             1,
             0,
             &LossCauses {
@@ -338,7 +366,7 @@ mod producers {
     /// predicate that reads the clause and answers differently.
     #[test]
     fn a_recovery_casualty_keeps_its_kind_and_still_offers_another_copy() {
-        let msg = incomplete_reason(
+        let msg = declared(
             1,
             0,
             &LossCauses {
@@ -378,7 +406,7 @@ mod producers {
     /// must keep answering true for each on its own.
     #[test]
     fn both_appended_recovery_clauses_also_open_the_parked_offer() {
-        let unobtainable = incomplete_reason(
+        let unobtainable = declared(
             2,
             0,
             &LossCauses {
@@ -411,7 +439,7 @@ mod producers {
         let shortfall = crate::repair::RepairShortfall::Blocks { needed: 9, have: 8 }.clause();
         let with_clause = format!(
             "{}; {shortfall}",
-            incomplete_reason(
+            declared(
                 1,
                 0,
                 &LossCauses {
@@ -446,7 +474,7 @@ mod producers {
     /// hint overrides it with a re-fetch.
     #[test]
     fn corrupt_articles_are_local_and_offer_retry_but_never_another_copy() {
-        let msg = incomplete_reason(
+        let msg = declared(
             0,
             7,
             &LossCauses {
@@ -487,7 +515,7 @@ mod producers {
     /// the folder is where the evidence is.
     #[test]
     fn a_write_fault_is_local_and_points_at_the_folder() {
-        let msg = incomplete_reason(
+        let msg = declared(
             0,
             2,
             &LossCauses {
@@ -520,7 +548,7 @@ mod producers {
     /// folder does not answer a full volume, the free-space block does.
     #[test]
     fn a_write_fault_on_a_full_disk_offers_space_not_the_folder() {
-        let msg = incomplete_reason(
+        let msg = declared(
             0,
             2,
             &LossCauses {
@@ -554,7 +582,7 @@ mod producers {
     /// copy of the release is excluded by the same setting.
     #[test]
     fn a_retention_exclusion_hints_at_the_setting_and_refuses_another_copy() {
-        let msg = incomplete_reason(
+        let msg = declared(
             2,
             0,
             &LossCauses {
@@ -588,7 +616,7 @@ mod producers {
     /// surface has.
     #[test]
     fn a_post_with_no_parity_offers_a_search_and_another_copy() {
-        let msg = incomplete_reason(
+        let msg = declared(
             1,
             0,
             &LossCauses {
@@ -623,7 +651,7 @@ mod producers {
     /// sharper hint.
     #[test]
     fn an_aged_post_is_hinted_stale_only_when_nothing_sharper_applies() {
-        let aged = incomplete_reason(
+        let aged = declared(
             1,
             0,
             &LossCauses {
@@ -655,7 +683,7 @@ mod producers {
 
         // Same age, but the post also carries no parity: `nopar2` is
         // the better answer and keeps the hint.
-        let aged_no_parity = incomplete_reason(
+        let aged_no_parity = declared(
             1,
             0,
             &LossCauses {
@@ -1325,5 +1353,159 @@ mod typed {
                 "the pool's own wording must never read as a dead post: {reason}"
             );
         }
+    }
+}
+
+/// TODO 307 item 1's JOB-level carry: the code a job's own producer
+/// stated, its wire spelling, and the error it travels in.
+///
+/// The sibling of `typed` above, and the difference between the two is
+/// the whole design judgement (written out at `failkind::job_kind`): the
+/// pool's `FailCode` is about ONE ARTICLE'S FETCH and every variant of
+/// it is `Transport`, so it can never carry the four post-evidence kinds
+/// a job's terminal failure needs. The job's code is `FailKind` itself -
+/// the value the string classifier exists to reconstruct, recorded where
+/// it was decided instead of re-derived from the prose it produced.
+mod job_carry {
+    use super::*;
+    use crate::failkind::{Classified, code_of_error, job_kind, kind_from_token};
+
+    /// The six kinds this build has. A seventh added without a token, or
+    /// without a way back from one, fails the two tests below rather
+    /// than quietly persisting as `null`.
+    const ALL: [FailKind; 6] = [
+        FailKind::MissingArticles,
+        FailKind::Transport,
+        FailKind::Unrepairable,
+        FailKind::PreflightImpossible,
+        FailKind::Gone,
+        FailKind::Local,
+    ];
+
+    /// Every kind survives the wire vocabulary and comes back itself.
+    #[test]
+    fn every_kind_survives_the_wire_token_and_back() {
+        for kind in ALL {
+            let tok = fail_kind_token(kind);
+            assert_eq!(
+                kind_from_token(tok),
+                Some(kind),
+                "{kind:?} does not survive its own token {tok:?}"
+            );
+        }
+    }
+
+    /// The tokens are DISTINCT, which the round trip above cannot see on
+    /// its own: two kinds sharing one token round-trips one of them to
+    /// the other, silently, on every record on every disk.
+    #[test]
+    fn no_two_kinds_share_a_token() {
+        let mut seen: Vec<&'static str> = Vec::new();
+        for kind in ALL {
+            let tok = fail_kind_token(kind);
+            assert!(!seen.contains(&tok), "{tok:?} is spelled by two kinds");
+            seen.push(tok);
+        }
+        assert_eq!(seen.len(), 6, "the roster above has gone stale");
+    }
+
+    /// A token no build here knows reads `None` - never a panic, never a
+    /// wrong kind, and never a refused record. `JOB_SCHEMA_VERSION`'s
+    /// rule is explicit that an ADDITIVE key must never cost a record,
+    /// and a newer build naming a seventh kind is exactly the case where
+    /// falling back to the sentence is the honest answer.
+    #[test]
+    fn an_unknown_token_falls_back_rather_than_guessing() {
+        for tok in ["", "MISSING", "quarantined", "transport ", "null"] {
+            assert_eq!(kind_from_token(tok), None, "{tok:?}");
+        }
+    }
+
+    /// The code DECIDES. Asserted on a message whose own opening says
+    /// something else, because that is the only shape where the two
+    /// answers are distinguishable - and it is precisely the shape a
+    /// rewording produces.
+    #[test]
+    fn a_stated_code_outranks_the_sentence() {
+        let gone = "post is gone: not one of the 812 article(s) is on any server";
+        assert_eq!(fail_kind(gone), FailKind::Gone);
+        assert_eq!(
+            job_kind(Some(FailKind::Transport), gone),
+            FailKind::Transport,
+            "a stated code must not be second-guessed by the prose"
+        );
+        // ...and it carries through the policy question that actually
+        // costs something: `Gone` is reportable to an indexer as a dead
+        // post and `Transport` must never be.
+        assert!(!job_kind(Some(FailKind::Transport), gone).post_unavailable());
+        assert!(fail_kind(gone).post_unavailable());
+    }
+
+    /// Without a code the answer is EXACTLY the string classifier's, for
+    /// every opening it knows. The fallback is not a legacy arm: it is
+    /// what every record written before this field existed still lands
+    /// on, and what a producer that caught an unclassifiable error hands
+    /// over on purpose.
+    #[test]
+    fn without_a_code_the_answer_is_exactly_the_string_classifiers() {
+        for msg in [
+            "download incomplete: 3 file(s) with missing segments, 0 decode/write errors",
+            "download failed on connection errors: the connection pool stalled",
+            "verification failed and PAR2 repair could not complete",
+            "pre-flight: articles missing beyond repair (12 segments)",
+            "content no longer retrievable",
+            "post is gone: not one of the 4 article(s) is on any server",
+            "No space left on device (os error 28)",
+            "",
+        ] {
+            assert_eq!(job_kind(None, msg), fail_kind(msg), "{msg}");
+        }
+    }
+
+    /// The error the download pipeline bails with prints the message
+    /// VERBATIM. That is the contract the whole carry rests on: the
+    /// daemon still stamps `e.to_string()` onto `fail_message`, so the
+    /// log, the SAB-compat surface and every message assertion in this
+    /// tree see exactly what they saw before the code existed.
+    #[test]
+    fn the_carrier_prints_its_message_and_nothing_else() {
+        let msg = with_build("download incomplete: 1 file(s) with missing segments".to_string());
+        let e = anyhow::Error::new(Classified::new(FailKind::MissingArticles, msg.clone()));
+        assert_eq!(e.to_string(), msg, "the carrier changed the sentence");
+        assert_eq!(code_of_error(&e), Some(FailKind::MissingArticles));
+    }
+
+    /// The code survives a `.context(..)` between the producer and the
+    /// daemon - and that is the case where it is worth MORE than the
+    /// sentence, not less, because the sentence the classifier would
+    /// have read is by then the context's own words.
+    #[test]
+    fn the_code_survives_a_context_that_replaces_the_sentence() {
+        let e = anyhow::Error::new(Classified::new(
+            FailKind::Unrepairable,
+            "verification failed and PAR2 repair could not complete".to_string(),
+        ))
+        .context("while settling the tail");
+        assert_eq!(
+            fail_kind(&e.to_string()),
+            FailKind::Local,
+            "the context really does defeat the string classifier"
+        );
+        assert_eq!(code_of_error(&e), Some(FailKind::Unrepairable));
+    }
+
+    /// An error nobody classified answers `None`, so the daemon falls
+    /// back exactly as it always did. `io::Error` is the shape that
+    /// matters here: a move that failed, a directory that could not be
+    /// made, a config that would not parse.
+    #[test]
+    fn an_unclassified_error_states_nothing() {
+        let e = anyhow::Error::new(std::io::Error::other("No space left on device"));
+        assert_eq!(code_of_error(&e), None);
+        assert_eq!(
+            job_kind(code_of_error(&e), &e.to_string()),
+            FailKind::Local,
+            "and the fallback still answers"
+        );
     }
 }

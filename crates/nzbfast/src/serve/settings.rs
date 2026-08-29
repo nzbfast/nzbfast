@@ -282,6 +282,16 @@ pub(super) const PATHS: &[Setting] = &[
     rw("early_file_publish", |c| {
         json!(c.d.early_file_publish.load(Ordering::Relaxed))
     }),
+    rw("write_manifest", |c| {
+        json!(c.d.write_manifest.load(Ordering::Relaxed))
+    }),
+    // Whether `/metrics` answers without an API key. Beside the
+    // listening-surface settings in spirit; here beside its neighbours
+    // in the table because the table's order is only the order
+    // `get_config` walks it.
+    rw("metrics_open", |c| {
+        json!(c.d.metrics_open.load(Ordering::Relaxed))
+    }),
     rw("move_completed", |c| {
         json!(
             c.d.move_completed
@@ -443,6 +453,15 @@ pub(super) const SPEED: &[Setting] = &[
     }),
     rw("live_tune", |c| {
         json!(c.d.live_tune.load(Ordering::Relaxed))
+    }),
+    // TODO 312 item 1: the fleet cap as a number the user can type.
+    // Read back off settings.json rather than off the daemon, the way
+    // `conntune` next door is, because that file IS where this setting
+    // lives: every job build re-reads it (`conntune::line_cap_setting`),
+    // so a mirror on `Daemon` would be a second authority with nothing
+    // holding the two in step. Null = the automatic curve.
+    rw("line_cap_fleet", |c| {
+        crate::conntune::line_cap_setting(c.cfg_path).map_or(Value::Null, |n| json!(n))
     }),
     ro("conntune", |c| {
         serde_json::to_value(crate::conntune::load(c.cfg_path)).unwrap_or_else(|_| json!({}))
@@ -691,6 +710,18 @@ pub(super) const INDEXING: &[Setting] = &[
     #[cfg(feature = "indexer")]
     rw("index_evict_kinds", |c| {
         json!(c.d.index_evict_kinds.lock_ok().clone())
+    }),
+    #[cfg(feature = "indexer")]
+    rw("index_keep_kinds", |c| {
+        json!(c.d.index_keep_kinds.lock_ok().clone())
+    }),
+    #[cfg(feature = "indexer")]
+    rw("index_evict_scope", |c| {
+        json!(c.d.index_evict_scope.lock_ok().clone())
+    }),
+    #[cfg(feature = "indexer")]
+    rw("index_evict_headroom", |c| {
+        json!(c.d.index_evict_headroom.load(Ordering::Relaxed))
     }),
     #[cfg(feature = "indexer")]
     rw("index_gates", |c| {
@@ -1340,6 +1371,30 @@ pub(super) fn apply_setting(
             d.hub.live_tune.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
+        // TODO 312 item 1: the whole fleet's connection budget, typed.
+        // Empty = the automatic curve (the key is REMOVED, which is what
+        // `save_settings` does with a null and what
+        // `conntune::line_cap_setting` reads as "no setting"); `0` = the
+        // rule off; a number = that fleet at every rate.
+        //
+        // Nothing is stored on the daemon: the next job build reads
+        // settings.json itself, which is what makes this take effect
+        // without a restart where `NZBFAST_LINE_CAP` cannot. `true` all
+        // the same - the restart-pending banner means "relaunch to get
+        // this", and relaunching is exactly what this setting removed
+        // the need for. It does not move a job already running.
+        //
+        // NOT CLAMPED, and `conntune::line_cap_setting` carries the
+        // argument: the number typed is the number in force. Refused
+        // only when it is not a number at all, so a typo cannot read as
+        // "turn the rule off".
+        "line_cap_fleet" => {
+            let t = v.trim();
+            match t.is_empty() {
+                true => (true, Value::Null),
+                false => (true, json!(uint()?)),
+            }
+        }
         "update_checks" => {
             let on = flag();
             d.update_checks.store(on, Ordering::Relaxed);
@@ -1526,6 +1581,16 @@ pub(super) fn apply_setting(
         "early_file_publish" => {
             let on = flag();
             d.early_file_publish.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
+        "write_manifest" => {
+            let on = flag();
+            d.write_manifest.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
+        "metrics_open" => {
+            let on = flag();
+            d.metrics_open.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
         "rename_junk" => {

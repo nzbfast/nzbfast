@@ -627,6 +627,15 @@ mod tests {
         sc.connections = 2;
         let pc = nzbkit::pool::PoolConfig {
             connections: 2,
+            // TODO 315's late re-ask is OFF for this rig, because
+            // `assert_wire` below is built on every id being asked
+            // EXACTLY ONCE and the re-ask deliberately asks a refused
+            // article a second time. That is a real cost and a real
+            // feature; it is just not the cost this rig measures, which
+            // is whether the drop-and-refetch path over-fetches. The
+            // re-ask has its own end-to-end pair in
+            // `nzbkit::pool::unit_tests::recheck_tests`.
+            recheck_430: false,
             ..Default::default()
         };
         let slot_file: Vec<usize> = (0..n).collect();

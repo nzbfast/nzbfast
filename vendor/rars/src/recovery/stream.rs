@@ -250,7 +250,12 @@ pub fn scan_inline_recovery_chunks_in(
     let mut window = vec![0u8; IO_BUF];
     let mut offset = range.start;
     'scan: while offset + 4 <= source_len {
-        let len = IO_BUF.min((source_len - offset) as usize);
+        // Clamp in u64 BEFORE narrowing, here and in every window loop
+        // below: on a 32-bit target a remaining span that is a multiple of
+        // 4 GiB casts to 0 and the loop never advances.
+        // (nzbfast-local change, 27 Aug 2026 - re-apply on the next rars
+        // re-sync, see vendor/rars/VENDORING.md.)
+        let len = (source_len - offset).min(IO_BUF as u64) as usize;
         src.read_at(offset, &mut window[..len])?;
 
         // Markers inside this window. A candidate that fails validation
@@ -400,7 +405,7 @@ fn read_chunk_at(
     let mut position = start + 0x0c;
     let end = start + total_size;
     while position < end {
-        let len = IO_BUF.min((end - position) as usize);
+        let len = (end - position).min(IO_BUF as u64) as usize;
         src.read_at(position, &mut buf[..len])?;
         state = crc64_update(&buf[..len], state);
         position += len as u64;
@@ -534,7 +539,7 @@ pub fn damaged_shards(
         let mut state = 0u64;
         let mut position = start.min(end);
         while position < end {
-            let len = IO_BUF.min((end - position) as usize);
+            let len = (end - position).min(IO_BUF as u64) as usize;
             src.read_at(prefix_start + position, &mut buf[..len])?;
             state = crc64_update(&buf[..len], state);
             position += len as u64;
@@ -674,7 +679,7 @@ fn shard_crcs(
             let mut state = 0u64;
             let mut position = start;
             while position < end {
-                let len = buf.len().min((end - position) as usize);
+                let len = (end - position).min(buf.len() as u64) as usize;
                 src.read_at(prefix_start + position, &mut buf[..len])?;
                 state = crc64_update(&buf[..len], state);
                 position += len as u64;
@@ -707,7 +712,7 @@ fn copy_range(src: &dyn RangeSource, offset: u64, len: u64, dest: &mut File) -> 
     let mut position = offset;
     let end = offset.checked_add(len).ok_or(Error::TooShort)?;
     while position < end {
-        let take = IO_BUF.min((end - position) as usize);
+        let take = (end - position).min(IO_BUF as u64) as usize;
         src.read_at(position, &mut buf[..take])?;
         dest.write_all(&buf[..take])?;
         position += take as u64;
@@ -1070,7 +1075,7 @@ pub fn copy_file_verified(src: &dyn RangeSource, dest: &mut File) -> Result<u32>
     let mut position = 0u64;
     let len = src.len();
     while position < len {
-        let take = IO_BUF.min((len - position) as usize);
+        let take = (len - position).min(IO_BUF as u64) as usize;
         src.read_at(position, &mut buf[..take])?;
         crc.update(&buf[..take]);
         dest.write_all(&buf[..take])?;

@@ -11,6 +11,7 @@
 //! cannot see that.
 
 use super::*;
+use crate::gf16::MulTable;
 
 /// Wrap a body in a valid packet (magic, length, body MD5) - the same
 /// shape par2.rs's own tests build. Header is 64 bytes per spec.
@@ -299,7 +300,7 @@ fn too_little_recovery_reports_the_shortfall() {
     // over the identified-but-damaged target itself, finds nothing (the
     // corrupt bytes are gone), and the verdict states the arithmetic.
     match repair_dir(&dir).expect("shortfall is a verdict, not an error") {
-        RepairStatus::Unrepairable { needed, have } => {
+        RepairStatus::Unrepairable { needed, have, .. } => {
             assert_eq!((needed, have), (2, 1));
         }
         other => panic!("expected Unrepairable, got {other:?}"),
@@ -383,7 +384,7 @@ fn a_donor_directory_completes_a_repair_the_recovery_set_cannot() {
 
     // Baseline: without the donor, the set is short by twelve slices.
     match repair_dir(&dir).expect("baseline runs") {
-        RepairStatus::Unrepairable { needed, have } => {
+        RepairStatus::Unrepairable { needed, have, .. } => {
             println!("§293 A/B baseline: Unrepairable, {needed} needed, {have} held");
             assert_eq!((needed, have), (13, 1));
         }
@@ -452,13 +453,13 @@ fn a_donor_with_wrong_bytes_donates_nothing_and_changes_nothing() {
     .unwrap();
 
     let baseline = match repair_dir(&dir).expect("baseline runs") {
-        RepairStatus::Unrepairable { needed, have } => (needed, have),
+        RepairStatus::Unrepairable { needed, have, .. } => (needed, have),
         other => panic!("5 blocks missing, 1 slice held - must be short, got {other:?}"),
     };
     let ghost = donor.join("no-such-subdir");
     let with_poison =
         match repair_dir_with_donors(&dir, &[donor.clone(), ghost]).expect("poisoned run") {
-            RepairStatus::Unrepairable { needed, have } => (needed, have),
+            RepairStatus::Unrepairable { needed, have, .. } => (needed, have),
             other => panic!("wrong bytes must not repair anything, got {other:?}"),
         };
     assert_eq!(
@@ -651,7 +652,7 @@ fn an_unreadable_donor_file_degrades_to_no_donation() {
     match repair_dir_with_donors(&dir, std::slice::from_ref(&donor))
         .expect("a dead donor file must not fail the shortfall verdict either")
     {
-        RepairStatus::Unrepairable { needed, have } => {
+        RepairStatus::Unrepairable { needed, have, .. } => {
             assert_eq!((needed, have), (5, 1), "the no-donor arithmetic, untouched")
         }
         other => panic!("one slice held against five missing, got {other:?}"),
@@ -848,7 +849,7 @@ fn adoption_and_recovery_slices_compose_on_one_file() {
     .unwrap();
 
     match repair_dir(&dir).expect("baseline runs") {
-        RepairStatus::Unrepairable { needed, have } => assert_eq!((needed, have), (6, 2)),
+        RepairStatus::Unrepairable { needed, have, .. } => assert_eq!((needed, have), (6, 2)),
         other => panic!("six missing, two held - must be short alone, got {other:?}"),
     }
     let report = match repair_dir_with_donors(&dir, std::slice::from_ref(&donor))
@@ -954,6 +955,43 @@ fn recovery_slice_locators_report_only_the_wanted_set() {
     let slices = global_slices(files, BS);
     let want = generate_recovery(&slices, BS, 0);
     assert_eq!(&vol[locs[0].1..locs[0].1 + locs[0].2], &want[..]);
+}
+
+#[test]
+fn the_slice_census_answers_every_set_in_one_pass() {
+    let files_data = payload(200, 9);
+    let files: &[(&str, &[u8])] = &[("e.bin", &files_data)];
+    let mut vol = par2_volume(SET, BS, files, &[0, 5]);
+    // A SECOND set's volume in the same buffer - which is exactly the
+    // shape a census walks past on a per-file-set post's job dir.
+    let other = [3u8; 16];
+    vol.extend_from_slice(&par2_volume(other, BS, files, &[7]));
+
+    let census = recovery_slice_census(&vol);
+    // Grouped by (set, slice length): both sets present, each with its
+    // own count, off ONE pass. Calling the singular once per adopted set
+    // is what this replaces - it reads the same bytes N times to answer
+    // 0 for every set but the one that owns the volume.
+    let mut got: Vec<([u8; 16], usize, usize)> = census.clone();
+    got.sort_unstable();
+    let mut want = vec![(SET, BS, 2), (other, BS, 1)];
+    want.sort_unstable();
+    assert_eq!(got, want);
+
+    // And it agrees with the singular, set for set - the property that
+    // lets a caller swap one for the other.
+    for (id, _, n) in &census {
+        assert_eq!(
+            recovery_slice_locators(&vol, id)
+                .into_iter()
+                .filter(|(_, _, l)| *l == BS)
+                .count(),
+            *n
+        );
+    }
+    // A set with nothing here is absent rather than zero-counted, which
+    // is what lets a caller read "0 slices" off a miss.
+    assert!(!census.iter().any(|(id, _, _)| *id == [1u8; 16]));
 }
 
 // --- §129: block-parallel hashing --------------------------------------
@@ -1607,7 +1645,11 @@ fn reused_catalog_reproves_a_silently_mutated_recovery_slice() {
     mutate_silently(&vol2, slice_stride + 64 + 4 + 3, 0xff);
     let results = cat2.repair_present_sets().expect("sets walk");
     match &results[0].status {
-        Ok(RepairStatus::Unrepairable { needed: 1, have: 0 }) => {}
+        Ok(RepairStatus::Unrepairable {
+            needed: 1,
+            have: 0,
+            adopted: 0,
+        }) => {}
         other => panic!("expected Unrepairable {{1, 0}}, got {other:?}"),
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -1849,4 +1891,343 @@ fn the_disk_route_refuses_a_set_one_block_over_the_repair_matrix_cap() {
         other => panic!("expected the repair-matrix cap refusal, got {other:?}"),
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v1.2.4 sweep R5: the digest that earns a donation its rename is
+/// taken off the COPY, not off the read that chose it.
+///
+/// The window R5 names is a mutation between the two - a donor is a
+/// directory this job does not own, so a retention sweep, a user
+/// delete-and-replace or the predecessor's own repair patch can land
+/// between the screen and `std::fs::copy`. That race is not reproducible
+/// from a test without a hook inside the loop, so what is pinned here is
+/// the GUARD it turns on, driven directly: bytes that are not the
+/// member's must not be renamed into place, whatever chose them.
+///
+/// It bites. Delete the digest comparison in `copy_verified` and the
+/// wrong-bytes half of this returns `true`.
+#[test]
+fn a_donated_copy_is_verified_by_its_own_bytes_and_not_by_the_screen() {
+    let dir = tmpdir("copy-verified");
+    let data = payload(300_000, 51);
+    let src = dir.join("src.bin");
+    std::fs::write(&src, &data).unwrap();
+    let right = <[u8; 16]>::from(Md5::digest(&data));
+    let wrong = <[u8; 16]>::from(Md5::digest(payload(300_000, 52)));
+
+    let good = dir.join("good.tmp");
+    assert!(
+        donate::copy_verified(&src, &good, right).expect("a readable donor copies"),
+        "the member's own digest must pass"
+    );
+    assert_eq!(
+        std::fs::read(&good).unwrap(),
+        data,
+        "and the copy is byte-exact"
+    );
+
+    let bad = dir.join("bad.tmp");
+    assert!(
+        !donate::copy_verified(&src, &bad, wrong).expect("a readable donor copies"),
+        "bytes that are not the member's must be REFUSED, however the \
+         screen judged the file a moment earlier"
+    );
+
+    // A vanished source is an error, never a silent success: the caller
+    // drops the member and the fetch plan keeps its articles.
+    assert!(
+        donate::copy_verified(&dir.join("no-such-file"), &dir.join("x.tmp"), right).is_err(),
+        "an unreadable donor must not answer `true`"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// v1.2.4 sweep R6: donors with nothing to give must not end the pass
+/// before it can see a PREVIOUS pass's own donation.
+///
+/// A donated file has no journal placements - its articles were never
+/// fetched - so nothing on the crash-resume path can recognise it. The
+/// already-here arm is the only thing that can, and the old
+/// `cands.is_empty()` early return took it out exactly when it was
+/// needed: a successor resuming after its predecessor was swept
+/// re-downloaded a file whole and byte-exact in its own `out_dir`.
+///
+/// It bites. Put the early return back and `still_reported` is empty.
+#[test]
+fn a_swept_donor_still_finds_the_members_a_previous_pass_placed() {
+    let donor = tmpdir("swept-src");
+    let dir = tmpdir("swept-dst");
+    let data = payload(260, 61);
+    let files: &[(&str, &[u8])] = &[("f1.bin", &data)];
+    let index = par2_index(SET, BS, files);
+    let set = par2::Par2Set::parse(&[&index]).expect("fixture parses");
+
+    // The predecessor's directory is still there and holds nothing: the
+    // retention sweep got to it between the two runs.
+    assert_eq!(donor_candidates(std::slice::from_ref(&donor), &dir), 0);
+    // ...and the earlier pass's placement is sitting in out_dir.
+    std::fs::write(dir.join("f1.bin"), &data).unwrap();
+
+    let still_reported = donate_whole_files(&set, std::slice::from_ref(&donor), &dir);
+    assert_eq!(
+        still_reported.len(),
+        1,
+        "the member already placed must still be reported so the plan \
+         strikes its articles: {still_reported:?}"
+    );
+    assert_eq!(still_reported[0].from, dir.join("f1.bin"));
+    assert_eq!(std::fs::read(dir.join("f1.bin")).unwrap(), data);
+
+    // The cheap question the caller asks first, on the same directory.
+    assert_eq!(
+        placed_names(&dir),
+        ["f1.bin"],
+        "and out_dir's own walk is what tells the caller to look at all"
+    );
+    assert!(
+        placed_names(&donor).is_empty(),
+        "a swept directory offers no name"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&donor);
+}
+
+/// v1.2.4 sweep R7: two FileDesc packets naming one file identify no
+/// member, so neither may be placed and neither may be reported.
+///
+/// Both would land on one path. The first in set order wins the name,
+/// the second finds a destination that is not itself and is left alone -
+/// so the successor's file carries whichever came first and its
+/// articles are struck out either way, which is a coin flip on bytes
+/// there is no way back from. `probe_recovery_set` refuses the same
+/// shape one rung narrower (it only judges the length); this judges
+/// every fact the donation turns on.
+///
+/// It bites. Delete the `ambiguous.contains` skip and the donor's
+/// `dup.bin` is placed and reported, on evidence that names two files.
+#[test]
+fn two_members_under_one_name_donate_nothing_on_either_arm() {
+    let donor = tmpdir("ambig-src");
+    let dir = tmpdir("ambig-dst");
+    let first = payload(260, 71);
+    let second = payload(260, 72);
+    let clear = payload(200, 73);
+    // `par2_index` gives each entry its own file id, so the same NAME
+    // twice is two members that disagree about everything else - the
+    // malformed set this guard is for.
+    let files: &[(&str, &[u8])] = &[
+        ("dup.bin", &first),
+        ("dup.bin", &second),
+        ("clear.bin", &clear),
+    ];
+    let index = par2_index(SET, BS, files);
+    let set = par2::Par2Set::parse(&[&index]).expect("fixture parses");
+    std::fs::write(donor.join("dup.bin"), &first).unwrap();
+    std::fs::write(donor.join("clear.bin"), &clear).unwrap();
+
+    let placed = donate_whole_files(&set, std::slice::from_ref(&donor), &dir);
+    assert_eq!(
+        placed.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        ["clear.bin"],
+        "only the unambiguous member may be donated: {placed:?}"
+    );
+    assert!(
+        !dir.join("dup.bin").exists(),
+        "an ambiguous name must place NOTHING"
+    );
+
+    // The already-here arm answers the same way: a member sitting in
+    // out_dir under an ambiguous name is not reported either, because
+    // reporting it strikes the articles out just as surely as placing
+    // it would.
+    std::fs::write(dir.join("dup.bin"), &first).unwrap();
+    let again = donate_whole_files(&set, std::slice::from_ref(&donor), &dir);
+    assert_eq!(
+        again.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+        ["clear.bin"],
+        "and an ambiguous name already in place is still not reported: {again:?}"
+    );
+
+    // A set that names one file twice with the SAME facts is not
+    // ambiguous - there is one answer to give, and refusing it would
+    // refuse a duplicated packet, which real sets carry.
+    let twice: &[(&str, &[u8])] = &[("clear.bin", &clear), ("clear.bin", &clear)];
+    let dir2 = tmpdir("ambig-dst2");
+    let idx2 = par2_index(SET, BS, twice);
+    let set2 = par2::Par2Set::parse(&[&idx2]).expect("fixture parses");
+    let dupe_ok = donate_whole_files(&set2, std::slice::from_ref(&donor), &dir2);
+    assert_eq!(
+        dupe_ok.len(),
+        2,
+        "two identical descriptions of one file are one answer, not a \
+         disagreement: {dupe_ok:?}"
+    );
+    assert_eq!(std::fs::read(dir2.join("clear.bin")).unwrap(), clear);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+    let _ = std::fs::remove_dir_all(&donor);
+}
+
+/// PLAN M31's bench-gate geometry to scale, and the two facts a bench
+/// round on 28 Aug 2026 could not tell apart.
+///
+/// A failed predecessor and its successor were seeded from ONE posting
+/// with complementary stride-2 ARTICLE masks, disjoint by construction
+/// and verified overlap 0. The successor still failed, and no
+/// `block(s) adopted from` line appeared anywhere in the daemon log,
+/// which reads as "the donor bridged nothing". Both halves of that
+/// reading were wrong, and this pins each.
+///
+/// FIRST: article-disjoint is not block-disjoint. That set's PAR2
+/// block was exactly two articles wide, so every block spanning an
+/// eligible article pair is damaged in BOTH postings - the two logs
+/// report the identical `13/14 blocks bad` on every volume. The only
+/// block a donor can offer is the one at the edge of the damaged
+/// range, and here that is one per file. Adoption is behaving
+/// correctly; the SEEDING cannot produce the pair the gate wants.
+///
+/// SECOND: the count was invisible, not zero. The set is still short
+/// afterwards, so the verdict is `Unrepairable`, and
+/// `RepairReport::blocks_adopted` is only reachable through
+/// `Repaired`. The donation is legible now because that verdict
+/// carries `adopted` - which is what this asserts, and what makes the
+/// difference between the two readings measurable from a log.
+#[test]
+fn a_donor_damaged_at_the_complementary_article_phase_donates_almost_nothing() {
+    let (art, nart, tail, nfiles) = (64usize, 27usize, 32usize, 4usize);
+    let bs = 2 * art; // the field's 1_536_000 over 768_000 articles
+    let len = (nart - 1) * art + tail;
+    let (dir, donor, truth, names) = field_shape(art, nart, len, nfiles, |a| a % 2 == 1);
+    std::fs::write(
+        dir.join("set.par2"),
+        par2_index([3u8; 16], bs, &named(&names, &truth)),
+    )
+    .unwrap();
+
+    // Baseline: what the successor is missing with no donor at all.
+    let base = match repair_dir(&dir).expect("baseline runs") {
+        RepairStatus::Unrepairable { needed, have, .. } => {
+            assert_eq!(have, 0, "no recovery on disk, as in the field");
+            needed
+        }
+        other => panic!("baseline must be unrepairable, got {other:?}"),
+    };
+    assert_eq!(base, 13 * nfiles, "13 of this file's 14 blocks, per file");
+
+    match repair_dir_with_donors(&dir, std::slice::from_ref(&donor)).expect("donor repair runs") {
+        RepairStatus::Unrepairable {
+            needed,
+            have,
+            adopted,
+        } => {
+            println!(
+                "field geometry: {base} missing, {adopted} adopted, {needed} still needed, \
+                 {have} recovery held"
+            );
+            assert_eq!(adopted, nfiles, "one edge block per file and no more");
+            assert_eq!(needed, base - adopted, "adoption is already subtracted");
+            assert!(
+                adopted > 0,
+                "the donation is REPORTED on the shortfall verdict - the whole point"
+            );
+        }
+        other => panic!("still short after adoption, so unrepairable: got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&donor);
+}
+
+/// The control, and the shape a future round has to seed to test §293
+/// at all: the same two postings damaged in BLOCK-aligned pairs rather
+/// than at alternating article positions. Nothing about the adoption
+/// code changes - only the mask - and every missing block is now
+/// intact in the donor, so the set that could not be repaired above
+/// repairs completely with no recovery data whatsoever.
+#[test]
+fn a_donor_damaged_at_the_complementary_block_phase_donates_everything() {
+    let (art, nart, tail, nfiles) = (64usize, 27usize, 32usize, 4usize);
+    let bs = 2 * art;
+    let len = (nart - 1) * art + tail;
+    // Poison whole BLOCKS: both articles of every other block-aligned
+    // pair, so the complement leaves those blocks whole in the donor.
+    let (dir, donor, truth, names) = field_shape(art, nart, len, nfiles, |a| (a / 2) % 2 == 1);
+    std::fs::write(
+        dir.join("set.par2"),
+        par2_index([4u8; 16], bs, &named(&names, &truth)),
+    )
+    .unwrap();
+    let report = match repair_dir_with_donors(&dir, std::slice::from_ref(&donor))
+        .expect("donor repair runs")
+    {
+        RepairStatus::Repaired(r) => r,
+        other => panic!("a block-disjoint donor completes the set: got {other:?}"),
+    };
+    println!(
+        "block-aligned mask: {} adopted, {} rebuilt",
+        report.blocks_adopted, report.blocks_rebuilt
+    );
+    assert!(
+        report.blocks_adopted > 0,
+        "every missing block came off disk"
+    );
+    assert_eq!(
+        report.blocks_rebuilt, 0,
+        "no recovery data exists to rebuild from"
+    );
+    for (f, name) in names.iter().enumerate() {
+        assert_eq!(
+            std::fs::read(dir.join(name)).unwrap(),
+            truth[f],
+            "{name} landed byte-exact"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&donor);
+}
+
+/// Build the two-posting shape both legs above share: `poisoned(a)`
+/// picks the predecessor's articles, its complement the successor's,
+/// and article 0 is never picked (the seeding tool skips each file's
+/// first segment so headers stay resolvable). The donor's files carry
+/// the `.nzbfast-partial` suffix a failed job's quarantine leaves.
+fn field_shape(
+    art: usize,
+    nart: usize,
+    len: usize,
+    nfiles: usize,
+    poisoned: impl Fn(usize) -> bool,
+) -> (PathBuf, PathBuf, Vec<Vec<u8>>, Vec<String>) {
+    let truth: Vec<Vec<u8>> = (0..nfiles).map(|f| payload(len, 200 + f as u64)).collect();
+    let names: Vec<String> = (0..nfiles).map(|f| format!("v{f:02}.rar")).collect();
+    let hole = |data: &[u8], want: bool| -> Vec<u8> {
+        let mut v = data.to_vec();
+        for a in 1..nart {
+            if poisoned(a) == want {
+                let (s, e) = (a * art, ((a + 1) * art).min(len));
+                v[s..e].fill(0);
+            }
+        }
+        v
+    };
+    let donor = tmpdir("m31-field-donor");
+    let dir = tmpdir("m31-field-dst");
+    for f in 0..nfiles {
+        std::fs::write(
+            donor.join(format!("{}.nzbfast-partial", names[f])),
+            hole(&truth[f], true),
+        )
+        .unwrap();
+        std::fs::write(dir.join(&names[f]), hole(&truth[f], false)).unwrap();
+    }
+    (dir, donor, truth, names)
+}
+
+/// `(name, bytes)` pairs for [`par2_index`] out of the two vectors
+/// [`field_shape`] returns.
+fn named<'a>(names: &'a [String], truth: &'a [Vec<u8>]) -> Vec<(&'a str, &'a [u8])> {
+    names
+        .iter()
+        .zip(truth)
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect()
 }

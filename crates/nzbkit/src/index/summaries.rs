@@ -112,12 +112,19 @@ pub(crate) struct TitleSummary {
     /// `MAX(kind)`, which is what the card query projects and what the
     /// category grouping clusters on.
     pub(crate) rep_kind: String,
-    /// The representative release: newest posted, id breaking the tie -
-    /// the identical, fully deterministic pick the card query's two
-    /// correlated subqueries make.
+    /// The FRESHNESS pick: newest posted, id breaking the tie. `rep_grp`
+    /// is its group, and the wall pairs that group's family with
+    /// `latest` to read a retention verdict, so the two must come off
+    /// ONE release.
     pub(crate) rep_id: i64,
-    /// `COALESCE(NULLIF(pre_title,''), stem)` of the representative.
+    /// `COALESCE(NULLIF(pre_title,''), stem)` of the NAME pick, which is
+    /// a different release from `rep_id` whenever the newest copy is not
+    /// a complete one: complete first, then newest posted, then id. Not
+    /// an inconsistency - a card answers two questions and they belong
+    /// to two releases; `cards::card_page_sql` carries the argument at
+    /// length. Nothing pairs this with `rep_grp`.
     pub(crate) rep_stem: String,
+    /// `grp` of the FRESHNESS pick (`rep_id`), never of the name pick.
     pub(crate) rep_grp: String,
 }
 
@@ -163,11 +170,17 @@ pub(crate) fn res_rank(res: &str) -> i64 {
 
 impl TitleSummary {
     /// The full-scan formula: what one key's summary row must equal
-    /// after any write. Two statements rather than one because the
-    /// representative's tiebreak (`first_posted DESC, id DESC`) is a
-    /// two-column order, and SQLite's bare-column-beside-MAX rule only
-    /// carries a row through for a SINGLE min/max aggregate - with the
-    /// six MAXes below it, the bare columns would be an arbitrary row.
+    /// after any write. THREE statements rather than one, for two
+    /// separate reasons. The representative's tiebreak is a multi-column
+    /// order, and SQLite's bare-column-beside-MAX rule only carries a
+    /// row through for a SINGLE min/max aggregate - with the six MAXes
+    /// below it, the bare columns would be an arbitrary row; that is why
+    /// the representative cannot ride the aggregate. And there are TWO
+    /// representatives, on two different orders - see the block at the
+    /// pick itself. The third statement is what the second pick cost;
+    /// it is one more indexed walk of the key's releases, on a path the
+    /// aggregate already walks them, and it is the figure to watch if
+    /// `ingest_cost_of_maintaining_the_summaries` is ever re-run.
     ///
     /// `None` = the key has no qualifying release; its summary row must
     /// be deleted rather than zeroed (a zeroed row would still be
@@ -202,13 +215,30 @@ impl TitleSummary {
         if n == 0 {
             return Ok(None);
         }
-        let rep: (i64, String, String) = db
+        // TWO picks, because the card query makes two - see the two
+        // comment blocks on `cards::card_page_sql`'s representative
+        // subqueries. The FRESHNESS pick (id, grp) is newest-first,
+        // because the wall pairs the group's family with `latest` to
+        // read a retention verdict and those must come off one release.
+        // The NAME pick leads with `complete`, so the name the card
+        // shows - and everything derived from it, the enrichment seed
+        // and the have-badge - describes the copy the `any_complete`
+        // badge is about. This function is the oracle those subqueries
+        // are held to, so the two orders are spelled here exactly as
+        // they are spelled there.
+        let rep: (i64, String) = db
             .prepare_cached(&format!(
-                "SELECT id, COALESCE(NULLIF(pre_title,''), stem), grp
-                   FROM releases WHERE title_key = ?1 AND {canon}
+                "SELECT id, grp FROM releases WHERE title_key = ?1 AND {canon}
                   ORDER BY first_posted DESC, id DESC LIMIT 1"
             ))?
-            .query_row([key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            .query_row([key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rep_stem: String = db
+            .prepare_cached(&format!(
+                "SELECT COALESCE(NULLIF(pre_title,''), stem)
+                   FROM releases WHERE title_key = ?1 AND {canon}
+                  ORDER BY complete DESC, first_posted DESC, id DESC LIMIT 1"
+            ))?
+            .query_row([key], |r| r.get(0))?;
         Ok(Some(TitleSummary {
             n,
             latest,
@@ -218,8 +248,8 @@ impl TitleSummary {
             best_res,
             rep_kind,
             rep_id: rep.0,
-            rep_stem: rep.1,
-            rep_grp: rep.2,
+            rep_stem,
+            rep_grp: rep.1,
         }))
     }
 
@@ -237,6 +267,40 @@ impl TitleSummary {
     // unfulfilled under cfg(test).
     #[allow(dead_code)] // see RelFacts: the fold half is not wired yet.
     pub(crate) fn apply_release(&mut self, old: Option<&RelFacts>, new: &RelFacts) -> bool {
+        // The NAME pick leads with `complete` (see `rep_stem`), and this
+        // fold carries no state for it: `rep_id` and `latest` describe
+        // the FRESHNESS pick, and nothing here knows the sitting name
+        // pick's own `(first_posted, id)`. Three of the four cases need
+        // no such state and are folded at the foot of this function; the
+        // fourth - a complete release arriving under a key that ALREADY
+        // holds one - is the only one that has to rank two complete rows
+        // against each other, so it is refused and the caller
+        // recomputes. Conservative on purpose: a summary that quietly
+        // stops matching `recompute` is the one failure this module has
+        // no way to notice.
+        //
+        // BEFORE ANY MUTATION, `self.n += 1` included - a refused fold
+        // must leave the row untouched, and this check landed below that
+        // increment first, which the test for it caught.
+        //
+        // The exemption is a release moving IN PLACE with its whole name
+        // key intact. No release's `(complete, first_posted, id, name)`
+        // has changed, so no ranking among them can have moved, whoever
+        // the sitting name pick is - which keeps an already-complete
+        // release growing its byte count foldable. A RENAME in place is
+        // not exempt: it can change the name without changing the rank.
+        let was_complete = self.any_complete;
+        if new.complete
+            && was_complete
+            && !old.is_some_and(|o| {
+                o.complete == new.complete
+                    && o.first_posted == new.first_posted
+                    && o.id == new.id
+                    && o.name == new.name
+            })
+        {
+            return false;
+        }
         if let Some(o) = old {
             debug_assert_eq!(o.id, new.id, "apply_release folds ONE release");
             // A maxed column moving DOWN can un-set a maximum this row
@@ -261,23 +325,40 @@ impl TitleSummary {
         if new.kind > self.rep_kind {
             self.rep_kind = new.kind.clone();
         }
-        // The representative is the newest post, id breaking the tie -
+        // The FRESHNESS pick is the newest post, id breaking the tie -
         // strictly greater on the pair, so a re-touch of the sitting
-        // representative keeps it (and picks up its new name).
+        // pick keeps it (and picks up its new group).
         if (new.first_posted, new.id) >= (self.latest_field_for_rep(), self.rep_id) {
             self.rep_id = new.id;
-            self.rep_stem = new.name.clone();
             self.rep_grp = new.grp.clone();
+            // The name pick follows the freshness pick only while
+            // NOTHING under this key is complete - see the four cases
+            // enumerated at the head of this function. `was_complete`
+            // is the state BEFORE `any_complete` absorbed `new` above.
+            if !was_complete {
+                self.rep_stem = new.name.clone();
+            }
+        }
+        // A complete arrival under a key that had none takes the name
+        // outright, whatever it does to the freshness pick: it is the
+        // only complete release there is.
+        if new.complete && !was_complete {
+            self.rep_stem = new.name.clone();
         }
         true
     }
 
-    /// `first_posted` of the sitting representative. Not stored: the
-    /// representative is by definition the newest qualifying post, so
+    /// `first_posted` of the sitting FRESHNESS pick (`rep_id`). Not
+    /// stored: that pick is by definition the newest qualifying post, so
     /// its `first_posted` IS `latest` - except during the one statement
     /// in [`Self::apply_release`] where `latest` has already absorbed
     /// the new row. Read before that assignment, so it is called on the
     /// pre-update value.
+    ///
+    /// This derivation is why the NAME pick cannot be folded the same
+    /// way: leading with `complete` un-couples it from `latest`, so
+    /// there is no aggregate on this struct that gives its own
+    /// `first_posted` back.
     // Not #[expect]: the unit tests exercise it, so the expectation is
     // unfulfilled under cfg(test).
     #[allow(dead_code)] // see RelFacts: the fold half is not wired yet.
@@ -404,9 +485,15 @@ pub(crate) fn seed(db: &Connection) -> rusqlite::Result<u64> {
                     (SELECT s.id FROM releases s
                       WHERE s.title_key = r.title_key AND {rep_canon}
                       ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
+                    -- Complete-first, and the group below newest-first:
+                    -- the same split `recompute` and the card query
+                    -- spell, and this is the third of the three places
+                    -- it is written out. Change one and change all
+                    -- three, or `assert_rows_match_recompute` reports
+                    -- the seed and the drain disagreeing.
                     (SELECT COALESCE(NULLIF(s.pre_title,''), s.stem) FROM releases s
                       WHERE s.title_key = r.title_key AND {rep_canon}
-                      ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
+                      ORDER BY s.complete DESC, s.first_posted DESC, s.id DESC LIMIT 1),
                     (SELECT s.grp FROM releases s
                       WHERE s.title_key = r.title_key AND {rep_canon}
                       ORDER BY s.first_posted DESC, s.id DESC LIMIT 1)
@@ -1591,6 +1678,169 @@ mod tests {
         };
         assert!(!agg.apply_release(Some(&new), &smaller));
         assert_eq!(agg, before, "a refused fold must leave the row untouched");
+
+        // A SECOND complete release is refused, and this is the case the
+        // name pick's leading `complete` term created. The fold carries
+        // no state for that pick - `rep_id` and `latest` describe the
+        // FRESHNESS pick - so once a key holds a complete release there
+        // is nothing here that can say whether an arriving complete one
+        // outranks the sitting name. Refusing sends the caller to
+        // `recompute`, which can.
+        let before = agg.clone();
+        put(
+            &ix,
+            (
+                3,
+                "t:f",
+                "tv",
+                1_700_000_300,
+                2000,
+                "2160p",
+                true,
+                0,
+                false,
+                "",
+            ),
+        );
+        let third = RelFacts {
+            id: 3,
+            first_posted: 1_700_000_300,
+            first_seen: 1_700_000_360,
+            complete: true,
+            total_bytes: 2000,
+            res_rank: res_rank("2160p"),
+            kind: "tv".into(),
+            name: "stem.3.t:f".into(),
+            grp: "alt.binaries.g0".into(),
+        };
+        assert!(
+            !agg.apply_release(None, &third),
+            "a complete arrival under a key that already holds one is not foldable"
+        );
+        assert_eq!(agg, before, "a refused fold must leave the row untouched");
+        // ...and the recompute it defers to gets it right.
+        ix.drain_title_dirty(10).unwrap();
+        let after = TitleSummary::recompute(&ix.db, "t:f").unwrap().unwrap();
+        assert_eq!(
+            after.rep_stem, "stem.3.t:f",
+            "newest complete names the card"
+        );
+        assert_eq!(after.rep_id, 3);
+
+        // The other three cases ARE foldable and must stay so: an
+        // incomplete arrival under a key that already holds a complete
+        // one moves the freshness pick and leaves the name alone.
+        let mut agg = after;
+        put(
+            &ix,
+            (
+                4,
+                "t:f",
+                "tv",
+                1_700_000_400,
+                2000,
+                "2160p",
+                false,
+                0,
+                false,
+                "",
+            ),
+        );
+        assert!(agg.apply_release(
+            None,
+            &RelFacts {
+                id: 4,
+                first_posted: 1_700_000_400,
+                first_seen: 1_700_000_460,
+                complete: false,
+                total_bytes: 2000,
+                res_rank: res_rank("2160p"),
+                kind: "tv".into(),
+                name: "stem.4.t:f".into(),
+                grp: "alt.binaries.g1".into(),
+            }
+        ));
+        ix.drain_title_dirty(10).unwrap();
+        assert_eq!(
+            Some(agg.clone()),
+            TitleSummary::recompute(&ix.db, "t:f").unwrap(),
+            "the fold must still track recompute across the split"
+        );
+        assert_eq!(
+            agg.rep_stem, "stem.3.t:f",
+            "an incomplete cannot take the name"
+        );
+        assert_eq!(agg.rep_id, 4, "but it does take the freshness pick");
+
+        // The fourth case, and the one the whole split exists for: a
+        // complete release arriving OLDER than everything under a key
+        // that holds no complete release. It cannot take the freshness
+        // pick - it is not the newest - and it must take the NAME
+        // anyway, because it is the only complete copy there is. That is
+        // the wall card that badged as complete while naming a newer
+        // dupe, in fold form. Its own key, so `any_complete` starts
+        // false.
+        put(
+            &ix,
+            (
+                10,
+                "t:g",
+                "tv",
+                1_700_000_500,
+                500,
+                "1080p",
+                false,
+                0,
+                false,
+                "",
+            ),
+        );
+        ix.drain_title_dirty(10).unwrap();
+        let mut agg = TitleSummary::recompute(&ix.db, "t:g").unwrap().unwrap();
+        assert!(!agg.any_complete);
+        put(
+            &ix,
+            (
+                11,
+                "t:g",
+                "tv",
+                1_700_000_450,
+                500,
+                "1080p",
+                true,
+                0,
+                false,
+                "",
+            ),
+        );
+        assert!(agg.apply_release(
+            None,
+            &RelFacts {
+                id: 11,
+                first_posted: 1_700_000_450,
+                first_seen: 1_700_000_510,
+                complete: true,
+                total_bytes: 500,
+                res_rank: res_rank("1080p"),
+                kind: "tv".into(),
+                name: "stem.11.t:g".into(),
+                grp: "alt.binaries.g2".into(),
+            }
+        ));
+        ix.drain_title_dirty(10).unwrap();
+        assert_eq!(
+            Some(agg.clone()),
+            TitleSummary::recompute(&ix.db, "t:g").unwrap(),
+            "the fold must still track recompute when the only complete copy is the oldest"
+        );
+        assert_eq!(
+            agg.rep_stem, "stem.11.t:g",
+            "the only complete copy names the card even though it is not the newest"
+        );
+        assert_eq!(
+            agg.rep_id, 10,
+            "the freshness pick stays the newest release"
+        );
         teardown(&dir, ix);
     }
 
@@ -1750,17 +2000,51 @@ mod tests {
                 "",
             ),
         );
+        // A NEWER INCOMPLETE one, which is what makes this fixture able
+        // to see the seed diverge at all. The name pick leads with
+        // `complete` and the freshness pick does not, so the two are the
+        // same release under any all-complete or all-incomplete corpus -
+        // and `assert_rows_match_recompute` below then passes over a
+        // seed that spells the representative the OLD way. It did:
+        // reverting `seed`'s name subquery on its own left every test in
+        // this module green until this row was added.
+        put(
+            &ix,
+            (
+                3,
+                "t:seeded",
+                "tv",
+                1_700_000_300,
+                100,
+                "720p",
+                false,
+                0,
+                false,
+                "",
+            ),
+        );
         put_title(&ix, "t:seeded", "tv", "Drama", 2011, true);
         ensure_schema(&ix.db).unwrap();
         ix.summaries = true;
         assert!(ix.summaries_fresh());
         assert_rows_match_recompute(&ix);
+        // The seed picked the two apart the way `recompute` does: the
+        // newest COMPLETE release names the card, the newest release
+        // supplies the group the retention verdict is read against.
+        let seeded = TitleSummary::recompute(&ix.db, "t:seeded")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            seeded.rep_stem, "stem.2.t:seeded",
+            "name pick: newest complete"
+        );
+        assert_eq!(seeded.rep_id, 3, "freshness pick: newest, complete or not");
         let (cards, total) = ix
             .browse_cards_summary(&wall_q(), CardSort::Latest, true, false, false)
             .unwrap()
             .expect("an installed summary must serve the default wall");
         assert_eq!((cards.len(), total), (1, 1), "the install did not seed");
-        assert_eq!(cards[0].n_releases, 2);
+        assert_eq!(cards[0].n_releases, 3);
         // A second call is a no-op, not a re-seed that could race a
         // writer: it must neither wipe rows nor dirty anything.
         ensure_schema(&ix.db).unwrap();
@@ -1782,10 +2066,10 @@ mod tests {
         put(
             &ix,
             (
-                3,
+                4,
                 "t:seeded",
                 "tv",
-                1_700_000_300,
+                1_700_000_400,
                 100,
                 "720p",
                 true,

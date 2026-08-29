@@ -548,6 +548,16 @@ almindelige webadresse er nok; en Prowlarr-linje ser ud som
 hvad der kom tilbage, hvilket beviser adressen og nøglen med ét klik. En gemt nøgle vises
 aldrig igen: feltet siger det, og lader du det stå tomt, beholdes den nøgle, der allerede
 er der.</p>
+<p><b>nzbindex, helt uden konto.</b> Indstillinger → Søg på indeksere →
+<b>+ Tilføj indekser</b>, og sæt rækkens første felt til <code>nzbindex</code> i stedet
+for at navngive en konto. Den søger på nzbindex.com direkte via dets eget dokumenterede
+API, ingen nøgle krævet, selvom nzbindex også tager imod en, for en højere grænse på
+dets side. Den indekserer det, der rent faktisk er lagt op, frem for en udvalgt
+releaseliste, så den finder ting, kontoerne ovenfor ikke har, til prisen af at mange af
+dens resultater bærer forvanskede navne. Downloads sættes stadig i kø og pakkes ud som
+ethvert andet job. <b>Kun komplette</b>, slået til som standard, holder indlæg ude, der
+mangler dele og aldrig kan blive færdige; felterne for størrelse, alder og
+nyhedsgruppe ved siden af indsnævrer en søgning yderligere.</p>
 <p><b>At søge.</b> Åbn <b>🎬 væggen</b> i overskriftslinjen, og vælg <b>Releases</b>. Rullemenuen ved siden af søgefeltet afgør, hvor en søgning kigger:
 <b>Dette indeks</b>, altså det, denne maskine selv har skannet, <b>Indeksere</b> eller
 <b>Begge</b>. Dit valg huskes. At spørge dine konti kræver noget i feltet, for at blade i
@@ -1099,7 +1109,8 @@ overvågningsmappen), <code>nzb.refeed</code> (en færdig downloads egen NZB-fil
 overvågningslisten landede, og den erstattede kopi blev fjernet),
 <code>queue.idle</code>, <code>queue.paused</code> og <code>queue.resumed</code> (køen stoppede eller startede igen, uanset hvem eller hvad der gjorde det), <code>queue.finished_action</code>
 (handlingen ved køens afslutning blev slået til, kørte eller blev annulleret), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> og <code>update.available</code> (en nyere nzbfast-version blev fundet). Hver bærer
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> og <code>server.block_spent</code> (en forudbetalt blokkonto er nede på de sidste 15 % af de købte data eller har brugt det hele) og <code>update.available</code> (en nyere nzbfast-version blev fundet). Hver bærer
 <code>schema_version</code> (i øjeblikket 1; nye nøgler kan dukke op uden et hop -
 ignorer det, du ikke kender), et monotont <code>seq</code> og et
 <code>at</code>-tidsstempel i millisekunder.</p>
@@ -1260,6 +1271,7 @@ klient laver overlap på tværs af jobs.</li>
 <li><b>Soak på tværs af jobs</b>: mens et færdigt jobs hale (verificér/udpak) gøres færdig på
 disken, ejer det næste jobs download allerede linjen.</li>
 </ul>
+<p><b>Med kun én konfigureret udbyder</b> kan dette kun opdage et opslag, der er helt dødt - der kommer overhovedet intet ind fra det, uanset om hver artikel afvises, eller udbyderen simpelthen holder op med at svare. Et job, der blot er langsomt, men stadig modtager nogle bytes, bliver ladt i fred, fordi der ikke er nogen anden udbyder at flytte det til. Konfigurér en anden udbyder, så kan nzbfast også bemærke et opslag, som en server ikke længere har, og omdirigere eller udskyde det i stedet for at vente jobbet ud.</p>
 <h3 id="oracle">Tilgængelighedsoraklet</h3>
 <p>Takedowns er den vigtigste grund til, at et Usenet-download slår fejl, og de kan
 forudsiges: den samme udgivelse forsvinder hos én backbone, mens en anden stadig har
@@ -1443,6 +1455,7 @@ SABnzbd-kompatibelt, så eksisterende SAB-integrationer virker uændret. To nøg
 <tr><td>Diagnostik</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: enhver bruger, API-nøgle som adgangskode)</td></tr>
 <tr><td>Forhåndsvisning / afspilning</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; at starte et parkeret biblioteksjob kræver <code>?t=</code>-token eller nøgle), <code>/m3u/&lt;id&gt;</code> (kræver nøgle eller jobbets eget token; udsteder token'en), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Overvågning</td><td><code>/metrics</code> svarer i Prometheus-tekstformatet 0.0.4: downloadhastighed, kødybde og byte, forbindelser pr. udbyder, udfald og artikeltællinger, hukommelse pr. delsystem og oppetid. Basisenheder hele vejen (byte, sekunder), så panelet omregner, og intet ankommer forudafrundet. Kun GET, og som standard kræves den fulde API-nøgle. Sæt <code>metrics_open</code> for at servere det uden nøgle, hvilket er den sædvanlige Prometheus-opsætning: det indeholder ingen jobnavne og ingen stier, men det offentliggør værtsnavnet for hver opsat udbyder til enhver, der kan nå porten.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Filer &amp; placeringer</h2>

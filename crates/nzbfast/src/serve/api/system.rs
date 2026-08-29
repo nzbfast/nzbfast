@@ -836,9 +836,46 @@ pub(in crate::serve) fn dispatch(
                 None => json!({"status": false, "error": "no such job"}),
             }
         }
-        // M18b: per-provider data-usage history (UTC days).
+        // M18b: per-provider data-usage history (UTC days), plus the
+        // prepaid-block standings a client needs to render the same
+        // balance the dashboard does.
+        //
+        // `blocks` is FROM OUR OWN ACCOUNTING and carries no
+        // provider-reported figure - the design's section 3 rules that
+        // out, and a client must not add one on top either. `band` is
+        // the daemon's answer to "is this one low", so the page never
+        // re-derives the 85% threshold; an empty array is the normal
+        // case (nobody has bought a block).
+        //
+        // Design: research/BLOCK-ACCOUNT-ECONOMICS-2026-08-27.md § 5.
         "usage" => {
-            json!({"days": Value::Object(d.usage.lock_ok().clone())})
+            let blocks: Vec<Value> = nzbkit::config::Config::load(ctx.cfg_path)
+                .map(|c| {
+                    d.block_standings(&c)
+                        .into_iter()
+                        .map(|b| {
+                            json!({
+                                "host": b.host,
+                                "enabled": b.enabled,
+                                "block_bytes": b.total,
+                                "block_used": b.spent,
+                                "block_left": b.left,
+                                "pct": b.pct(),
+                                "band": b.band_word(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // ...and the 30-day provider-quality roll-up beside them.
+            // On THIS mode rather than a door of its own: the card that
+            // renders it is the per-provider card this payload already
+            // feeds, so the section costs no second poll, and the
+            // arithmetic lives in exactly one place either way
+            // (`provquality::report`). It reads only the quality
+            // ledger's own mutex - no index door, TODO 166.
+            json!({"days": Value::Object(d.usage.lock_ok().clone()), "blocks": blocks,
+                   "quality": d.provquality.report_json(crate::serve::unix_now())})
         }
         // Reveal a configured folder in the OS file manager, for
         // the 📂 buttons beside the path settings.

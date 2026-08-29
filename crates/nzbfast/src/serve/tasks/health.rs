@@ -626,13 +626,25 @@ async fn probe_server(
             conn.send_stat(id).await?;
         }
         conn.flush().await?;
-        for cell in cells.iter_mut() {
-            // `read_stat` is the normalizer both this and the M29
-            // sampler share: 223 have, 423/430 missing, and Giganews's
-            // nonstandard "451 0 <msgid>" for a takedown counted as a
-            // miss rather than thrown away as a protocol error. Do not
-            // re-derive it here.
-            *cell = match conn.read_stat().await? {
+        for (cell, id) in cells.iter_mut().zip(ids) {
+            // `read_stat_checked` is the normalizer both this and the
+            // M29 sampler share: 223 have, 423/430 missing, and
+            // Giganews's nonstandard "451 0 <msgid>" for a takedown
+            // counted as a miss rather than thrown away as a protocol
+            // error. Do not re-derive it here.
+            //
+            // CHECKED and not the bare `read_stat` this used until
+            // 28 Aug 2026: every STAT went out before the first reply
+            // was read, so cells are filled POSITIONALLY - one reply
+            // lost upstream and every later refusal is filed against
+            // the article behind it, which is a healthy server voting
+            // Missing on articles it holds. An id mismatch errors, and
+            // the error path here already leaves every cell it never
+            // reached Unknown, which `crate::health::score` reads as
+            // "did not vote" rather than as evidence. A server that
+            // echoes no id at all still passes - that is most of them
+            // on a 430.
+            *cell = match conn.read_stat_checked(Some(id.as_str())).await? {
                 true => Avail::Have,
                 false => Avail::Missing,
             };

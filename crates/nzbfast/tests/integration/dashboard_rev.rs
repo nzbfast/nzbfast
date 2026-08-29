@@ -884,8 +884,23 @@ fn a_settings_change_bumps_the_queue_revision_on_an_idle_daemon() {
         .as_u64()
         .expect("queue_revision");
     // Untouched: the poll must still answer empty, or this fix has just
-    // put the queue back on the wire every second.
-    let idle = api(port, &format!("mode=dashboard&queue_rev={rev}"));
+    // put the queue back on the wire every second. ADOPTING a bump or
+    // two first, bounded: a freshly served daemon's noservers hold
+    // latches asynchronously and legitimately bumps the revision once,
+    // and on a loaded runner that bump lands BETWEEN this test's first
+    // two calls - windows-unit failed exactly here on 28 Aug 2026 (run
+    // 33219214125, green on the runs either side) with the full payload
+    // and the hold present where the fast box had already folded it into
+    // the first read. What is asserted is what the test is about: the
+    // revision goes QUIET, and only a settings write moves it after.
+    let mut idle = api(port, &format!("mode=dashboard&queue_rev={rev}"));
+    for _ in 0..5 {
+        if idle["queue"].is_null() {
+            break;
+        }
+        rev = idle["queue_revision"].as_u64().expect("queue_revision");
+        idle = api(port, &format!("mode=dashboard&queue_rev={rev}"));
+    }
     assert!(idle["queue"].is_null(), "idle poll must stay empty: {idle}");
 
     // (`speedlimit_abs` is a string in the payload - SAB's units are

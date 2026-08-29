@@ -129,6 +129,9 @@ impl Daemon {
     pub(in crate::serve) fn cpu_pct(&self) -> f64 {
         let now = Instant::now();
         let cpu = nzbkit::mem::cpu_time_secs().unwrap_or(0.0);
+        // cpu-workers-gate: the divisor that turns CPU seconds into a
+        // percentage of this machine. A cap would make a loaded box read
+        // as busier than it is.
         let ncpu = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
         let mut prev = self.cpu_sample.lock_ok();
         match *prev {

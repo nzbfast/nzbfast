@@ -207,12 +207,23 @@ pub(super) fn spawn_hunt_worker(daemon: &Arc<Daemon>) {
 /// through `flush_run_usage`, so the net-drain call bills only what the
 /// last tick had not; a tick with no download (pool_live is None) costs
 /// two lock peeks and no disk write.
+///
+/// Stage 2 of the block-account design hangs its 85%/100% crossings off
+/// the same tick (`block_threshold_tick`), because this is where paid
+/// spend becomes visible at all.
 pub(super) fn spawn_usage_flush(daemon: &Arc<Daemon>) {
     let d = daemon.clone();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             d.flush_run_usage();
+            // The block-account crossings ride the same tick, and this
+            // is the only place they can: `block_spent` is read off the
+            // ledger the line above just wrote, so evaluating anywhere
+            // else would be asking about a figure that had not moved
+            // yet. Edge-triggered inside, so a tick with nothing
+            // crossing costs one config read and a map compare.
+            d.block_threshold_tick();
         }
     });
 }
@@ -961,11 +972,29 @@ pub(super) fn spawn_rss_poller(
             /// The on-disk form: a JSON array, byte-compatible with
             /// what the bare HashSet wrote, so an existing
             /// rss-seen.json loads unchanged - it just gains an order.
+            /// Clears the mark only once there are bytes to write: an
+            /// encode failure keeps `dirty` set so the next pass tries
+            /// again instead of silently forgetting the set until some
+            /// later insert happens to re-mark it.
             fn take_dirty(&mut self) -> Option<Vec<u8>> {
-                if !std::mem::take(&mut self.dirty) {
+                if !self.dirty {
                     return None;
                 }
-                serde_json::to_vec(&self.order).ok()
+                match serde_json::to_vec(&self.order) {
+                    Ok(b) => {
+                        self.dirty = false;
+                        Some(b)
+                    }
+                    Err(e) => {
+                        warn!(target: "rss", "rss seen set could not be encoded ({e})");
+                        None
+                    }
+                }
+            }
+            /// The write's failure path: the bytes never landed, so the
+            /// mark goes back up and the next pass retries.
+            fn unpersisted(&mut self) {
+                self.dirty = true;
             }
         }
         let seen_path = d.spool.join("rss-seen.json");
@@ -978,30 +1007,67 @@ pub(super) fn spawn_rss_poller(
             order: loaded.into(),
             dirty: false,
         }));
-        // Per-feed next-poll deadlines, keyed by url (a removed feed's
-        // entry just goes stale; a re-added one polls immediately).
-        let mut due: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
+        // When each feed was LAST polled, keyed by feed id and pruned to
+        // the live id set on every pass below. Both halves of that are a
+        // fix rather than a preference, and both were reachable with a
+        // SINGLE feed configured:
+        //
+        // * It used to be keyed by URL and never pruned, so a removed
+        //   feed's entry outlived it. Re-adding the same address inside
+        //   the old interval found that stale entry and waited the rest
+        //   of it out - up to the whole interval - while the settings row
+        //   read as never-polled, which is exactly the case the comment
+        //   here used to claim polled immediately. A re-added row gets a
+        //   NEW id (`assign_feed_ids`), so with the id as the key it has
+        //   no entry at all and polls at once: the claim is true by
+        //   construction now rather than by hope.
+        // * It used to store the DEADLINE, computed when the poll was
+        //   armed. Shortening a feed's interval therefore did nothing
+        //   until the OLD longer deadline expired. Storing the last-poll
+        //   instant and comparing against the interval at read time makes
+        //   an interval edit take effect on the very next pass, in both
+        //   directions.
+        let mut last_poll: std::collections::HashMap<String, Instant> =
+            std::collections::HashMap::new();
         loop {
             let feed_list = d.feeds.lock_ok().clone();
             // §G: forget the health of feeds that are no longer
             // configured, so a removed-and-re-added url starts clean and
-            // the map cannot grow across a long-running daemon.
+            // the map cannot grow across a long-running daemon. The
+            // last-poll map is pruned in the same breath, and for the
+            // same two reasons - it is the other per-feed map that would
+            // otherwise grow without bound and hand a re-added feed a
+            // predecessor's timing.
             {
                 let live: std::collections::HashSet<&str> =
                     feed_list.iter().map(|f| f.url.as_str()).collect();
                 d.feed_health
                     .lock_ok()
                     .retain(|u, _| live.contains(u.as_str()));
+                let live_ids: std::collections::HashSet<&str> =
+                    feed_list.iter().map(|f| f.id.as_str()).collect();
+                last_poll.retain(|id, _| live_ids.contains(id.as_str()));
             }
             for feed in feed_list {
                 let now = Instant::now();
-                if due.get(&feed.url).is_some_and(|t| *t > now) {
+                // The minimum interval floor lives HERE, in the read-time
+                // comparison, and must stay here: settings.json is
+                // hand-editable, and an interval of 1 second without this
+                // floor would poll the indexer on every loop.
+                let interval = std::time::Duration::from_secs(feed.interval_secs.max(60));
+                if last_poll
+                    .get(&feed.id)
+                    .is_some_and(|t| now.saturating_duration_since(*t) < interval)
+                {
                     continue;
                 }
-                due.insert(
-                    feed.url.clone(),
-                    now + std::time::Duration::from_secs(feed.interval_secs.max(60)),
-                );
+                // Marked BEFORE the fetch, where the deadline used to be
+                // armed, and for the reason that put it there: the fetch
+                // below can take most of a minute, so a mark written
+                // after it would let the outer loop come round and
+                // re-poll a slow feed while its first poll is still in
+                // flight.
+                last_poll.insert(feed.id.clone(), now);
                 let polled = tokio::task::spawn_blocking({
                     let url = feed.url.clone();
                     move || {
@@ -1176,11 +1242,28 @@ pub(super) fn spawn_rss_poller(
                                 &format!("rss:{}", redact_url_creds(&feed.url)),
                                 DupeExempt::Nobody,
                             ) {
-                                // Enqueue failures are content errors
-                                // (bad NZB) - retrying can't help.
+                                // A content error (bad NZB, duplicate
+                                // discarded) is final for this guid.
+                                // A disk refusal is not: enqueue's one
+                                // transient arm is the spool copy write
+                                // (`write_spool_copy`, an io::Error
+                                // through anyhow), and marking that
+                                // seen dropped the release for good on
+                                // a momentarily full disk. Leave it
+                                // unmarked so the next poll retries -
+                                // the same trade the fetch-failure arm
+                                // below already makes.
                                 Err(e) => {
-                                    warn!(target: "rss", "enqueue {}: {e}", it.title);
-                                    mark_seen(&it.guid);
+                                    let transient = e.chain().any(|c| c.is::<std::io::Error>());
+                                    warn!(
+                                        target: "rss",
+                                        "enqueue {}: {e}{}",
+                                        it.title,
+                                        if transient { " (will retry next poll)" } else { "" }
+                                    );
+                                    if !transient {
+                                        mark_seen(&it.guid);
+                                    }
                                 }
                                 Ok(_) => mark_seen(&it.guid),
                             }
@@ -1200,7 +1283,21 @@ pub(super) fn spawn_rss_poller(
                 // can lose at most the pass in flight - the same
                 // exposure the per-item write had between items.
                 if let Some(body) = seen.lock_ok().take_dirty() {
-                    let _ = crate::persist::write_atomic(&seen_path, &body);
+                    // A refused write (ENOSPC, NFS, permissions) puts
+                    // the mark back: the in-memory set still suppresses
+                    // for this process's life, but a stale file on disk
+                    // re-grabs every one of this pass's guids after a
+                    // restart. Say so and retry at the next pass rather
+                    // than swallow it.
+                    if let Err(e) = crate::persist::write_atomic(&seen_path, &body) {
+                        warn!(
+                            target: "rss",
+                            "rss seen set could not be written to {} ({e}) - \
+                             retrying at the next pass",
+                            seen_path.display()
+                        );
+                        seen.lock_ok().unpersisted();
+                    }
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -1215,20 +1312,12 @@ pub(super) fn spawn_rss_poller(
 /// against the index the scan loop keeps fresh, so "as soon as it
 /// appears in a watched group" means one scan interval + one watcher
 /// tick at worst - and edits/check-now skip even that.
-pub(super) fn spawn_watchlist_watcher(daemon: &Arc<Daemon>, settings_path: &std::path::Path) {
-    if let Some(v) = load_settings(settings_path).get("watchlist") {
-        match serde_json::from_value(v.clone()) {
-            Ok(l) => *daemon.watchlist.lock_ok() = l,
-            Err(e) => warn!(target: "watch", "ignoring saved watchlist setting: {e}"),
-        }
-    }
-    let state_path = daemon.spool.join("watchlist-state.json");
-    if let Some(v) = crate::persist::load_json_with_backup(&state_path) {
-        match serde_json::from_value(v) {
-            Ok(s) => *daemon.watch_state.lock_ok() = s,
-            Err(e) => warn!(target: "watch", "ignoring {}: {e}", state_path.display()),
-        }
-    }
+pub(super) fn spawn_watchlist_watcher(daemon: &Arc<Daemon>) {
+    // The list and its state are NOT loaded here. They are seeded in
+    // `build_daemon` (`startup::seed_watchlist` / `seed_watch_state`),
+    // because §74's instant path reads the list from ingest legs that
+    // are spawned before this one - see those helpers for the nightly
+    // armv7-cross red that mechanism cost.
     let d = daemon.clone();
     tokio::spawn(async move {
         loop {
@@ -1490,6 +1579,11 @@ pub(super) fn spawn_library_recheck(daemon: &Arc<Daemon>, config: &std::path::Pa
                         let mut j = job.lock_ok();
                         j.state = JobState::Failed;
                         j.fail_message = "content no longer retrievable".into();
+                        // The one sentence `fail_kind` matches EXACTLY
+                        // rather than by opening, so a single appended
+                        // character used to move it to `Local`. TODO 307
+                        // item 1 states it instead.
+                        j.fail_code = Some(FailKind::Gone);
                         info!(target: "library", "{} vanished - marked Failed", j.nzo_id);
                     }
                     // Log and carry on, deliberately: this verdict is

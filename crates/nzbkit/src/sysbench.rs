@@ -130,9 +130,21 @@ pub async fn stat_presence(
             sent += 1;
         }
         conn.flush().await?;
-        let have = tokio::time::timeout(Duration::from_secs(20), conn.read_stat())
-            .await
-            .map_err(|_| Box::<dyn std::error::Error + Send + Sync>::from("STAT timed out"))??;
+        // `read_stat_checked`, never `read_stat`: replies are attributed
+        // POSITIONALLY here - the next one belongs to `ids[out.len()]` -
+        // so a leg that lost one reply upstream would file every later
+        // reply against the id behind it and the whole presence vector
+        // would shift. An id mismatch errors out, which is what this
+        // function already does for a session that dies mid-sweep: a
+        // partial verdict on a desynced session is not a sample. A
+        // server that echoes no id at all still passes.
+        let expected = ids[out.len()].as_str();
+        let have = tokio::time::timeout(
+            Duration::from_secs(20),
+            conn.read_stat_checked(Some(expected)),
+        )
+        .await
+        .map_err(|_| Box::<dyn std::error::Error + Send + Sync>::from("STAT timed out"))??;
         out.push(have);
     }
     conn.quit().await;
@@ -167,6 +179,9 @@ pub struct ComputeReport {
 
 /// Run the per-stage compute benchmark. `mb` = payload per stage.
 pub fn compute(mb: usize) -> ComputeReport {
+    // cpu-workers-gate: this benchmark measures the MACHINE's compute
+    // ceiling, so it has to use the machine's cores. Running it against a
+    // launcher's worker cap would report the cap back as the box's speed.
     let cores = std::thread::available_parallelism().map_or(8, |n| n.get());
     let bytes = mb * 1024 * 1024;
     let payload: Vec<u8> = (0..bytes)
@@ -312,8 +327,9 @@ pub async fn timed_fetch(
 /// Timed fetch across a whole SERVER SET sharing one work queue - the
 /// pool-aggregate measurement ("do my providers together saturate the
 /// line?"). Returns (aggregate Gbps, per-server raw bytes, per-server
-/// connections still granted at the measure point, supply-exhausted
-/// flag), all vecs in input order.
+/// GRANTED sockets - the most sessions that server served us at once
+/// during the run, exact rather than sampled - supply-exhausted flag),
+/// all vecs in input order.
 ///
 /// With a big-enough sample (≥8 completions over ≥1 s) the rate is
 /// measured first-completion to last-completion - steady state, the
@@ -441,24 +457,6 @@ pub async fn timed_fetch_multi(
     // holds one of these on purpose past the end of its run (see the type
     // docs), and aborting there would kill live playback.
     let _abort_on_cancel = AbortOnDrop(ctl.clone());
-    // Track peak granted sockets while the fetch runs: when the queue
-    // drains early the workers are already gone by the measure point, and
-    // a point sample would read 0.
-    let peaks: Vec<Arc<std::sync::atomic::AtomicUsize>> = live
-        .servers
-        .iter()
-        .map(|_| Arc::new(std::sync::atomic::AtomicUsize::new(0)))
-        .collect();
-    let live2 = live.clone();
-    let peaks2 = peaks.clone();
-    let sampler = tokio::spawn(async move {
-        loop {
-            for (s, p) in live2.servers.iter().zip(&peaks2) {
-                p.fetch_max(s.connected.load(Ordering::Relaxed), Ordering::Relaxed);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    });
     // Wait for the window - or for the queue to drain first, which stops
     // the clock at the real end of the transfer.
     let mut early = None;
@@ -466,7 +464,6 @@ pub async fn timed_fetch_multi(
         _ = tokio::time::sleep(Duration::from_secs(secs)) => {}
         r = &mut handle => { early = Some(r.unwrap_or_default()); }
     }
-    sampler.abort();
     let exhausted = early.is_some();
     // Granted = the PEAK sockets held at once during the run, on both
     // paths (asked ≠ granted near account limits).
@@ -480,7 +477,37 @@ pub async fn timed_fetch_multi(
     // keys off RATES. "The provider let us hold 16 at once" is a fact
     // about the account either way; a socket count that fell at the
     // deadline is not evidence it was never granted.
-    let granted: Vec<usize> = peaks.iter().map(|p| p.load(Ordering::Relaxed)).collect();
+    //
+    // The peak is read off the pool's own `connected_peak`, recorded at
+    // the moment each session is established, and NOT off a sampler
+    // here. This function ran a 100 ms sampler over `connected` until
+    // 28 Aug 2026 (TODO 312 item 3), and a sampler can only ever see a
+    // fleet that outlives a tick: a carry rung asking 13 sockets and
+    // draining in ~0.45 s reported 3; the daemon carry probe's rungs of
+    // 5 and 10 both reported 1 against an unpaced loopback provider; and
+    // `granted_sees_the_whole_fleet_on_a_rung_that_drains_at_once` below
+    // measures a fleet of six reported as ZERO, the whole transfer
+    // having fitted inside the sampler's first tick. Its own comment
+    // already said the quantity wanted was "the provider let us hold N
+    // at once" - a high-water mark, which the increment site can state
+    // exactly and for free.
+    //
+    // Do NOT "fix" a future under-read by ticking the sampler faster:
+    // that spends CPU on every ladder rung to approximate a number the
+    // pool already knows exactly. And do not redefine `granted` as
+    // "distinct sockets that COMPLETED an article" - that is a different
+    // quantity (USEFUL sockets, not granted ones) and it under-reads for
+    // the same reason, harder to see: on a fast-draining rung most of
+    // the fleet legitimately connects and is handed no work because the
+    // queue is already empty. `conntune::knee_of` reads this field to
+    // decide the provider is REFUSING sockets and caps the user's
+    // connection count to it; a socket the provider accepted and we then
+    // had nothing to send down is not a refusal.
+    let granted: Vec<usize> = live
+        .servers
+        .iter()
+        .map(|s| s.connected_peak.load(Ordering::Acquire))
+        .collect();
     let stats = match early {
         Some(s) => s,
         None => {
@@ -1234,12 +1261,44 @@ pub fn verdict(
                      Only a faster CPU raises it further.",
                     c, compute.ceiling_gbps
                 )
-            } else {
+            } else if compute.fast_ceiling_gbps > compute.ceiling_gbps {
                 format!(
                     "CPU verification is your limit ({:.0} Gbps). Rare - only \
                      on very fast links. Turn on \"Checking while downloading: \
                      fast\" in Settings to raise it to {:.0} Gbps, or use a \
                      faster CPU.",
+                    c, compute.fast_ceiling_gbps
+                )
+            } else {
+                // THAT ORDERING IS A PROPERTY OF THE KERNELS AND NOT OF THE
+                // BOX - the full-verify stage hashes each chunk with MD5 and
+                // then CRC32s the same chunk, so it does strictly more work
+                // than the CRC32-only stage - but the two ceilings reaching
+                // here are LIVE MEASUREMENTS, and a measurement can come out
+                // the other way on a loaded machine. Measured on the dev Mac
+                // on 27 Aug 2026 under artificial load: the full-verify stage
+                // timed FASTER than MD5 alone in two runs of three, which is
+                // structurally impossible, so the estimator demonstrably
+                // inverts its own orderings when the box is busy. Recommending
+                // a setting on the strength of such a reading would advertise
+                // fast verify as a speed-up that slows the box down, which is
+                // the one thing this pair of ceilings must never say. So the
+                // RECOMMENDATION is withheld and the reading is reported as
+                // what it is. The `fast_verify` arm above needs no such guard:
+                // it quotes both measured figures and recommends nothing.
+                //
+                // This is the guard that `sysbench::tests` used to carry as a
+                // live assertion on `compute(16)`, where it was really
+                // asserting the test runner was fast; it reddened CI on
+                // 27 Aug 2026 (run 33035356437). It belongs here, on the
+                // stated numbers a user's own inverted measurement would
+                // reach, and it is tested on a fixture in
+                // `compute_advice_matches_the_fast_verify_state`.
+                format!(
+                    "CPU verification is your limit ({:.0} Gbps). Rare - only \
+                     on very fast links. This run did not measure fast verify \
+                     (CRC32-only block checks) as any quicker here ({:.0} \
+                     Gbps), so only a faster CPU raises it.",
                     c, compute.fast_ceiling_gbps
                 )
             },
@@ -1398,8 +1457,21 @@ pub async fn diversity(
                             if conn.flush().await.is_err() {
                                 break;
                             }
-                            match tokio::time::timeout(Duration::from_secs(20), conn.read_stat())
-                                .await
+                            // `read_stat_checked`, never `read_stat`:
+                            // `vec[recv]` files this reply POSITIONALLY,
+                            // so one lost reply upstream would shift
+                            // every later verdict by one slot. A
+                            // mismatch breaks the sweep, which leaves
+                            // `answered` short - and everything past it
+                            // reads as unknown rather than as missing
+                            // (Codex sweep 12 Aug F15). A server that
+                            // echoes no id at all still passes.
+                            let expected = ids[recv].as_str();
+                            match tokio::time::timeout(
+                                Duration::from_secs(20),
+                                conn.read_stat_checked(Some(expected)),
+                            )
+                            .await
                             {
                                 Ok(Ok(has)) => {
                                     vec[recv] = has;
@@ -1604,19 +1676,77 @@ mod tests {
         assert!(!reopen_won(r(20.0), r(37.0)), "slower is not a win");
     }
 
+    /// `compute()` BENCHMARKS THE MACHINE IT RUNS ON, so a test over its
+    /// output may assert only what a noisy box cannot break: the shape of the
+    /// report, and the arithmetic that derives the two ceilings from the
+    /// stage rates. It may not assert a performance ORDERING.
+    ///
+    /// It used to assert two of them - `decode_simd > md5`, and, through the
+    /// ceilings, `crc32 > verify`. The second inverted on a loaded CI runner
+    /// on 27 Aug 2026 (run 33035356437, main `7212ad8c9`) and failed
+    /// `unit-one-process`, which is one of only two places in this system
+    /// that can see the process-global-state class. Five later pushes then
+    /// carried a failed run, because the job that reports main red is itself
+    /// a job that can go red. Nobody fixed anything; it cleared on its own.
+    /// That is the mistake `verdict_picks_min` below was converted away from,
+    /// one test along, for the same reason in the same file: it was asserting
+    /// the host was fast, not that the code was right.
+    ///
+    /// NO TOLERANCE RESCUES A LIVE ORDERING HERE, which is why one is not
+    /// offered. A preempted thread loses an unbounded amount of wall time, so
+    /// a measured rate has no lower bound to write a margin against - and the
+    /// nominal margin is not the protection it looks like. Measured on the dev
+    /// Mac under artificial load on 27 Aug 2026, `verify` timed FASTER than
+    /// `md5` alone in two runs of three, an ordering that is structurally
+    /// impossible: `verify` hashes each chunk with MD5 and then CRC32s the
+    /// same chunk, so it always does strictly more work. An estimator that
+    /// inverts a relationship it cannot possibly have is not one to assert
+    /// orderings from.
+    ///
+    /// What that ordering was FOR - that fast verify is a speed-up rather
+    /// than a slow-down - now lives where it can be tested exactly and where
+    /// an inverted measurement would actually reach a user: `verdict` refuses
+    /// to recommend the setting when the pair of ceilings does not support
+    /// it, asserted on stated numbers in
+    /// `compute_advice_matches_the_fast_verify_state`.
     #[test]
     fn compute_report_is_sane() {
         let r = compute(16);
         assert!(r.cores >= 1);
-        // SIMD decode must beat MD5 (it does in reality by ~5×).
-        assert!(r.decode_simd.all_core > r.md5.all_core);
-        assert!(r.ceiling_gbps > 0.0);
-        assert!(r.fast_ceiling_gbps > 0.0);
-        // CRC32-only must beat MD5+CRC32 combined (it does in reality by
-        // roughly the same ~5× MD5 is behind CRC32 alone) - if this ever
-        // inverts, fast_verify would be advertised as a speed-up that
-        // slows the box down.
-        assert!(r.fast_ceiling_gbps > r.ceiling_gbps);
+        for (name, s) in [
+            ("decode_simd", r.decode_simd),
+            ("crc32", r.crc32),
+            ("md5", r.md5),
+            ("verify", r.verify),
+        ] {
+            assert!(
+                s.one_core.is_finite() && s.one_core > 0.0,
+                "{name} one_core is {}",
+                s.one_core
+            );
+            assert!(
+                s.all_core.is_finite() && s.all_core > 0.0,
+                "{name} all_core is {}",
+                s.all_core
+            );
+        }
+        assert!(r.ceiling_gbps.is_finite() && r.ceiling_gbps > 0.0);
+        assert!(r.fast_ceiling_gbps.is_finite() && r.fast_ceiling_gbps > 0.0);
+        // The derivation, which is the part with no timing in it: the full
+        // ceiling is the MD5+CRC32 `verify` stage and the fast one is the
+        // CRC32-only stage, each converted GB/s to Gbps. Holding the report
+        // against its OWN stage rates rather than against a threshold is what
+        // makes this noise-proof - both sides move together however slow the
+        // box is - and `* 8.0` is exact in binary floating point, so equality
+        // is the right test here rather than an epsilon.
+        //
+        // This is what catches the mistake that matters: the two stages wired
+        // to the wrong ceilings. It catches it whenever the two measurements
+        // differ, which two timings of different work always do. Note the
+        // polarity - bit-equal stage rates would let a swap through, and can
+        // never produce a FAILURE - so this assertion has no flake in it.
+        assert_eq!(r.ceiling_gbps, r.verify.all_core * 8.0);
+        assert_eq!(r.fast_ceiling_gbps, r.crc32.all_core * 8.0);
     }
 
     #[test]
@@ -1726,6 +1856,49 @@ mod tests {
             "off-state advice must quote the fast-verify ceiling it promises: {}",
             off.advice
         );
+
+        // AND THE INVERTED PAIR, which is this test's half of the guard
+        // `compute_report_is_sane` used to carry as a live assertion on a real
+        // benchmark. The two ceilings are measured, so on a loaded box the
+        // CRC32-only figure can come out at or below the MD5+CRC32 one even
+        // though the kernel does strictly less work - the same estimator was
+        // measured inverting a structurally impossible ordering on the dev Mac
+        // on 27 Aug 2026, and inverting THIS one on a CI runner the same day.
+        // When it does, the off-state advice must not tell the reader to turn
+        // a setting on to reach a number below the one they already have.
+        // Stated numbers, so this bites on every machine and every build
+        // profile, which is exactly what the live version could not do.
+        for (full, fast) in [(40.0, 20.0), (40.0, 40.0)] {
+            let inverted = ComputeReport {
+                cores: 8,
+                decode_simd: flat,
+                crc32: flat,
+                md5: flat,
+                verify: flat,
+                ceiling_gbps: full,
+                fast_ceiling_gbps: fast,
+            };
+            let off = verdict(50.0, &inverted, 100.0, false);
+            assert_eq!(off.bottleneck, "compute");
+            assert!(
+                !off.advice.contains("Turn on"),
+                "must not recommend fast verify when it did not measure faster \
+                 (full {full}, fast {fast}): {}",
+                off.advice
+            );
+            assert!(
+                !off.advice.contains("raise it to"),
+                "must not promise a raise it cannot deliver (full {full}, fast \
+                 {fast}): {}",
+                off.advice
+            );
+            assert!(
+                off.advice.contains("faster CPU"),
+                "the remaining advice is still owed to the reader (full {full}, \
+                 fast {fast}): {}",
+                off.advice
+            );
+        }
     }
 
     /// Regression (East Coast bench box, 5 Gbps): a fixed article supply drained in
@@ -1763,6 +1936,256 @@ mod tests {
         assert!(
             gbps > capped * 10.0,
             "rate must reflect actual drain time, not the window ({gbps} vs capped {capped})"
+        );
+    }
+
+    /// TODO 312 item 3: the granted count must survive a rung that
+    /// drains before a sampler could tick.
+    ///
+    /// This is the SAME loopback fixture as
+    /// `exhausted_supply_measures_actual_transfer_time` above - a
+    /// handful of small articles served unpaced, gone in milliseconds -
+    /// and it is the cheapest deterministic reproduction of the defect
+    /// there is. Under the old 100 ms sampler this reported `granted: 1`
+    /// for a fleet of six, because the whole transfer fitted inside the
+    /// sampler's first tick; the daemon carry probe had to PACE its mock
+    /// at 12 MB/s a connection just to keep two of its assertions
+    /// falsifiable (see `TEE_BPS` in `daemon_carry`).
+    ///
+    /// Asserting MORE THAN ONE, and the reason it is not the whole fleet
+    /// is written out at the assertion itself: the fleet size a ramp
+    /// reaches inside a drain this fast is a property of the box, not of
+    /// the product, and asserting it made this test fail on Windows with
+    /// two different numbers. Anything above 1 is what the sampler could
+    /// not support at any tick rate, and that is the point of moving the
+    /// recording to the increment site.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn granted_sees_the_whole_fleet_on_a_rung_that_drains_at_once() {
+        const CONNS: usize = 6;
+        let mut articles = std::collections::HashMap::new();
+        let data: Vec<u8> = (0..400_000u32).map(|i| i as u8).collect();
+        let segs = crate::mock::make_file_articles("g.bin", &data, 20_000, "gr", &mut articles);
+        let srv = crate::mock::MockServer::start(articles, crate::mock::Chaos::default()).await;
+        let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+        let cfg = crate::pool::PoolConfig {
+            connections: CONNS,
+            window: 4,
+            ramp_delay: Duration::from_millis(0),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let (_gbps, _per, granted, exhausted) =
+            timed_fetch_multi(vec![(srv.server_config(), cfg)], ids, usize::MAX, 30).await;
+        let took = t0.elapsed();
+        assert!(exhausted, "the supply must drain inside the window");
+        // The condition that makes this test about the defect at all. If
+        // a future box is slow enough that the run outlives a 100 ms
+        // sampler tick, the assertion below would pass under the old
+        // code too and would be pinning nothing.
+        assert!(
+            took < Duration::from_millis(400),
+            "this fixture must drain faster than the sampler this replaced              could ever have seen a fleet through (took {took:?})"
+        );
+        // WHY THIS IS `>= 2` AND NOT `== CONNS`, since the block above
+        // argues at length for the whole fleet and that argument is half
+        // right. It is right about the MECHANISM: recording at the
+        // increment site is what makes any number above 1 reachable, and
+        // a sampler cannot report one at any tick rate on a fixture that
+        // drains this fast. It is wrong about the FIXTURE, because "every
+        // one of these workers dials before it looks for work" is a race
+        // and not a guarantee - the supply is 20 small articles and the
+        // first workers to connect can drain it before the last ones
+        // finish dialling. So a fleet of six is what we ASK for, never
+        // what a box must grant inside the drain.
+        //
+        // Measured, not reasoned: windows-unit shard 2 of run
+        // 33221261870 failed BOTH attempts of this test, reporting 5 on
+        // one and 3 on the other. Two different numbers is the signature
+        // of a race, and neither is a defect - `granted` was correctly
+        // reporting a peak that really was 5, then really was 3. The
+        // sibling test added hours later,
+        // `a_fleet_cannot_be_bigger_than_its_ramp_had_time_to_dial`,
+        // states the same property from the other side.
+        //
+        // What survives is the assertion that actually falsifies the
+        // defect. The old sampler reported `granted: 1` for a fleet of
+        // six because the whole transfer fitted inside its first tick, so
+        // anything above 1 kills it, on every box, deterministically. Do
+        // NOT restore `== CONNS` to make it feel stronger: an assertion
+        // that fails on a slow-dial box is not stronger, it is flaky, and
+        // a flaky test in a shard that retries is how a real wedge gets
+        // reported as green.
+        let peak = granted.first().copied().unwrap_or(0);
+        assert!(
+            peak >= 2,
+            "the probe must see the concurrency the fleet actually reached;              a sampler reported 1 here and this reported {granted:?}"
+        );
+        assert!(
+            peak <= CONNS,
+            "the probe may never report more sessions than were asked for              ({CONNS} asked, {granted:?} reported)"
+        );
+    }
+
+    /// The other half of the same contract: a provider that grants
+    /// NOTHING must read 0, not "however many the gauge happened to
+    /// see". `granted == 0` is what the carry panel turns into "this
+    /// server accepted no connections at all" - the 481 / account
+    /// already-in-use case - so a peak that could drift up from a failed
+    /// dial would replace a true diagnosis with a wrong rate.
+    ///
+    /// `cap_ghost_ms` is the shape that reaches it: every accept is
+    /// greeted with the provider's own capacity refusal and closed, so
+    /// sessions are attempted and none is ever established.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn granted_is_zero_when_the_provider_establishes_no_session() {
+        let mut articles = std::collections::HashMap::new();
+        let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let segs = crate::mock::make_file_articles("z.bin", &data, 20_000, "gz", &mut articles);
+        let chaos = crate::mock::Chaos {
+            // Longer than the window below, so the refusal holds for the
+            // whole run rather than clearing under it.
+            cap_ghost_ms: 60_000,
+            ..Default::default()
+        };
+        let srv = crate::mock::MockServer::start(articles, chaos).await;
+        let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+        let cfg = crate::pool::PoolConfig {
+            connections: 4,
+            window: 4,
+            ramp_delay: Duration::from_millis(0),
+            ..Default::default()
+        };
+        let (_gbps, per, granted, _exhausted) =
+            timed_fetch_multi(vec![(srv.server_config(), cfg)], ids, usize::MAX, 3).await;
+        assert_eq!(
+            granted,
+            vec![0],
+            "a provider refusing every dial granted nothing, got {granted:?}"
+        );
+        assert_eq!(per, vec![0], "a refused provider moved no bytes");
+    }
+
+    /// The other half of what `granted` means, and the one nothing
+    /// pinned: a fleet cannot be larger than its own RAMP had time to
+    /// dial. Worker slot k sleeps `ramp_delay * k` before it connects
+    /// (`pool.rs`'s `let ramp = cfg.ramp_delay * slot`), so a rung whose
+    /// window is W can never hold more than `floor(W / ramp_delay) + 1`
+    /// sockets at once - whatever the provider allows, and with nothing
+    /// anywhere saying so.
+    ///
+    /// That arithmetic is why this test exists rather than being a note.
+    /// Both real ladder callers pass a 5 s step against the shipped
+    /// 150 ms ramp, so their ceiling is 34, and measured against a mock
+    /// capping NOTHING a rung asking 48 and a rung asking 64 both read
+    /// 34 granted. `conn_ladder` then reads the shortfall as the
+    /// provider refusing sockets and `conntune::knee_of` clamps the
+    /// user's connection count to it. Worse, and not visible in
+    /// `granted` at all, the RATE of such a rung is the rate of the
+    /// partial fleet that did dial: on this same mock, 32 sockets and 64
+    /// sockets read 0.0330 and 0.0331 Gbps - a false flat inside
+    /// `CLIMB_GAIN`, on a provider that would have given nearly four
+    /// times as much. TODO 312 item 6(c) carries the full measurement
+    /// and the option pricing; two of the four options it opened with
+    /// are eliminated there, by measurement rather than by argument.
+    ///
+    /// What is pinned here is the POOL's contract - the ceiling exists
+    /// and is the ramp's arithmetic - NOT the ladder's use of it, which
+    /// is the defect. So this stays true and stays meaningful under
+    /// every option still open there: shorten the probe ramp and the ceiling
+    /// rises with it, lengthen the window and it rises too, and the
+    /// control leg below is what keeps the assertion falsifiable either
+    /// way. Do NOT relax it to "granted is near the ask" once the ladder
+    /// is fixed - the ask is exactly the thing it must not assume.
+    ///
+    /// The band is loose ON PURPOSE, in the one direction that can
+    /// wobble. A loaded box makes the ramp sleeps land LATE, which only
+    /// ever lowers `granted`; the window's own `sleep` landing late is
+    /// what could raise it, so the upper bound is twice the arithmetic
+    /// rather than the arithmetic itself. Nothing in between is
+    /// interesting - the failure this pins is the whole fleet appearing
+    /// when the ramp says it cannot.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fleet_cannot_be_bigger_than_its_ramp_had_time_to_dial() {
+        const CONNS: usize = 32;
+        const WINDOW: u64 = 1;
+        const RAMP_MS: u64 = 100;
+        // Paced so the supply CANNOT drain inside the window - a rung
+        // that ends early ends its own ramp with it, which would make
+        // this test measure the drain instead of the ramp.
+        //
+        // Returns the fleet AND the window that actually elapsed, which
+        // is what keeps the arithmetic below honest on a loaded runner.
+        // The two error directions are not symmetric: a slow box makes
+        // the ramp sleeps land LATE, which only ever lowers `granted`,
+        // while the window's own `sleep` landing late RAISES it - so the
+        // ceiling is computed against the measured window rather than
+        // the nominal one, and a runner that overruns cannot turn this
+        // into a red that says nothing about the pool.
+        let fleet = |ramp_ms: u64| async move {
+            let mut articles = std::collections::HashMap::new();
+            let data: Vec<u8> = (0..6_000_000u32).map(|i| i as u8).collect();
+            let segs =
+                crate::mock::make_file_articles("ramp.bin", &data, 20_000, "rp", &mut articles);
+            let chaos = crate::mock::Chaos {
+                throttle: crate::mock::Throttle {
+                    per_conn_bps: 40_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let srv = crate::mock::MockServer::start(articles, chaos).await;
+            let ids: Vec<String> = segs.iter().map(|(id, _, _)| format!("<{id}>")).collect();
+            let cfg = crate::pool::PoolConfig {
+                connections: CONNS,
+                window: 4,
+                ramp_delay: Duration::from_millis(ramp_ms),
+                ..Default::default()
+            };
+            let t0 = Instant::now();
+            let (_gbps, _per, granted, exhausted) =
+                timed_fetch_multi(vec![(srv.server_config(), cfg)], ids, usize::MAX, WINDOW).await;
+            assert!(
+                !exhausted,
+                "the supply must outlast the window or this measures the drain, not the ramp"
+            );
+            (granted[0], t0.elapsed())
+        };
+
+        // The control, and the half that keeps the assertion below
+        // honest: the SAME fleet, the same window and the same provider,
+        // with the ramp taken out. Everything the provider was ever
+        // going to grant is granted.
+        //
+        // Two short of the ask rather than exact, and the tolerance is
+        // borrowed rather than invented: `granted + 2 < asked` is the
+        // rule `conn_ladder` and `conntune::knee_of` BOTH use to decide
+        // a provider is refusing sockets, precisely because a socket or
+        // two short is ordinary timing. A straggler on a loaded runner
+        // must not read as a cap here either.
+        let (unramped, _) = fleet(0).await;
+        assert!(
+            unramped + 2 >= CONNS,
+            "this provider caps nothing, so an unramped fleet of {CONNS} must \
+             essentially all connect, and only {unramped} did"
+        );
+
+        let (ramped, window) = fleet(RAMP_MS).await;
+        assert!(
+            ramped < unramped,
+            "a {RAMP_MS} ms ramp cannot dial as many sockets as no ramp at all, \
+             yet granted read {ramped} against the unramped {unramped} - the \
+             ceiling this pins has moved"
+        );
+        // The ceiling itself, against the window that really elapsed:
+        // slot k dials at `ramp_ms * k`, so at most `floor(W / r) + 1`
+        // can be up. Rounded up by one for the boundary slot, whose
+        // sleep lands within a scheduler tick of the deadline and may
+        // fall either side of it.
+        let formable = (window.as_millis() as u64 / RAMP_MS) as usize + 2;
+        assert!(
+            ramped <= formable,
+            "granted {ramped} is above the {formable} a {RAMP_MS} ms ramp had \
+             time to dial in the {window:?} this rung actually ran"
         );
     }
 

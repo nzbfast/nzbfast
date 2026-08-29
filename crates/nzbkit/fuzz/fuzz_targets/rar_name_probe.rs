@@ -26,7 +26,7 @@
 //! read past what it holds).
 use libfuzzer_sys::fuzz_target;
 
-use nzbkit::nameprobe::{ProbeError, pick_rar_media_name, rar_head};
+use nzbkit::nameprobe::{pick_rar_media_name, rar_head, ProbeError};
 
 fuzz_target!(|data: &[u8]| {
     // One article's worth is the live bound; bigger inputs exercise

@@ -5,6 +5,18 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- A foreground service is exempt from being killed, not from the
+         device suspending: with the screen off and no wakelock the CPU
+         stops and the download stalls under a notification that still
+         claims progress. Held only while the queue has work in it -
+         EngineService.holdWake. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Read-only, and for two questions: is this network metered (the
+         pause-on-metered setting) and what does the platform think its
+         downstream rate is (the connection count a phone should open,
+         DeviceProfile). Neither needs location and neither is a network
+         change. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!-- extractNativeLibs=true: the engine ships as libnzbfast.so and is
          exec'd from nativeLibraryDir, which requires a real file on disk.

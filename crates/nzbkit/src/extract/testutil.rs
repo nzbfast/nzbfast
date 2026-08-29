@@ -325,6 +325,52 @@ pub(super) fn rars_compressed_volume(entries: &[(&str, &[u8])]) -> Vec<u8> {
 /// Compressed RAR5 multi-volume set (one member split across
 /// volumes), capped payload bytes per volume.
 pub(super) fn rars_compressed_volumes(name: &str, data: &[u8], per_vol: usize) -> Vec<Vec<u8>> {
+    rars_compressed_volumes_at_level(name, data, per_vol, None)
+}
+
+/// The same set with the encoder's SEARCH EFFORT named, for the two
+/// tests whose fixture has to clear the 8 MiB holds-cap floor and so
+/// compresses tens of megabytes. Only the search changes; the ARCHIVE
+/// does not.
+///
+/// `None` - what [`rars_compressed_volumes`] passes, and the writer's
+/// own default - is the most expensive setting it has:
+/// `encode_options_for_level` gives it 256 match candidates per position
+/// AND a lazy-matching pass, where `Some(1)` gets 8 candidates and no
+/// lazy pass. Nothing a decoder reads differs between them.
+/// `compression_method_for_level` answers 1 for both, the dictionary is
+/// the same 128 KiB default, and `rar50_algorithm_version` is 0 for
+/// both - verified rather than reasoned, by parsing the volumes back
+/// and comparing the packed `FileHeader::compression_info`, which is
+/// `0x80` either way. Only the match/literal mix inside the bitstream
+/// moves, and nothing in this suite asserts on that.
+///
+/// Measured 28 Aug 2026 on the dev Mac, debug build, over 16 MiB of
+/// [`noisy`]: 7.42 s at `None` against 1.51 s at `Some(1)`, a 4.9x cut,
+/// at a packed ratio of 0.770 against 0.768. `.config/nextest.toml`
+/// puts a 300 s `terminate-after` on the whole `extract::` module
+/// (`58b793077`), so a second saved here is headroom under it on every
+/// profile - which is the other half of the remedy
+/// `research/ARMV7-CHASE-TIMEOUT-2026-08-28.md` prescribes.
+///
+/// `Some(0)` was measured too and is NOT available: it packs to 1.000
+/// of the input, so `should_store_compressed_payload` takes the STORE
+/// arm and [`assert_not_store`] refuses the fixture - the test would
+/// then silently exercise the phase-1 store path instead of the chase.
+///
+/// This is NOT the default for the whole suite, and the reason is a
+/// measurement rather than caution: converting every caller reddened
+/// `chase_tests::stalled_chase_pages_cold_frontier_then_demotes_byte_exact`,
+/// whose `chase_retained_bytes() < 1 << 20` is tuned against the shared
+/// `chase_volume_set` fixture's packed size, which the slightly worse
+/// ratio moves. A fixture whose size a test asserts on is not one to
+/// re-cut in passing.
+pub(super) fn rars_compressed_volumes_at_level(
+    name: &str,
+    data: &[u8],
+    per_vol: usize,
+    level: Option<u8>,
+) -> Vec<Vec<u8>> {
     use rars::rar50::{CompressedEntry, Rar50VolumeWriter, WriterOptions};
     let entries = [CompressedEntry {
         name: name.as_bytes(),
@@ -333,7 +379,11 @@ pub(super) fn rars_compressed_volumes(name: &str, data: &[u8], per_vol: usize) -
         attributes: 0,
         host_os: 0,
     }];
-    Rar50VolumeWriter::new(WriterOptions::default())
+    let mut options = WriterOptions::default();
+    if let Some(level) = level {
+        options = options.with_compression_level(level);
+    }
+    Rar50VolumeWriter::new(options)
         .compressed_entries(&entries)
         .max_payload_per_volume(per_vol)
         .finish()

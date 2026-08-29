@@ -5,7 +5,9 @@
 //! `par2repair`, the sibling of `unit_tests` (which covers the on-disk
 //! entry points), so `super::*` still names the private internals.
 
+use super::linalg::*;
 use super::*;
+use crate::gf16::MulTable;
 
 /// Destination identity is a filesystem question, not a string question.
 /// The colliding-target guard, the adoption-source exclusion and the

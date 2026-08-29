@@ -287,6 +287,51 @@ fn a_job_that_fails_mid_copy_never_lands_a_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Codex C08: the queue store refuses AFTER the rename landed. The
+/// record push and the destination file are one custody transaction, so
+/// a save that cannot land takes both back - a restart must not restore
+/// a job that has never heard of a completed copy already on disk. The
+/// whole-job move still carries the file, so Skipped is the honest
+/// verdict.
+#[test]
+fn a_refused_queue_save_takes_the_published_copy_back() {
+    use crate::serve::storecut::{Store, arm_store_cut, disarm};
+    let dir = scratch("storecut");
+    let d = test_daemon(&dir);
+    *d.move_completed.write_ok() = Some(dir.join("nas"));
+    let out = d.out_dir().join("Some.Release");
+    let body = vec![7u8; 2 << 20];
+    let job = job_with(&d, &out, &[("ep1.mkv", &body)]);
+    job.lock_ok().state = JobState::Downloading;
+    let dest = d.move_dest_for(&out, "").unwrap();
+    let pace = |_: u64| {};
+    arm_store_cut(&[Store::Queue]);
+    let got = d.early_publish_one(
+        &job,
+        "SABnzbd_nzo_early1",
+        &dest,
+        &cand(&out, "ep1.mkv"),
+        &pace,
+    );
+    disarm();
+    assert!(matches!(got, Publish::Skipped));
+    assert!(
+        !dest.join("ep1.mkv").exists(),
+        "an unrecorded destination copy is exactly what the rollback exists to prevent"
+    );
+    assert!(
+        job.lock_ok().early_published.is_empty(),
+        "the record and the store must agree - the push was taken back with the file"
+    );
+    assert!(
+        out.join("ep1.mkv").exists(),
+        "the source is untouched: the whole-job move still carries it"
+    );
+    // The commit released the custody fence behind itself.
+    assert!(!d.moving.lock_ok().contains("SABnzbd_nzo_early1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A job that has already settled by commit time is refused BEFORE the
 /// rename: the destination never sees the file at all.
 #[test]

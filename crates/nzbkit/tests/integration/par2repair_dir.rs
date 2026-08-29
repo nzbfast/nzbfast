@@ -200,7 +200,7 @@ fn damage_beyond_recovery_reports_unrepairable_counts() {
     bytes[5000] ^= 0xFF; // block 1
     std::fs::write(t.0.join("big.bin"), bytes).unwrap();
     match repair_dir(&t.0).expect("repair runs") {
-        RepairStatus::Unrepairable { needed, have } => {
+        RepairStatus::Unrepairable { needed, have, .. } => {
             assert_eq!((needed, have), (2, 1));
         }
         other => panic!("expected Unrepairable, got {other:?}"),

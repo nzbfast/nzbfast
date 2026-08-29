@@ -139,6 +139,18 @@ fn m_playback(
         // not have to page the whole list to know there are twelve.
         "queue_total": num(&queue["queue"]["noofslots"]) as u64,
         "history_total": num(&history["history"]["noofslots"]) as u64,
+        // Contract ADDITION (TODO 281 AN2, 26 Aug 2026): the daemon's own
+        // drain latch, which is a question no client can answer from the
+        // lists above. `queue_total == 0` is NOT the same fact: a job that
+        // has finished downloading is stamped Completed and retained out of
+        // the queue a hundred lines before its record is filed into history
+        // (`Daemon::note_queue_idle`), so there is a window in which it is
+        // in NEITHER list while its tail - repair, extract, the move - is
+        // still running. A phone that read an empty queue as "done" would
+        // stop the engine in the middle of that. The latch is set only when
+        // the queue walk is quiet AND `postproc_backlog` is zero, and it is
+        // re-armed by enqueue, so it is exactly "there is no work left".
+        "queue_idle": d.queue_idle_latch.load(Ordering::Relaxed),
         "queue": jobs,
         "history": done,
         "stream": stream_telemetry(d),

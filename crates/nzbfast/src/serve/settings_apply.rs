@@ -197,6 +197,12 @@ pub(super) fn apply_setting_tail(
         "index_evict_order" => set_index_evict_order(d, name, v)?,
         #[cfg(feature = "indexer")]
         "index_evict_kinds" => set_index_evict_kinds(d, name, v)?,
+        #[cfg(feature = "indexer")]
+        "index_keep_kinds" => set_index_keep_kinds(d, name, v)?,
+        #[cfg(feature = "indexer")]
+        "index_evict_scope" => set_index_evict_scope(d, name, v)?,
+        #[cfg(feature = "indexer")]
+        "index_evict_headroom" => set_index_evict_headroom(d, name, v)?,
         "index_evict" => {
             let applied = set_index_evict(d, name, v)?;
             if d.index_evict.load(Ordering::Relaxed) {

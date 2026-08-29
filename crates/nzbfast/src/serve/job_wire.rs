@@ -149,6 +149,15 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         "alt_why": j.alt_why,
         "alt_to_name": j.alt_to_name,
         "fail_message": j.fail_message,
+        // TODO 307 item 1's job-level carry, as the token
+        // `fail_kind_token` already publishes to `history_json` rather
+        // than a second spelling of the same six values. ADDITIVE, so it
+        // does NOT bump `JOB_SCHEMA_VERSION` - see that constant for the
+        // rule and for what a bump would cost. `null` for a job nothing
+        // classified, which is what every record written before this
+        // field existed reads as and is the correct answer for them:
+        // the sentence is genuinely all the evidence such a record has.
+        "fail_code": j.fail_code.map(crate::failkind::fail_kind_token),
         "fail_detail": j.fail_detail,
         "delete_status": j.delete_status,
         "priority": j.priority,
@@ -170,6 +179,11 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         // is not: a mark indexes a process-global ring, a verdict is a
         // statement about the download. See `Job::whyslow`.
         "whyslow": j.whyslow.as_ref().map(super::whyslow::verdict_json),
+        // TODO 309: which route this job's last run took through the
+        // §94 A resume gate. Same rule as `whyslow` above and for the
+        // same reason - it is a statement about the download, and the
+        // engine's log line about it is gone by the time anybody asks.
+        "resume_route": j.resume_route.as_ref().map(resume_route_json),
         // The other wall clock, for the same reason: `queued_at` is a
         // monotonic Instant that cannot cross a process (and is taken at
         // pick), so every restored queue row answered SAB's numeric
@@ -348,6 +362,18 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         alt_why: s("alt_why").unwrap_or_default(),
         alt_to_name: s("alt_to_name").unwrap_or_default(),
         fail_message: s("fail_message").unwrap_or_default(),
+        // Absent on every record written before TODO 307 item 1, and
+        // `None` is exactly what those records can truthfully say - the
+        // reader then falls back to the string classifier, which is what
+        // it did for all of them anyway. An UNKNOWN token reads `None`
+        // too rather than refusing the record: a kind this build has not
+        // heard of can only come from a newer one, and the schema rule
+        // above is explicit that an additive key must never cost a
+        // record. See `failkind::kind_from_token`.
+        fail_code: v
+            .get("fail_code")
+            .and_then(Value::as_str)
+            .and_then(crate::failkind::kind_from_token),
         fail_detail: s("fail_detail").unwrap_or_default(),
         // Monotonic clock cannot survive a process, so this stays None;
         // `finished_unix` is the one that carries the age across.
@@ -368,6 +394,7 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         // All of the reading is in `verdict_from_json`, so the token
         // set has one home.
         whyslow: super::whyslow::verdict_from_json(v.get("whyslow")),
+        resume_route: resume_route_from_json(v.get("resume_route")),
         // Never written, so never read: these index a log ring this
         // process has not filled. See `Job::log_mark`.
         log_mark: 0,
@@ -395,6 +422,7 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         // `Job::insurance_attempts` - a restart is a new day).
         insurance: v.get("insurance").and_then(Value::as_bool).unwrap_or(false),
         insurance_attempts: 0,
+        insurance_note: String::new(),
         fetched: v.get("fetched").and_then(Value::as_bool).unwrap_or(false),
         tombstone: false,
         // Never persisted: a relocation cannot outlive the process
@@ -577,5 +605,42 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
             .get("cleaned_trash")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+    })
+}
+
+/// TODO 309: [`crate::streamhub::ResumeRoute`] onto the wire.
+///
+/// Beside the record rather than beside the type, in the file that owns
+/// every other field's round trip - the type belongs to the engine and
+/// the daemon's persistence format is not its business.
+fn resume_route_json(r: &crate::streamhub::ResumeRoute) -> Value {
+    json!({
+        "mapped": r.mapped,
+        "restored_bytes": r.restored_bytes,
+        "budget_bytes": r.budget_bytes,
+        "widest_slot_bytes": r.widest_slot_bytes,
+        "seatable_bytes": r.seatable_bytes,
+    })
+}
+
+/// ...and back, defensively, on `whyslow`'s rule: every record written
+/// before this field existed must read as ABSENT.
+///
+/// `mapped` is the discriminator and it has no default. A route with a
+/// missing verdict is not a route that took the cheap path, it is a
+/// record that never carried one, and defaulting it either way would
+/// print a claim about a run nobody measured. The four FIGURES do
+/// default to 0, because `line()` in the report prints no clause for a
+/// zero and a route whose numbers were lost still knows which way it
+/// went.
+fn resume_route_from_json(v: Option<&Value>) -> Option<crate::streamhub::ResumeRoute> {
+    let v = v?;
+    let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some(crate::streamhub::ResumeRoute {
+        mapped: v.get("mapped")?.as_bool()?,
+        restored_bytes: n("restored_bytes"),
+        budget_bytes: n("budget_bytes"),
+        widest_slot_bytes: n("widest_slot_bytes"),
+        seatable_bytes: n("seatable_bytes"),
     })
 }

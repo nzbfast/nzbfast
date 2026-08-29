@@ -13,6 +13,10 @@
 //! everything daemon.rs's test module already has in scope.
 
 use super::*;
+// Both users of this are `#[cfg(feature = "indexer")]` tests, so the
+// import has to carry the same gate or the slim build imports a name it
+// never names.
+#[cfg(feature = "indexer")]
 use crate::serve::testutil::flat_rate_config;
 
 /// An NZB declaring exactly `ids` as its articles, posted by `poster` to

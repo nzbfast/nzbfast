@@ -166,3 +166,220 @@ fn the_refusal_floor_holds() {
     assert_eq!(armed, None, "under the floor there is nothing to arm on");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A rolling window of watchdog samples, oldest first, one per `tick`
+/// seconds and ending now: `(fleet byte total, cumulative dispatches,
+/// cumulative refusals)`.
+///
+/// One host, because [`super::flat_gone`] reads the fleet SUM and a
+/// second host would only test that addition works. Which servers have
+/// been asked is [`super::fleet_answered`]'s question and is driven off
+/// a real `LiveStats` in the cases below.
+fn window(tick: u64, samples: &[(u64, u64, u64)]) -> VecDeque<Sample> {
+    let now = Instant::now();
+    let last = samples.len() as u64 - 1;
+    samples
+        .iter()
+        .enumerate()
+        .map(|(i, (bytes, tried, missing))| {
+            (
+                now - std::time::Duration::from_secs((last - i as u64) * tick),
+                vec![("a.example".to_string(), *bytes)],
+                *tried,
+                *missing,
+            )
+        })
+        .collect()
+}
+
+/// A daemon with somewhere for the queue to go next, without which
+/// every demotion arm correctly stays silent.
+fn daemon_with_a_peer_waiting(tag: &str) -> Arc<Daemon> {
+    let dir = std::env::temp_dir().join(format!("nzbfast-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = crate::serve::testutil::test_daemon(&dir);
+    let waiting = crate::serve::job_from_json(&serde_json::json!({
+        "nzo_id": "waiting1",
+        "name": "peer",
+        "nzb_path": "/spool/peer.nzb",
+        "out_dir": "/dl/peer",
+        "state": "Queued",
+    }))
+    .expect("job_from_json");
+    d.queue
+        .lock_ok()
+        .push_back(Arc::new(std::sync::Mutex::new(waiting)));
+    d
+}
+
+/// The flatline is the NEWEST unbroken run of samples with the same
+/// fleet byte total, and it is measured from the oldest sample of that
+/// run - not from the start of the window, and not from the last
+/// sample that differed.
+#[test]
+fn the_flatline_is_the_newest_run_of_equal_byte_totals() {
+    // Bytes climb for two ticks and then stop for three.
+    let w = window(5, &[(10, 10, 0), (99, 40, 8), (99, 90, 58), (99, 150, 118)]);
+    let f = super::flat_gone(&w).expect("three samples agree on the byte total");
+    assert_eq!(f.secs as u64, 10, "two intervals of flatline, not three");
+    assert_eq!(f.misses, 110, "refusals banked SINCE the last byte");
+    assert_eq!(f.tried, 110, "and the dispatches they answered");
+}
+
+/// One sample is not an interval, so the first tick of every job has
+/// nothing to say.
+#[test]
+fn a_single_sample_is_not_a_flatline() {
+    assert!(super::flat_gone(&window(5, &[(0, 0, 0)])).is_none());
+    assert!(
+        super::flat_gone(&VecDeque::new()).is_none(),
+        "and neither is an empty window"
+    );
+}
+
+/// A byte landing in the newest interval ends the flatline outright -
+/// which is the whole reason this arm needs no separate arm-then-fire
+/// latch: an in-flight body arriving IS the stand-down.
+#[test]
+fn a_byte_in_the_newest_interval_ends_the_flatline() {
+    let w = window(5, &[(99, 10, 0), (99, 90, 80), (100, 150, 139)]);
+    assert!(
+        super::flat_gone(&w).is_none(),
+        "the newest sample moved, so there is no flat run behind it"
+    );
+}
+
+/// The shape the arm exists for: the post's first third arrived, then
+/// nothing for two ticks while the fleet kept being told "no such
+/// article".
+#[test]
+fn a_flatline_full_of_refusals_is_the_partial_verdict() {
+    let d = daemon_with_a_peer_waiting("partialarm");
+    let l = live(&["a.example"]);
+    l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
+    l.servers[0].articles_tried.store(1400, Ordering::Relaxed);
+    l.servers[0].articles_missing.store(200, Ordering::Relaxed);
+    let w = window(
+        5,
+        &[
+            (4_800_000, 1200, 0),
+            (4_800_000, 1300, 100),
+            (4_800_000, 1400, 200),
+        ],
+    );
+    let reason =
+        super::partial_gone_defer(&d, &l, &w, 64, 10, 0).expect("10s flat, 200 refusals in it");
+    assert!(
+        reason.contains("carries what is left of this post"),
+        "the wording has to separate this arm from both siblings: {reason}"
+    );
+    assert!(
+        !reason.contains("answered so far came back missing")
+            && !reason.contains("came back missing and not a byte arrived"),
+        "and must not collide with either of theirs: {reason}"
+    );
+
+    // Bytes ARRIVED on this job, which is exactly what stands the early
+    // twin down - the two arms cover disjoint shapes on purpose.
+    assert!(
+        gone_evidence(&l).is_none(),
+        "premise: the run-cumulative arm cannot speak for a partial takedown"
+    );
+}
+
+/// One interval short of the floor is not a verdict. Five seconds is
+/// the length of the disk hiccup this arm has to tell itself apart
+/// from, so a single tick of flatline is deliberately not enough.
+#[test]
+fn a_flatline_under_the_floor_holds_its_tongue() {
+    let d = daemon_with_a_peer_waiting("partialfloorsecs");
+    let l = live(&["a.example"]);
+    l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
+    l.servers[0].articles_missing.store(100, Ordering::Relaxed);
+    let w = window(5, &[(4_800_000, 1200, 0), (4_800_000, 1300, 100)]);
+    assert!(
+        super::partial_gone_defer(&d, &l, &w, 64, 10, 0).is_none(),
+        "one 5s interval of flatline is under a 10s floor"
+    );
+}
+
+/// A DRY TAIL is a flatline too, and it is not a takedown: the queue
+/// has simply run out of articles to ask for. Refusals still landing
+/// inside the stretch are what separates the two, and they are also
+/// what rules out a wedged worker, which completes no transaction of
+/// either kind.
+#[test]
+fn a_flatline_with_no_refusals_in_it_is_a_tail_not_a_takedown() {
+    let d = daemon_with_a_peer_waiting("partialtail");
+    let l = live(&["a.example"]);
+    l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
+    l.servers[0].articles_missing.store(800, Ordering::Relaxed);
+    // The 800 refusals are all OLDER than the flatline: nothing has
+    // been answered at all for the last ten seconds.
+    let w = window(
+        5,
+        &[
+            (4_800_000, 2000, 800),
+            (4_800_000, 2000, 800),
+            (4_800_000, 2000, 800),
+        ],
+    );
+    assert!(
+        super::partial_gone_defer(&d, &l, &w, 64, 10, 0).is_none(),
+        "a run-cumulative count must never satisfy a stretch-scoped floor"
+    );
+}
+
+/// "No configured server carries what is left of this post" is a claim
+/// about every server, so a server that is up and has simply not been
+/// asked yet stands this arm down exactly as it does its early twin.
+#[test]
+fn an_unprobed_server_stands_the_partial_verdict_down() {
+    let d = daemon_with_a_peer_waiting("partialunprobed");
+    let l = live(&["a.example", "quiet.example"]);
+    l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
+    l.servers[0].articles_missing.store(200, Ordering::Relaxed);
+    let w = window(
+        5,
+        &[
+            (4_800_000, 1200, 0),
+            (4_800_000, 1300, 100),
+            (4_800_000, 1400, 200),
+        ],
+    );
+    assert!(
+        super::partial_gone_defer(&d, &l, &w, 64, 10, 0).is_none(),
+        "the quiet server might be the one that still has the rest"
+    );
+
+    // Down is different from silent, the same way it is for the early
+    // arm: a server granting no connection cannot supply anything and
+    // is the outage arm's business.
+    l.servers[1].down_since.store(1, Ordering::Relaxed);
+    assert!(
+        super::partial_gone_defer(&d, &l, &w, 64, 10, 0).is_some(),
+        "a DOWN server does not block the verdict"
+    );
+}
+
+/// Nowhere for the queue to go is the justification every arm rests
+/// on: setting a job aside costs nothing when something else can run
+/// and costs a restart when nothing can.
+#[test]
+fn the_partial_arm_stays_silent_with_nothing_else_to_run() {
+    let d = daemon_with_a_peer_waiting("partialalone");
+    d.queue.lock_ok().clear();
+    let l = live(&["a.example"]);
+    l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
+    l.servers[0].articles_missing.store(200, Ordering::Relaxed);
+    let w = window(
+        5,
+        &[
+            (4_800_000, 1200, 0),
+            (4_800_000, 1300, 100),
+            (4_800_000, 1400, 200),
+        ],
+    );
+    assert!(super::partial_gone_defer(&d, &l, &w, 64, 10, 0).is_none());
+}

@@ -17,20 +17,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use tracing::warn;
 
-static SENDER: OnceLock<mpsc::Sender<PathBuf>> = OnceLock::new();
+static SENDER: OnceLock<mpsc::Sender<Task>> = OnceLock::new();
 /// Staging roots this process has already drained of leftovers.
 static SEEN: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
 /// Disambiguates same-named files from different jobs (every job has
 /// a `.par2`, most have an `.nfo`).
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn sender() -> &'static mpsc::Sender<PathBuf> {
+/// What the worker takes off its queue.
+///
+/// [`Task::Fence`] carries no work. It is a marker a test drops into
+/// the queue and then waits for: the queue is FIFO and one thread
+/// drains it, so an acknowledged fence means every task sent before it
+/// ran to the END of its iteration. See [`drained`].
+enum Task {
+    Dispose(PathBuf),
+    /// Constructed only by [`drained`], which is `cfg(test)`.
+    #[cfg_attr(not(test), expect(dead_code))]
+    Fence(mpsc::Sender<()>),
+}
+
+fn sender() -> &'static mpsc::Sender<Task> {
     SENDER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<PathBuf>();
+        let (tx, rx) = mpsc::channel::<Task>();
         std::thread::Builder::new()
             .name("trash-worker".into())
             .spawn(move || {
-                for p in rx {
+                for task in rx {
+                    let p = match task {
+                        Task::Dispose(p) => p,
+                        Task::Fence(ack) => {
+                            let _ = ack.send(());
+                            continue;
+                        }
+                    };
                     // The setting is re-read at disposal time, not
                     // frozen at park time: the file already left the
                     // user's tree when the sweep decided to delete it,
@@ -87,6 +107,58 @@ fn sender() -> &'static mpsc::Sender<PathBuf> {
     })
 }
 
+/// TEST ONLY. Block until the worker has finished every task queued
+/// before this call.
+///
+/// THE PRUNE IS THE HALF NO FILESYSTEM OBSERVATION CAN WAIT FOR. Each
+/// iteration is two steps - dispose of the file, then `remove_dir` the
+/// staging root if that emptied it - and only the FIRST is visible from
+/// outside. A test that polls for a condition on the staging folder
+/// therefore resumes the instant `remove_user_file` returns, with the
+/// `remove_dir` of that same iteration still pending, and then races it.
+/// Measured 28 Aug 2026 on the dev Mac, roughly one full-suite run in
+/// four of `cargo test -p nzbfast --bin nzbfast`:
+/// `a_refused_disposal_is_retried_by_the_next_stage` cleared the
+/// leftover its poll had just seen, which emptied the root, and the
+/// pending `remove_dir` then took the staging folder with it - so the
+/// test's very next write landed in a directory that no longer existed
+/// and failed `NotFound`. A longer poll makes that rarer and never
+/// safer; this makes it unreachable.
+///
+/// It also holds the disposals inside the window
+/// [`super::testkit::trash_globals_steady`] is taken for: without it a
+/// test releases that guard while its own files are still in flight,
+/// and the worker re-reads the trash globals per file at disposal time.
+///
+/// Fails rather than hangs if the worker is wedged, which is the ONLY
+/// job the deadline has - the synchronisation is the fence, so this
+/// number never wants tuning and a longer one would fix nothing. It is
+/// picked to sit between the two figures it has to clear: four times
+/// the 30 s bound `smart::TRASH_DEADLINE` puts on a single disposal
+/// that could legitimately be queued ahead of us, and comfortably under
+/// the 600 s `terminate-after` on `[profile.ci]`, so a genuinely wedged
+/// worker fails HERE by name rather than being killed as an
+/// unattributed timeout.
+///
+/// SPELLED OUT rather than derived from that constant, which is what it
+/// was for the hours between `d49f5ab32` and this commit: it is
+/// `cfg(target_os = "macos")`, so `4 * super::TRASH_DEADLINE` compiled
+/// on the box it was written on and took `check`, `slim-check`,
+/// `windows-clippy` and `windows-build` red on E0425 the moment CI
+/// compiled anything else. A host clippy run cannot see that class -
+/// see CLAUDE.md's SIXTEENTH gate. Both figures above are BOUNDS this
+/// has to clear, not values it has to track, so nothing rots by
+/// restating them here in prose.
+#[cfg(test)]
+pub(super) fn drained() {
+    let (ack, done) = mpsc::channel();
+    sender()
+        .send(Task::Fence(ack))
+        .expect("the trash worker is gone");
+    done.recv_timeout(std::time::Duration::from_secs(120))
+        .expect("the trash worker never reached the fence");
+}
+
 /// Re-arm the leftover drain for `root`: the next [`stage`] into it
 /// re-lists the folder instead of sending only its own file. Called
 /// when a disposal was REFUSED, so what it left behind gets asked
@@ -135,12 +207,12 @@ pub(super) fn stage(path: &Path, root: &Path) -> std::io::Result<()> {
                 // to. A directory entry was worse still: `trash_attempt`
                 // takes a whole tree in one call.
                 if is_staged_entry(&e) {
-                    let _ = tx.send(e.path());
+                    let _ = tx.send(Task::Dispose(e.path()));
                 }
             }
         }
     } else {
-        let _ = tx.send(dest);
+        let _ = tx.send(Task::Dispose(dest));
     }
     Ok(())
 }

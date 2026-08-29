@@ -588,6 +588,17 @@ dann <b>Indexer übernehmen</b>. <b>Testen</b> fragt die Seite, was sie unterst�
 zeigt die Antwort, was Adresse und Schlüssel mit einem Klick belegt. Ein gespeicherter
 Schlüssel wird nie wieder angezeigt: das Feld sagt es, und leer lassen behält den
 Schlüssel, der schon da ist.</p>
+<p><b>nzbindex, ganz ohne Konto.</b> Einstellungen → Indexer durchsuchen →
+<b>+ Indexer hinzufügen</b>, und setze das erste Feld der Zeile auf <code>nzbindex</code>
+statt ein Konto einzutragen. Es durchsucht nzbindex.com direkt über dessen eigene,
+dokumentierte API, kein Schlüssel nötig, auch wenn nzbindex selbst einen annimmt, für ein
+höheres Limit auf seiner Seite. Es indexiert, was wirklich gepostet wurde, statt einer
+kuratierten Release-Liste, und findet damit Dinge, die die Konten oben nicht haben, um
+den Preis, dass viele seiner Ergebnisse verwürfelte Namen tragen. Downloads werden
+trotzdem in die Warteschlange gestellt und entpackt wie jeder andere Job.
+<b>Nur vollständige</b>, standardmäßig an, hält Posts fern, denen Teile fehlen und die
+nie fertig werden können; die Felder für Größe, Alter und Newsgroup daneben grenzen eine
+Suche weiter ein.</p>
 <p><b>Suchen.</b> Öffne <b>🎬 Wand</b> in der Kopfzeile und wähle <b>Releases</b>.
 Das Auswahlfeld neben dem Suchfeld entscheidet, wo eine Suche nachsieht: <b>Dieser
 Index</b>, also das, was diese Maschine selbst gescannt hat, <b>Indexer</b> oder
@@ -1182,7 +1193,8 @@ entfernt, konnte aber dessen Dateien nicht entfernen), dazu
 ersetzte Kopie wurde entfernt),
 <code>queue.idle</code>, <code>queue.paused</code> und <code>queue.resumed</code> (die Warteschlange wurde angehalten oder wieder gestartet, von wem oder was auch immer), <code>queue.finished_action</code>
 (die Aktion bei Warteschlangenende wurde scharfgeschaltet, ausgeführt oder abgebrochen), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> und <code>update.available</code> (eine neuere nzbfast-Version wurde gefunden). Jedes trägt
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> und <code>server.block_spent</code> (ein Prepaid-Blockkonto ist bei den letzten 15 % der gekauften Daten angekommen oder hat alles aufgebraucht) und <code>update.available</code> (eine neuere nzbfast-Version wurde gefunden). Jedes trägt
 <code>schema_version</code> (derzeit 1; neue Schlüssel können ohne Erhöhung
 auftauchen - ignoriere, was du nicht kennst), eine monotone <code>seq</code> und
 einen <code>at</code>-Zeitstempel in Millisekunden.</p>
@@ -1351,6 +1363,7 @@ Job. Kein anderer Client überlappt Jobs so.</li>
 (Prüfen/Entpacken) auf der Festplatte ausläuft, gehört die Leitung schon dem Download
 des nächsten Jobs.</li>
 </ul>
+<p><b>Mit nur einem konfigurierten Provider</b> kann dies nur einen völlig toten Beitrag erkennen - es kommt überhaupt nichts mehr an, sei es weil jeder Artikel abgelehnt wird oder weil der Provider einfach nicht mehr antwortet. Ein Auftrag, der nur langsam ist, aber noch einige Bytes empfängt, wird in Ruhe gelassen, weil es keinen zweiten Provider gibt, zu dem er verschoben werden könnte. Richten Sie einen zweiten Provider ein, und nzbfast kann auch bemerken, dass ein Server einen Beitrag nicht mehr führt, und ihn umleiten oder zurückstellen, statt den Auftrag auszusitzen.</p>
 <h3 id="oracle">Das Verfügbarkeits-Orakel</h3>
 <p>Takedowns sind der Hauptgrund, warum ein Usenet-Download scheitert, und sie sind
 vorhersagbar: dasselbe Release verschwindet auf einem Backbone, während ein anderes es
@@ -1546,6 +1559,7 @@ Keys: der <b>API-Key</b> (volle Kontrolle) und der <b>NZB-Key</b> (nur Hinzufüg
 <tr><td>Diagnose</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-Auth: beliebiger Benutzer, API-Key als Passwort)</td></tr>
 <tr><td>Vorschau / Wiedergabe</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-Ranges; das Starten eines geparkten Bibliotheks-Jobs braucht ein <code>?t=</code>-Token oder den Key), <code>/m3u/&lt;id&gt;</code> (braucht den Key oder das Token des Jobs; stellt das Token aus), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Überwachung</td><td><code>/metrics</code> antwortet im Prometheus-Textformat 0.0.4: Downloadrate, Warteschlangentiefe und Bytes, Verbindungen je Anbieter, Ausfälle und Artikelzahlen, Speicher je Teilsystem und Laufzeit. Durchgehend Basiseinheiten (Bytes, Sekunden), damit das Dashboard umrechnet und nichts vorgerundet ankommt. Nur GET, und standardmäßig ist der volle API-Schlüssel nötig. Setzen Sie <code>metrics_open</code>, um es ohne Schlüssel auszuliefern, was der übliche Prometheus-Aufbau ist: es enthält keine Auftragsnamen und keine Pfade, veröffentlicht aber den Hostnamen jedes eingerichteten Anbieters an jeden, der den Port erreichen kann.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Dateien &amp; Speicherorte</h2>

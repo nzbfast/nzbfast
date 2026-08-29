@@ -16,6 +16,9 @@ mod daemon_index;
 // reach it had inline.
 #[cfg(feature = "indexer")]
 pub use daemon_index::IndexReadPool;
+// Same reason: `Daemon`'s `index_ledger` field is typed on it.
+#[cfg(feature = "indexer")]
+pub use daemon_index::IndexLedger;
 
 // The whole `enqueue` add path, moved out bodily (TODO 106). Same
 // child-module shape as daemon_index for the same reason.
@@ -399,6 +402,41 @@ pub struct Daemon {
     /// *arr on the other side does the renaming - which is what Sonarr
     /// and Radarr ask for anyway.
     pub early_file_publish: std::sync::atomic::AtomicBool,
+    /// Write a `.nzbfast.manifest` beside every completed job's payload:
+    /// the settle-time PAR2 checksums (whole-file MD5, first-16k MD5,
+    /// per-block CRC32) kept so the directory can be re-verified after
+    /// the `.par2` files are cleaned up. OFF by default: it is a new
+    /// file in every finished folder, which is a default to choose
+    /// deliberately, not inherit. Costs serialization only - the data
+    /// is already in memory at settle.
+    pub write_manifest: std::sync::atomic::AtomicBool,
+    /// When this daemon started serving, so `/metrics` can report an
+    /// uptime.
+    ///
+    /// An `Instant` and not a unix stamp: uptime is a DURATION, and a
+    /// wall-clock subtraction hands you a negative one the first time
+    /// NTP steps the clock backwards under a monitoring system that then
+    /// alerts on a restart nobody performed. Distinct from `started_at`,
+    /// which is the ACTIVE JOB's start and is cleared at network drain -
+    /// a process uptime that reset to zero between downloads would say
+    /// the daemon had restarted, which is the one thing an uptime series
+    /// is read for.
+    pub boot_at: Instant,
+    /// Serve `/metrics` to callers with no API key.
+    ///
+    /// OFF by default, so the endpoint sits behind the full API key like
+    /// every other read of this daemon's state. The switch exists
+    /// because the Prometheus convention is an unauthenticated scrape -
+    /// the scrape config has nowhere tidy to put a secret, and most
+    /// installs put the exporter on a private network instead - and an
+    /// operator who wants that should not have to choose between it and
+    /// having a key at all.
+    ///
+    /// What it publishes to anyone who can reach the port: the numbers
+    /// in `serve/metrics.rs`, which carry no job names and no paths, but
+    /// DO carry each configured provider's hostname as a label. That is
+    /// the disclosure to weigh, and the manual says so at the setting.
+    pub metrics_open: std::sync::atomic::AtomicBool,
     /// Output directories chosen but not yet owned by any job record.
     ///
     /// `dir_claim` answers from the queue and history, so a directory
@@ -956,6 +994,12 @@ pub struct Daemon {
     /// thresholds and the live pause all live inside it - see
     /// `serve::slowstore`.
     pub(super) slow_storage: super::slowstore::Governor,
+    /// TODO 309(b): the last answer `Daemon::pause_cost` gave about what
+    /// pausing the job on the wire would cost its next run, and when.
+    /// The queue payload asks on every poll and the honest answer means
+    /// parsing a journal, so the read is screened and then cached here -
+    /// `serve::requeue` carries both arguments.
+    pub(super) pause_cost: super::requeue::PauseCostCache,
     /// Permissions to put on finished downloads (#20), as a umask: dirs
     /// get `0o777 & !umask`, files `0o666 & !umask`. `u32::MAX` is OFF
     /// and is the default, so an install that says nothing keeps exactly
@@ -1354,6 +1398,19 @@ pub struct Daemon {
     /// It shares the database, the pass gate and the pause rules with
     /// indexing (one SQLite file, one writer at a time, and a download
     /// still outranks both) - it just does not need the other switch on.
+    ///
+    /// Its READERS are the index gate (`indexer`-only) and the shell key
+    /// that stamps the page before its first paint (`dashboard`-only),
+    /// and `indexer` pulls `dashboard` in - so the one configuration
+    /// where this is written and never read is the slim, pageless one
+    /// the phones build (TODO 281 IO3b).
+    // Not #[expect]: `dead_code` is a rustc lint judged in EVERY
+    // configuration, and the field is plainly read in all of them but
+    // the `--no-default-features` one, so an expectation would go
+    // unfulfilled in the default build and redden the clippy gate.
+    // Measured 28 Aug 2026: `cargo check -p nzbfast
+    // --no-default-features --all-targets` is the only one that warns.
+    #[cfg_attr(not(feature = "dashboard"), allow(dead_code))]
     pub(super) spot_enabled: std::sync::atomic::AtomicBool,
     /// Spot groups to scan. free.pt is the one live Spotnet group.
     pub(super) spot_groups: Mutex<Vec<String>>,
@@ -1405,6 +1462,21 @@ pub struct Daemon {
     /// "software", "other"); empty = every kind is fair game.
     #[cfg(feature = "indexer")]
     pub index_evict_kinds: Mutex<Vec<String>>,
+    /// The protective complement: kinds the cap must NEVER evict,
+    /// whatever `index_evict_kinds` says (a kind in both lists is
+    /// kept). Empty = nothing is exempt by kind.
+    #[cfg(feature = "indexer")]
+    pub index_keep_kinds: Mutex<Vec<String>>,
+    /// Which rows are candidates at all: "all", "junk", "incomplete",
+    /// "junk_incomplete" (never delete real complete content).
+    /// Validated on write, so this always holds one of those.
+    #[cfg(feature = "indexer")]
+    pub index_evict_scope: Mutex<String>,
+    /// How far below the cap an eviction empties, percent 0..=50.
+    /// Default 10 - the engine's own hysteresis figure; see the
+    /// headroom note in nzbkit's evict.rs for what 0 costs.
+    #[cfg(feature = "indexer")]
+    pub index_evict_headroom: AtomicU64,
     /// A prune left free pages behind and the file wants a VACUUM.
     /// Deliberately NOT acted on where it is set: VACUUM exclusive-locks
     /// and rewrites the whole database, so it waits for a genuinely idle
@@ -1424,6 +1496,14 @@ pub struct Daemon {
     /// would be answering a question about now with a fact about then.
     #[cfg(feature = "indexer")]
     pub last_auto_trim: std::sync::Mutex<Option<(i64, u64)>>,
+    /// The index space ledger - last compaction and evictions to date.
+    /// Unlike `last_auto_trim` above this one is PERSISTED (in the
+    /// index's own kv, reconciled by the maintenance loop), because it
+    /// answers questions about the database file rather than about this
+    /// process: "never compacted" is a wrong answer to give about a file
+    /// that was compacted before the last restart. See `IndexLedger`.
+    #[cfg(feature = "indexer")]
+    pub index_ledger: std::sync::Mutex<IndexLedger>,
     /// Releases and titles the user has actually looked at: title_key /
     /// release id → unix seconds of the last touch. This is the fourth
     /// protection the size cap honours ("don't evict what I've been
@@ -1449,6 +1529,11 @@ pub struct Daemon {
     /// §125: the learned peak the throughput graph anchors 100% to -
     /// seeded by `line_speed`, overridden by sustained measurement.
     pub link_peak: super::linkpeak::LinkPeak,
+    /// TODO 275 item 1 part 2: the per-socket carry the last job
+    /// measured, persisted, so the next job's fleet seed starts where
+    /// that one ended instead of re-walking the climb from the curve's
+    /// planned carry. Fed by the same 1 s ticker as `link_peak`.
+    pub line_carry: super::linecarry::LineCarry,
     /// §129 4b: the "Why is this slow?" attribution engine - fed by
     /// the same 1 s ticker as `link_peak`, published on the queue poll.
     pub(super) whyslow: super::whyslow::WhySlow,
@@ -1474,11 +1559,29 @@ pub struct Daemon {
     /// persisted to .spool/usage.json (metered/block accounts need to see
     /// where the gigabytes went).
     pub(super) usage: Mutex<serde_json::Map<String, Value>>,
+    /// The rolling 30-day per-provider quality ledger - article tries,
+    /// 430s, bytes and connection caps, split by post age, plus the job
+    /// outcomes those provider facts sat under. Persisted to
+    /// .spool/provquality.json. Written once per finished job on the
+    /// post-processing lane (where the outcome is known), read by
+    /// `mode=usage`. See `serve::provquality`.
+    pub(super) provquality: super::provquality::ProvQuality,
     /// §96.5: per-host bytes of the RUNNING download already billed to
     /// the usage ledger by `flush_run_usage` - the high-water map that
     /// makes mid-job billing idempotent against the end-of-job call.
     /// Cleared by the runner at every job start, beside `pool_live`.
     pub(super) run_usage_flushed: Mutex<std::collections::HashMap<String, u64>>,
+    /// Which band each block account was last seen in - 0 fine, 1 low
+    /// (>= `BLOCK_LOW_PCT`), 2 spent - so `block_threshold_tick` fires
+    /// `server.block_low` / `server.block_spent` on the CROSSING and not
+    /// on every 30 s flush. Absent means "not seen yet", which seeds
+    /// silently: a daemon starting up against an already-spent block has
+    /// not watched it cross anything. A band that goes DOWN (a refill)
+    /// rewrites the entry, so the next crossing fires again. Keyed per
+    /// CONFIG ENTRY (`host#ordinal`, the ordinal among same-host
+    /// entries), because two entries may share one host with different
+    /// block sizes and standings are per entry.
+    pub(super) block_band: Mutex<std::collections::HashMap<String, u8>>,
     /// Timed pause ("pause for N minutes"): auto-resume deadline, and
     /// the ONLY thing that decides whether the timer fires. Every
     /// pause/resume writer clears or replaces it under this mutex (see
@@ -1994,10 +2097,11 @@ pub struct ScanProgress {
 #[path = "daemon_evict.rs"]
 mod daemon_evict;
 #[cfg(feature = "indexer")]
-pub(in crate::serve) use daemon_evict::EVICT_MAX_PASSES;
+pub(in crate::serve) use daemon_evict::{EVICT_MAX_PASSES, EVICT_PREVIEW_MAX_EXAMINE};
 #[cfg(feature = "indexer")]
 pub use daemon_evict::{
-    EVICT_ORDERS, OPENED_PROTECT_DAYS, OpenedLog, parse_evict_kinds, parse_evict_order,
+    EVICT_ORDERS, EVICT_SCOPES, OPENED_PROTECT_DAYS, OpenedLog, parse_evict_kinds,
+    parse_evict_order, parse_evict_scope,
 };
 pub use daemon_evict::{SCOREBOARD_CATEGORIES, parse_scoreboard_cats};
 // The opened-log's two bounds have no reader outside their own module

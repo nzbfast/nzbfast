@@ -596,6 +596,17 @@ regroupe.</p>
 affiche sa réponse, ce qui valide l'adresse et la clé en un clic. Une clé enregistrée
 n'est jamais réaffichée : le champ le dit, et le laisser vide conserve la clé déjà
 en place.</p>
+<p><b>nzbindex, sans aucun compte.</b> Paramètres → Chercher sur les indexeurs →
+<b>+ Ajouter un indexeur</b>, puis réglez le premier champ de la ligne sur
+<code>nzbindex</code> au lieu de nommer un compte. Il interroge nzbindex.com directement
+via sa propre API documentée, aucune clé requise, même si nzbindex en accepte une aussi,
+pour une limite plus haute de son côté. Il indexe ce qui a réellement été publié plutôt
+qu'une liste de sorties triée sur le volet, il trouve donc des choses que les comptes
+ci-dessus n'ont pas, au prix que beaucoup de ses résultats portent des noms brouillés.
+Les téléchargements se mettent quand même en file et se décompressent comme n'importe
+quel autre job. <b>Complets seulement</b>, activé par défaut, écarte les publications
+auxquelles il manque des parties et qui ne pourront jamais aboutir ; les champs de
+taille, d'âge et de newsgroup à côté restreignent encore une recherche.</p>
 <p><b>Chercher.</b> Ouvrez <b>🎬 le mur</b> dans l'en-tête et choisissez <b>Releases</b>. Le menu déroulant à côté du champ de recherche décide où la recherche
 regarde : <b>Cet index</b>, c'est-à-dire ce que cette machine a scanné elle-même,
 <b>Indexeurs</b>, ou <b>Les deux</b>. Votre choix est mémorisé. Interroger vos comptes
@@ -1204,7 +1215,8 @@ dossier surveillé), <code>nzb.refeed</code> (le fichier NZB d’un télécharge
 suivi a abouti et la copie remplacée a été supprimée),
 <code>queue.idle</code>, <code>queue.paused</code> et <code>queue.resumed</code> (la file s'est arrêtée ou est repartie, quel qu'en soit l'auteur), <code>queue.finished_action</code>
 (l'action de fin de file a été armée, exécutée ou annulée), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> et <code>update.available</code> (une version plus récente de nzbfast a été trouvée). Chacun porte
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> et <code>server.block_spent</code> (un compte à blocs prépayé arrive aux derniers 15 % des données achetées, ou les a toutes consommées) et <code>update.available</code> (une version plus récente de nzbfast a été trouvée). Chacun porte
 <code>schema_version</code> (actuellement 1 ; de nouvelles clés peuvent apparaître
 sans incrément - ignorez ce que vous ne connaissez pas), un <code>seq</code>
 monotone et un horodatage <code>at</code> en millisecondes.</p>
@@ -1375,6 +1387,7 @@ inter-tâches.</li>
 (vérification/extraction) se termine sur disque, le téléchargement de la suivante
 possède déjà la ligne.</li>
 </ul>
+<p><b>Avec un seul fournisseur configuré</b>, ceci ne peut détecter qu’un post complètement mort - rien n’arrive du tout, que ce soit parce que chaque article est refusé ou parce que le fournisseur cesse simplement de répondre. Une tâche simplement lente mais qui reçoit encore quelques octets est laissée telle quelle, car il n’y a pas de second fournisseur vers lequel la déplacer. Configurez un second fournisseur et nzbfast peut aussi remarquer un post qu’un serveur ne possède plus et le router ou le reporter au lieu d’attendre la fin de la tâche.</p>
 <h3 id="oracle">L'oracle de disponibilité</h3>
 <p>Les retraits sont la première cause d'échec d'un téléchargement Usenet, et ils sont
 prévisibles : la même release disparaît d'un backbone pendant qu'un autre l'a encore.
@@ -1575,6 +1588,7 @@ changement. Deux clés : la <b>clé API</b> (contrôle total) et la <b>clé NZB<
 <tr><td>Diagnostics</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (auth Basic : n'importe quel utilisateur, la clé API comme mot de passe)</td></tr>
 <tr><td>Aperçu / lecture</td><td><code>/stream/&lt;nzo_id&gt;</code> (plages HTTP ; démarrer une tâche de bibliothèque en attente exige le jeton <code>?t=</code> ou la clé), <code>/m3u/&lt;id&gt;</code> (exige la clé ou le jeton de la tâche ; génère le jeton), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Supervision</td><td><code>/metrics</code> répond au format d'exposition texte Prometheus 0.0.4 : débit de téléchargement, profondeur et octets de la file, connexions par fournisseur, pannes et nombre d'articles, mémoire par sous-système, et temps de fonctionnement. Unités de base partout (octets, secondes), donc c'est le tableau de bord qui convertit et rien n'arrive pré-arrondi. GET uniquement, et la clé API complète est exigée par défaut. Mettez <code>metrics_open</code> pour le servir sans clé, ce qui est l'usage habituel avec Prometheus : cela ne transporte ni nom de tâche ni chemin, mais publie le nom d'hôte de chaque fournisseur configuré à quiconque peut joindre le port.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Fichiers &amp; emplacements</h2>

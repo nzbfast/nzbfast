@@ -284,6 +284,8 @@ pub(super) struct DecodeCtx {
     pub(super) retention_excluded: Arc<CauseSplit>,
     pub(super) missing_430: Arc<CauseSplit>,
     pub(super) takedown_430: Arc<CauseSplit>,
+    pub(super) unasked_430: Arc<CauseSplit>,
+    pub(super) unasked_noted: Arc<std::sync::atomic::AtomicBool>,
     pub(super) transport_failed: Arc<CauseSplit>,
     pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) decode_error_sample: crate::diag::DecodeSampleCell,
@@ -527,6 +529,8 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         retention_excluded,
         missing_430,
         takedown_430,
+        unasked_430,
+        unasked_noted,
         transport_failed,
         transport_sample,
         decode_error_sample,
@@ -624,11 +628,19 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             // every decode thread, and the only consumers that
                             // need to OWN the name are the two park arms below,
                             // which are rare.
-                            let name: &str = if dec.name.is_empty() {
-                                &slot.hint
-                            } else {
-                                &dec.name
-                            };
+                            //
+                            // GH #63: the yEnc header name is NOT
+                            // automatically the better of the two. It won
+                            // unconditionally here, with the subject as a
+                            // fallback for a header carrying no name at all,
+                            // and a poster who obfuscates the FILES and leaves
+                            // the SUBJECT clean - the opposite polarity to
+                            // #43/#47/#55 - therefore lost every name to a
+                            // hash it had already read correctly. `write_name`
+                            // takes the yEnc name unless it gives up a real
+                            // posted name; `dec.name` still goes to the
+                            // verifier below as the set-match key.
+                            let name: &str = slot.write_name(&dec.name);
                             // Issue #14: the offset-0 article of a
                             // payload-classified slot decoding to
                             // the PAR2 packet magic identifies
@@ -939,21 +951,15 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                     // here because here is the only place the slot is
                     // still in hand - see `CauseSplit`.
                     let rec = is_recovery_article(&id, &id_to_slot, &slots);
-                    match cause {
-                        nzbkit::pool::MissingCause::Retention => {
-                            retention_excluded.add(rec);
-                        }
-                        nzbkit::pool::MissingCause::Gone { takedown } => {
-                            missing_430.add(rec);
-                            // The hint rides its own counter so the
-                            // failure summary can say "removed", and
-                            // stays inside missing_430 for everything
-                            // else - a takedown is still a refusal.
-                            if takedown {
-                                takedown_430.add(rec);
-                            }
-                        }
-                    }
+                    note_missing_cause(
+                        cause,
+                        rec,
+                        &retention_excluded,
+                        &missing_430,
+                        &takedown_430,
+                        &unasked_430,
+                        &unasked_noted,
+                    );
                     par2.article_lost(&id, &id_to_slot, &fetch_done);
                 }
                 FetchOutcome::Failed { id, code, error } => {
@@ -1002,6 +1008,67 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                 }
             }
         }
+    }
+}
+
+/// Charge one Missing article to the counter its cause names, and say
+/// the one thing a count cannot.
+///
+/// A free function rather than three arms inline: `decode_consumer_loop`
+/// is at its size-gate ceiling, and this is the classification of a
+/// loss, which is a subject of its own.
+///
+/// `Unasked` is counted EXACTLY as `Gone` is, on purpose. `missing_430`
+/// is what the repair planner and every verdict gate read, and moving a
+/// loss between those counters is a policy change this is not - the
+/// same reasoning `FailCode` is instrumented under at the `Failed` arm
+/// of `decode_consumer_loop`, and for the same reason. What changes is that the run can now SAY it: the pool used to
+/// report a fleet that shrank past an article as `Gone`, i.e. as
+/// evidence about the post, when it is evidence about our own fleet
+/// (27 Aug sweep finding 8). Wiring that into the failure summary's
+/// copy is its own change with its own wording to settle; the typed
+/// cause is the only reading of it that does not go through a sentence.
+fn note_missing_cause(
+    cause: nzbkit::pool::MissingCause,
+    rec: bool,
+    retention_excluded: &CauseSplit,
+    missing_430: &CauseSplit,
+    takedown_430: &CauseSplit,
+    unasked_430: &CauseSplit,
+    unasked_noted: &std::sync::atomic::AtomicBool,
+) {
+    let takedown = match cause {
+        nzbkit::pool::MissingCause::Retention => {
+            retention_excluded.add(rec);
+            return;
+        }
+        nzbkit::pool::MissingCause::Gone { takedown } => takedown,
+        nzbkit::pool::MissingCause::Unasked { takedown, dark } => {
+            // The share the failure summary needs to tell a departure
+            // from a dead post. Charged BESIDE `missing_430` below and
+            // never instead of it - see `diag::LossCauses::unasked_430`.
+            unasked_430.add(rec);
+            // Once per run, not once per article: a post that outlives
+            // a server is hundreds of articles wide and this is one
+            // fact about the run, not one fact about each of them.
+            if !unasked_noted.swap(true, Ordering::Relaxed) {
+                warn!(
+                    target: "get",
+                    "{dark} server(s) stopped serving before some articles reached them. \
+                     Those articles count as missing, but no server that could still \
+                     answer was asked for them - another attempt once the server is back \
+                     may well find them.",
+                );
+            }
+            takedown
+        }
+    };
+    missing_430.add(rec);
+    // The hint rides its own counter so the failure summary can say
+    // "removed", and stays inside missing_430 for everything else - a
+    // takedown is still a refusal.
+    if takedown {
+        takedown_430.add(rec);
     }
 }
 
@@ -1419,7 +1486,15 @@ impl DamageWatch {
     /// §282 incident that line landed within seconds of the first
     /// article, and the counter it reads climbs for the whole run.
     fn project(&self, slots: &[Arc<FileSlot>]) -> Option<DamageProjection> {
-        let set = self.verifier.set()?;
+        // ONE representative set, deliberately (TODO 311): this is a
+        // projection stated in blocks, and a post whose sets disagree
+        // about block size has no single figure to state it in. The
+        // largest set is `sets()[0]` by construction, so a per-file-set
+        // post is projected in the block size of the set covering the
+        // most of it - the same number this read before every set was
+        // adopted, and the fraction it feeds is counted off SEGMENTS
+        // rather than off that set's own files.
+        let set = self.verifier.sets().into_iter().next()?;
         let block = set.block_size.max(1) as usize;
         // PAYLOAD only, both halves of the fraction. A recovery volume
         // is deferred rather than downloaded on the normal route, so
@@ -1790,6 +1865,8 @@ pub(super) struct Counters {
     pub(super) retention_excluded: Arc<CauseSplit>,
     pub(super) missing_430: Arc<CauseSplit>,
     pub(super) takedown_430: Arc<CauseSplit>,
+    pub(super) unasked_430: Arc<CauseSplit>,
+    pub(super) unasked_noted: Arc<std::sync::atomic::AtomicBool>,
     pub(super) transport_failed: Arc<CauseSplit>,
     pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) decode_error_sample: crate::diag::DecodeSampleCell,
@@ -1863,6 +1940,20 @@ pub(super) fn build_counters(
     // (a takedown or removal notice) - a hint for the failure summary,
     // never a separate verdict class.
     let takedown_430 = Arc::new(CauseSplit::default());
+    // And of those, the ones no COMPLETE fleet ever voted on: a server
+    // that had been serving went out before the article reached it, so
+    // the survivors' 430s went unanimous over a shrunken quorum
+    // (`pool::MissingCause::Unasked`). Its own counter purely so the
+    // failure summary can say what the departure cost - it stays inside
+    // `missing_430` for every count and verdict, exactly as
+    // `takedown_430` does.
+    let unasked_430 = Arc::new(CauseSplit::default());
+    // Said ONCE per run, not once per article: a post that outlives a
+    // server is hundreds of articles wide and the fact is one fact.
+    // Separate from the counter above because the counter cannot answer
+    // "was this the first" without a race - two decode threads charging
+    // it at once would both read zero and both warn.
+    let unasked_noted: Arc<std::sync::atomic::AtomicBool> = Default::default();
     let transport_failed = Arc::new(CauseSplit::default());
     // First error of each kind, verbatim, for the failure summary to
     // quote - the counter alone says nothing a bug report can act on.
@@ -1904,6 +1995,8 @@ pub(super) fn build_counters(
         retention_excluded,
         missing_430,
         takedown_430,
+        unasked_430,
+        unasked_noted,
         transport_failed,
         transport_sample,
         decode_error_sample,
@@ -1936,6 +2029,8 @@ pub(super) fn spawn_decode_consumers(
     retention_excluded: &Arc<CauseSplit>,
     missing_430: &Arc<CauseSplit>,
     takedown_430: &Arc<CauseSplit>,
+    unasked_430: &Arc<CauseSplit>,
+    unasked_noted: &Arc<std::sync::atomic::AtomicBool>,
     transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
     decode_error_sample: &crate::diag::DecodeSampleCell,
@@ -1971,10 +2066,11 @@ pub(super) fn spawn_decode_consumers(
     let pending_r: Arc<std::sync::Mutex<PendingR>> = replay.pending_r.clone();
     // More decode threads than cores is pure scheduler churn (measured on
     // the 2-CPU cgroup rig): the default 4 stands on big metal, small
-    // boxes get one per core.
-    let n_decoders = decoders
-        .max(1)
-        .min(std::thread::available_parallelism().map_or(usize::MAX, |n| n.get()));
+    // boxes get one per core. `cpu_workers` rather than
+    // `available_parallelism` so a launcher that knows better than the
+    // core count - a phone, where half the cores are little ones sharing
+    // one thermal envelope - can say so (TODO 281 AN4).
+    let n_decoders = decoders.max(1).min(nzbkit::mem::cpu_workers());
     for i in 0..n_decoders {
         let ctx = DecodeCtx {
             rx: rx.clone(),
@@ -1991,6 +2087,8 @@ pub(super) fn spawn_decode_consumers(
             retention_excluded: retention_excluded.clone(),
             missing_430: missing_430.clone(),
             takedown_430: takedown_430.clone(),
+            unasked_430: unasked_430.clone(),
+            unasked_noted: unasked_noted.clone(),
             transport_failed: transport_failed.clone(),
             transport_sample: transport_sample.clone(),
             decode_error_sample: decode_error_sample.clone(),
@@ -2110,6 +2208,112 @@ pub(super) fn spawn_tail_watchers(
 }
 
 #[cfg(test)]
+mod missing_cause_tests {
+    use super::*;
+    use nzbkit::pool::MissingCause;
+
+    /// The contract `note_missing_cause` carries and no other test can
+    /// see: `Unasked` is charged BESIDE `missing_430`, never instead of
+    /// it.
+    ///
+    /// `missing_430` is what the repair planner and every verdict gate
+    /// in `diag` read, so moving a loss out of it would be a POLICY
+    /// change - the standing rule is the memory topic
+    /// `nzbfast-retry-propagation-trap`: say it in the message, keep
+    /// the classification. `takedown_430` is the shipped precedent and
+    /// is asserted here beside it, because the two ride together on an
+    /// `Unasked { takedown: true }`: a server DID name a takedown, it
+    /// just was not the whole fleet that refused.
+    ///
+    /// Without this the summary clause has nothing behind it. Every
+    /// other pin on this work drives `diag::incomplete_reason` with a
+    /// hand-built `LossCauses`, so a `note_missing_cause` that stopped
+    /// charging the counter would leave all of them green and the
+    /// clause silent on every real run.
+    #[test]
+    fn an_unasked_loss_is_charged_beside_the_refusal_it_still_is() {
+        let (missing, takedown, unasked) = (
+            CauseSplit::default(),
+            CauseSplit::default(),
+            CauseSplit::default(),
+        );
+        let noted = std::sync::atomic::AtomicBool::new(false);
+        let note = |cause| {
+            note_missing_cause(
+                cause,
+                false,
+                &CauseSplit::default(),
+                &missing,
+                &takedown,
+                &unasked,
+                &noted,
+            )
+        };
+        note(MissingCause::Gone { takedown: false });
+        note(MissingCause::Unasked {
+            takedown: false,
+            dark: 1,
+        });
+        note(MissingCause::Unasked {
+            takedown: true,
+            dark: 2,
+        });
+        assert_eq!(missing.payload(), 3, "every one of them is still a refusal");
+        assert_eq!(unasked.payload(), 2);
+        assert_eq!(
+            takedown.payload(),
+            1,
+            "a takedown named on an unasked loss is still a takedown"
+        );
+        // Retention is the one cause that is NOT a refusal: it returns
+        // before any of the three counters above.
+        let retention = CauseSplit::default();
+        note_missing_cause(
+            MissingCause::Retention,
+            false,
+            &retention,
+            &missing,
+            &takedown,
+            &unasked,
+            &noted,
+        );
+        assert_eq!(retention.payload(), 1);
+        assert_eq!(missing.payload(), 3);
+    }
+
+    /// The recovery/payload split is taken here, where the slot is
+    /// still in hand, and `unasked_430`'s recovery half is DISCARDED at
+    /// the `LossCauses` literal on purpose (see the field's doc comment
+    /// in `diag.rs`). It still has to be counted on the right side, or
+    /// a `.par2` article's loss would land in the payload figure the
+    /// summary clause prints.
+    #[test]
+    fn a_recovery_articles_unasked_loss_is_not_payload() {
+        let (missing, takedown, unasked) = (
+            CauseSplit::default(),
+            CauseSplit::default(),
+            CauseSplit::default(),
+        );
+        let noted = std::sync::atomic::AtomicBool::new(false);
+        note_missing_cause(
+            MissingCause::Unasked {
+                takedown: false,
+                dark: 1,
+            },
+            true,
+            &CauseSplit::default(),
+            &missing,
+            &takedown,
+            &unasked,
+            &noted,
+        );
+        assert_eq!(unasked.payload(), 0);
+        assert_eq!(unasked.recovery(), 1);
+        assert_eq!(missing.recovery(), 1);
+    }
+}
+
+#[cfg(test)]
 mod disk_full_halt_tests {
     use super::*;
 
@@ -2192,6 +2396,8 @@ mod cause_split_tests {
     fn slot(hint: &str, par2: bool) -> Arc<FileSlot> {
         Arc::new(FileSlot {
             hint: hint.into(),
+            hint_is_posted_name: nzbkit::release::stem_is_a_name(hint),
+            name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main: par2,
             sample_skipped: false,
             par2_sniffed: AtomicBool::new(false),

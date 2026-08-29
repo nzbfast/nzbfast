@@ -19,11 +19,23 @@
 #[cfg(feature = "indexer")]
 pub const EVICT_ORDERS: [&str; 5] = ["ladder", "oldest", "newest", "largest", "smallest"];
 
-/// Release kinds the index stores, and so the only values
-/// `index_evict_kinds` may name. Anything else is a typo that would
-/// silently make the whole restriction match nothing.
+/// The built-in release kinds the index stores. Mirrors
+/// `categories::RESERVED_KINDS` by definition so the two cannot drift:
+/// `kind_str` (index/mod.rs) writes exactly these six into
+/// `releases.kind`, plus a custom category's slug verbatim - so this
+/// list is the RESERVED half of the vocabulary `index_evict_kinds` and
+/// `index_keep_kinds` may name, and `parse_evict_kinds` accepts a
+/// slug-shaped token beside it. It was the four-entry list until 27 Aug
+/// 2026, so music, book and every custom kind could be neither kept nor
+/// targeted while the eviction ladder deleted their rows.
 #[cfg(feature = "indexer")]
-pub const EVICT_KINDS: [&str; 4] = ["movie", "tv", "software", "other"];
+pub const EVICT_KINDS: [&str; 6] = nzbkit::categories::RESERVED_KINDS;
+
+/// The scopes `index_evict_scope` accepts, in the order the UI lists
+/// them. "junk_incomplete" is the union - never delete real, complete
+/// content, whatever the cap says.
+#[cfg(feature = "indexer")]
+pub const EVICT_SCOPES: [&str; 4] = ["all", "junk", "incomplete", "junk_incomplete"];
 
 /// The parity scoreboard's sampling menu: newznab's standard top-level
 /// thousands, paired with the label the samples are stored and reported
@@ -87,6 +99,18 @@ pub(crate) const OPENED_MAX_ENTRIES: usize = 5_000;
 /// fast; the bound is only there so a pathological fixture cannot spin.
 #[cfg(feature = "indexer")]
 pub(in crate::serve) const EVICT_MAX_PASSES: usize = 8;
+
+/// Rows the dry-run preview may examine before it stops and reports
+/// itself truncated. The preview holds the same lock the real eviction
+/// would and each candidate page is a scan-and-sort of `releases` (no
+/// index serves the ladder's CASE - the measured figure is in the
+/// engine's EVICT_PAGE note), so on a many-million-row index an
+/// unbounded walk is minutes inside the write lock for an answer whose
+/// tail nobody reads. 200k rows is a hundred pages: enough to answer
+/// every plausible cap on an index that size honestly, and the report
+/// says `truncated` past it rather than pretending it finished.
+#[cfg(feature = "indexer")]
+pub(in crate::serve) const EVICT_PREVIEW_MAX_EXAMINE: usize = 200_000;
 
 /// Deliberate user attention, remembered. See `Daemon::index_opened`.
 #[cfg(feature = "indexer")]
@@ -168,21 +192,48 @@ pub fn parse_evict_order(s: &str) -> Option<nzbkit::index::EvictOrder> {
     })
 }
 
+/// The `index_evict_scope` string → the engine's enum. `None` for
+/// anything else, which `apply_setting` refuses to store; the fallback
+/// at read time is All, matching the engine's own default.
+#[cfg(feature = "indexer")]
+pub fn parse_evict_scope(s: &str) -> Option<nzbkit::index::EvictScope> {
+    use nzbkit::index::EvictScope as S;
+    Some(match s.trim().to_ascii_lowercase().as_str() {
+        "all" | "" => S::All,
+        "junk" => S::Junk,
+        "incomplete" => S::Incomplete,
+        "junk_incomplete" => S::JunkOrIncomplete,
+        _ => return None,
+    })
+}
+
 /// The `index_evict_kinds` comma list → validated lowercase kinds.
 /// `Err` names the offender: a typo here would restrict eviction to a
 /// kind no row carries, and the user would be left staring at a cap that
 /// never frees anything.
+///
+/// A token is valid when it is a reserved kind OR shaped like a custom
+/// category slug (the `categories::validate` charset), because
+/// `kind_str` stores `Custom(slug)` verbatim in `releases.kind`. Shape
+/// only, deliberately: rows keep the kind of a category deleted since,
+/// and those rows still need naming here. What remains refusable is a
+/// malformed token - punctuation, interior whitespace, non-ASCII.
 #[cfg(feature = "indexer")]
 pub fn parse_evict_kinds(s: &str) -> std::result::Result<Vec<String>, String> {
+    let slug_shaped = |k: &str| {
+        !k.is_empty()
+            && k.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
     let mut out: Vec<String> = Vec::new();
     for raw in s.split(',') {
         let k = raw.trim().to_ascii_lowercase();
         if k.is_empty() {
             continue;
         }
-        if !EVICT_KINDS.contains(&k.as_str()) {
+        if !EVICT_KINDS.contains(&k.as_str()) && !slug_shaped(&k) {
             return Err(format!(
-                "unknown kind {k:?} (expected {})",
+                "unknown kind {k:?} (expected {}, or a custom category slug)",
                 EVICT_KINDS.join(", ")
             ));
         }

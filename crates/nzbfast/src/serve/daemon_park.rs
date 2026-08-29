@@ -179,7 +179,7 @@ impl Daemon {
             // fell over says nothing about the post - reporting it marks
             // a healthy release dead for every other user of that indexer
             // and, under `regrab`, spends bandwidth replacing it.
-            if !fail_kind(&j.fail_message).post_unavailable() {
+            if !j.fail_kind().post_unavailable() {
                 info!(
                     target: "failurelink",
                     "{}: not reported - {} is a local fault, not a dead post",
@@ -850,7 +850,7 @@ impl Daemon {
         // to wait for at all, and the old copy told the user to sit
         // out 20 minutes for a propagation that was never the
         // problem.
-        let kind = fail_kind(&job.lock_ok().fail_message);
+        let kind = job.lock_ok().fail_kind();
         let (secs, why, token) = match kind {
             FailKind::Transport => (
                 secs.min(SHORT_RETRY_SECS),
@@ -905,6 +905,17 @@ impl Daemon {
     /// just pressed: the same shape the sidecar's late Ok had, and the
     /// same answer (Fable sweep 15 Aug). `None` keeps the old behaviour
     /// exactly.
+    ///
+    /// **The demote arm's requeue is not free, and nothing here decides
+    /// that** (TODO 309(d)). A job sent back deferred reruns from its
+    /// journal through `get::plan::resume_map_admitted`, which stops
+    /// mapping the replay in-stream once the journal's placed bytes
+    /// exceed the held-span budget and extracts from volumes on disk
+    /// instead - 2.53x payload of device I/O against 1.02x (TODO 94 A).
+    /// The WATCHDOG weighs that before it ever sets `demote`
+    /// (`serve/tasks/stall.rs`: `requeue_cost`, `slow_keeps_its_slot`),
+    /// so by the time a job reaches here the cost is already spelled out
+    /// in its `defer_reason`.
     pub(in crate::serve) fn park_gen(&self, job: Arc<Mutex<Job>>, gen0: Option<(u32, u64)>) {
         let (id, failed, key, nzb_path, demote, stale) = {
             let g = job.lock_ok();
@@ -1003,7 +1014,9 @@ impl Daemon {
         // Watchdog demotion: back into the queue (deferred, at the end)
         // instead of history - the abort was ours, not a failure. The
         // journal keeps everything already landed, so the eventual rerun
-        // fetches only what's still missing.
+        // fetches only what's still missing (and what THAT costs is
+        // TODO 309(d), weighed before the flag is set - see the doc
+        // comment above).
         // `!tombstone`: a deleted job stays deleted. Both flags together is
         // an ordinary race - the slow-job watchdog demotes at T, the user (or
         // an *arr) deletes at T+ε - and the demote arm used to win, pushing
@@ -1022,7 +1035,7 @@ impl Daemon {
             {
                 let mut g = job.lock_ok();
                 g.state = JobState::Queued;
-                g.fail_message.clear();
+                g.clear_failure();
                 // The evidence goes with the verdict it explained - a
                 // re-queued job that fails again captures its own.
                 g.clear_attempt_verdicts();
@@ -1230,6 +1243,12 @@ impl Daemon {
                 } else {
                     "deleted from the queue".into()
                 };
+                // The code that classified the ABORT goes with the
+                // sentence it explained (TODO 307's invariant): left
+                // behind, fail_kind() reports this deletion as the
+                // tail's verdict and altcand can offer a replacement
+                // for a title the user just removed.
+                g.fail_code = Some(FailKind::Local);
                 g.fail_detail.clear();
                 // The auto-retry stamp too: `will_auto_retry` read the
                 // tombstone BEFORE this arm's delete verb landed, so a

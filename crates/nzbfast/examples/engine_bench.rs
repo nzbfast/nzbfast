@@ -30,21 +30,34 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let refs: Vec<&[u8]> = par2_bytes.iter().map(|v| v.as_slice()).collect();
-            let set = nzbkit::par2::Par2Set::parse(&refs)?;
+            // Every set in the directory, not one. This read every
+            // `.par2` in `dir` into ONE `Par2Set::parse`, which refuses
+            // the whole input the moment two of them carry different
+            // recovery-set ids - so on a per-file-set directory (GH
+            // #63's shape) this harness bailed with `MixedRecoverySets`
+            // and timed nothing at all. The third surface of TODO 311's
+            // defect, after `unpack::verify_dir` and
+            // `preflight::probe_par2_sets`; it is dev-only, which is
+            // why it went unnoticed and not why it is left.
+            let sets = nzbkit::live::pick_sets(&refs)?;
             let mut bad_total = 0usize;
-            for f in &set.files {
-                let path = dir.join(nzbkit::disk::sanitize_filename(&f.name));
-                match std::fs::read(&path) {
-                    Ok(data) => {
-                        let v = nzbkit::par2::verify_file(f, set.block_size, &data);
-                        bad_total += v.blocks.iter().filter(|ok| !**ok).count();
+            let mut files = 0usize;
+            for set in &sets {
+                files += set.files.len();
+                for f in &set.files {
+                    let path = dir.join(nzbkit::disk::sanitize_filename(&f.name));
+                    match std::fs::read(&path) {
+                        Ok(data) => {
+                            let v = nzbkit::par2::verify_file(f, set.block_size, &data);
+                            bad_total += v.blocks.iter().filter(|ok| !**ok).count();
+                        }
+                        Err(_) => bad_total += 1,
                     }
-                    Err(_) => bad_total += 1,
                 }
             }
             println!(
-                "verify: {} file(s), {bad_total} bad block(s)/missing",
-                set.files.len()
+                "verify: {} set(s), {files} file(s), {bad_total} bad block(s)/missing",
+                sets.len()
             );
         }
         "extract" => {

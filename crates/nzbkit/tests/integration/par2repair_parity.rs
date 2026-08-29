@@ -384,7 +384,7 @@ fn beyond_capacity_fails_on_both_engines() {
         std::fs::write(&a, b).unwrap();
     });
     match repair_dir(&ours.0).expect("native repair runs") {
-        RepairStatus::Unrepairable { needed, have } => {
+        RepairStatus::Unrepairable { needed, have, .. } => {
             assert_eq!((needed, have), (2, 1), "c.bin adopted, 2 blocks short");
         }
         other => panic!("expected Unrepairable, got {other:?}"),

@@ -5,13 +5,12 @@
 //! order. NNTP responses arrive strictly in command order, which is what
 //! makes pipelining safe. AUTHINFO is never pipelined (done once at connect).
 
-use crate::sync::MutexExt;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::config::{AddressFamily, ServerConfig};
-use tracing::{info, warn};
+use tracing::warn;
 
 pub mod resolve;
 pub use resolve::{Resolve, ResolveFuture, SystemResolver, install_resolver, resolver_installed};
@@ -384,13 +383,14 @@ pub fn takedown_flavoured(code: u16, line: &[u8]) -> bool {
 /// protocol error threw away whole sample batches, so Giganews
 /// takedowns were never counted as misses).
 ///
-/// One function, two readers: [`Connection::read_stat`] for the serial
-/// callers that own the whole conversation, and
-/// [`Connection::read_stat_noting`] for the pipelined one. They differ
-/// in what they do around the status line - timeouts, positional
-/// attribution, TTFB - and must never differ in what a refusal IS,
-/// because the pool now charges a STAT's refusal to the same unanimity
-/// that a BODY's answers to (TODO 96.4).
+/// One function, three readers: [`Connection::read_stat`] for the
+/// serial callers that own the whole conversation,
+/// [`Connection::read_stat_checked`] for the pipelined sweeps that own
+/// their own socket, and [`Connection::read_stat_noting`] for the
+/// pool's. They differ in what they do around the status line -
+/// timeouts, positional attribution, TTFB - and must never differ in
+/// what a refusal IS, because the pool now charges a STAT's refusal to
+/// the same unanimity that a BODY's answers to (TODO 96.4).
 fn stat_verdict(st: Status) -> Result<bool, NntpError> {
     match st.code {
         223 => Ok(true),
@@ -822,86 +822,6 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for DeflateTransport<T> {
     }
 }
 
-/// Whether this CPU has hardware AES (AES-NI / ARMv8 crypto extensions).
-/// Boxes without it - Raspberry Pi 4-class ARM, old x86 - do AES-GCM in
-/// software at a fraction of ChaCha20-Poly1305's speed, and TLS covers
-/// every downloaded byte.
-fn aes_accelerated() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        std::arch::is_x86_feature_detected!("aes")
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        std::arch::is_aarch64_feature_detected!("aes")
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        false
-    }
-}
-
-/// Whether a suite is ChaCha20-Poly1305 (any TLS version).
-fn is_chacha(s: &rustls::SupportedCipherSuite) -> bool {
-    matches!(
-        s.suite(),
-        rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
-            | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
-            | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
-    )
-}
-
-/// Whether a suite is AES-**128**-GCM (any TLS version).
-fn is_aes128(s: &rustls::SupportedCipherSuite) -> bool {
-    matches!(
-        s.suite(),
-        rustls::CipherSuite::TLS13_AES_128_GCM_SHA256
-            | rustls::CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-            | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-    )
-}
-
-/// The aws-lc-rs provider, tuned for bulk transfer.
-///
-/// TLS covers every downloaded byte, so the AEAD runs over the whole
-/// download and its cost per byte is a throughput term on any CPU
-/// without headroom. Measured on Apple silicon at 16 KB records:
-/// AES-128-GCM 9.70 GB/s, AES-256-GCM 8.25, ChaCha20-Poly1305 2.12.
-///
-/// `pin_fast_suite` offers exactly ONE suite: the fastest this CPU can
-/// run (AES-128-GCM with hardware AES, ChaCha20 without - on a
-/// Raspberry Pi 4-class core, software AES-GCM is the slow one and the
-/// ranking inverts).
-///
-/// It has to be exactly one, and that is the whole subtlety. Under TLS
-/// 1.3 the SERVER chooses, walking its own preference list for the
-/// first suite the client offered; OpenSSL's default order is
-/// AES-256 → ChaCha20 → AES-128. So a client that merely REORDERS its
-/// list changes nothing, and a client that drops only AES-256 gets
-/// handed ChaCha20 - measured on 4 of our 6 providers, a ~4x per-byte
-/// REGRESSION over the AES-256 it was trying to improve on. Offering a
-/// single suite is the only way to actually choose.
-///
-/// A server that cannot do our one suite fails the handshake, and
-/// `connect_unbounded` retries once with the full list, remembering the
-/// host (see [`tls_full_host`]). 128-bit AES is not a meaningful
-/// security downgrade for bulk transfer.
-fn tls_provider(aes_accelerated: bool, pin_fast_suite: bool) -> rustls::crypto::CryptoProvider {
-    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
-    if pin_fast_suite {
-        if aes_accelerated {
-            provider.cipher_suites.retain(is_aes128);
-        } else {
-            provider.cipher_suites.retain(is_chacha);
-        }
-    } else if !aes_accelerated {
-        // Full-list fallback on a soft-AES CPU: ChaCha first is the best
-        // we can do, though a server-preference server will ignore it.
-        provider.cipher_suites.sort_by_key(|s| !is_chacha(s));
-    }
-    provider
-}
-
 /// The socket, buffered exactly once.
 ///
 /// TLS deliberately gets NO `BufReader` on its PLAINTEXT side. rustls
@@ -1138,7 +1058,36 @@ pub(crate) use multiline::*;
 // The userspace TLS socket - the ciphertext read buffer and the rung
 // that builds it (TODO 70C) - is a child module for the same reason.
 mod tlswire;
-use tlswire::userspace_tls;
+
+// Everything ABOUT the TLS session rather than about NNTP - the suite
+// and trust-anchor policy, the shared `ClientConfig` cache, the
+// handshake ladder and the Linux kernel offload - is a child module for
+// the same reason. `Connection` reaches into it three times and the
+// three public doors keep their `nzbkit::nntp::` paths through the
+// re-export below.
+mod tls;
+use tls::{mark_tls_full_host, tls_full_host, tls_handshake};
+pub use tls::{probe_tls, set_extra_ca, shared_tls_client_config};
+
+// The Linux kernel TLS offload is its own child again - one platform and
+// one cargo feature, so the cfg lives HERE, on the declaration, and
+// nothing inside the module carries one.
+//
+// IT IS `ktls` AND ITS SIBLINGS REACH IT AS `super::ktls`. It was an
+// INLINE `mod ktls_offload` until the TODO 106 split, named that way
+// because the module and the `ktls` CRATE were then both spelled inside
+// this one file and a bare `ktls::` would have been ambiguous between
+// them. The split ended that collision - the crate is now named only
+// from inside ktls.rs, where the module's own name is not in scope - but
+// it left four call sites still saying `ktls_offload::`, which resolves
+// to nothing from any of them. Four E0433s, invisible to this whole
+// fleet and to every CI job, because nothing builds `--features ktls` on
+// linux; fixed 29 Aug 2026 by qualifying the three sites in tls.rs and
+// dropping the prefix on the one INSIDE the module, which is a sibling
+// item and never needed one. So do not "restore" the bare `ktls_offload`
+// spelling: no module of that name has ever existed on disk.
+#[cfg(all(feature = "ktls", target_os = "linux"))]
+mod ktls;
 
 /// Resolve `host`, order the candidates by this server's
 /// `address_family` and `bind_ip` ([`resolve::order_candidates`] carries
@@ -1442,560 +1391,6 @@ async fn socks5_connect(
     let mut skip = vec![0u8; addr_len + 2];
     s.read_exact(&mut skip).await?;
     Ok(s)
-}
-
-/// Hosts whose handshake failed on the AES-128-only offer (see
-/// [`tls_provider`]). Small and append-only: one entry per genuinely
-/// odd provider, for the life of the process.
-fn tls_full_hosts() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    S.get_or_init(Default::default)
-}
-
-fn tls_full_host(host: &str) -> bool {
-    // NZBFAST_TLS_AES256=1 forces the old full-list behaviour everywhere:
-    // the escape hatch if a provider we never tested behaves oddly.
-    if std::env::var_os("NZBFAST_TLS_AES256").is_some() {
-        return true;
-    }
-    tls_full_hosts().lock_ok().contains(host)
-}
-
-fn mark_tls_full_host(host: &str) {
-    tls_full_hosts().lock_ok().insert(host.to_string());
-}
-
-/// The PEM file the extra trust anchors are read from, or `None`:
-/// [`set_extra_ca`] first, then `NZBFAST_EXTRA_CA`. Both name a PATH -
-/// neither turns verification off, and no third spelling does either.
-fn extra_ca_path() -> Option<std::path::PathBuf> {
-    if let Some(p) = extra_ca_override().lock_ok().clone() {
-        return Some(p);
-    }
-    std::env::var_os("NZBFAST_EXTRA_CA").map(std::path::PathBuf::from)
-}
-
-fn extra_ca_override() -> &'static std::sync::Mutex<Option<std::path::PathBuf>> {
-    static S: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
-        std::sync::OnceLock::new();
-    S.get_or_init(Default::default)
-}
-
-/// Point the extra trust anchors at `path`, or clear them with `None`,
-/// without writing the environment.
-///
-/// Same anchors and the same opt-in-by-explicit-path rule as
-/// `NZBFAST_EXTRA_CA`, which this overrides while it is set. It exists
-/// because `std::env::set_var` is sound only where nothing else reads
-/// the environment, which `crates/nzbkit/tests/integration/` - one
-/// binary of twenty-odd modules on parallel threads, all reading
-/// `NZBFAST_*` - is not. Changing the anchors after a connection has
-/// been made takes effect: [`tls_client_config`] keys its cache on this
-/// path.
-pub fn set_extra_ca(path: Option<std::path::PathBuf>) {
-    *extra_ca_override().lock_ok() = path;
-}
-
-/// The trust anchors: webpki's built-in roots plus anything in the PEM
-/// file at `extra_ca`. Built once per distinct `extra_ca`.
-fn tls_roots(extra_ca: Option<&std::path::Path>) -> rustls::RootCertStore {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    // Extra trust anchors from a PEM file, ADDED to the webpki set,
-    // never replacing it. Two real uses: a self-hosted or corporate-
-    // MITM'd provider whose CA isn't public, and the TLS bench leg
-    // (mockserve's self-signed cert). Opt-in by explicit path - this is
-    // deliberately not a "skip verification" switch, which is the thing
-    // that quietly ships and then never gets turned back off.
-    let Some(p) = extra_ca else {
-        return roots;
-    };
-    use rustls::pki_types::pem::PemObject;
-    match rustls::pki_types::CertificateDer::pem_file_iter(p) {
-        Err(e) => warn!(target: "tls", "NZBFAST_EXTRA_CA {p:?}: {e}"),
-        Ok(it) => {
-            let mut added = 0usize;
-            for c in it {
-                match c
-                    .map_err(|e| e.to_string())
-                    .and_then(|c| roots.add(c).map_err(|e| e.to_string()))
-                {
-                    Ok(()) => added += 1,
-                    Err(e) => warn!(target: "tls", "NZBFAST_EXTRA_CA {p:?}: {e}"),
-                }
-            }
-            info!(target: "tls", "NZBFAST_EXTRA_CA {p:?}: {added} extra trust anchor(s)");
-        }
-    }
-    roots
-}
-
-/// True when this process has asked for kernel TLS. Constant `false`
-/// unless the `ktls` feature is built in on Linux, and it is read
-/// before the first `ClientConfig` is built so the answer cannot
-/// change underneath a cached config.
-fn ktls_wanted() -> bool {
-    #[cfg(all(feature = "ktls", target_os = "linux"))]
-    {
-        ktls_offload::wanted()
-    }
-    #[cfg(not(all(feature = "ktls", target_os = "linux")))]
-    {
-        false
-    }
-}
-
-/// One shared ClientConfig per (suite policy, trust anchors), for the
-/// life of the process: rustls keeps its session ticket cache inside the
-/// config, so sharing it enables TLS session RESUMPTION on reconnects
-/// (abbreviated handshake - one less round-trip and no fresh key
-/// exchange per connection). Two suite policies, because the AES-128
-/// offer needs a full-list fallback for any server that cannot do it.
-///
-/// KEYED BY THE EXTRA-CA PATH, and that half is not an optimisation.
-/// This was two `OnceLock`s, so the FIRST caller to want a config
-/// latched the trust anchors for the whole process and every later one
-/// silently got them - a `tls_roots()` read that could never happen
-/// again, however the path changed underneath it. Production never
-/// notices, since it sets the path once before anything connects, which
-/// is exactly why nothing reported it: it surfaces only where two things
-/// in one process legitimately need different anchors, and there the
-/// second one simply cannot connect. A process pointed at N distinct CA
-/// paths holds up to 2N configs; production's N is 1.
-fn tls_client_config(pin_fast_suite: bool) -> Arc<rustls::ClientConfig> {
-    type Key = (bool, Option<std::path::PathBuf>);
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<Key, Arc<rustls::ClientConfig>>>,
-    > = std::sync::OnceLock::new();
-    let build = |pin_fast_suite: bool, extra_ca: Option<&std::path::Path>| {
-        // Name the crypto provider explicitly. The dependency tree links
-        // BOTH aws-lc-rs and ring (a transitive dep pulled ring in), so
-        // rustls can no longer auto-select a process default - plain
-        // `builder()` panics at runtime. Pin aws-lc-rs so the choice is
-        // unambiguous regardless of what else links a provider.
-        let mut cfg = rustls::ClientConfig::builder_with_provider(Arc::new(tls_provider(
-            aes_accelerated(),
-            pin_fast_suite,
-        )))
-        .with_safe_default_protocol_versions()
-        .expect("aws-lc-rs supports safe default protocol versions")
-        .with_root_certificates(tls_roots(extra_ca))
-        .with_no_client_auth();
-        // Kernel TLS needs the negotiated traffic secrets after the
-        // handshake, and rustls will only part with them when it was
-        // told so before the handshake. Left off otherwise: the secrets
-        // are in the process either way, but there is no reason to make
-        // them extractable when nothing extracts them.
-        cfg.enable_secret_extraction = ktls_wanted();
-        Arc::new(cfg)
-    };
-    let key: Key = (pin_fast_suite, extra_ca_path());
-    // Built under the lock, so two connects racing the same key build
-    // one config rather than two - which is the whole point of sharing
-    // it, since a second config would start with an empty ticket cache.
-    let mut cache = CACHE.get_or_init(Default::default).lock_ok();
-    if let Some(cfg) = cache.get(&key) {
-        return cfg.clone();
-    }
-    let cfg = build(pin_fast_suite, key.1.as_deref());
-    cache.insert(key, cfg.clone());
-    cfg
-}
-
-/// Kernel TLS: after the rustls handshake, hand the traffic keys to the
-/// kernel and let it do the record crypto.
-///
-/// Every downloaded byte crosses this path, and userspace TLS charges
-/// three things for it (measured 26 Jul, +43% CPU/GB over plain TCP):
-/// the AEAD ~0.120 cpu-s/GB, one extra `recvmsg` per record ~0.079, and
-/// one extra copy per record ~0.081 - rustls decrypts in place and then
-/// `Payload::into_vec()`s the plaintext out, and it stops reading the
-/// socket the moment one record's worth is buffered, so a read is one
-/// ~16 KB record and never more. `setsockopt(TCP_ULP, "tls")` plus the
-/// extracted `TLS_TX`/`TLS_RX` keys turns the socket back into an
-/// ordinary one that happens to return plaintext: the AEAD stays (the
-/// kernel runs it on the same AES-NI), the copy goes, and one `read()`
-/// can drain every record the kernel has.
-///
-/// Opt-in twice over - the `ktls` cargo feature has to be built in AND
-/// `NZBFAST_KTLS=1` set - because the fallback matters more than the
-/// win: NAS firmware kernels predate TLS_RX, containers may not be able
-/// to autoload the `tls` module, and a kernel that refuses must cost a
-/// user nothing.
-///
-/// What the kernel will NOT do is renegotiate. A post-handshake
-/// KeyUpdate arrives as a control record the kernel cannot act on, so
-/// [`KtlsWire`] treats one as a dead connection: the pool reconnects,
-/// and that connection finishes in userspace.
-#[cfg(all(feature = "ktls", target_os = "linux"))]
-mod ktls_offload {
-    use super::Wire;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// `NZBFAST_KTLS=1` opts in. Read once, before the first
-    /// `ClientConfig` exists - [`super::ktls_wanted`] bakes the answer
-    /// into that config's `enable_secret_extraction`.
-    pub(super) fn wanted() -> bool {
-        static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *WANTED.get_or_init(|| {
-            matches!(
-                std::env::var("NZBFAST_KTLS").as_deref(),
-                Ok("1") | Ok("true")
-            )
-        })
-    }
-
-    /// Latched the first time a kernel refuses the handoff. One process
-    /// talks to one kernel, so the second refusal would tell us nothing
-    /// the first did not - and every attempt costs a spent socket.
-    static OFF: AtomicBool = AtomicBool::new(false);
-
-    pub(super) fn active() -> bool {
-        wanted() && !OFF.load(Ordering::Relaxed)
-    }
-
-    /// Silent and total, one log line the first time. This is the whole
-    /// point of the opt-in: an old kernel just downloads in userspace.
-    pub(super) fn disable(why: &dyn std::fmt::Display) {
-        if !OFF.swap(true, Ordering::Relaxed) {
-            info!(target: "ktls", "kernel declined the handoff ({why}); TLS stays in userspace");
-        }
-    }
-
-    /// Handshake with rustls, then hand the socket to the kernel.
-    ///
-    /// - `Ok(Some(wire))` - kTLS is live on this connection.
-    /// - `Ok(None)` - the kernel refused. kTLS is off for the rest of
-    ///   the process and the caller must redial: draining rustls spent
-    ///   this socket.
-    /// - `Err(e)` - the TLS handshake itself failed, exactly as it
-    ///   would have without kTLS, and the caller's existing ladder
-    ///   (pinned suite → full cipher list) applies unchanged.
-    pub(super) async fn connect(
-        name: rustls::pki_types::ServerName<'static>,
-        tcp: tokio::net::TcpStream,
-        pin_fast_suite: bool,
-    ) -> std::io::Result<Option<Wire>> {
-        let connector = tokio_rustls::TlsConnector::from(super::tls_client_config(pin_fast_suite));
-        // The cork is load-bearing. rustls reads whatever the socket
-        // has, so by the time `connect` returns it can be holding a
-        // PARTIAL record - and the kernel, handed keys that start at a
-        // record boundary, could never decrypt the remainder. A corked
-        // stream stops at each boundary, which lets the drain below end
-        // exactly where the kernel begins.
-        let stream = connector.connect(name, ktls::CorkStream::new(tcp)).await?;
-        match ktls::config_ktls_client(stream).await {
-            Ok(k) => {
-                // Say so once. "It downloaded" is not evidence that the
-                // kernel took the socket - the fallback is silent and
-                // looks identical from the outside.
-                static LOGGED: AtomicBool = AtomicBool::new(false);
-                if !LOGGED.swap(true, Ordering::Relaxed) {
-                    info!(target: "ktls", "kernel TLS active - record crypto moved into the kernel");
-                }
-                // Whatever rustls decrypted before the handoff (the NNTP
-                // greeting usually arrives in the same flight) rides
-                // along inside the stream and comes out of the first
-                // reads, ahead of anything the kernel produces.
-                let (drained, tcp) = k.into_raw();
-                Ok(Some(Wire::buffered(Box::new(super::KtlsWire::new(
-                    tcp, drained,
-                )))))
-            }
-            Err(e) => {
-                disable(&e);
-                Ok(None)
-            }
-        }
-    }
-}
-
-/// A socket the kernel decrypts: ordinary `read`/`write`, plaintext on
-/// both sides, plus whatever rustls had already decrypted when the
-/// kernel took over.
-///
-/// It exists instead of `ktls::KtlsStream` for one reason: control
-/// records. A `read()` on a kTLS socket fails with `EIO` for any record
-/// that is not application data, and the only way to see what it was is
-/// `recvmsg` with room for a `TLS_GET_RECORD_TYPE` control message. The
-/// crate's own stream does that too, but answers the awkward cases -
-/// an unexpected `cmsg`, a two-byte alert that arrives as one byte, a
-/// `change_cipher_spec` - with `panic!`. A panic in a pool worker takes
-/// the download with it (an `Err` never hangs the pool; a panic does),
-/// and every one of those cases is reachable from the far end of a
-/// socket, which is untrusted input. Here they are all errors, and an
-/// error just costs that one connection.
-#[cfg(all(feature = "ktls", target_os = "linux"))]
-struct KtlsWire {
-    tcp: tokio::net::TcpStream,
-    fd: std::os::fd::RawFd,
-    /// Plaintext rustls decrypted before the handoff (the NNTP greeting
-    /// usually), and how much of it has been handed out.
-    drained: Option<(usize, Vec<u8>)>,
-}
-
-#[cfg(all(feature = "ktls", target_os = "linux"))]
-impl KtlsWire {
-    /// `SOL_TLS` and `TLS_GET_RECORD_TYPE` from the kernel's
-    /// `include/uapi/linux/tls.h`; libc does not export them.
-    const SOL_TLS: libc::c_int = 282;
-    const TLS_GET_RECORD_TYPE: libc::c_int = 2;
-    const RECORD_ALERT: u8 = 21;
-    const RECORD_HANDSHAKE: u8 = 22;
-    const ALERT_CLOSE_NOTIFY: u8 = 0;
-    const HANDSHAKE_NEW_SESSION_TICKET: u8 = 4;
-    const HANDSHAKE_KEY_UPDATE: u8 = 24;
-
-    fn new(tcp: tokio::net::TcpStream, drained: Option<Vec<u8>>) -> Self {
-        use std::os::fd::AsRawFd as _;
-        let fd = tcp.as_raw_fd();
-        Self {
-            tcp,
-            fd,
-            // An EMPTY leftover is no leftover: kept as `Some(vec![])` it
-            // would fill nothing on the first `poll_read` and return
-            // `Ready(Ok(()))`, which every reader above reads as EOF.
-            drained: drained.filter(|d| !d.is_empty()).map(|d| (0, d)),
-        }
-    }
-
-    /// Consume the one non-data record the kernel is holding, and say
-    /// what to do next. Until it is consumed, nothing behind it can be
-    /// read.
-    ///
-    /// `scratch` is the caller's own read buffer, borrowed and then
-    /// discarded: a control record's contents are never application
-    /// data, so nothing here is ever handed upward.
-    fn take_control_record(&mut self, scratch: &mut [u8]) -> std::io::Result<ControlRecord> {
-        // A union with the header, not a byte array: `CMSG_FIRSTHDR`
-        // casts this buffer to a `cmsghdr`, so it has to carry that
-        // type's alignment. A `[u8; N]` is 1-aligned and reads as a
-        // misaligned dereference - which a release build happily runs
-        // and a debug build aborts on (it did, first run).
-        union CmsgSpace {
-            _hdr: libc::cmsghdr,
-            bytes: [u8; 64],
-        }
-        let mut cmsg_space = CmsgSpace { bytes: [0u8; 64] };
-        let cmsg_len = std::mem::size_of::<CmsgSpace>();
-        // SAFETY: every pointer handed to recvmsg points at a live local
-        // buffer, the lengths match those buffers, and the cmsg walk uses
-        // the kernel's own macros over the header recvmsg filled in.
-        let (n, record_type) = unsafe {
-            let mut iov = libc::iovec {
-                iov_base: scratch.as_mut_ptr().cast(),
-                iov_len: scratch.len(),
-            };
-            let mut msg: libc::msghdr = std::mem::zeroed();
-            msg.msg_iov = &mut iov;
-            msg.msg_iovlen = 1;
-            msg.msg_control = cmsg_space.bytes.as_mut_ptr().cast();
-            msg.msg_controllen = cmsg_len as _;
-            let n = libc::recvmsg(self.fd, &mut msg, libc::MSG_DONTWAIT);
-            if n < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut ty = None;
-            let mut c = libc::CMSG_FIRSTHDR(&msg);
-            while !c.is_null() {
-                if (*c).cmsg_level == Self::SOL_TLS && (*c).cmsg_type == Self::TLS_GET_RECORD_TYPE {
-                    ty = Some(*libc::CMSG_DATA(c));
-                }
-                c = libc::CMSG_NXTHDR(&msg, c);
-            }
-            (n as usize, ty)
-        };
-        let Some(record_type) = record_type else {
-            // No record-type control message means this was not the
-            // control record we were told about. Nothing sane left to
-            // do with the connection.
-            return Err(std::io::Error::other(
-                "kTLS: EIO on read with no TLS record type",
-            ));
-        };
-        let body = &scratch[..n];
-        match record_type {
-            Self::RECORD_ALERT => match body {
-                // A close_notify is the peer hanging up cleanly, which
-                // is exactly EOF. Every other alert aborts the session
-                // by definition, so it is an error either way.
-                [_, Self::ALERT_CLOSE_NOTIFY] | [Self::ALERT_CLOSE_NOTIFY] => {
-                    Ok(ControlRecord::Eof)
-                }
-                _ => Err(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionAborted,
-                    "kTLS: TLS alert",
-                )),
-            },
-            Self::RECORD_HANDSHAKE => match body.first().copied() {
-                // Session tickets: the ordinary post-handshake traffic
-                // of any TLS 1.3 server. The kernel cannot use them and
-                // neither can we now that rustls is out of the loop, so
-                // resumption is a cost kTLS connections pay - one extra
-                // round-trip on the NEXT connect to that host.
-                Some(Self::HANDSHAKE_NEW_SESSION_TICKET) => Ok(ControlRecord::Skip),
-                // A rekey. The kernel holds one set of keys and cannot
-                // be handed another mid-stream, so this connection is
-                // over - and a server that rekeys once will do it
-                // again, so stop using kTLS for the rest of the run.
-                Some(Self::HANDSHAKE_KEY_UPDATE) => {
-                    ktls_offload::disable(&"server sent a TLS KeyUpdate");
-                    Err(std::io::Error::other(
-                        "kTLS: TLS KeyUpdate cannot be applied",
-                    ))
-                }
-                _ => Ok(ControlRecord::Skip),
-            },
-            // change_cipher_spec (20) after the handshake, or anything
-            // else: not something a TLS 1.3 peer sends on a live
-            // connection.
-            other => Err(std::io::Error::other(format!(
-                "kTLS: unexpected TLS record type {other}"
-            ))),
-        }
-    }
-}
-
-/// What a consumed control record means for the read that hit it.
-#[cfg(all(feature = "ktls", target_os = "linux"))]
-enum ControlRecord {
-    /// Ignorable; read again.
-    Skip,
-    /// The peer closed cleanly.
-    Eof,
-}
-
-#[cfg(all(feature = "ktls", target_os = "linux"))]
-impl AsyncRead for KtlsWire {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let me = self.get_mut();
-        // Pre-handoff plaintext first - it sits in front of everything
-        // the kernel will ever produce.
-        if let Some((at, d)) = &mut me.drained {
-            let n = (d.len() - *at).min(buf.remaining());
-            buf.put_slice(&d[*at..*at + n]);
-            *at += n;
-            if *at >= d.len() {
-                me.drained = None;
-            }
-            return std::task::Poll::Ready(Ok(()));
-        }
-        match std::pin::Pin::new(&mut me.tcp).poll_read(cx, buf) {
-            std::task::Poll::Ready(Err(e)) if e.raw_os_error() == Some(libc::EIO) => {
-                // Not a failure: the kernel is holding a record it will
-                // not hand over as data, and says so with EIO.
-                match me.take_control_record(buf.initialize_unfilled()) {
-                    Ok(ControlRecord::Skip) => {
-                        // The record is consumed; whatever is behind it
-                        // may be readable right now, so try again
-                        // rather than wait for the next readiness edge.
-                        cx.waker().wake_by_ref();
-                        std::task::Poll::Pending
-                    }
-                    // Nothing filled == EOF.
-                    Ok(ControlRecord::Eof) => std::task::Poll::Ready(Ok(())),
-                    Err(e) => std::task::Poll::Ready(Err(e)),
-                }
-            }
-            other => other,
-        }
-    }
-}
-
-#[cfg(all(feature = "ktls", target_os = "linux"))]
-impl AsyncWrite for KtlsWire {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().tcp).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().tcp).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().tcp).poll_shutdown(cx)
-    }
-}
-
-/// The shared TLS client configuration, for the engine's non-NNTP TLS
-/// links (today: the pre feed's IRC connection). Full suite list, not
-/// the AES-128 pin - that pin is a per-byte throughput optimisation for
-/// the download path and means nothing on a link carrying a line of
-/// text a minute. Sharing the config also shares the trust anchors, so
-/// `NZBFAST_EXTRA_CA` applies here too.
-pub fn shared_tls_client_config() -> Arc<rustls::ClientConfig> {
-    tls_client_config(false)
-}
-
-/// One rung of the handshake ladder. `Ok(None)` means "the kernel
-/// refused kTLS, the socket is spent, dial again" - it cannot happen
-/// when kTLS is not compiled in.
-#[cfg(all(feature = "ktls", target_os = "linux"))]
-async fn tls_handshake(
-    name: rustls::pki_types::ServerName<'static>,
-    tcp: tokio::net::TcpStream,
-    pin_fast_suite: bool,
-) -> std::io::Result<Option<Wire>> {
-    if ktls_offload::active() {
-        return ktls_offload::connect(name, tcp, pin_fast_suite).await;
-    }
-    userspace_tls(name, tcp, pin_fast_suite).await.map(Some)
-}
-
-#[cfg(not(all(feature = "ktls", target_os = "linux")))]
-async fn tls_handshake(
-    name: rustls::pki_types::ServerName<'static>,
-    tcp: tokio::net::TcpStream,
-    pin_fast_suite: bool,
-) -> std::io::Result<Option<Wire>> {
-    userspace_tls(name, tcp, pin_fast_suite).await.map(Some)
-}
-
-/// Diagnostic: handshake with `host:port` exactly as a download
-/// connection would, and report `(protocol, cipher suite)`. Answers the
-/// only question that matters when tuning the AEAD cost - what the
-/// server actually PICKED, which under TLS 1.3 is its choice from our
-/// offer, not ours (see [`tls_provider`]). No NNTP traffic, no
-/// credentials sent.
-pub async fn probe_tls(host: &str, port: u16) -> Result<(String, String), NntpError> {
-    // Bounded like every production connect: a single-candidate dial gets
-    // no per-candidate slice and the TLS peer may simply never answer, so
-    // an unbounded probe parked its caller for as long as the OS let the
-    // SYN wait.
-    let dial = direct_connect_opts(host, port, None, None, AddressFamily::default());
-    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, dial)
-        .await
-        .map_err(|_| NntpError::Timeout)??;
-    tcp.set_nodelay(true)?;
-    let name = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|_| NntpError::TlsName)?;
-    let connector = tokio_rustls::TlsConnector::from(tls_client_config(!tls_full_host(host)));
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, tcp))
-        .await
-        .map_err(|_| NntpError::Timeout)??;
-    let (_, conn) = stream.get_ref();
-    let proto = conn
-        .protocol_version()
-        .map_or_else(|| "?".to_string(), |v| format!("{v:?}"));
-    let suite = conn
-        .negotiated_cipher_suite()
-        .map_or_else(|| "?".to_string(), |s| format!("{:?}", s.suite()));
-    Ok((proto, suite))
 }
 
 impl Connection {
@@ -3040,8 +2435,49 @@ impl Connection {
     /// "451 0 <msgid>" for removed/DMCA'd articles - treating that as a
     /// protocol error threw away whole sample batches, so Giganews
     /// takedowns were never counted as misses).
+    ///
+    /// SERIAL callers only - one command in flight, so the reply cannot
+    /// belong to anything but the id just sent and there is nothing to
+    /// check it against. A caller that has more than one STAT on the
+    /// wire wants [`Self::read_stat_checked`]; see there for what
+    /// happens when it does not.
     pub async fn read_stat(&mut self) -> Result<bool, NntpError> {
         let st = self.read_status().await?;
+        stat_verdict(st)
+    }
+
+    /// [`Self::read_stat`] for a PIPELINED sweep that owns its own
+    /// socket: same command, same verdict alphabet ([`stat_verdict`]),
+    /// plus the one thing positional attribution requires -
+    /// `check_echoed_id` against the id this reply is being filed
+    /// against.
+    ///
+    /// Every pipelined STAT reader here tracks its ids in a positional
+    /// queue (a `VecDeque` in the pre-flight sweep, a receive counter
+    /// in sysbench, a bare `for id in &ids` in the daemon's oracle
+    /// sampler and health prober). All five called plain `read_stat`
+    /// until 28 Aug 2026, which validates nothing: if a server or an
+    /// upstream frontend under-replies once on the leg, EVERY later
+    /// reply on it is filed against the wrong article for the rest of
+    /// the leg. A shifted 430 marks a present article Missing across
+    /// the server union, which in the pre-flight sweep is enough to
+    /// drive a false Impossible fast-abort on a healthy post. Do not
+    /// reintroduce it by reaching for `read_stat` in a loop that sent
+    /// more than one STAT before reading.
+    ///
+    /// A MISSING echoed id is NOT an error, and that is load-bearing
+    /// rather than lenient: all five real backbones answer a bare
+    /// "430 no such article" with no id on it, so absence has to mean
+    /// "no evidence" (see [`echoed_message_id`]). Only a PRESENT id
+    /// that disagrees fails.
+    ///
+    /// This is the sibling to reach for rather than
+    /// [`Self::read_stat_noting`], which wants a first-byte budget and
+    /// three `&AtomicBool` out-params the pool needs and a sweep has no
+    /// use for, and which moves the timeout inside.
+    pub async fn read_stat_checked(&mut self, expected: Option<&str>) -> Result<bool, NntpError> {
+        let st = self.read_status().await?;
+        check_echoed_id(&st, expected)?;
         stat_verdict(st)
     }
 
@@ -3055,8 +2491,13 @@ impl Connection {
     /// attributed POSITIONALLY, so it has to pass `check_echoed_id` and
     /// report whether the id was echoed, or a dropped response upstream
     /// files this refusal against the article behind it - the §129 3g
-    /// class. `read_stat`'s serial callers (preflight, sysbench, scan,
-    /// the indexer) own the whole conversation and need none of it.
+    /// class. The pipelined sweeps (preflight, sysbench, the daemon's
+    /// oracle sampler and health prober) need the id check and take it
+    /// from [`Self::read_stat_checked`]; they have no suspicion timer
+    /// to report an arrival to and no TTFB to bank, which is what this
+    /// one adds on top. Only the genuinely SERIAL callers - scan's
+    /// `stat_one` and the POST path, which send, flush and read inside
+    /// one future - own the whole conversation and need none of it.
     ///
     /// `first_byte` bounds the wait for the status line, and
     /// `status_seen` reports its arrival to a caller racing a
@@ -3172,148 +2613,6 @@ impl Connection {
         }
     }
 }
-
-#[cfg(test)]
-mod tls_provider_tests {
-    use super::tls_provider;
-    use std::sync::Arc;
-
-    fn is_chacha(s: &rustls::SupportedCipherSuite) -> bool {
-        format!("{:?}", s.suite()).contains("CHACHA20")
-    }
-
-    fn is_aes128(s: &rustls::SupportedCipherSuite) -> bool {
-        format!("{:?}", s.suite()).contains("AES_128")
-    }
-
-    /// The pinned offer must contain EXACTLY ONE algorithm, because a
-    /// TLS 1.3 server picks from its own preference order: an offer with
-    /// two entries is the server's choice, not ours. This is the
-    /// regression guard for the measured trap - dropping only AES-256
-    /// left {AES-128, ChaCha} and 4 of 6 providers answered ChaCha,
-    /// which is ~4x slower per byte than the AES-256 it replaced.
-    #[test]
-    fn pinned_offer_is_a_single_algorithm() {
-        let aes = tls_provider(true, true);
-        assert!(!aes.cipher_suites.is_empty());
-        assert!(
-            aes.cipher_suites.iter().all(is_aes128),
-            "hardware-AES CPUs must offer AES-128 and nothing else: {:?}",
-            aes.cipher_suites
-        );
-
-        let soft = tls_provider(false, true);
-        assert!(!soft.cipher_suites.is_empty());
-        assert!(
-            soft.cipher_suites.iter().all(is_chacha),
-            "soft-AES CPUs must offer ChaCha20 and nothing else: {:?}",
-            soft.cipher_suites
-        );
-    }
-
-    #[test]
-    fn unaccelerated_cpu_gets_chacha_first_in_the_fallback() {
-        let p = tls_provider(false, false);
-        assert!(is_chacha(&p.cipher_suites[0]), "{:?}", p.cipher_suites);
-        // Stable partition: every ChaCha suite precedes every AES suite,
-        // and the AES suites keep aws-lc-rs's own relative order.
-        let first_aes = p.cipher_suites.iter().position(|s| !is_chacha(s)).unwrap();
-        assert!(p.cipher_suites[first_aes..].iter().all(|s| !is_chacha(s)));
-        let default = rustls::crypto::aws_lc_rs::default_provider();
-        let aes_order: Vec<_> = p.cipher_suites[first_aes..]
-            .iter()
-            .map(|s| s.suite())
-            .collect();
-        let default_aes: Vec<_> = default
-            .cipher_suites
-            .iter()
-            .filter(|s| !is_chacha(s))
-            .map(|s| s.suite())
-            .collect();
-        assert_eq!(aes_order, default_aes);
-    }
-
-    /// The policy has to reach the handshake. `tls_provider` decides
-    /// what to offer, but what a connection actually offers is whatever
-    /// `tls_client_config` built - and the two only stay in step while
-    /// nothing else in this file constructs a `ClientConfig` of its
-    /// own. Verified live on x86_64 (2 Aug): a connection to the bench
-    /// server negotiates TLSv1_3 / TLS13_AES_128_GCM_SHA256, which is
-    /// the single suite this pin offers.
-    #[test]
-    fn the_shared_config_carries_the_pinned_offer() {
-        let cfg = super::tls_client_config(true);
-        let got: Vec<_> = cfg
-            .crypto_provider()
-            .cipher_suites
-            .iter()
-            .map(|s| s.suite())
-            .collect();
-        let want: Vec<_> = tls_provider(super::aes_accelerated(), true)
-            .cipher_suites
-            .iter()
-            .map(|s| s.suite())
-            .collect();
-        assert_eq!(got, want, "the built config must offer the pinned suite");
-        // Extractable traffic secrets are for kTLS and nothing else, so
-        // a process that did not ask for kTLS must not have them.
-        assert_eq!(cfg.enable_secret_extraction, super::ktls_wanted());
-    }
-
-    /// The cached config must follow the trust anchors, not latch them.
-    ///
-    /// Sharing one config per suite policy is what gets session
-    /// resumption, so the SAME anchors must still hand back the SAME
-    /// `Arc`: equality would pass on an implementation that rebuilt a
-    /// config every call and quietly lost the ticket cache, hence
-    /// `Arc::ptr_eq`. Two DIFFERENT anchors must hand back two configs;
-    /// before the key carried the path, the second caller got the first
-    /// one's roots and could not connect.
-    ///
-    /// The paths deliberately do not exist: `tls_roots` warns and
-    /// returns the plain webpki set for an unreadable file, so every
-    /// config here is equivalent to the default one and cannot affect a
-    /// neighbour in the same process. Cleared again at the end for the
-    /// same reason.
-    #[test]
-    fn the_config_cache_follows_the_trust_anchors() {
-        let dir = std::env::temp_dir();
-        let a = dir.join("nzbkit-no-such-ca-a.pem");
-        let b = dir.join("nzbkit-no-such-ca-b.pem");
-
-        super::set_extra_ca(Some(a.clone()));
-        let first = super::tls_client_config(true);
-        let again = super::tls_client_config(true);
-        assert!(
-            Arc::ptr_eq(&first, &again),
-            "the same anchors must share one config, ticket cache included"
-        );
-
-        super::set_extra_ca(Some(b));
-        let other = super::tls_client_config(true);
-        assert!(
-            !Arc::ptr_eq(&first, &other),
-            "different anchors must not be served the first caller's config"
-        );
-
-        super::set_extra_ca(Some(a));
-        let back = super::tls_client_config(true);
-        super::set_extra_ca(None);
-        assert!(Arc::ptr_eq(&first, &back), "the first config must survive");
-    }
-
-    /// The fallback path must stay a superset - it is what rescues a
-    /// server that cannot do the pinned suite.
-    #[test]
-    fn accelerated_cpu_fallback_keeps_default_order() {
-        let p = tls_provider(true, false);
-        let default = rustls::crypto::aws_lc_rs::default_provider();
-        let got: Vec<_> = p.cipher_suites.iter().map(|s| s.suite()).collect();
-        let want: Vec<_> = default.cipher_suites.iter().map(|s| s.suite()).collect();
-        assert_eq!(got, want);
-    }
-}
-
 // The multiline read cap - a child module (the `unit_tests` pattern
 // below) so nntp.rs stays inside its size-gate entry.
 #[cfg(test)]

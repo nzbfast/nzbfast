@@ -550,6 +550,16 @@ intrare și aduce cu ea fiecare indexer din spatele ei.</p>
 înapoi, ceea ce dovedește adresa și cheia dintr-un clic. O cheie salvată nu mai este
 arătată niciodată: căsuța o spune, iar dacă o lași goală păstrezi cheia care este deja
 acolo.</p>
+<p><b>nzbindex, fără niciun cont.</b> Setări → Caută pe indexere →
+<b>+ Adaugă indexer</b>, apoi pune primul câmp al rândului pe <code>nzbindex</code> în
+loc să numești un cont. Caută direct pe nzbindex.com prin propriul său API documentat,
+fără să fie nevoie de o cheie, deși nzbindex acceptă și el una, pentru o limită mai mare
+de partea lui. Indexează ce a fost postat cu adevărat, nu o listă de lansări selectată,
+așa că găsește lucruri pe care conturile de mai sus nu le au, cu prețul că multe dintre
+rezultatele lui poartă nume amestecate. Descărcările tot intră în coadă și se
+dezarhivează ca orice altă sarcină. <b>Doar complete</b>, pornit implicit, ține departe
+postările cărora le lipsesc părți și care nu se pot termina niciodată; câmpurile de
+mărime, vechime și grup de știri de alături restrâng și mai mult o căutare.</p>
 <p><b>Căutarea.</b> Deschide <b>🎬 peretele</b> din antet și alege <b>Release-uri</b>.
 Meniul de lângă caseta de căutare hotărăște unde se uită o căutare: <b>Acest index</b>,
 adică ce a scanat singură mașina asta, <b>Indexere</b> sau <b>Ambele</b>. Alegerea ta este
@@ -1114,7 +1124,8 @@ folderul urmărit), <code>nzb.refeed</code> (fișierul NZB al unei descărcări 
 urmărire a reușit, iar copia înlocuită a fost ștearsă),
 <code>queue.idle</code>, <code>queue.paused</code> și <code>queue.resumed</code> (coada s-a oprit sau a pornit din nou, oricine sau orice ar fi făcut-o), <code>queue.finished_action</code>
 (acțiunea de la sfârșitul cozii a fost armată, a rulat sau a fost anulată), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> și <code>update.available</code> (a fost găsită o versiune nzbfast mai nouă). Fiecare poartă
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> și <code>server.block_spent</code> (un cont de bloc plătit în avans a ajuns la ultimele 15% din datele cumpărate sau le-a consumat pe toate) și <code>update.available</code> (a fost găsită o versiune nzbfast mai nouă). Fiecare poartă
 <code>schema_version</code> (acum 1; chei noi pot apărea fără o incrementare -
 ignoră ce nu cunoști), un <code>seq</code> monoton și un marcaj de timp
 <code>at</code> în milisecunde.</p>
@@ -1277,6 +1288,7 @@ client nu face suprapunere între joburi.</li>
 <li><b>Suprapunere între joburi</b>: în timp ce coada unui job terminat (verificare/extragere) se finalizează pe
 disc, descărcarea următorului job deține deja linia.</li>
 </ul>
+<p><b>Cu un singur furnizor configurat</b>, acest lucru poate detecta doar o postare complet moartă - nu sosește absolut nimic de la ea, fie pentru că fiecare articol este refuzat, fie pentru că furnizorul pur și simplu nu mai răspunde. O sarcină care este doar lentă, dar care încă primește câțiva octeți, este lăsată în pace, pentru că nu există un al doilea furnizor la care să fie mutată. Configurați un al doilea furnizor, iar nzbfast poate observa și o postare pe care un server nu o mai are și o poate redirecționa sau amâna, în loc să aștepte terminarea sarcinii.</p>
 <h3 id="oracle">Oracolul de disponibilitate</h3>
 <p>Retragerile sunt principalul motiv pentru care eșuează o descărcare Usenet și sunt
 previzibile: același release dispare de pe un backbone în timp ce altul încă îl are.
@@ -1464,6 +1476,7 @@ compatibil SABnzbd, așa că integrările SAB existente funcționează neschimba
 <tr><td>Diagnostice</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (autentificare Basic: orice utilizator, cheia API drept parolă)</td></tr>
 <tr><td>Previzualizare / redare</td><td><code>/stream/&lt;nzo_id&gt;</code> (intervale HTTP; pornirea unui job de bibliotecă parcat necesită token <code>?t=</code> sau cheie), <code>/m3u/&lt;id&gt;</code> (necesită cheie sau tokenul propriu al jobului; generează tokenul), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Monitorizare</td><td><code>/metrics</code> răspunde în formatul text Prometheus 0.0.4: viteza de descărcare, adâncimea cozii și octeții, conexiunile per furnizor, întreruperile și numărul de articole, memoria pe subsistem și timpul de funcționare. Unități de bază peste tot (octeți, secunde), astfel încât panoul face conversia și nimic nu sosește prerotunjit. Doar GET și, implicit, este nevoie de cheia API completă. Setați <code>metrics_open</code> pentru a-l servi fără cheie, ceea ce este aranjamentul obișnuit cu Prometheus: nu conține nume de sarcini și nici căi, dar publică numele de gazdă al fiecărui furnizor configurat oricui poate ajunge la port.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Fișiere și locații</h2>

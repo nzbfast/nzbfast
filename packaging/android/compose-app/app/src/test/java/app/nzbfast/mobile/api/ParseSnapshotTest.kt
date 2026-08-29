@@ -249,6 +249,44 @@ class ParseSnapshotTest {
         assertEquals(0L, p.stream.zeroFilledBytes)
     }
 
+    /**
+     * TODO 281 AN2's drain latch, from BOTH sides, and the absent case is
+     * the one that matters.
+     *
+     * The foreground service stops the engine on this key, so what a
+     * daemon that predates the addition means by not sending it has to be
+     * "I cannot tell" and not "there is nothing left to do". The four
+     * `playback_*` fixtures are all pre-addition recordings, which makes
+     * them the real negative case rather than a constructed one - the same
+     * argument as `playbackWithoutLinkPeakMeansNoAnchor` above, and the
+     * same reason CONTRACT.md says not to re-record them.
+     */
+    @Test
+    fun playbackWithoutQueueIdleIsNotIdle() {
+        assertFalse(Parse.playback(snap("playback_live.json")).queueIdle)
+        assertFalse(Parse.playback(snap("playback_done.json")).queueIdle)
+    }
+
+    @Test
+    fun playbackQueueIdleParses() {
+        val body = snap("playback_done.json").replace(
+            "\"paused\": false,",
+            "\"paused\": false, \"queue_idle\": true,",
+        )
+        assertTrue(Parse.playback(body).queueIdle)
+    }
+
+    /**
+     * The export path needs the on-disk directory, and only `mode=history`
+     * carries one - see the `storage` field on HistorySlot.
+     */
+    @Test
+    fun historyCarriesTheOnDiskPath() {
+        val h = Parse.history(snap("history_completed.json"))
+        assertTrue(h[0].storage.isNotEmpty())
+        assertTrue(h[0].storage.startsWith("/"))
+    }
+
     @Test
     fun streamTokenMintsAScopedUrl() {
         val url = Parse.streamToken(snap("stream_token.json"))

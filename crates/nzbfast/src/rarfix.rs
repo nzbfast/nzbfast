@@ -1118,10 +1118,24 @@ pub(crate) fn try_rev_group(
     rebuilt > 0
 }
 
+/// What one recovery-record repair of one volume actually did - split so
+/// the caller's "rewritten" log and stats count only real rewrites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RrRepair {
+    /// Shards were rebuilt and the repaired copy was published by rename.
+    Rebuilt,
+    /// The record proved the protected prefix already intact - the
+    /// original is untouched and nothing was published.
+    PrefixIntact,
+    /// No RR / unsupported family (clean skip).
+    NoRecord,
+}
+
 /// Repair one volume in place from its own recovery record.
-/// Ok(true) = rewritten (atomic rename), Ok(false) = no RR / unsupported
-/// family (clean skip), Err = volume has RR but repair failed.
-pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -> Result<bool> {
+/// Ok(Rebuilt) = rewritten (atomic rename), Ok(PrefixIntact) = record says
+/// the prefix is already intact (original kept), Ok(NoRecord) = no RR /
+/// unsupported family (clean skip), Err = volume has RR but repair failed.
+pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -> Result<RrRepair> {
     // A UNIQUE temp we provably created, not `path.with_extension("rrtmp")`.
     //
     // The deterministic name was opened with `File::create` - truncating, and
@@ -1196,13 +1210,15 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
         Ok(rebuilt) => {
             // KEEP the shard list rather than `map(|_| ())`. An empty one
             // is the library saying the protected prefix was already
-            // intact - the destination is then a byte-for-byte copy and
-            // the rename publishes nothing. That used to be
-            // indistinguishable in the log from a volume genuinely rebuilt
-            // from its record, which is how a repair that did not happen
-            // read as one that did. It is now only ever the intact case:
-            // a damaged group with no usable record is an error inside the
-            // walk rather than a silently skipped group (see
+            // intact - the destination is then a byte-for-byte copy, so
+            // the ORIGINAL stays the published file and the copy is
+            // deleted: renaming it over the original would replace a
+            // known-good inode with a fresh copy for nothing. That used
+            // to be indistinguishable in the log from a volume genuinely
+            // rebuilt from its record, which is how a repair that did not
+            // happen read as one that did. It is now only ever the intact
+            // case: a damaged group with no usable record is an error
+            // inside the walk rather than a silently skipped group (see
             // `recovery::stream::repair_prefix_streaming`).
             if rebuilt.is_empty() {
                 info!(
@@ -1211,9 +1227,23 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
                      any damage is outside it",
                     path.display()
                 );
+                cleanup(&tmp);
+                return Ok(RrRepair::PrefixIntact);
+            }
+            // Flush the rebuild before the rename publishes it - the
+            // rename replaces the original, so a torn temp published
+            // over it would leave the copy as the only one. Same order
+            // as the .rev path above.
+            if let Err(e) = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&tmp)
+                .and_then(|f| f.sync_all())
+            {
+                cleanup(&tmp);
+                return Err(e.into());
             }
             std::fs::rename(&tmp, path)?;
-            Ok(true)
+            Ok(RrRepair::Rebuilt)
         }
         Err(e) => {
             cleanup(&tmp);
@@ -1224,7 +1254,7 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
             let text = e.to_string();
             let no_record = text.contains("does not contain") && text.contains("recovery record");
             if no_record || matches!(e, rars::Error::UnsupportedFamilyFeature { .. }) {
-                return Ok(false);
+                return Ok(RrRepair::NoRecord);
             }
             // Too large is the one failure the operator can actually act on:
             // the repair is arithmetically possible, it just needs a wider
@@ -1656,10 +1686,7 @@ fn zip_pass(
         w.flush()?;
         Ok(())
     };
-    let workers = files
-        .len()
-        .min(std::thread::available_parallelism().map_or(1, |n| n.get() / 2))
-        .clamp(1, 4);
+    let workers = files.len().min(nzbkit::mem::cpu_workers() / 2).clamp(1, 4);
     if workers <= 1 {
         // Not `?` in the loop: the resumed files have to be handed back
         // to the ledger on the failure path too, and an early return

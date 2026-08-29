@@ -253,6 +253,12 @@ pub(super) fn group_delete(
                     } else {
                         "deleted from the queue".into()
                     };
+                    // A queued row can already be Failed with a
+                    // classified code; the delete sentence replaces
+                    // the message, so the code goes with it (TODO
+                    // 307's invariant) or fail_kind() classifies this
+                    // deletion by the previous failure.
+                    g.fail_code = Some(FailKind::Local);
                     g.finished_at = Some(std::time::Instant::now());
                     g.finished_unix = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -297,17 +303,28 @@ pub(super) fn group_delete(
         let _ = d.history_upsert(&to_history);
     }
     // A placeholder's in-flight registration ends where its record
-    // reaches MEMORY. For the ACTIVE arm that is a park an unbounded
-    // wait away and park's own guard takes the id back out, so those
-    // are left alone; for every other row this handler prewrote it is
-    // the extend above. `owed` minus `stopped_ids` is exactly that
-    // remainder - and it also covers a row that left the queue between
-    // the prewrite and the retain, which reaches neither and would
-    // otherwise sit in the set for the life of the daemon.
-    let settled: Vec<String> = owed
+    // reaches MEMORY, and only the arm that files the record may end
+    // it. For the ACTIVE arm that is a park an unbounded wait away and
+    // park's own guard takes the id back out; for the rows THIS handler
+    // filed it is the extend above, so exactly those come out here.
+    //
+    // NOT `owed` minus `stopped_ids`, which is what this line was until
+    // the v1.2.4 tranche sweep (27 Aug 2026): that set also swept up a
+    // row that left the queue between the prewrite and the retain - and
+    // the only doors out of the queue in that window are a park or
+    // another delete verb, each holding a registration of its OWN for
+    // the same id. `hist_inflight` is a SET, so the two registrations
+    // are one entry, and taking it out here stripped that owner's Q2
+    // cover while its record was still in flight: a `history_compact`
+    // landing next dropped both the park's prewrite line and this
+    // handler's placeholder from the rewrite, and a kill before the
+    // park's own filing left the record in neither store. The leak the
+    // old comment feared is not there to fear - whichever door took the
+    // row out deregisters it at its own filing, exactly as this arm
+    // does for its own.
+    let settled: Vec<String> = to_history
         .iter()
         .map(|j| j.lock_ok().nzo_id.clone())
-        .filter(|id| !stopped_ids.contains(id))
         .collect();
     d.delete_prewrite_filed(&settled);
     // Every record this handler removed now has a durable

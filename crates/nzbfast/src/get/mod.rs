@@ -13,9 +13,19 @@ mod fleet;
 use fleet::{Fleet, build_fleet};
 mod plan;
 use plan::{FetchPlan, Intake, build_fetch_plan, build_intake, clamp_concurrency};
+// The demotion watchdog (`serve/tasks/stall.rs`) predicts this gate's
+// answer before it causes a requeue, and a prediction made with a COPY
+// of the rule is one that drifts the day the rule moves - which is
+// exactly what happened when TODO 309(a) widened the gate and the
+// watchdog kept warning about a disk route the rerun no longer takes.
+// One function, two readers.
+pub(crate) use plan::resume_map_admits;
 mod census;
 mod donor;
 mod dropped;
+// PLAN M31 stage 1: borrow a bad block's bytes from a duplicate
+// posting's live articles, before repair spends a recovery block on it.
+mod dupefill;
 mod tail;
 use tail::finish_run;
 mod settle;
@@ -82,6 +92,8 @@ fn shard_count(total_conns: usize) -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .map(|n| n.clamp(1, 16))
         .unwrap_or_else(|| {
+            // cpu-workers-gate: I/O runtime shards, not a CPU pool, and
+            // NZBFAST_SHARDS above is this site's own override.
             let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
             if cores >= 12 && total_conns >= 24 {
                 (total_conns / 16).clamp(2, 4)
@@ -161,6 +173,146 @@ async fn test_stall_tail() {
     }
 }
 
+/// Sweep F1 (27 Aug 2026): a §293 donation lands AFTER the restore
+/// already ran in the map shape - which wrote NO volume bytes, every
+/// restored span still sitting in the previous run's output files,
+/// named by `seeds.sources` - and the donation then flips the run onto
+/// the adopt shape, whose path hands each restored seed to the
+/// extractor via `seed_slot`/`seed_pre_spans`. Those calls assert the
+/// spans are in the volume files themselves, so without this re-run the
+/// verifier trusts bytes that were never written.
+///
+/// Re-running the restore MATERIALISING is idempotent over the
+/// map-shape pass: phase A re-encrypts the same bytes to the same
+/// offsets and phase B is a plain copy into the volume file (pinned by
+/// `a_no_materialise_restore_writes_no_volume_and_names_the_real_source`).
+/// The admission answer can only shrink if a source file vanished in
+/// the milliseconds between the two calls - the same exposure the map
+/// replay itself carries, per `restore_for`'s own doc - so `completed`
+/// is extended, not rebuilt. Paid only by a resumed switch that
+/// actually donated, which has just skipped a download.
+fn rematerialize_for_donation(
+    out_dir: &Path,
+    resume_state: &nzbkit::journal::ResumeState,
+    password: Option<&str>,
+    mut completed: std::collections::HashSet<String>,
+    resume_route: Option<crate::streamhub::ResumeRoute>,
+) -> (
+    nzbkit::journal::Restored,
+    std::collections::HashSet<String>,
+    Option<crate::streamhub::ResumeRoute>,
+) {
+    info!(
+        target: "resume",
+        "donation forces the adopt shape - re-running the restore to materialise volumes"
+    );
+    let mut redone = crate::persist::blocking_db(|| {
+        nzbkit::journal::restore_for(out_dir, resume_state, password, true)
+    });
+    completed.extend(std::mem::take(&mut redone.ids));
+    // The report must say which way the run actually went: the gate
+    // admitted the map, the donation overrode it.
+    let route = resume_route.map(|mut r| {
+        r.mapped = false;
+        r
+    });
+    (redone, completed, route)
+}
+
+/// TODO 309: publish which route the resume took, tagged with the job
+/// that owns it, for the tail to latch onto the record and the download
+/// report to print. Called from `get_with_progress` rather than inside
+/// `build_intake` because that is where `stream_owner` is - and the tag
+/// is not optional: the lane reads this cell after the next job may
+/// already have claimed the hub (`detach_job_tail`), which is the
+/// handover `extractor_for` exists for. Called after the donation block,
+/// so a donation-overridden route is published as the adopt shape it
+/// became rather than the map the gate admitted.
+///
+/// Left alone when there is no route, rather than stored as `None`. The
+/// runner clears the cell at every job start, so the only thing a store
+/// of `None` could overwrite is a verdict this same run already
+/// published, and there is exactly one gate call per run. Lifted out of
+/// `get_with_progress` for the size gate.
+fn publish_resume_route(
+    hub: &Option<Arc<StreamHub>>,
+    stream_owner: &str,
+    resume_route: Option<crate::streamhub::ResumeRoute>,
+) {
+    if let (Some(h), Some(r)) = (hub, resume_route) {
+        *h.resume_route.lock_ok() = Some((stream_owner.to_string(), r));
+    }
+}
+
+/// A donation forces the run off the mapped shape (the flip in
+/// `build_fetch_plan`, sweep F1): re-materialize the resume state when
+/// one landed, and hand the three values back untouched when none did.
+///
+/// Lifted out of `get_with_progress` for the size gate, body verbatim;
+/// the caller destructures the triple straight back onto the inline
+/// names. The condition is a parameter rather than re-derived here so
+/// the two facts it is made of - `resume_map` and whether the adoption
+/// pass placed anything - stay where they are computed.
+fn donation_reshape(
+    donated: bool,
+    out_dir: &Path,
+    resume_state: &nzbkit::journal::ResumeState,
+    password: Option<&str>,
+    restored: nzbkit::journal::Restored,
+    completed: std::collections::HashSet<String>,
+    resume_route: Option<crate::streamhub::ResumeRoute>,
+) -> (
+    nzbkit::journal::Restored,
+    std::collections::HashSet<String>,
+    Option<crate::streamhub::ResumeRoute>,
+) {
+    if donated {
+        rematerialize_for_donation(out_dir, resume_state, password, completed, resume_route)
+    } else {
+        (restored, completed, resume_route)
+    }
+}
+
+/// Register each donated file as a restored SLOT SEED.
+///
+/// A donated file is bytes on disk this run will not fetch, which is the
+/// crash-resume ADOPT shape exactly - so it takes that path, seeds and
+/// all. `SlotSeed` is the same record `journal::restore` builds, and
+/// `replay_or_adopt_restored` (inside `build_rig`) does the three things
+/// it exists to do: adopt the file as the slot's plain writer, register
+/// its bytes as pre-activation spans so the M15b backfill re-reads and
+/// HASHES them against the PAR2 block map, and let the real on-disk name
+/// beat the subject hint for PAR2 matching. The donation's own
+/// whole-file MD5 is therefore not the only thing standing behind these
+/// bytes: the backfill checks every block of them, and the settle
+/// read-back backs that up.
+///
+/// A free function rather than the inline loop it was until 28 Aug 2026,
+/// and the reason is worth stating so nobody folds it back: its caller
+/// sits at the 500-line function ceiling (`tools/size-gate.py`), so an
+/// ordinary lane threading one more counter through has nowhere to put
+/// it. Behaviour is unchanged - the same loop over the same three
+/// inputs, hoisted whole.
+fn seed_donated_slots(
+    donated: &donor::Donated,
+    slot_file: &[usize],
+    restored: &mut nzbkit::journal::Restored,
+) {
+    for (fi, name, size) in &donated.placed {
+        let Some(slot) = slot_file.iter().position(|&f| f == *fi) else {
+            continue;
+        };
+        restored.seeds.push(nzbkit::journal::SlotSeed {
+            slot,
+            name: name.clone(),
+            size: *size,
+            spans: vec![(0, *size)],
+            sources: Vec::new(),
+            article_ids: Vec::new(),
+        });
+    }
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn get_with_progress(
     config: &Path,
@@ -206,6 +358,10 @@ pub(crate) async fn get_with_progress(
     // everywhere downstream; empty on the CLI, the sidecar and every
     // ordinary job.
     donor_dirs: Vec<PathBuf>,
+    // PLAN M31: NZBs of DUPLICATE POSTINGS whose ARTICLES may fill a bad
+    // block - see `get::dupefill`. Empty on the CLI and wherever no
+    // alternative is held, which is the pass's whole no-op test.
+    donor_nzbs: Vec<PathBuf>,
     progress: Option<Arc<AtomicU64>>,
     hub: Option<Arc<StreamHub>>,
     // The nzo_id that owns this run's hub extractor (daemon jobs); empty for
@@ -239,13 +395,15 @@ pub(crate) async fn get_with_progress(
         job_posted,
         password,
         journal,
-        mut restored,
+        restored,
         completed,
         resuming,
         has_main,
         bootstrap_vol,
         resume_vols,
         resume_map,
+        resume_route,
+        resume_state,
     } = build_intake(config, nzb_path, out_dir, password, no_extract, &hub)?;
     // §293 plan-side adoption (TODO 305 item 2): before the plan
     // finalizes, take whole member files off a failed predecessor's disk
@@ -253,7 +411,19 @@ pub(crate) async fn get_with_progress(
     // fetch and touches nothing at all when `donor_dirs` is empty, which
     // is the CLI, the sidecar and every job that is not a switch. See
     // get/donor.rs for why it needs the successor's own set to be safe.
-    let donated = donor::adopt_from_donors(&cfg_all.servers, &nzb, out_dir, &donor_dirs).await;
+    let donated =
+        donor::adopt_from_donors(&cfg_all.servers, &nzb, out_dir, &donor_dirs, &completed).await;
+    let (mut restored, completed, resume_route) = donation_reshape(
+        resume_map && donated.any(),
+        out_dir,
+        &resume_state,
+        password.as_deref(),
+        restored,
+        completed,
+        resume_route,
+    );
+    drop(resume_state);
+    publish_resume_route(&hub, stream_owner, resume_route);
     // The slot + article fetch plan: see build_fetch_plan. The
     // destructure keeps every downstream read on the inline names.
     let FetchPlan {
@@ -283,30 +453,9 @@ pub(crate) async fn get_with_progress(
     // 128k-article set sit resident through the whole fetch and tail.
     drop(completed);
 
-    // A donated file is bytes on disk this run will not fetch, which is
-    // the crash-resume ADOPT shape exactly - so it takes that path,
-    // seeds and all. `SlotSeed` is the same record `journal::restore`
-    // builds, and `replay_or_adopt_restored` (below, inside build_rig)
-    // does the three things it exists to do: adopt the file as the
-    // slot's plain writer, register its bytes as pre-activation spans so
-    // the M15b backfill re-reads and HASHES them against the PAR2 block
-    // map, and let the real on-disk name beat the subject hint for PAR2
-    // matching. The donation's own whole-file MD5 is therefore not the
-    // only thing standing behind these bytes: the backfill checks every
-    // block of them, and the settle read-back backs that up.
-    for (fi, name, size) in &donated.placed {
-        let Some(slot) = slot_file.iter().position(|&f| f == *fi) else {
-            continue;
-        };
-        restored.seeds.push(nzbkit::journal::SlotSeed {
-            slot,
-            name: name.clone(),
-            size: *size,
-            spans: vec![(0, *size)],
-            sources: Vec::new(),
-            article_ids: Vec::new(),
-        });
-    }
+    // Donated files join the run on the crash-resume ADOPT path: see
+    // `seed_donated_slots`.
+    seed_donated_slots(&donated, &slot_file, &mut restored);
     // ...and the two flags that path answers to. `resume_map` is forced
     // OFF rather than left: mapping means replaying journal placements
     // through the one-pass extractor, and a donated file has no
@@ -413,6 +562,8 @@ pub(crate) async fn get_with_progress(
         retention_excluded,
         missing_430,
         takedown_430,
+        unasked_430,
+        unasked_noted,
         transport_failed,
         transport_sample,
         decode_error_sample,
@@ -437,6 +588,8 @@ pub(crate) async fn get_with_progress(
         &retention_excluded,
         &missing_430,
         &takedown_430,
+        &unasked_430,
+        &unasked_noted,
         &transport_failed,
         &transport_sample,
         &decode_error_sample,
@@ -614,6 +767,7 @@ pub(crate) async fn get_with_progress(
         &decoded_bytes,
         &missing_430,
         &takedown_430,
+        &unasked_430,
         &transport_failed,
         &transport_sample,
         &decode_error_sample,
@@ -634,6 +788,7 @@ pub(crate) async fn get_with_progress(
         &note_activity,
         cancel,
         &donor_dirs,
+        &donor_nzbs,
         &hub,
         stream_owner,
         &budget,

@@ -175,6 +175,13 @@ impl Index {
         self.retry_on_schema_change("search", || self.search_once(query, limit))
     }
 
+    /// Complete-only search - see [`Self::search_complete_once`], wrapped.
+    pub fn search_complete(&self, query: &str, limit: u32) -> rusqlite::Result<Vec<Release>> {
+        self.retry_on_schema_change("search_complete", || {
+            self.search_complete_once(query, limit)
+        })
+    }
+
     /// Name search - see [`Self::people_search_once`], wrapped.
     pub fn people_search(&self, q: &str, limit: u32) -> rusqlite::Result<Vec<PersonHit>> {
         self.retry_on_schema_change("people_search", || self.people_search_once(q, limit))

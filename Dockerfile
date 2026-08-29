@@ -8,7 +8,7 @@
 # arm64 and amd64 builds both still resolve. Dependabot's `docker`
 # ecosystem moves these forward weekly - if you unpin one, drop its
 # ecosystem entry too, or the pin silently rots.
-FROM rust:1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS build
+FROM rust:1-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS build
 WORKDIR /src
 # Issue #38: a wedged daemon in the official image could not be given a
 # usable backtrace - the release profile strips symbols and the strip
@@ -43,7 +43,7 @@ RUN touch crates/nzbkit/src/lib.rs crates/nzbfast/src/main.rs \
     && objcopy --strip-all --add-gnu-debuglink=target/release/nzbfast.debug \
          target/release/nzbfast
 
-FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 # unrar (non-free) matches the real unrar the desktop bundles embed -
 # unrar-free chokes on too many real-world RAR sets.
 RUN sed -i 's/Components: main/Components: main non-free non-free-firmware/' \

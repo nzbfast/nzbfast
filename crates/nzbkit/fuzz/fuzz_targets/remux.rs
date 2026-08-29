@@ -5,9 +5,9 @@
 //! reads a header and stops; this walks sample tables and block lacing,
 //! which are exactly the structures where one number describes another
 //! - a lace count that says how many sizes follow, a chunk table that
-//! says where payload begins, a declared size that says how far a frame
-//! extends. Every one of those is an attacker's lever, and all of them
-//! arrive off Usenet before PAR2 has verified a byte.
+//!   says where payload begins, a declared size that says how far a frame
+//!   extends. Every one of those is an attacker's lever, and all of them
+//!   arrive off Usenet before PAR2 has verified a byte.
 //!
 //! Four properties beyond "does not crash":
 //!

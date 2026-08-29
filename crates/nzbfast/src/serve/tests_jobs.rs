@@ -11,6 +11,7 @@ pub(super) fn no_causes() -> crate::LossCauses<'static> {
     crate::LossCauses {
         missing_430: 0,
         takedown_430: 0,
+        unasked_430: 0,
         retention_excluded: 0,
         transport_failed: 0,
         missing_430_recovery: 0,

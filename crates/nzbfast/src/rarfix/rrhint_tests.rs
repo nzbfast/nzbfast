@@ -162,7 +162,10 @@ fn blind_pass_scans_every_volume_as_before() {
 
     let stats = rr_repair_volumes(&dir, &vols, None, None);
     assert_eq!(stats.hard_failures, 0, "{stats:?}");
-    assert_eq!(stats.rewritten, vols.len(), "{stats:?}");
+    // Only the damaged volume is rewritten - the intact ones open their
+    // record, prove the prefix, and are counted separately.
+    assert_eq!(stats.rewritten, 1, "{stats:?}");
+    assert_eq!(stats.intact, vols.len() - 1, "{stats:?}");
     assert!(stats.skipped.is_empty());
     assert_eq!(stats.bytes_skipped, 0);
     assert_eq!(stats.bytes_scanned, total);
@@ -204,10 +207,11 @@ fn volumes_outside_par2_coverage_get_the_full_pass() {
     let uncovered: u64 = vols[n / 2..].iter().map(|v| size(v)).sum();
     assert_eq!(stats.hard_failures, 0, "{stats:?}");
     assert_eq!(
-        stats.rewritten,
+        stats.rewritten + stats.intact,
         n - n / 2,
         "every uncovered volume opened: {stats:?}"
     );
+    assert_eq!(stats.rewritten, 1, "{stats:?}");
     assert_eq!(stats.bytes_skipped, covered);
     assert_eq!(stats.bytes_scanned, uncovered);
 

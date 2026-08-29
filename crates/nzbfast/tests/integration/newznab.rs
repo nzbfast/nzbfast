@@ -318,6 +318,26 @@ fn items(body: &str) -> usize {
     body.matches("<item>").count()
 }
 
+/// Every item's `<guid>` in a feed, in document order - the one field a
+/// deep-paging walk can use to tell releases apart across pages.
+fn guids(body: &str) -> Vec<String> {
+    body.match_indices("<guid isPermaLink=\"false\">")
+        .filter_map(|(i, m)| {
+            let start = i + m.len();
+            body[start..].split("</guid>").next().map(str::to_string)
+        })
+        .collect()
+}
+
+/// The `<newznab:response>` element's `total="…"` attribute.
+fn total_attr(body: &str) -> usize {
+    body.split("total=\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_else(|| panic!("no total attr in response: {body}"))
+}
+
 /// [`http_get`] with extra request headers - the reverse-proxy hops.
 fn http_get_hdrs(port: u16, req: &str, hdrs: &str) -> (u16, String) {
     let mut last = String::new();
@@ -2118,6 +2138,135 @@ async fn a_wall_identity_correction_drops_the_superseded_tvdb_id() {
         let (_, body) = http_get(port, "/api?t=tvsearch&tvmazeid=888");
         assert_eq!(items(&body), 1, "the corrected id did not resolve: {body}");
         assert!(body.contains("Cat.Show.S02E01"), "{body}");
+    })
+    .await
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Deep paging (newznab-deep-paging-test, TODO ARR-CERTIFICATION-2026-08-28
+/// B2): the facade already had one silent deep-page defect (the old path
+/// pulled limit+offset rows and paged in memory - the comment at
+/// `sabcompat/newznab.rs`'s `browse()` call says so), and until now every
+/// test in this file asked only for `offset="0"`, leaving the
+/// `offset > 0` branch of `note_search`'s guard unexercised by anything.
+///
+/// Walks `offset=0, N, 2N, …` over a seven-release feed with a page size
+/// of three, and checks the property a naive re-query-per-page can pass
+/// while still being wrong: no release seen twice (overlap), the union
+/// across pages equal to the full seeded set (no gap), `total` unmoved
+/// for the whole walk, and `<newznab:response offset="…">` echoing the
+/// request rather than always reporting 0. Releases are ingested through
+/// `Index::ingest` - the real subject classifier - never with a
+/// hand-written `kind`/`title_key`, per the certification run's own
+/// warning about that shortcut.
+#[tokio::test(flavor = "multi_thread")]
+async fn newznab_deep_paging_has_no_overlap_and_no_gaps() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-nndeep-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    const TOTAL: usize = 7;
+    let db = dir.join("index.db");
+    {
+        let mut ix = nzbkit::index::Index::open(&db).unwrap();
+        let mut rows = Vec::new();
+        let mut n: u64 = 1;
+        for i in 1..=TOTAL {
+            rows.push(over(
+                n,
+                &format!("\"Deep.Page.Show.S01E{i:02}.1080p.rar\" yEnc (1/1)"),
+                &format!("<dp{i}a@x>"),
+                1000,
+            ));
+            n += 1;
+            rows.push(over(
+                n,
+                &format!("\"Deep.Page.Show.S01E{i:02}.1080p.par2\" yEnc (1/1)"),
+                &format!("<dp{i}b@x>"),
+                200,
+            ));
+            n += 1;
+        }
+        ix.ingest("alt.binaries.teevee", &rows, 1_700_000_000)
+            .unwrap();
+    }
+
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        "{\"servers\":[{\"host\":\"127.0.0.1\",\"port\":1,\"tls\":false}]}",
+    )
+    .unwrap();
+    index_enabled(&cfg);
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_OPEN", "1")
+            .env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--out")
+            .arg(dir.join("complete"))
+            .arg("--index-db")
+            .arg(&db);
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        const PAGE: usize = 3;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut total_seen: Option<usize> = None;
+        let mut offset = 0usize;
+        // TOTAL/PAGE full pages, one partial page, one empty tail page -
+        // bounded generously so a defect that never terminates the walk
+        // fails loudly instead of hanging the suite.
+        for _ in 0..10 {
+            let (code, body) = http_get(
+                port,
+                &format!("/api?t=search&q=Deep.Page.Show&limit={PAGE}&offset={offset}"),
+            );
+            assert_eq!(code, 200, "{body}");
+            assert!(
+                body.contains(&format!("offset=\"{offset}\"")),
+                "offset should echo the request, not always report 0: {body}"
+            );
+            let total = total_attr(&body);
+            match total_seen {
+                None => total_seen = Some(total),
+                Some(t) => assert_eq!(
+                    t, total,
+                    "total drifted mid-walk at offset {offset}: {body}"
+                ),
+            }
+            let page_ids = guids(&body);
+            if page_ids.is_empty() {
+                break;
+            }
+            for id in page_ids {
+                assert!(
+                    seen.insert(id.clone()),
+                    "release {id} came back on more than one page (offset {offset}, overlap): {body}"
+                );
+            }
+            offset += PAGE;
+        }
+        assert_eq!(
+            total_seen,
+            Some(TOTAL),
+            "seeded {TOTAL} releases but the facade's total said otherwise"
+        );
+        assert_eq!(
+            seen.len(),
+            TOTAL,
+            "paging walk only covered {} of {TOTAL} seeded releases (gap)",
+            seen.len()
+        );
     })
     .await
     .unwrap();

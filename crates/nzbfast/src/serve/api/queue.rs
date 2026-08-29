@@ -18,6 +18,70 @@ pub(in crate::serve) use controls::{
 };
 use payload::{m_history, m_queue};
 
+/// The `m_config` POST-body door, for the queue-family writes: accept
+/// the same string fields in a JSON body as arrive in the query, body
+/// winning like m_config's. A bulk selection's id list (250 ids a Show
+/// more page) outgrows the 8 KB request line and 414s, and an archive
+/// password or an nzblnk must stay out of access logs, history and any
+/// Referer. The urlencoded form path cannot stand in - `parse_form_body`
+/// caps a value at 4096 bytes, and silently drops a longer one. The GET
+/// form stays for SAB parity.
+fn merge_body_params(
+    req: &tiny_http::Request,
+    params: &std::collections::HashMap<String, String>,
+    api_body: &mut Option<Vec<u8>>,
+) -> std::collections::HashMap<String, String> {
+    let mut merged = params.clone();
+    if req.method() == &tiny_http::Method::Post
+        && let Some(raw) = api_body.take()
+        && let Ok(serde_json::Value::Object(map)) = serde_json::from_slice(&raw)
+    {
+        for (k, v) in map {
+            if let Some(s) = v.as_str() {
+                merged.insert(k, s.to_string());
+            }
+        }
+    }
+    merged
+}
+
+#[cfg(test)]
+mod body_door_tests {
+    use super::*;
+
+    /// 27 Aug sweep findings 1/2/14: the queue-family writes accept
+    /// their fields in a JSON POST body - a bulk id list outgrows the
+    /// 8 KB request line, and a password must not ride it. Body wins
+    /// over the query, like m_config's; a GET never reads the body.
+    #[test]
+    fn the_body_door_merges_json_fields_and_the_body_wins() {
+        let mut params = std::collections::HashMap::new();
+        params.insert("name".to_string(), "delete".to_string());
+        params.insert("value".to_string(), "query-id".to_string());
+        // ~10 KB: past the request line AND parse_form_body's 4096-byte
+        // value cap, which is why the form path could not stand in.
+        let long = "SABnzbd_nzo_nzbfast1,".repeat(500);
+        let mut body =
+            Some(serde_json::to_vec(&json!({"value": long, "del_files": "1", "n": 7})).unwrap());
+        let req: tiny_http::Request = tiny_http::TestRequest::new()
+            .with_method(tiny_http::Method::Post)
+            .into();
+        let m = merge_body_params(&req, &params, &mut body);
+        assert_eq!(m["name"], "delete", "query fields survive the merge");
+        assert_eq!(m["value"], long, "body wins over the query");
+        assert_eq!(m["del_files"], "1");
+        assert!(!m.contains_key("n"), "non-string JSON fields are ignored");
+        assert!(body.is_none(), "the body is consumed");
+
+        // A GET leaves the body alone and the params untouched.
+        let mut body = Some(b"{\"value\":\"x\"}".to_vec());
+        let req: tiny_http::Request = tiny_http::TestRequest::new().into();
+        let m = merge_body_params(&req, &params, &mut body);
+        assert_eq!(m["value"], "query-id");
+        assert!(body.is_some(), "a GET never reads the body");
+    }
+}
+
 fn m_pause(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -340,9 +404,21 @@ fn m_change_cat(
                         "error": e
                     }));
                 }
-                Ok(_fence) => {
-                    d.save_queue();
-                    json!({"status": true})
+                // Saved with the fence still held, rolled back whole on
+                // a refused store (Codex C10) - the relocation fence
+                // prevents the live scheduling race, not a restart after
+                // refused persistence.
+                Ok(fence) => {
+                    if persist_relocations(d, vec![fence]) {
+                        json!({"status": true})
+                    } else {
+                        json!({
+                            "status": false,
+                            "error": "the recategorize could not be written to the \
+                                      queue store - it was undone. Check free space \
+                                      and write permission on the data folder",
+                        })
+                    }
                 }
             },
         }
@@ -482,12 +558,15 @@ fn m_eat_volumes(
 
 fn m_set_password(
     d: &Arc<Daemon>,
-    _req: &mut tiny_http::Request,
+    req: &mut tiny_http::Request,
     params: &std::collections::HashMap<String, String>,
     _ctx: &ApiCtx<'_>,
-    _api_body: &mut Option<Vec<u8>>,
+    api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some({
+        // The password must not ride the request line - see
+        // `merge_body_params`.
+        let params = &merge_body_params(req, params, api_body);
         let id = params.get("value").cloned().unwrap_or_default();
         let pw = params.get("password").cloned().unwrap_or_default();
         if pw.is_empty() {
@@ -658,7 +737,7 @@ fn m_set_password(
                                 // ladder's own reason rather than the
                                 // literal beside it.
                                 if crate::diag::unlock_answers(&j.fail_message) {
-                                    j.fail_message.clear();
+                                    j.clear_failure();
                                 }
                                 if !done.identify.is_empty() {
                                     j.identify = done.identify;
@@ -1021,10 +1100,15 @@ fn m_stats(
             .as_ref()
             .map(|v| {
                 let (done, bad) = v.live_counts();
+                // Every adopted set (TODO 311) - the progress denominator
+                // is how many blocks this job will verify, and on a
+                // per-file-set post that is all of them.
                 let total: u64 = v
-                    .set()
-                    .map(|s| s.files.iter().map(|f| f.blocks.len() as u64).sum())
-                    .unwrap_or(0);
+                    .sets()
+                    .iter()
+                    .flat_map(|s| s.files.iter())
+                    .map(|f| f.blocks.len() as u64)
+                    .sum();
                 (done, bad, total)
             })
             .unwrap_or((0, 0, 0));
@@ -1261,9 +1345,13 @@ fn m_addnzblnk(
     req: &mut tiny_http::Request,
     params: &std::collections::HashMap<String, String>,
     _ctx: &ApiCtx<'_>,
-    _api_body: &mut Option<Vec<u8>>,
+    api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some({
+        // A long article-id list outgrows the request line, and an
+        // nzblnk password (p=) must not ride it - see
+        // `merge_body_params`.
+        let params = &merge_body_params(req, params, api_body);
         // `link` is ours; `name` is where addurl puts its
         // URL, so a caller that treats the two modes alike
         // still works.
@@ -1817,12 +1905,15 @@ pub(in crate::serve) fn dispatch(
 /// three, and `dir_claim` locks every job in both lists. Not reentrant
 /// with `history_change_cat`, which takes `add_lock` itself.
 ///
-/// The `save_queue` is the CALLER's, and every door pays it: the SAB
-/// `change_cat` and `rename_arm` arms call it, the two NZBGet ones ride
-/// `jr_editqueue`'s tail save (audited 20 Aug 2026, pinned end to end by
-/// remote_compat.rs). Not done here: both rename doors mutate again
-/// after this returns - `name`, then the password - so a save here would
-/// persist a half-applied record instead of the whole transaction.
+/// The `save_queue` is the CALLER's, taken with the fence still held
+/// and its verdict CHECKED: the SAB `change_cat` arm persists one fence
+/// through `persist_relocations`, the rename doors and the NZBGet
+/// category arm batch theirs (N jobs, one queue.json rewrite), and a
+/// refused save rolls the whole relocation back - record and bytes -
+/// so a restart restores a row that still agrees with the tree (Codex
+/// C10). Not done here: both rename doors mutate again after this
+/// returns - `name`, then the password - so a save here would persist a
+/// half-applied record instead of the whole transaction.
 ///
 /// Codex F-06: returns the relocation fence, and the caller decides when
 /// it lifts. Every arm that only re-files gets what it wants by dropping
@@ -1866,10 +1957,18 @@ pub(in crate::serve) fn requeue_category(
         if g.state != JobState::Queued {
             return Err("job already started");
         }
-        g.category = cat.to_string();
+        let old_cat = std::mem::replace(&mut g.category, cat.to_string());
         let old_dir = std::mem::replace(&mut g.out_dir, dir.clone());
         g.relocating += 1;
-        (Relocation(job.clone()), old_dir)
+        (
+            Relocation {
+                job: job.clone(),
+                old_cat,
+                old_dir: old_dir.clone(),
+                new_dir: dir.clone(),
+            },
+            old_dir,
+        )
     };
     d.register_cat(cat);
     // A queued job can be RUNNING in the prefetch sidecar, against the
@@ -1945,11 +2044,70 @@ pub(in crate::serve) fn requeue_category(
 /// call's return. A panic anywhere in the transaction lifts it too,
 /// which is the behaviour to want: a fence nothing will ever clear is a
 /// job that can never start again.
-pub(in crate::serve) struct Relocation(Arc<Mutex<Job>>);
+pub(in crate::serve) struct Relocation {
+    job: Arc<Mutex<Job>>,
+    // The undo set (Codex C10): what the record said before the
+    // transaction, so a queue save that REFUSES after the bytes moved
+    // can put record and tree back together instead of leaving the
+    // durable row naming an empty directory while the partial bytes sit
+    // orphaned at the new path.
+    old_cat: String,
+    old_dir: PathBuf,
+    new_dir: PathBuf,
+}
+
+impl Relocation {
+    /// Undo the transaction this fence covers, for the caller whose
+    /// `save_queue` refused: restore the old category and `out_dir`,
+    /// then move the tree back - record first, then bytes, mirroring
+    /// the forward order. The fence stays up until this returns, so the
+    /// job cannot start against either path mid-undo. Consumes the
+    /// guard; the fence lifts on the way out.
+    pub(in crate::serve) fn rollback(self) {
+        {
+            let mut g = self.job.lock_ok();
+            g.category = self.old_cat.clone();
+            g.out_dir = self.old_dir.clone();
+        }
+        if self.new_dir != self.old_dir
+            && self.new_dir.exists()
+            && let Err(e) = crate::smart::move_tree(&self.new_dir, &self.old_dir)
+        {
+            // Not fatal: the record is back on the old path and the
+            // job simply downloads again. Say where the stranded
+            // bytes are, because nothing else will.
+            warn!(
+                target: "queue",
+                "could not move the earlier progress back from {} to {}: {e} - \
+                 the release will be downloaded again, and those files are \
+                 not named by any record",
+                self.new_dir.display(),
+                self.old_dir.display()
+            );
+        }
+    }
+}
+
+/// The durability half of one or more `requeue_category` transactions:
+/// ONE queue save, taken with every fence still held. On refusal every
+/// relocation is rolled back - record and bytes together - so a restart
+/// restores a row that still agrees with the tree (Codex C10). Returns
+/// whether the store took it; a caller answering an API owes the user a
+/// `status:false` on false.
+#[must_use = "a refused save has already been rolled back - report it"]
+pub(in crate::serve) fn persist_relocations(d: &Daemon, fences: Vec<Relocation>) -> bool {
+    if d.save_queue() {
+        return true;
+    }
+    for f in fences {
+        f.rollback();
+    }
+    false
+}
 
 impl Drop for Relocation {
     fn drop(&mut self) {
-        let mut g = self.0.lock_ok();
+        let mut g = self.job.lock_ok();
         // Saturating because the fence is a depth, and the only thing
         // that could take it below zero is a double-drop, which cannot
         // happen - but a wrapping panic here would be a far worse

@@ -831,6 +831,65 @@ pub(super) fn set_feeds(
         // nothing to keep, so it is dropped rather than stored as a
         // feed that fails forever.
         list.retain(|f| !f.url.is_empty());
+        // F8: two rows carrying the SAME address are refused, because the
+        // poller cannot tell them apart and says nothing when it fails to.
+        // `assign_feed_ids` below hands every row a distinct id, so the
+        // list looked fine from here - but the poller keys its next-poll
+        // deadline by url, its health by url, and the on-disk seen scope
+        // by url (`FeedConfig::scope_key` hashes the url). So the first
+        // row polls and arms the deadline; every later row with that url
+        // reads the same future deadline and is skipped, on that pass and
+        // on every pass after it, forever, with no error anywhere - and
+        // its settings row displays the FIRST row's health, so the UI
+        // positively asserts that a feed which has never polled is fine.
+        // Two rows with disjoint Accept rules could not both work.
+        //
+        // Refused rather than fixed by keying those maps per id: the
+        // third key is the seen scope, which is baked into the on-disk
+        // rss-seen.json, so moving it orphans every existing entry and
+        // the whole rolling window would be re-grabbed on the next poll.
+        // Per-id seen scopes also raise a product question nobody has
+        // answered - an item matching both rows would be enqueued twice.
+        // A refusal costs no migration, touches no durable format, and
+        // turns a silent permanent starvation into a legible error at the
+        // moment of the mistake.
+        //
+        // AFTER the id-keyed merge above and after the empty-url retain,
+        // never before either: a row that sent the mask back still holds
+        // the mask at that point, so it would be compared as `***` rather
+        // than as the url it stands for - two untouched rows of two
+        // DIFFERENT feeds can mask to the same string, and a check placed
+        // earlier would refuse an ordinary save of a correct list.
+        //
+        // Accepted limit: the comparison is of raw url strings, so two
+        // spellings of one address - the same query parameters in a
+        // different order, a trailing slash - are not caught. A
+        // canonicaliser here would be a second guess at every indexer's
+        // url grammar, and guessing wrong would MERGE two feeds that are
+        // genuinely different.
+        {
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for f in &list {
+                if !seen.insert(f.url.as_str()) {
+                    // The MASKED url, never the raw one: this string
+                    // reaches the settings UI and the log ring, and a feed
+                    // url essentially always carries the indexer's
+                    // `apikey=`. Same rule as `FeedHealth::failed`.
+                    //
+                    // English, like every other daemon string (§5), and
+                    // nothing keys on the text - reword it freely.
+                    return Err(format!(
+                        "feeds: {} is listed twice. One address is one feed: the poller \
+                         keys a feed's next poll, its health and what it has already seen \
+                         by its address, so the second row would never poll and would show \
+                         the first row's health. Delete it and put its rules on the first \
+                         row - Accept(category=..., priority=...) files what each rule \
+                         matches.",
+                        crate::rss::mask_feed_url(&f.url)
+                    ));
+                }
+            }
+        }
         crate::rss::assign_feed_ids(&mut list);
         let persist = serde_json::to_value(&list).unwrap_or(json!([]));
         *d.feeds.lock_ok() = list;

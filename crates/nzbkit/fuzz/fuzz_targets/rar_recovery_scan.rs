@@ -15,7 +15,7 @@
 //! one that does not shows up as a timeout.
 use libfuzzer_sys::fuzz_target;
 
-use rars::recovery::stream::{MemorySource, scan_inline_recovery_chunks};
+use rars::recovery::stream::{scan_inline_recovery_chunks, MemorySource};
 
 fuzz_target!(|data: &[u8]| {
     // Cap the corpus: these scanners are linear in the input and the point

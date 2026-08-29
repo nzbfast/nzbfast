@@ -389,6 +389,7 @@ fn a_regrabbed_replacement_keeps_the_password_the_priority_and_our_category() {
 /// Source-level guard: the embedded dashboard is one file with ~60
 /// call sites, so what matters is that the two fetch helpers funnel
 /// through the checking reader.
+#[cfg(feature = "dashboard")]
 #[test]
 fn the_dashboard_turns_an_http_error_into_a_visible_one() {
     let src = DASHBOARD_HTML;
@@ -426,6 +427,7 @@ fn the_dashboard_turns_an_http_error_into_a_visible_one() {
 /// Source-level like its neighbour above, and for the same reason:
 /// the property is about which branch a name takes, and the branch
 /// is one line.
+#[cfg(feature = "dashboard")]
 #[test]
 fn a_secret_setting_never_travels_in_the_request_line() {
     let src = DASHBOARD_HTML;
@@ -457,6 +459,49 @@ fn a_secret_setting_never_travels_in_the_request_line() {
         src.contains("await apiPost('notify_test', {target: row})"),
         "notify_test still puts the whole target in the request line"
     );
+    // 27 Aug sweep findings 2 and 14: an archive password and an
+    // nzblnk (whose p= is a password) are credentials too. The unlock
+    // bodies its pair, the add-with-password rides the multipart body,
+    // and the nzblnk add bodies its link.
+    assert!(
+        src.contains("await apiPost('set_password',{value:id, password:pw})"),
+        "set_password still puts the archive password in the request line"
+    );
+    assert!(
+        src.contains("if(opt.pw) fd.append('password', opt.pw);")
+            && !src.contains("&password=${encodeURIComponent(opt.pw)}"),
+        "addfile still puts the archive password in the request line"
+    );
+    assert!(
+        src.contains("await apiPost('addnzblnk',{link:link.trim()})"),
+        "addnzblnk still puts the link in the request line"
+    );
+}
+
+/// 27 Aug sweep finding 1: a bulk selection's id list is 250 ids a
+/// Show more page (~7 KB), so one page past the first 414s on the
+/// request line. Every multi-id queue/history op goes up in a JSON
+/// POST body through the `merge_body_params` door.
+///
+/// Source-level like its neighbours above, and for the same reason:
+/// the property is which channel a call takes, and the call is one
+/// line.
+#[cfg(feature = "dashboard")]
+#[test]
+fn a_bulk_selection_never_travels_in_the_request_line() {
+    let src = DASHBOARD_HTML;
+    for call in [
+        "await apiPost('queue',{name:op, value:ids.join(',')})",
+        "await apiPost('queue',{name:'priority', value:ids.join(','), value2:String(v)})",
+        "await apiPost('queue',{name:'delete', value:ids.join(',')})",
+        "await apiPost('history',{name:'delete', value:ids.join(',')})",
+        "await apiPost('history',{name:'delete', value:ids.join(','), del_files:'1'})",
+    ] {
+        assert!(
+            src.contains(call),
+            "a bulk op regressed to the request line: {call}"
+        );
+    }
 }
 
 /// BUG (MEDIUM): `apply_and_save` answers a write it could not persist
@@ -471,6 +516,7 @@ fn a_secret_setting_never_travels_in_the_request_line() {
 /// that can see the flag must raise the durability bar, and none of
 /// them may refuse the key - the daemon is already on it, so a page
 /// that kept the old one would lock itself out.
+#[cfg(feature = "dashboard")]
 #[test]
 fn the_dashboard_says_when_a_change_is_live_but_not_durable() {
     let src = DASHBOARD_HTML;
@@ -556,6 +602,7 @@ fn the_dashboard_says_when_a_change_is_live_but_not_durable() {
 /// Source-level guard, like its neighbours - the page is one file with
 /// no test harness of its own, and every one of these pieces is load
 /// bearing on its own.
+#[cfg(feature = "dashboard")]
 #[test]
 fn a_stale_refusal_can_never_ask_for_a_key() {
     // The dashboard half of this holds in a slim build too, so the test
@@ -692,6 +739,73 @@ fn every_served_page_gets_the_shared_design_tokens() {
             shipped.contains("data-theme=\"contrast\"") && shipped.contains("--surface:"),
             "the {lang} manual did not get the shared design tokens"
         );
+    }
+}
+
+/// ONE sound engine, actually reaching both pages that have controls -
+/// and, more to the point, exactly one copy of it.
+///
+/// THE DEFECT this replaces: `web/wall.html` carried a hand-made fork of
+/// the dashboard's engine as it stood before the per-action vocabulary
+/// landed. It agreed with the original until it did not, and then it sat
+/// there - one blip for all 105 of the wall's controls, deaf to the
+/// volume slider and to two of the three preferences, and still carrying
+/// a frozen-clock bug the dashboard's copy had already been fixed for,
+/// with nothing anywhere reporting it. It was found by measuring.
+///
+/// So the interesting half of this test is the LAST one: a page that
+/// declares any of the engine's own names is a third copy being born,
+/// which is the only way this can go wrong again.
+#[cfg(feature = "indexer")]
+#[test]
+fn one_sound_engine_reaches_both_shell_pages() {
+    const MARK: &str = "__NZBFAST_UI_SOUND__";
+    assert!(
+        !UI_SOUND_HTML.contains(MARK),
+        "ui-sound.html names the placeholder, which re-emits it into every page"
+    );
+    // The engine itself, so a gutted file cannot pass. One per layer:
+    // the preference blob, the master gain, the frozen-clock guard, a
+    // recipe, the door every press goes through, and the classifier.
+    for tok in [
+        "nzbfastSnd",
+        "sndMaster.gain.value",
+        "if(ac.state!=='running') return;",
+        "refuse:",
+        "function actSnd(",
+        "function sndKindFor(",
+        "SND_PRESS_SEL",
+    ] {
+        assert!(
+            UI_SOUND_HTML.contains(tok),
+            "the shared sound engine lost {tok}"
+        );
+    }
+    for (name, page) in [("dashboard", DASHBOARD_HTML), ("wall", WALL_HTML)] {
+        assert!(page.contains(MARK), "{name} has no sound placeholder");
+        assert!(
+            !ui_themed(page).contains(MARK),
+            "{name} kept a stray placeholder"
+        );
+        // The whole point. A page may CALL the engine; it may not carry
+        // one. Anything here means somebody has started copy number
+        // three, which is how the wall's fork happened in the first
+        // place - and it would drift the same silent way.
+        for own in [
+            "function actSnd(",
+            "function sndKindFor(",
+            "function clickBlip(",
+            "function actx(",
+            "function popupErr(",
+            "new (window.AudioContext",
+        ] {
+            assert!(
+                !page.contains(own),
+                "{name} declares `{own}` itself - the sound engine is \
+                 web/ui-sound.html, shared by both pages. A second copy \
+                 agrees with the first until it does not."
+            );
+        }
     }
 }
 
@@ -1676,6 +1790,40 @@ fn ssrf_guard_blocks_metadata_but_allows_local() {
     }
 }
 
+/// The daemon-API variant: a `--host` on an auto-IP LAN (169.254/16 via
+/// mDNS) or an IPv6 link-local address is a machine the user owns and
+/// must stay reachable - the pre-agent `TcpStream::connect` submit
+/// reached both - while the metadata endpoints inside link-local stay
+/// refused by address, and everything else keeps the fetch guard's
+/// answer.
+#[test]
+fn the_daemon_agent_allows_link_local_but_never_the_metadata_endpoints() {
+    use std::net::IpAddr;
+    for s in [
+        "169.254.1.1", // auto-IP LAN peer
+        "fe80::1",     // v6 link-local
+        "::ffff:169.254.1.1",
+        "127.0.0.1",
+        "192.168.1.10",
+        "100.64.0.1",
+    ] {
+        let ip: IpAddr = s.parse().unwrap();
+        assert!(!super::is_forbidden_daemon_ip(ip), "should allow {s}");
+    }
+    for s in [
+        "169.254.169.254", // cloud metadata
+        "169.254.170.2",   // ECS credentials
+        "::ffff:169.254.169.254",
+        "0.0.0.0",
+        "255.255.255.255",
+        "100.100.100.200", // Alibaba metadata (inside CGNAT)
+        "fd00:ec2::254",   // AWS IPv6 IMDS
+    ] {
+        let ip: IpAddr = s.parse().unwrap();
+        assert!(super::is_forbidden_daemon_ip(ip), "should block {s}");
+    }
+}
+
 /// The other half of the SSRF picture (M12): which addresses count as
 /// INSIDE the user's network, and so may only be reached by the source
 /// that owns them. The always-forbidden set is folded in - a caller
@@ -2271,8 +2419,21 @@ fn evict_kinds_setting_validates_and_normalizes() {
         super::parse_evict_kinds("tv,tv,,other,").unwrap(),
         vec!["tv".to_string(), "other".to_string()]
     );
-    let e = super::parse_evict_kinds("movie,film").unwrap_err();
-    assert!(e.contains("film"), "the error must name the offender: {e}");
+    // The full reserved vocabulary and a custom slug all pass: the index
+    // stores music, book and Custom(slug) in releases.kind, and the
+    // four-kind list this validated against until 27 Aug 2026 meant those
+    // rows could be neither kept nor targeted.
+    assert_eq!(
+        super::parse_evict_kinds("music,book,formula-1").unwrap(),
+        vec![
+            "music".to_string(),
+            "book".to_string(),
+            "formula-1".to_string()
+        ]
+    );
+    // A malformed token (not slug-shaped) is still refused by name.
+    let e = super::parse_evict_kinds("movie,fil m").unwrap_err();
+    assert!(e.contains("fil m"), "the error must name the offender: {e}");
 }
 
 /// The wizard's answer must not read as an established install: the

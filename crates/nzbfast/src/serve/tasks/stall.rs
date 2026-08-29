@@ -333,6 +333,13 @@ impl Watched {
     /// hub slots hold an `Arc` per run and `install_seek` replaces them),
     /// so a late escalation is inert rather than aimed at the next job.
     ///
+    /// **A run that is ALREADY draining still gets the bound.** The verb
+    /// is idempotent and the bound is not: a drain the verdict did not
+    /// start - the user's own graceful pause is the live case - carries
+    /// no escalation behind it, so skipping the arming left the wedge
+    /// held by the read ladder alone. The reasoning, and why a duplicate
+    /// escalation is harmless if one were ever possible, is at the site.
+    ///
     /// The engine's abort flag is set only WITH the escalation. On the
     /// ordinary path the run ends on the drain's own bail instead
     /// ("paused (drained in-flight; queue kept for resume)"), which is
@@ -348,13 +355,48 @@ impl Watched {
             }
             return;
         };
-        if ctl.is_draining() {
-            // Already winding down - a second verdict on the same run
-            // (or the user's own graceful pause) must not arm a second
-            // escalation behind the first.
-            return;
-        }
-        if !ctl.drain() {
+        // Wind the fleet down - unless something already has, in which
+        // case the verb is done and only the BOUND is still owed. Until
+        // 27 Aug 2026 an already-draining run took an early return here,
+        // on the reasoning that "a second verdict on the same run (or
+        // the user's own graceful pause) must not arm a second
+        // escalation behind the first". Half of that never happened and
+        // the other half cost the verdict its teeth:
+        //
+        // * A SECOND VERDICT CANNOT REACH THIS. `fire_defer` sets
+        //   `job.demote` before it calls `stop`, and the watchdog loop's
+        //   own `if demote { continue }` gate skips every later tick for
+        //   that job. A re-run of the same job clears `demote` (in
+        //   `park`) and gets a fresh `QueueControl` besides. (This said
+        //   "`fire_defer` and the two arms that still spell it out" when
+        //   it was written, hours before TODO 309(d) folded the last
+        //   three sites into `fire_defer`. Same argument, one door now.)
+        // * THE USER'S OWN GRACEFUL PAUSE HAS NO FIRST ESCALATION.
+        //   `fire_pause(false)` calls `drain()` and arms nothing, so
+        //   returning here left a defer against a wedged fleet a
+        //   complete no-op: the drain was already set, the flag was
+        //   never set, and the wedge was bounded only by the pre-byte
+        //   read ladder - the 9.6 s rows in the table above, which is
+        //   the exact measurement `DEFER_DRAIN_GRACE` exists to replace.
+        //   (v1.2.4 sweep, finding R4.)
+        //
+        // And arming one is safe even if a second ever did arrive:
+        // `abort()` is idempotent, and it answers false once the pool
+        // has dropped its `Shared`, so the worst a duplicate can do is
+        // sleep out its own grace and find nothing.
+        //
+        // What a defer costs a paused run is nothing it was keeping: the
+        // four ZERO-BYTE arms that get here all require that no byte
+        // moved (or that every article answered came back missing), so
+        // there is no in-flight body whose journaling the escalation
+        // discards. The FIFTH, the single-server-bound arm, is the one
+        // exception and is bounded rather than free - it fires precisely
+        // because bytes ARE moving, so it can have bodies in flight, and
+        // what protects them is the drain: the escalation lands only at
+        // `DEFER_DRAIN_GRACE`, and everything that finished before it is
+        // journaled. TODO 309(d) is that arm's other half - it weighs
+        // what the requeue will cost before it ever reaches here.
+        if !ctl.is_draining() && !ctl.drain() {
             // The run beat the verdict to the line. Set the flag anyway:
             // `park` is what decides a demotion actually happened, and
             // it already knows how to drop a stale one.
@@ -568,7 +610,7 @@ fn observe_transfer_and_outages(
 /// The whole justification for every demotion below: setting a job
 /// aside costs the queue nothing when something else can run, and costs
 /// it a restart when nothing can. Deliberately the same test in all
-/// four arms - a Queued job that is neither paused nor already
+/// arms - a Queued job that is neither paused nor already
 /// deferred - so no arm can be more or less willing to demote than its
 /// siblings for a reason nobody wrote down.
 fn others_waiting(d: &Daemon) -> bool {
@@ -655,28 +697,78 @@ struct GoneEvidence {
 ///   down keeps condition 2 unsatisfied forever.
 /// * A PARTIAL takedown - some of the post arrives and the rest is
 ///   refused - fails condition 1 by construction, and that is the price
-///   of firing with no warmup. Measured 26 Aug 2026 on round A's S6
-///   row: unchanged at both threshold sets, still holding the queue for
-///   its whole 11.6 s run at the shipped ones. Covering it means
-///   shortening the FLATLINE window rather than removing a warmup,
-///   which is a different risk decision and is TODO 306's own remaining
-///   box. Do NOT reach for [`StallTracker`] to shorten it: this
-///   module's header says why action stays out of that scope.
+///   of firing with no warmup. That shape is [`partial_gone_defer`]'s,
+///   which is a THIRD arm and not a loosening of this one, because what
+///   has to shorten for it is the FLATLINE and that is a different risk
+///   decision. The two are disjoint on purpose: bytes arriving is
+///   exactly what stands this one down and exactly what the other one
+///   assumes.
 fn gone_evidence(live: &nzbkit::pool::LiveStats) -> Option<GoneEvidence> {
-    let (mut misses, mut probed) = (0u64, 0usize);
+    let mut misses = 0u64;
     for s in live.servers.iter() {
         if s.bytes.load(Ordering::Relaxed) > 0 {
             return None;
         }
-        let m = s.articles_missing.load(Ordering::Relaxed);
-        if m > 0 {
-            misses += m;
+        misses += s.articles_missing.load(Ordering::Relaxed);
+    }
+    let probed = fleet_answered(live)?;
+    Some(GoneEvidence { misses, probed })
+}
+
+/// How many servers have themselves answered "no such article", or
+/// `None` when any server is up and simply has not been asked yet.
+///
+/// Condition 2 of [`gone_evidence`], lifted out because both
+/// post-is-gone arms ask it and only one of them can also ask for a
+/// zero byte count. "No configured server carries this post" is a claim
+/// about EVERY server, so a server that is up and unprobed stands the
+/// verdict down - it might be the one that has it. A server granting no
+/// connection at all (`down_since`) cannot supply anything either way
+/// and is the outage arm's business, so it neither blocks the verdict
+/// nor is counted as agreeing with it.
+///
+/// # It is the WHOLE of what keeps the windowed arm alive
+///
+/// This is the one condition the windowed post-is-gone arm in
+/// [`spawn_slow_job_watchdog`] does not ask, and therefore the only
+/// thing it can still be reached by - so read this before tidying the
+/// three arms into two. A fleet carrying a server that is up and has
+/// simply never been asked returns `None` here, both twins stand down
+/// forever, and the windowed arm is the only one left that can speak.
+/// A `retention_days` shorter than the post's age is how a real
+/// install produces such a server ([`nzbkit::pool::retention_mask`]
+/// seeds it into every article's `tried_430` at queue-build time), and
+/// `e2e_qprog::an_unprobed_server_leaves_the_windowed_arm_to_speak` is
+/// that fleet driven end to end.
+///
+/// **There is no second such condition**, and the arm's own comment
+/// claimed one until 27 Aug 2026 - "a refusal rate slow enough that no
+/// single flatline stretch clears the floor a whole window does".
+/// There is no such rate, and the argument is kept here so nobody
+/// re-derives it as grounds for leaving that arm untested. Per-host
+/// byte counters are monotonic inside a run (the watchdog clears its
+/// window on job change), so `total == 0` over the window means EVERY
+/// sample in it carries the same byte sum - which is exactly the
+/// trailing run [`flat_gone`] walks back over. Its `first` is then the
+/// window's own front, so the flatline's seconds are `span`, its
+/// misses ARE `missing_delta` and its tries ARE `tried_delta`: the
+/// same three numbers, never a smaller count over a shorter stretch.
+/// `span >= window * 0.8` also implies the flatline minimum
+/// (`2 * (window / 6).clamp(1, 5)`) for every window of 3 s or more,
+/// covering the shipped 30 s and both compressed sets in the tests.
+/// Add that [`partial_gone_defer`] is evaluated earlier in the tick
+/// and takes no warmup, and it reaches the verdict FIRST wherever this
+/// function says yes - always.
+fn fleet_answered(live: &nzbkit::pool::LiveStats) -> Option<usize> {
+    let mut probed = 0usize;
+    for s in live.servers.iter() {
+        if s.articles_missing.load(Ordering::Relaxed) > 0 {
             probed += 1;
         } else if s.down_since.load(Ordering::Relaxed) == 0 {
             return None;
         }
     }
-    (probed > 0).then_some(GoneEvidence { misses, probed })
+    (probed > 0).then_some(probed)
 }
 
 /// TODO 306's early post-is-gone arm: the same verdict as the windowed
@@ -725,11 +817,356 @@ fn early_gone_defer(
         return None;
     }
     *armed = None;
+    // `misses` counts per-server refusal TRANSACTIONS (the ladder asks
+    // each missing article on every server), so the article count shown
+    // is the floor `ceil(misses / probed)` - each distinct article can
+    // be refused at most once per answering server - never the raw sum,
+    // which overstates by the fleet multiple.
     Some(format!(
-        "not a byte has arrived since this job started and every one of the {} \
-         article(s) answered so far came back missing, on all {} server(s) that \
-         could be asked - no configured server carries this post right now",
-        e.misses, e.probed
+        "not a byte has arrived since this job started and every article \
+         answered so far came back missing - at least {} of them, on all {} \
+         server(s) that could be asked - no configured server carries this \
+         post right now",
+        e.misses.div_ceil(e.probed as u64),
+        e.probed
+    ))
+}
+
+/// Land a demotion verdict on the job this tick judged: mark it, say
+/// what it will cost, and wind the judged run down.
+///
+/// Shared by all five arms. It was shared by the two post-is-gone arms
+/// TODO 306 added, while the outage, windowed post-is-gone and
+/// single-server-bound arms each spelled the same five lines out - which
+/// that change called "a fine tidy-up" deliberately not taken. TODO
+/// 309(d) took it, because the cost clause below is one sentence that
+/// has to be true at every one of those sites, and a sentence copied to
+/// five hand-maintained siblings is this repo's most documented defect
+/// class.
+///
+/// **The clause is appended to `defer_reason`, not merely logged.** That
+/// field is what the dashboard's queue drawer prints, so a user who is
+/// wondering why a job went to the back of the queue reads what the trip
+/// back cost it in the same breath. Before this, the only trace anywhere
+/// that a job had taken the 2.53x route was one `info!` on the `resume`
+/// target of the rerun, hours later, with nothing tying it to the
+/// demotion that caused it.
+fn fire_defer(
+    job: &Arc<Mutex<Job>>,
+    reason: &str,
+    cost: Option<RequeueCost>,
+    w: &Watched,
+    win: &mut VecDeque<Sample>,
+) {
+    // `w.id` and not a second parameter: the caller found `job` by
+    // `g.nzo_id == w.id`, so they are the same string by construction,
+    // and one of the two would only ever be the one that went stale.
+    let id = &w.id;
+    let reason = match cost {
+        Some(RequeueCost::Disk { restored, cap }) => format!(
+            "{reason}; the {:.1} GB already downloaded is over the {:.1} GB budget \
+             that keeps a resume to one pass, so when this job runs again it will \
+             unpack from volumes on disk instead",
+            restored as f64 / 1e9,
+            cap as f64 / 1e9
+        ),
+        Some(RequeueCost::Refetch { refetch }) => format!(
+            "{reason}; the {:.1} GB already downloaded unpacked as it arrived and \
+             left nothing on disk for a resume to pick up, so when this job runs \
+             again it will download those bytes a second time",
+            refetch as f64 / 1e9
+        ),
+        None => reason.to_string(),
+    };
+    {
+        let mut g = job.lock_ok();
+        g.demote = true;
+        g.defer_reason = reason.clone();
+    }
+    info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
+    w.stop();
+    win.clear();
+}
+
+/// TODO 309(d): does what the requeue would cost VETO the
+/// single-server-bound demotion?
+///
+/// **This is the one arm where the trade is real, and that falls out of
+/// the code rather than being asserted.** All four arms above it require
+/// a stretch in which not one byte arrived - `gone_evidence` refuses a
+/// server that has moved any, `flat_gone` reads a flatline, and the
+/// outage and windowed post-is-gone arms both gate on `total == 0`. A
+/// job moving nothing cannot be made cheaper by keeping its slot,
+/// because keeping it buys the queue nothing at all and the alternative
+/// is that the whole queue sits behind a post no reachable server
+/// carries. So their answer is "defer, whatever it costs" - which is
+/// what `the_defer_line_says_what_the_requeue_will_cost` asserts at the
+/// landing site they all share, and what their own signatures pin, since
+/// neither `early_gone_defer` nor `partial_gone_defer` takes a cost at
+/// all. This arm is different in kind: the job IS making progress. It is
+/// merely bound to one server and slower than the session's best, so
+/// deferring it trades the queue's throughput against a rerun that has
+/// to extract from volumes on disk - or, for a compressed set, fetch
+/// every byte it already downloaded a second time
+/// ([`RequeueCost::Refetch`]; the inequality per arm is
+/// [`cost_outweighs_the_wait`]'s).
+///
+/// **The inequality, and why it is not a magic number.** TODO 94 A
+/// prices the disk route at 2.53x payload of device I/O against 1.02x
+/// mapped, so a requeue's EXTRA work is about one and a half passes over
+/// everything already restored. What deferring buys is that the bytes
+/// still to fetch leave the critical path. So the job keeps its slot
+/// while `left < 1.5 * restored` - past that crossing the extra disk
+/// work is the bigger number. Both sides are measured quantities; the
+/// 1.5 is TODO 94 A's own two figures subtracted.
+///
+/// **What stops it keeping the slot forever.** Two things, and the first
+/// is the load-bearing one. The arm only reaches this test when bytes
+/// ARE moving (its caller has already bailed on `total == 0`), so `left`
+/// strictly shrinks every window while the veto holds, and the veto's
+/// own condition therefore only ever gets easier to satisfy - the job
+/// finishes. The second is the belt for the pathological case that
+/// argument does not cover, a job trickling a few bytes a window: the
+/// veto also requires the job to still be moving at a tenth of the
+/// session best. Under that it is closer to the stalled shapes the arms
+/// above own than to a working download, and the queue's claim wins. The
+/// arm's own gate is 0.4 of best, so a job between 0.1 and 0.4 is the
+/// band this speaks for.
+///
+/// Kill switch: `NZBFAST_DEFER_IGNORE_RESUME_COST=1` (read in
+/// [`requeue_cost`], so it disarms the clause and the veto together).
+fn slow_keeps_its_slot(d: &Daemon, id: &str, rate: f64, best: u64, st: &mut SlowCost) -> bool {
+    let Some(c) = st.seen.as_ref() else {
+        return false;
+    };
+    let Some((_, _, left)) = d.wire_counters(id) else {
+        return false;
+    };
+    if !cost_outweighs_the_wait(c, left, rate, best) {
+        return false;
+    }
+    if !st.noted {
+        st.noted = true;
+        match *c {
+            RequeueCost::Disk { restored, cap } => info!(
+                target: "defer",
+                "{id}: slow, but {:.1} GB restored is over the {:.1} GB one-pass resume budget \
+                 and only {:.1} GB is left - keeping its slot rather than paying to unpack from \
+                 volumes on disk when it runs again",
+                restored as f64 / 1e9,
+                cap as f64 / 1e9,
+                left as f64 / 1e9
+            ),
+            RequeueCost::Refetch { refetch } => info!(
+                target: "defer",
+                "{id}: slow, but a rerun would download the {:.1} GB already fetched all over \
+                 again and only {:.1} GB is left - keeping its slot rather than paying for the \
+                 same bytes twice",
+                refetch as f64 / 1e9,
+                left as f64 / 1e9
+            ),
+        }
+    }
+    true
+}
+
+/// The single-server-bound arm's per-active-job state, reset on every job
+/// change: what the requeue was last measured to cost, and whether the
+/// veto has already said so.
+///
+/// **It exists because a veto REPEATS and a demotion does not.** Every
+/// other arm reads the cost once and fires; this one re-reaches its
+/// verdict every window for as long as it keeps the slot, which for a
+/// large slow job is hours. Re-parsing a 60 GB job's journal every 30 s
+/// to be told what it said last time is exactly the kind of cost nobody
+/// finds until it is a support question.
+///
+/// **Latching is sound because both figures only GROW.** Once the placed
+/// bytes are over the held-span budget they stay over, so a `Disk` never
+/// becomes a `None`; and the `restored` figure going stale can only make
+/// it SMALLER than the truth, which under-vetoes rather than over-vetoes.
+/// The same argument carries the `Refetch` arm: a compressed set's
+/// placements never grow, the wire counter only climbs, so a stale
+/// `refetch` is smaller than the truth and under-vetoes the same way.
+/// A `None` is deliberately not latched - a job under the budget is
+/// demoted on the spot, so there is no second tick to save, and a job
+/// that has not yet crossed must be free to.
+#[derive(Default)]
+struct SlowCost {
+    seen: Option<RequeueCost>,
+    noted: bool,
+}
+
+/// The inequality [`slow_keeps_its_slot`] is built on, split out so it
+/// can be driven directly, one arm per [`RequeueCost`] variant and the
+/// rate belt shared:
+///
+/// * **Disk**: TODO 94 A's 2.53x-against-1.02x is about one and a half
+///   extra passes over what is restored, against the bytes a deferral
+///   would take off the critical path.
+/// * **Refetch**: the rerun's extra wire work is exactly the bytes it
+///   downloads a second time, so the factor is 1.0 - the job keeps its
+///   slot while what is left to fetch is smaller than what a deferral
+///   would make it fetch twice. Both sides are wire bytes, so unlike
+///   the disk arm no cross-medium exchange rate is being asserted.
+fn cost_outweighs_the_wait(cost: &RequeueCost, left: u64, rate: f64, best: u64) -> bool {
+    const EXTRA_PASSES: f64 = 1.5;
+    if rate < 0.10 * best as f64 {
+        return false;
+    }
+    match *cost {
+        RequeueCost::Disk { restored, .. } => (left as f64) < restored as f64 * EXTRA_PASSES,
+        RequeueCost::Refetch { refetch } => left < refetch,
+    }
+}
+
+/// One watchdog sample of the judged job's pool: when it was taken, the
+/// per-host cumulative byte totals, and the fleet's cumulative article
+/// dispatches and refusals. Named so the two readers of the rolling
+/// window can be given a signature rather than a four-tuple.
+type Sample = (Instant, Vec<(String, u64)>, u64, u64);
+
+/// The newest unbroken run of watchdog samples over which not one byte
+/// moved anywhere in the fleet: TODO 306's FLATLINE.
+struct FlatGone {
+    /// Wall seconds from the oldest sample of the stretch to the newest.
+    secs: f64,
+    /// Articles the fleet answered "no such article" inside it.
+    misses: u64,
+    /// Article dispatches it answered at all inside it.
+    tried: u64,
+}
+
+/// How far back the byte total has been flat, and what the fleet was
+/// doing while it was.
+///
+/// Read off the rolling window the watchdog already keeps, so the
+/// resolution is one tick and the reach is one `window`. Every per-host
+/// total is cumulative, so a fleet sum that has not moved between two
+/// samples is "not a byte arrived anywhere between them" exactly.
+///
+/// `None` while there is no second sample to compare against, which is
+/// the first tick of every job.
+fn flat_gone(win: &VecDeque<Sample>) -> Option<FlatGone> {
+    let bytes = |s: &Sample| -> u64 { s.1.iter().map(|(_, b)| *b).sum() };
+    let last = win.back()?;
+    let flat = bytes(last);
+    let first = win
+        .iter()
+        .rev()
+        .skip(1)
+        .take_while(|s| bytes(s) == flat)
+        .last()?;
+    Some(FlatGone {
+        secs: last.0.duration_since(first.0).as_secs_f64(),
+        misses: last.3.saturating_sub(first.3),
+        tried: last.2.saturating_sub(first.2),
+    })
+}
+
+/// TODO 306's PARTIAL post-is-gone arm: the windowed twin's verdict off
+/// a FLATLINE rather than off the whole rolling window.
+///
+/// # The case neither sibling can reach
+///
+/// [`early_gone_defer`] fires with no warmup because it asks for "not a
+/// byte since this job started", and that is exactly what a partial
+/// takedown is not: the first third of the post arrives and the rest is
+/// refused, so the strongest condition the early arm has is false by
+/// construction and it correctly stands down. The windowed arm in
+/// [`spawn_slow_job_watchdog`] is then the only thing that can speak
+/// for it, and it cannot do so inside about 69 seconds - `warmup`
+/// (45 s) plus a window at least 80% full. Measured 26 Aug 2026 on
+/// round A's S6 row: a partial takedown held three healthy jobs for its
+/// whole run at the shipped thresholds, `set aside never`.
+///
+/// So what has to shorten here is the FLATLINE, and that is a different
+/// risk decision from the early arm's, which is why this is a third arm
+/// and not a loosened second one. The 30 s window is what tells a dead
+/// patch from a job that paused five seconds on a disk hiccup with a
+/// few 430s still in flight.
+///
+/// # What each condition rules out
+///
+/// 1. **A flatline of at least `flat_min`** (two watchdog ticks, so
+///    10 s at the shipped thresholds). One tick is the shortest
+///    interval over which "not a byte moved" is expressible at all, and
+///    it is deliberately not enough: five seconds is the length of the
+///    hiccup this arm has to be able to tell itself apart from. Two is
+///    also one confirmation interval MORE than [`early_gone_defer`]
+///    takes, which is the right way round - this arm's evidence is
+///    weaker than its early twin's by exactly one condition (bytes did
+///    arrive, once), so it pays for that with one more interval of
+///    nothing arriving.
+/// 2. **Refusals still landing inside it** (the caller's
+///    `gone_min_misses` floor, unchanged at 64). This is the condition
+///    that does the real work, and it is the windowed arm's own: a
+///    worker that is wedged - on a peer that has stopped answering, on
+///    a full downstream channel, on anything - completes no
+///    transactions at all, so it contributes neither bytes NOR
+///    refusals. Every refusal banked inside a flatline is a completed
+///    transaction that proves the article asked for is not there. A dry
+///    network tail and a stalled provider both fail this outright.
+/// 3. **Nothing unprobed** ([`fleet_answered`]): every server has
+///    itself answered a refusal, or is granting no connection at all
+///    and is the outage arm's business. A server that is up and has
+///    simply not been asked yet might be the one holding what is left.
+/// 4. The windowed arm's own remaining list, unchanged: the feature on,
+///    the demotion budget, a sidecar that is only borrowing, and
+///    somewhere for the queue to go next.
+///
+/// # Measured and rejected: `ServerLive::blocked_ms`
+///
+/// The obvious extra guard is to stand down when the write side was
+/// what stopped the bytes, and the gauge for it exists. It was read and
+/// left out, in both directions: it is charged on the send that
+/// COMPLETES, so it stays flat during the very wedge it would be meant
+/// to catch, and brief parks are NORMAL on a fast line ("the channel is
+/// meant to fill"), so a job whose channel filled once in the last ten
+/// seconds would never reach a real takedown verdict. Condition 2 is
+/// the discriminator that actually works, and it is the one the
+/// windowed arm already rests on.
+///
+/// # What it does not do
+///
+/// It does not take the elapsed-time gate. That gate is the OUTAGE and
+/// single-server-bound arms' - a job whose fleet is still dialling, or
+/// whose first megabyte is slow, must not be benched for it - and TODO
+/// 306 already settled that the post-is-gone verdict does not improve
+/// by waiting. Do not lift it off the other two on the strength of
+/// this one. And it does not reach for [`StallTracker`] to find the
+/// flatline: this module's header says why action stays out of that
+/// scope, and the rolling window the watchdog already keeps answers the
+/// same question with no new detector in it.
+fn partial_gone_defer(
+    d: &Arc<Daemon>,
+    live: &nzbkit::pool::LiveStats,
+    win: &VecDeque<Sample>,
+    gone_min_misses: u64,
+    flat_min: u64,
+    defer_count: u32,
+) -> Option<String> {
+    let f = flat_gone(win)?;
+    if f.secs < flat_min as f64 || f.misses < gone_min_misses || f.tried == 0 {
+        return None;
+    }
+    let probed = fleet_answered(live)?;
+    if !d.auto_defer.load(Ordering::Relaxed)
+        || defer_count >= 3
+        || !d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
+        || !others_waiting(d)
+    {
+        return None;
+    }
+    // Same per-server-transaction arithmetic as the early arm: the
+    // count shown is the distinct-article floor, never the raw sum.
+    Some(format!(
+        "not a byte has arrived for {:.0}s and every article answered in that \
+         time came back missing - at least {} of them, on all {probed} \
+         server(s) that could be asked - no configured server carries what is \
+         left of this post right now",
+        f.secs,
+        f.misses.div_ceil(probed as u64)
     ))
 }
 
@@ -783,6 +1220,12 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
         // hosts at 1-2 connections each), never a full-budget one.
         let tail_prefetch = std::env::var("NZBFAST_TAIL_PREFETCH").is_ok_and(|v| v == "1");
         let tick = (window / 6).clamp(1, 5);
+        // TODO 306: how long the fleet must go without a byte before
+        // the PARTIAL takedown arm will speak - two watchdog ticks, so
+        // 10 s at the shipped thresholds against the windowed arm's
+        // 69. Why two and not one, and why the length is not the part
+        // that makes it safe, is in `partial_gone_defer`.
+        let gone_flat = tick * 2;
         // Rolling (time, per-host cumulative bytes) samples of the
         // ACTIVE job's pool; reset on job change. `attempted` = jobs
         // already sidecar-tried during the current active job (so a
@@ -791,11 +1234,16 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
         // Per sample: (taken at, per-host raw bytes, articles tried,
         // articles 430'd) - the last two summed across servers, because
         // "is this post gone" is a job-wide question, not a per-host one.
-        let mut win: VecDeque<(Instant, Vec<(String, u64)>, u64, u64)> = VecDeque::new();
+        let mut win: VecDeque<Sample> = VecDeque::new();
         let mut cur: Option<String> = None;
         let mut attempted: std::collections::HashSet<String> = Default::default();
         // Once per active job: "every idle server has refused auth".
         let mut refusal_noted = false;
+        // TODO 309(d): the single-server-bound arm's cost latch. Both
+        // halves are latched for the same reason - that arm's verdict is
+        // re-reached every window for as long as it keeps the slot - and
+        // [`SlowCost`] argues why that is sound.
+        let mut slow_cost = SlowCost::default();
         // TODO 306's early post-is-gone arm, armed on one tick and
         // fired on a later one: the run-cumulative refusal count as it
         // stood when the evidence first held. `None` = not armed, and
@@ -868,17 +1316,26 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 win.clear();
                 continue;
             };
-            let (id, defer_count, demote) = {
+            let (id, defer_count, demote, out_dir) = {
                 let g = job.lock_ok();
-                (g.nzo_id.clone(), g.defer_count, g.demote)
+                (g.nzo_id.clone(), g.defer_count, g.demote, g.out_dir.clone())
             };
             if demote {
                 continue; // abort already in flight
             }
+            // TODO 309(d), read at a VERDICT rather than every tick: it
+            // parses the journal, and the four demoting arms below reach
+            // it only on a tick they are about to fire on. The fifth
+            // reader is the single-server-bound arm's veto, which
+            // re-reaches its verdict every window - `SlowCost` is the
+            // latch that keeps that from re-parsing, and says why it is
+            // sound to.
+            let cost = || requeue_cost(&d, &id, &out_dir, mem_budget);
             if cur.as_deref() != Some(id.as_str()) {
                 win.clear();
                 attempted.clear();
                 refusal_noted = false;
+                slow_cost = SlowCost::default();
                 gone_armed = None;
                 cur = Some(id.clone());
             }
@@ -910,14 +1367,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 gone_min_misses,
                 defer_count,
             ) {
-                {
-                    let mut g = job.lock_ok();
-                    g.demote = true;
-                    g.defer_reason = reason.clone();
-                }
-                info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-                w.stop();
-                win.clear();
+                fire_defer(&job, &reason, cost(), &w, &mut win);
                 continue;
             }
 
@@ -927,6 +1377,21 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 .is_some_and(|(t, ..)| now.duration_since(*t).as_secs() > window)
             {
                 win.pop_front();
+            }
+            // ---- What is LEFT of the post is gone (TODO 306).
+            // AFTER the window bookkeeping, which is where the
+            // flatline is read from, and BEFORE the `span < window *
+            // 0.8` bail. See [`partial_gone_defer`].
+            if let Some(reason) = partial_gone_defer(
+                &d,
+                &w.pool_live,
+                &win,
+                gone_min_misses,
+                gone_flat,
+                defer_count,
+            ) {
+                fire_defer(&job, &reason, cost(), &w, &mut win);
+                continue;
             }
             let Some((t_first, first, tried_base, missing_base)) = win.front().cloned() else {
                 continue;
@@ -992,7 +1457,8 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 && defer_count < 3
                 && d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
                 && others_waiting(&d)
-                && let Some(o) = server_outages(&d)
+                // TODO 308: THIS job's gauges, never the hub's.
+                && let Some(o) = outages_in(&w.pool_live)
                     .into_iter()
                     .find(|o| o.secs >= span as u64 && o.secs >= server_down_secs())
             {
@@ -1002,20 +1468,27 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                      are only on that server",
                     o.host, o.secs, o.kind, span
                 );
-                {
-                    let mut g = job.lock_ok();
-                    g.demote = true;
-                    g.defer_reason = reason.clone();
-                }
-                info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-                w.stop();
-                win.clear();
+                fire_defer(&job, &reason, cost(), &w, &mut win);
                 continue;
             }
             // ---- The post is gone: servers healthy, every answer a 430.
             //
-            // The sibling arm above covers a server that grants no
+            // The outage arm above covers a server that grants no
             // CONNECTION. This is the other shape of a zero-byte window,
+            // and since TODO 306 it is the SLOWEST of the three arms
+            // that reach it: `early_gone_defer` takes the same verdict
+            // off the run and `partial_gone_defer` off a flatline
+            // inside the window, both with no warmup. It is not
+            // redundant, because both twins ask for something this one
+            // does not - every server having ANSWERED a refusal itself
+            // ([`fleet_answered`]). A fleet with a server that is up
+            // and has simply never been asked stands both of them down
+            // forever, and that fleet is this arm's territory ALONE -
+            // the whole of it, which `fleet_answered`'s own doc
+            // comment now argues at length after this comment claimed
+            // a second shape for nine days and had none.
+            // `e2e_qprog::an_unprobed_server_leaves_the_windowed_arm_to_speak`
+            // drives it end to end.
             // and the `total == 0` bail below sends it to the pool's
             // retry logic on the reasoning that articles "430ing their
             // way through a refusal ladder" are real progress. They are,
@@ -1057,14 +1530,7 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                      last {span:.0}s came back missing and not a byte arrived - \
                      no configured server carries this post right now"
                 );
-                {
-                    let mut g = job.lock_ok();
-                    g.demote = true;
-                    g.defer_reason = reason.clone();
-                }
-                info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-                w.stop();
-                win.clear();
+                fire_defer(&job, &reason, cost(), &w, &mut win);
                 continue;
             }
             // A wholly stalled job is the pool's retry logic's
@@ -1205,6 +1671,10 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
             if share < 0.90 || best < 1_000_000 || rate >= 0.4 * best as f64 {
                 continue;
             }
+            slow_cost.seen = slow_cost.seen.take().or_else(&cost);
+            if slow_keeps_its_slot(&d, &id, rate, best, &mut slow_cost) {
+                continue;
+            }
             let reason = format!(
                 "{:.0}% of the last {:.0}s came from {top_host} at {:.1} MB/s \
                  (session best {:.1} MB/s) - the other servers had nothing \
@@ -1214,16 +1684,430 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 rate / 1e6,
                 best as f64 / 1e6
             );
-            {
-                let mut g = job.lock_ok();
-                g.demote = true;
-                g.defer_reason = reason.clone();
-            }
-            info!(target: "defer", "{id}: {reason} - moving to the back of the queue");
-            w.stop();
-            win.clear();
+            fire_defer(&job, &reason, slow_cost.seen.take(), &w, &mut win);
         }
     });
+}
+
+/// TODO 309(d): the demotion watchdog now asks what the requeue it is
+/// about to cause will COST, and one arm lets the answer veto it.
+///
+/// What each of these pins, and why the split is the way it is, is in
+/// [`slow_keeps_its_slot`]'s own comment: the three zero-byte arms defer
+/// whatever it costs, because a job moving nothing cannot be made
+/// cheaper by keeping its slot, and the single-server-bound arm is the
+/// only one where the job is still making progress.
+#[cfg(test)]
+mod requeue_cost_tests {
+    use super::*;
+    use nzbkit::extract::Frag;
+    use std::sync::atomic::AtomicBool;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-defercost-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A journal holding `n` placed articles of `len` bytes each, which
+    /// is what `resume_map_admitted` will weigh against the budget when
+    /// this job reruns.
+    fn journal_of(dir: &std::path::Path, n: usize, len: u64) {
+        let (j, _) = nzbkit::journal::Journal::open(dir, b"<nzb/>").unwrap();
+        for i in 0..n {
+            j.record_placed(
+                0,
+                &format!("<a{i}@x>"),
+                None,
+                "vol.part01.rar",
+                n as u64 * len,
+                &[Frag::identity("vol.part01.rar", i as u64 * len, len)],
+            );
+        }
+        j.flush();
+    }
+
+    /// The same total spread over `n` slots of `len` bytes EACH - the
+    /// small-volume shape TODO 309(a)'s widened gate maps however large
+    /// the total, where [`journal_of`]'s single wide slot never can.
+    fn journal_of_slots(dir: &std::path::Path, n: usize, len: u64) {
+        let (j, _) = nzbkit::journal::Journal::open(dir, b"<nzb/>").unwrap();
+        for i in 0..n {
+            let name = format!("vol.part{i:03}.rar");
+            j.record_placed(
+                i,
+                &format!("<a{i}@x>"),
+                None,
+                &name,
+                len,
+                &[Frag::identity(&name, 0, len)],
+            );
+        }
+        j.flush();
+    }
+
+    /// The judged job, spelled the way a restart spells one.
+    fn job_at(out_dir: &std::path::Path) -> Arc<Mutex<Job>> {
+        Arc::new(Mutex::new(
+            crate::serve::job_from_json(&serde_json::json!({
+                "nzo_id": "SABnzbd_nzo_nzbfast1",
+                "name": "Judged",
+                "nzb_path": out_dir.join("j.nzb"),
+                "out_dir": out_dir,
+                "state": "Downloading",
+            }))
+            .expect("job_from_json"),
+        ))
+    }
+
+    fn watched_for(id: &str) -> Watched {
+        Watched {
+            id: id.into(),
+            t0: Instant::now(),
+            pool_live: nzbkit::pool::LiveStats::for_servers(&[]),
+            abort: Some(Arc::new(AtomicBool::new(false))),
+            queue_ctl: None,
+            draining: false,
+        }
+    }
+
+    /// PART 1, and the whole of what this change owes the person reading
+    /// the queue: when the requeue will be expensive, the defer line
+    /// SAYS SO - in `defer_reason`, which is the string the dashboard's
+    /// queue drawer prints, not merely in a log line nobody correlates.
+    ///
+    /// Before this, `stall.rs` and `daemon_park.rs` between them named
+    /// neither `holds_cap` nor `placement_bytes` nor `resume_map`
+    /// anywhere (verified 27 Aug 2026), so a job could be demoted onto
+    /// the 2.53x route with the only trace being one `info!` on the
+    /// `resume` target of a rerun hours later.
+    #[test]
+    fn the_defer_line_says_what_the_requeue_will_cost() {
+        let dir = scratch("expensive");
+        // 60 MB placed against the smallest budget the process will
+        // take (64 MiB, so a ~30 MB replay budget): over, and
+        // unambiguously so. The FRAGMENT LENGTHS are what the gate
+        // weighs, so the fixture claims 60 MB in a file of a few KB.
+        journal_of(&dir, 60, 1_000_000);
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+        assert!(budget.holds_cap() < 60_000_000, "the fixture must be over");
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let cost = requeue_cost(&d, "SABnzbd_nzo_nzbfast1", &dir, budget)
+            .expect("60 MB placed is over a ~30 MB replay budget");
+        let RequeueCost::Disk { restored, .. } = cost else {
+            panic!("a single 60 MB volume cannot map under a ~30 MB budget");
+        };
+        assert_eq!(restored, 60_000_000);
+
+        let job = job_at(&dir);
+        let w = watched_for("SABnzbd_nzo_nzbfast1");
+        let mut win: VecDeque<Sample> = VecDeque::new();
+        fire_defer(
+            &job,
+            "the other servers had nothing for this job",
+            Some(cost),
+            &w,
+            &mut win,
+        );
+        let g = job.lock_ok();
+        assert!(g.demote, "the clause is a CLAUSE - it never vetoes here");
+        assert!(
+            g.defer_reason.contains("the other servers had nothing"),
+            "the arm's own verdict survives: {}",
+            g.defer_reason
+        );
+        assert!(
+            g.defer_reason.contains("unpack from volumes on disk"),
+            "and the cost is spelled out beside it: {}",
+            g.defer_reason
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PART 2, the per-arm decision, at the one site every arm lands
+    /// through: an expensive requeue does NOT stop a demotion. The three
+    /// zero-byte arms reach `fire_defer` unconditionally once their
+    /// evidence holds - `early_gone_defer` and `partial_gone_defer` do
+    /// not take a cost at all, which is the type system pinning it - so
+    /// this is where "defer whatever it costs" is decided for them, and
+    /// the assertion above that `demote` is set with `Some(cost)` in
+    /// hand is that decision.
+    ///
+    /// The mirror: an ordinary job under the budget says nothing extra,
+    /// so the common case is exactly the sentence it was before.
+    #[test]
+    fn a_requeue_inside_the_budget_adds_nothing_to_the_line() {
+        let dir = scratch("cheap");
+        journal_of(&dir, 4, 1_000_000);
+        // 45% of this is 450 MB, comfortably over the 4 MB placed.
+        let budget = nzbkit::mem::MemBudget::with_total(1_000_000_000);
+        let d = crate::serve::testutil::test_daemon(&dir);
+        assert!(
+            requeue_cost(&d, "SABnzbd_nzo_nzbfast1", &dir, budget).is_none(),
+            "under the budget, with no wire counters to price a refetch, \
+             there is no cost to report"
+        );
+
+        let job = job_at(&dir);
+        let w = watched_for("SABnzbd_nzo_nzbfast1");
+        let mut win: VecDeque<Sample> = VecDeque::new();
+        fire_defer(&job, "no bytes moved", None, &w, &mut win);
+        let g = job.lock_ok();
+        assert!(g.demote);
+        assert_eq!(
+            g.defer_reason, "no bytes moved",
+            "the cheap case must read exactly as it did before this change"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory with no journal, and one whose file is not a journal,
+    /// both answer "no cost to report" rather than inventing one - with
+    /// no wire counters either (the job is not the active download),
+    /// neither arm has anything to price. The second fixture is what
+    /// stops a stray file in an out_dir being parsed as an empty
+    /// journal - `Journal::peek` requires the v1 header.
+    #[test]
+    fn a_job_with_nothing_to_read_reports_no_cost() {
+        let dir = scratch("bare");
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let id = "SABnzbd_nzo_nzbfast1";
+        assert!(
+            requeue_cost(&d, id, &dir, budget).is_none(),
+            "no journal at all"
+        );
+        std::fs::write(dir.join(".nzbfast.journal"), b"not a journal\nR 0 x\n").unwrap();
+        assert!(
+            requeue_cost(&d, id, &dir, budget).is_none(),
+            "not a journal"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The inequality itself, driven directly at both sides of its
+    /// crossing and at its rate floor.
+    ///
+    /// TODO 94 A prices the disk route at 2.53x payload of device I/O
+    /// against 1.02x mapped, so the requeue's extra work is about one
+    /// and a half passes over what is restored - and the job keeps its
+    /// slot exactly while what is LEFT is smaller than that.
+    #[test]
+    fn the_crossing_is_one_and_a_half_passes_over_what_is_restored() {
+        let cost = RequeueCost::Disk {
+            restored: 2_000_000_000,
+            cap: 1_000_000_000,
+        };
+        let (rate, best) = (40e6, 100_000_000u64);
+        // 2.9 GB left against 3.0 GB of extra disk work: keep the slot.
+        assert!(cost_outweighs_the_wait(&cost, 2_900_000_000, rate, best));
+        // 3.1 GB left: past the crossing, the wait is the bigger number.
+        assert!(!cost_outweighs_the_wait(&cost, 3_100_000_000, rate, best));
+        // And the belt: a job trickling under a tenth of the session
+        // best is closer to the stalled shapes the other arms own than
+        // to a working download, so it is deferred however much is
+        // already on disk.
+        assert!(!cost_outweighs_the_wait(&cost, 1_000_000_000, 9e6, best));
+        assert!(cost_outweighs_the_wait(&cost, 1_000_000_000, 11e6, best));
+    }
+
+    /// The veto is armed by the COST and by nothing else: with the
+    /// requeue on the cheap route there is nothing to weigh, so the
+    /// single-server-bound arm demotes exactly as it always has.
+    ///
+    /// Deliberately not tested here: the `NZBFAST_DEFER_IGNORE_RESUME_COST`
+    /// kill switch. Reading it would mean setting a process-global
+    /// environment variable in a suite that shares one process with
+    /// ~1,750 other tests - the hazard `nzbkit::mem`'s own
+    /// `holds_cap_override_parses_decimal_sizes` declines for the same
+    /// reason.
+    #[test]
+    fn nothing_to_weigh_means_nothing_to_veto() {
+        let dir = scratch("noveto");
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let mut st = SlowCost::default();
+        assert!(
+            !slow_keeps_its_slot(&d, "SABnzbd_nzo_nzbfast1", 40e6, 100_000_000, &mut st),
+            "an affordable requeue never keeps a slow job's slot"
+        );
+        assert!(!st.noted, "and says nothing about it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The veto end to end, on a job the arm would otherwise have sent
+    /// to the back of the queue: 2 GB restored over a 1 GB budget with
+    /// 2 GB left is inside one and a half passes, so the job keeps its
+    /// slot - and says so exactly ONCE however many windows the verdict
+    /// is re-reached over. That latch is not tidiness: without it a
+    /// large slow job prints the same line every 30 s for hours.
+    ///
+    /// Then the crossing, driven through the same door: with 4 GB still
+    /// to fetch the wait is the bigger number and the arm demotes as it
+    /// always has.
+    #[test]
+    fn the_veto_keeps_the_slot_once_and_lets_go_at_the_crossing() {
+        let dir = scratch("veto");
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let id = "SABnzbd_nzo_nzbfast1";
+        *d.active_dl.lock_ok() = Some(id.into());
+        let f = d.hub.fetch_counters();
+        f.plan.store(10_000_000_000, Ordering::Relaxed);
+        f.done.store(8_000_000_000, Ordering::Relaxed);
+
+        let mut st = SlowCost {
+            seen: Some(RequeueCost::Disk {
+                restored: 2_000_000_000,
+                cap: 1_000_000_000,
+            }),
+            noted: false,
+        };
+        assert!(
+            slow_keeps_its_slot(&d, id, 40e6, 100_000_000, &mut st),
+            "2 GB left is inside 1.5 passes over 2 GB restored"
+        );
+        assert!(st.noted, "and it said so");
+        assert!(
+            slow_keeps_its_slot(&d, id, 40e6, 100_000_000, &mut st),
+            "the verdict is re-reached every window for as long as it holds"
+        );
+
+        // 4 GB left: past the crossing, so the slot is not kept and the
+        // demotion the arm was about to land goes ahead.
+        f.done.store(6_000_000_000, Ordering::Relaxed);
+        assert!(!slow_keeps_its_slot(&d, id, 40e6, 100_000_000, &mut st));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The disk arm is held to the rule the rerun applies, not to a copy
+    /// of its old self: the same 60 MB total that is a `Disk` cost as a
+    /// single volume is NO cost spread over sixty 1 MB volumes, because
+    /// TODO 309(a)'s volume arm maps that rerun in-stream at ~1.02x.
+    /// Before this, the drawer warned about a 2.53x route the rerun was
+    /// never going to take, and `slow_keeps_its_slot` vetoed demotions
+    /// on the strength of a cost that would never be paid.
+    #[test]
+    fn a_set_the_rerun_will_map_is_not_priced_as_a_disk_cost() {
+        let dir = scratch("mapped");
+        journal_of_slots(&dir, 60, 1_000_000);
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+        assert!(budget.holds_cap() < 60_000_000, "the total must be over");
+        assert!(
+            2_000_000 < budget.holds_cap() as u64,
+            "and the widest volume must fit the margin"
+        );
+        let d = crate::serve::testutil::test_daemon(&dir);
+        assert!(
+            requeue_cost(&d, "SABnzbd_nzo_nzbfast1", &dir, budget).is_none(),
+            "a rerun that maps in-stream has no disk cost to report"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TODO 309(b)'s warning half, end to end: the compressed shape is a
+    /// journal shielding nothing while the wire counters have moved
+    /// gigabytes, its price is the refetch, the defer line says so, and
+    /// the same figure vetoes the single-server-bound demotion while
+    /// what is left is the smaller number.
+    #[test]
+    fn a_compressed_set_prices_the_refetch_and_the_line_says_so() {
+        let dir = scratch("refetch");
+        // The measured shape (RESUME-ONEPASS-EDGES section 7.5): the
+        // journal exists and holds no placements - a compressed set's
+        // output bytes are decoded bytes, so nothing is ever placed.
+        let (j, _) = nzbkit::journal::Journal::open(&dir, b"<nzb/>").unwrap();
+        j.flush();
+        drop(j);
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let id = "SABnzbd_nzo_nzbfast1";
+        *d.active_dl.lock_ok() = Some(id.into());
+        let f = d.hub.fetch_counters();
+        f.plan.store(10_000_000_000, Ordering::Relaxed);
+        f.done.store(8_000_000_000, Ordering::Relaxed);
+
+        let cost = requeue_cost(&d, id, &dir, budget)
+            .expect("8 GB fetched with nothing shielded is a refetch cost");
+        let RequeueCost::Refetch { refetch } = cost else {
+            panic!("an empty journal cannot be a disk cost");
+        };
+        assert_eq!(refetch, 8_000_000_000);
+
+        let job = job_at(&dir);
+        let w = watched_for(id);
+        let mut win: VecDeque<Sample> = VecDeque::new();
+        fire_defer(&job, "no usable connection", Some(cost), &w, &mut win);
+        let g = job.lock_ok();
+        assert!(
+            g.defer_reason
+                .contains("download those bytes a second time"),
+            "the drawer says what the rerun refetches: {}",
+            g.defer_reason
+        );
+        drop(g);
+
+        // The veto, on the latched figure: 2 GB left against 8 GB
+        // fetched twice keeps the slot (and says so once); with the
+        // refetch the smaller number the demotion goes ahead.
+        let mut st = SlowCost {
+            seen: Some(RequeueCost::Refetch {
+                refetch: 8_000_000_000,
+            }),
+            noted: false,
+        };
+        assert!(
+            slow_keeps_its_slot(&d, id, 40e6, 100_000_000, &mut st),
+            "2 GB left is smaller than the 8 GB a rerun would fetch again"
+        );
+        assert!(st.noted);
+        f.done.store(1_000_000_000, Ordering::Relaxed);
+        assert!(
+            !slow_keeps_its_slot(&d, id, 40e6, 100_000_000, &mut st),
+            "9 GB left outweighs the 8 GB refetch - the wait is the bigger number"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two guards on the bandwidth arm, each driven at the shape it
+    /// exists for. A store set's placements legitimately trail the wire
+    /// (held spans, in-flight, par2-main), so a 400 MB shield against
+    /// 2.5 GB moved is bookkeeping lag and not a compressed set - the
+    /// ratio guard holds even though the raw gap tops the floor. And a
+    /// genuinely unshielded set under the floor is seconds of wire time,
+    /// not worth alarming over.
+    #[test]
+    fn the_refetch_arm_reads_lag_and_small_change_as_no_cost() {
+        let dir = scratch("guards");
+        journal_of(&dir, 400, 1_000_000);
+        let budget = nzbkit::mem::MemBudget::with_total(1_000_000_000);
+        assert!(400_000_000 < budget.holds_cap() as u64, "under the cap");
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let id = "SABnzbd_nzo_nzbfast1";
+        *d.active_dl.lock_ok() = Some(id.into());
+        let f = d.hub.fetch_counters();
+        f.plan.store(4_000_000_000, Ordering::Relaxed);
+        f.done.store(2_500_000_000, Ordering::Relaxed);
+        assert!(
+            requeue_cost(&d, id, &dir, budget).is_none(),
+            "400 MB shielded of 2.5 GB moved is lag, not a compressed set"
+        );
+
+        // Nothing shielded at all, but only 900 MB moved: under the
+        // floor, so still nothing worth a line.
+        let bare = scratch("floor");
+        let d2 = crate::serve::testutil::test_daemon(&bare);
+        *d2.active_dl.lock_ok() = Some(id.into());
+        let f2 = d2.hub.fetch_counters();
+        f2.plan.store(2_000_000_000, Ordering::Relaxed);
+        f2.done.store(900_000_000, Ordering::Relaxed);
+        assert!(
+            requeue_cost(&d2, id, &bare, budget).is_none(),
+            "a refetch under the floor is not worth alarming over"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
 }
 
 #[cfg(test)]
@@ -1277,6 +2161,63 @@ mod stop_verb_tests {
         );
     }
 
+    /// A live two-connection fleet against a mock whose bodies take
+    /// `delay_ms`, with its pipelines already full: 60_000 is the fleet
+    /// a drain cannot finish (the wedged rows of the table on
+    /// `DEFER_DRAIN_GRACE`), a small number is one that winds down well
+    /// inside any grace. Hands back the run's own `QueueControl` - the
+    /// handle a verdict's teeth go through - and the task to join.
+    async fn fleet_rig(delay_ms: u64) -> (Arc<QueueControl>, tokio::task::JoinHandle<()>) {
+        let mut articles = std::collections::HashMap::new();
+        let payload: Vec<u8> = (0..64_000u32).map(|i| i as u8).collect();
+        for i in 0..40 {
+            make_file_articles(
+                &format!("d{i}.bin"),
+                &payload,
+                64_000,
+                &format!("d{i}"),
+                &mut articles,
+            );
+        }
+        let ids: Vec<ArticleReq> = articles
+            .keys()
+            .map(|k| ArticleReq::fresh(k.as_str()))
+            .collect();
+        let srv = MockServer::start(
+            articles,
+            Chaos {
+                delay_ms,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut sc = srv.server_config();
+        sc.connections = 2;
+        let cfg = PoolConfig {
+            connections: 2,
+            window: 2,
+            ramp_delay: Duration::from_millis(0),
+            adaptive_timeout: true,
+            ..Default::default()
+        };
+        let ctl = Arc::new(QueueControl::default());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let ctl_fetch = ctl.clone();
+        let run = tokio::spawn(async move {
+            let servers = vec![(sc, cfg)];
+            let collect = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+            let _ = fetch_all_multi_ctl(&servers, ids, tx, Some(&ctl_fetch)).await;
+            let _ = collect.await;
+            // Hold the mock until the run is over, or its listener
+            // dies under the fleet and the rig measures a dead peer
+            // instead of the verb.
+            drop(srv);
+        });
+        // Let the fleet dial and fill its pipelines.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        (ctl, run)
+    }
+
     /// The verdict's verb, driven against a REAL fleet: a defer winds the
     /// pool down rather than killing it, and escalates at the grace.
     ///
@@ -1291,60 +2232,9 @@ mod stop_verb_tests {
     /// the whole of what stops a late escalation reaching a successor.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_defer_drains_the_fleet_and_escalates_only_at_the_grace() {
-        async fn rig(delay_ms: u64) -> (Arc<QueueControl>, tokio::task::JoinHandle<()>) {
-            let mut articles = std::collections::HashMap::new();
-            let payload: Vec<u8> = (0..64_000u32).map(|i| i as u8).collect();
-            for i in 0..40 {
-                make_file_articles(
-                    &format!("d{i}.bin"),
-                    &payload,
-                    64_000,
-                    &format!("d{i}"),
-                    &mut articles,
-                );
-            }
-            let ids: Vec<ArticleReq> = articles
-                .keys()
-                .map(|k| ArticleReq::fresh(k.as_str()))
-                .collect();
-            let srv = MockServer::start(
-                articles,
-                Chaos {
-                    delay_ms,
-                    ..Default::default()
-                },
-            )
-            .await;
-            let mut sc = srv.server_config();
-            sc.connections = 2;
-            let cfg = PoolConfig {
-                connections: 2,
-                window: 2,
-                ramp_delay: Duration::from_millis(0),
-                adaptive_timeout: true,
-                ..Default::default()
-            };
-            let ctl = Arc::new(QueueControl::default());
-            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-            let ctl_fetch = ctl.clone();
-            let run = tokio::spawn(async move {
-                let servers = vec![(sc, cfg)];
-                let collect = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-                let _ = fetch_all_multi_ctl(&servers, ids, tx, Some(&ctl_fetch)).await;
-                let _ = collect.await;
-                // Hold the mock until the run is over, or its listener
-                // dies under the fleet and the rig measures a dead peer
-                // instead of the verb.
-                drop(srv);
-            });
-            // Let the fleet dial and fill its pipelines.
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            (ctl, run)
-        }
-
         // Phase 1: the server has stopped answering. The drain cannot
         // finish, so the grace is what ends the run.
-        let (ctl, run) = rig(60_000).await;
+        let (ctl, run) = fleet_rig(60_000).await;
         let flag = Arc::new(AtomicBool::new(false));
         watched_over(Some(flag.clone()), Some(ctl.clone())).stop_within(Duration::from_millis(300));
         assert!(
@@ -1367,7 +2257,7 @@ mod stop_verb_tests {
 
         // Phase 2: the server is answering. The drain finishes long
         // before the grace, so the escalation must be inert.
-        let (ctl, run) = rig(30).await;
+        let (ctl, run) = fleet_rig(30).await;
         let flag = Arc::new(AtomicBool::new(false));
         watched_over(Some(flag.clone()), Some(ctl.clone())).stop_within(Duration::from_secs(3));
         tokio::time::timeout(Duration::from_secs(30), run)
@@ -1381,6 +2271,51 @@ mod stop_verb_tests {
             "a fleet that wound down inside the grace is never aborted - \
              that is what keeps a late escalation off a successor's run"
         );
+    }
+
+    /// The bound against a drain THE VERDICT DID NOT START, which until
+    /// 27 Aug 2026 was no bound at all (v1.2.4 sweep, finding R4).
+    ///
+    /// `stop_within` early-returned on `is_draining()`, so a defer
+    /// landing on a run the user had already paused gracefully did
+    /// nothing whatsoever: the drain was set, so the verb was a no-op;
+    /// the escalation was skipped, so no grace was armed; and the engine
+    /// flag belongs to the escalation, so it was never set either. The
+    /// wedge was then bounded only by the pre-byte read ladder - the
+    /// 9.6 s wedged rows of the table on `DEFER_DRAIN_GRACE`, which is
+    /// the measurement that constant exists to replace.
+    ///
+    /// The pause is spelled as `QueueControl::drain`, because that IS
+    /// the user's pause: `Daemon::fire_pause(false)` is exactly this
+    /// call on exactly this handle, and it arms nothing behind it.
+    ///
+    /// The FLAG is the assertion and the join is only hygiene. Under the
+    /// old code the flag could never be set, on any box at any load, so
+    /// this kills the mutation deterministically rather than by racing a
+    /// wedged fleet's ladder against a timeout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_defer_bounds_a_wedge_the_users_own_pause_left_draining() {
+        let (ctl, run) = fleet_rig(60_000).await;
+        // The user's graceful pause, ahead of the verdict.
+        assert!(ctl.drain(), "the pause must reach a live run");
+        assert!(ctl.is_draining(), "and leave it draining, with no bound");
+
+        let flag = Arc::new(AtomicBool::new(false));
+        watched_over(Some(flag.clone()), Some(ctl.clone())).stop_within(Duration::from_millis(300));
+        // Comfortably past the grace, and a small fraction of the
+        // ladder the old code left this wedge to.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "a defer against a fleet that has stopped answering must be \
+             bounded by DEFER_DRAIN_GRACE whoever started the drain - a \
+             verdict that finds the run already draining still owes the \
+             escalation, because the user's pause armed none"
+        );
+        tokio::time::timeout(Duration::from_secs(30), run)
+            .await
+            .expect("the escalation must take the line back")
+            .expect("the run task");
     }
 }
 

@@ -74,6 +74,7 @@ pub(crate) fn print_failure_diagnostics(
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
+        // cpu-workers-gate: a diagnostic REPORTING what the machine has.
         std::thread::available_parallelism().map_or(0, |n| n.get()),
         nzbkit::mem::physical_ram().map_or(0, |b| b / 1_000_000_000),
     );
@@ -236,6 +237,30 @@ pub(crate) struct LossCauses<'a> {
     /// every count and verdict above, and 0 is no evidence either way
     /// (most backbones never name the reason).
     pub(crate) takedown_430: u64,
+    /// Of those, segments the pool wrote off while the fleet was SHORT:
+    /// a server that had been serving went out before the article ever
+    /// reached it, so the survivors' 430s read as unanimous over a
+    /// quorum that was no longer whole (`pool::MissingCause::Unasked`).
+    ///
+    /// Rides its own counter for exactly the reason `takedown_430`
+    /// does, and stays inside `missing_430` for every count and verdict
+    /// above: the article IS still absent from every server that
+    /// answered, so moving it out would change what the repair planner
+    /// and every gate here read. What it buys is the WORDING - see
+    /// [`LossCauses::asked_430`] and [`unasked_clause`]. The standing
+    /// rule is the memory topic `nzbfast-retry-propagation-trap`: say
+    /// it in the message, keep the classification.
+    ///
+    /// PAYLOAD-ONLY WITH NO RECOVERY TWIN, unlike every counter around
+    /// it, and that is a decision rather than an omission. The
+    /// recovery-side clauses claim no unanimity - "were lost as well,
+    /// so there was less parity available to repair with" is true of an
+    /// unasked parity segment exactly as it is of a refused one - so a
+    /// twin would carry a distinction no sentence spends and would cost
+    /// a field in every literal that builds this struct. The clauses
+    /// that DO claim "every server" are all payload clauses, and they
+    /// are the ones this counter corrects.
+    pub(crate) unasked_430: u64,
     /// Never requested: outside every server's configured retention.
     pub(crate) retention_excluded: u64,
     /// Payload segments lost to transport errors (timeouts, resets,
@@ -372,6 +397,31 @@ impl LossCauses<'_> {
             + self.retention_excluded_recovery
             + self.recovery_errs
     }
+
+    /// Payload refusals a WHOLE fleet gave: `missing_430` less the share
+    /// written off after a participating server had already gone out.
+    ///
+    /// Every clause in [`incomplete_verdict`] that says "confirmed
+    /// missing by every server", or counts the backbones behind that
+    /// verdict, has to spend THIS figure and not `missing_430`. The two
+    /// were the same number until `MissingCause::Unasked` existed, and
+    /// the sentence they produce is the one the user acts on: "every
+    /// server said this article is gone" sends them looking for another
+    /// copy of the release, where "our own fleet shrank" sends them to
+    /// the server that stopped, or simply to try again later. Reporting
+    /// a loss our fleet caused in the first set of words is the defect
+    /// the participation mask in `nzbkit::pool::gates` was built to
+    /// make visible.
+    ///
+    /// Saturating rather than a plain subtraction: `unasked_430` is a
+    /// SHARE of `missing_430` by construction (`get::workers`
+    /// `note_missing_cause` charges both from one arm), so the two can
+    /// only disagree if a caller builds this struct by hand, and a
+    /// panic in the failure-summary path would replace a bad sentence
+    /// with no job report at all.
+    fn asked_430(&self) -> u64 {
+        self.missing_430.saturating_sub(self.unasked_430)
+    }
 }
 
 /// How old a post must be before "every article 430" may be called DEAD
@@ -469,7 +519,80 @@ fn recovery_is_the_casualty(
             <= causes.total_segments
 }
 
+/// What the fleet's own shrinkage cost this run, as the clause that
+/// tells the `left_servers` line what it was FOR.
+///
+/// `left_servers` names the server that served and then stopped;
+/// `unasked_430` is the bill. Until both are said the pair is two
+/// unrelated warnings - one about a provider, one about a post - and a
+/// reader has no way to join them, which is how a loss our own fleet
+/// caused went out reading as a verdict about the POST. Placed directly
+/// after that line for the same reason, so the two arrive as one story.
+///
+/// SELF-CONTAINED on purpose, rather than "N of those": the two facts
+/// come from different latches and one can fire without the other.
+/// `note_server_dark` skips the `left_mid_run` latch when the run is
+/// already aborted or draining, so a torn-down run can reach a terminal
+/// `Unasked` with `left_servers` empty. Rare, and a clause that reads as
+/// a dangling reference in exactly the case nothing else explains is the
+/// wrong half to save two words on.
+///
+/// IT NEVER SUPPRESSES THE REFUSAL CLAUSES, and that is the whole
+/// arithmetic. A run can be BOTH at once, and the first cut of the STALL
+/// message is the standing warning: it reassured a user that the failure
+/// was "not evidence that anything is missing" about a release four
+/// providers had just called short 2031 times. So the refusal clauses
+/// keep saying what a whole fleet refused - `asked_430`, not
+/// `missing_430` - and this one says what nobody was asked for. The two
+/// figures sum to `missing_430`, so neither has to walk the other back.
+///
+/// An empty string when there is nothing to report, so the call site is
+/// one line: this function's own comment is long, and
+/// [`incomplete_verdict`] is inside twenty lines of the 500-line
+/// function ceiling (`tools/size-gate.py`).
+fn unasked_clause(causes: &LossCauses) -> String {
+    if causes.unasked_430 == 0 {
+        return String::new();
+    }
+    format!(
+        "; {} segment(s) were written off while the fleet was short - a server that \
+         had been serving went out before those articles reached it, so no server \
+         that could still have answered was asked for them, and another attempt once \
+         that server is back may well find them",
+        causes.unasked_430
+    )
+}
+
+/// [`incomplete_verdict`]'s sentence alone.
+///
+/// TEST-ONLY since TODO 307 item 1's job-level carry, and that is the
+/// whole story of this function: production now takes the kind and the
+/// words together, because throwing the kind away here is what forced
+/// the daemon to rebuild it from the prose. Ninety-nine assertions read
+/// the sentence and nothing else, so the wrapper stays for them - as a
+/// wrapper, never as a second copy of the branch ladder, which would be
+/// the exact "second thing to keep in step" this item exists to remove.
+#[cfg(test)]
 pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCauses) -> String {
+    incomplete_verdict(incomplete, derrs, causes).1
+}
+
+/// Why a download did not come out whole - the CLASSIFICATION and the
+/// sentence, decided together and returned together.
+///
+/// TODO 307 item 1's job-level carry. Every opening below was already
+/// chosen for the `fail_kind` it would produce - the comments in this
+/// function say so at every arm, at length, with the incidents behind
+/// them - and the daemon then threw that knowledge away and rebuilt it
+/// by `starts_with` over the words. The kind is now stated where it is
+/// decided; the words are unchanged, and `failkind::tests::producers`
+/// asserts on every row that the two still agree.
+pub(crate) fn incomplete_verdict(
+    incomplete: usize,
+    derrs: u64,
+    causes: &LossCauses,
+) -> (crate::failkind::FailKind, String) {
+    use crate::failkind::FailKind;
     if incomplete > 0 {
         // A stall is OUR failure and has to say so, before any count is
         // read as evidence about the post. It opens with the connection
@@ -487,7 +610,7 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
             // the first version of this message told the user "not
             // evidence that anything is missing" about a release where
             // four providers had said exactly that, thousands of times.
-            match causes.missing_430 {
+            match causes.asked_430() {
                 0 => msg.push_str(
                     " No server said any article was missing, so this is a fault on \
                      THIS machine or its link rather than evidence about the post - \
@@ -510,7 +633,10 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                     causes.dead_servers.join(", ")
                 ));
             }
-            return msg;
+            // OUR failure. The opening was chosen for this kind (see
+            // the comment above it); now it is stated rather than
+            // spelled.
+            return (FailKind::Transport, msg);
         }
         // No server ever said "gone" - blaming the post would be a lie.
         let all_transport = causes.missing_430 == 0
@@ -612,26 +738,42 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         // so nothing else would carry it.
         const UNOBTAINABLE: &str = "the PAR2 recovery volumes this repair needed could not be fetched from \
              any server that has the post";
-        let mut msg = if size_header_lies {
-            format!(
-                "post size header disagrees with its parts: every payload article \
+        // ONE ladder for the kind and the words, so an arm cannot be
+        // added to either half alone. Each kind here is the one
+        // `fail_kind` reads back off the opening this arm writes, and
+        // the arms' own comments carry the reasons.
+        let (kind, mut msg) = if size_header_lies {
+            // `Local` in the string classifier too, and deliberately:
+            // re-downloading cannot post bytes the poster never posted,
+            // so this must not be transient.
+            (
+                FailKind::Local,
+                format!(
+                    "post size header disagrees with its parts: every payload article \
                  arrived and decoded, but {incomplete} file(s) declare more bytes than \
                  the post actually carries, {derrs} decode/write errors. Re-downloading \
                  cannot change this - the missing bytes were never posted"
+                ),
             )
         } else if post_gone {
-            format!(
-                "post is gone: not one of the {} article(s) is on any server - all \
+            (
+                FailKind::Gone,
+                format!(
+                    "post is gone: not one of the {} article(s) is on any server - all \
                  {incomplete} file(s) came back empty and none of the payload \
                  arrived, {derrs} decode/write errors",
-                causes.total_segments
+                    causes.total_segments
+                ),
             )
         } else if all_transport {
-            format!(
-                "download failed on connection errors: {incomplete} file(s) lost segments \
+            (
+                FailKind::Transport,
+                format!(
+                    "download failed on connection errors: {incomplete} file(s) lost segments \
                  to transport failures ({} in all - no server said any article was \
                  missing), {derrs} decode/write errors",
-                causes.transport_failed
+                    causes.transport_failed
+                ),
             )
         } else if recovery_casualty {
             // Same OPENING WORDS as the plain arm below, and that is
@@ -675,15 +817,24 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                 (Some(c), false) => c,
                 (None, _) => UNOBTAINABLE.to_string(),
             };
-            format!(
-                "download incomplete: the recovery data is what failed, not the payload - \
+            // The same kind as the plain arm below, for exactly the
+            // reason its opening words are the same - see the block
+            // comment above this arm.
+            (
+                FailKind::MissingArticles,
+                format!(
+                    "download incomplete: the recovery data is what failed, not the payload - \
                  {lost}, so the {incomplete} file(s) that came up short have no parity \
                  left to rebuild them from, {derrs} decode/write errors"
+                ),
             )
         } else {
-            format!(
-                "download incomplete: {incomplete} file(s) with missing segments, \
+            (
+                FailKind::MissingArticles,
+                format!(
+                    "download incomplete: {incomplete} file(s) with missing segments, \
                  {derrs} decode/write errors"
+                ),
             )
         };
         // Damage is not absence, and the automatic-retry gate has to be
@@ -827,13 +978,13 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         // additionally requires nothing to have arrived and the post to
         // be older than propagation explains), so this stands down when
         // that fired rather than saying the same thing twice.
-        if causes.missing_430 > 0 && causes.par2_slots == 0 && !post_gone {
+        if causes.asked_430() > 0 && causes.par2_slots == 0 && !post_gone {
             msg.push_str(&format!(
                 "; {} segment(s) were confirmed missing by every server AND this post \
                  carries no PAR2 recovery data, so nothing can rebuild them. If the \
                  post is not brand new (where the servers may simply not have it yet), \
                  retrying will not help and another version is the answer",
-                causes.missing_430
+                causes.asked_430()
             ));
         }
         // The takedown flavour, where a server actually named it. Most
@@ -905,18 +1056,21 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
                 causes.left_servers.join(", ")
             ));
         }
+        // What that departure COST, joined to the line above: see
+        // [`unasked_clause`], which is empty when nothing was unasked.
+        msg.push_str(&unasked_clause(causes));
         // How many INDEPENDENT opinions the verdict rests on. Only where
         // a server actually said 430: on a transport-only failure nobody
         // gave an opinion about the post at all, and naming the backbones
         // there would dress a provider wobble up as a unanimous verdict.
-        if causes.missing_430 > 0 && !causes.backbones.is_empty() {
+        if causes.asked_430() > 0 && !causes.backbones.is_empty() {
             msg.push_str(&format!(
                 "; asked {} backbone(s): {} (resellers of one backbone answer alike)",
                 causes.backbones.len(),
                 causes.backbones.join(", ")
             ));
         }
-        msg
+        (kind, msg)
     } else {
         // DECODE and WRITE errors share one counter but have opposite
         // remedies, and the sample says which happened: a decode error
@@ -953,7 +1107,11 @@ pub(crate) fn incomplete_reason(incomplete: usize, derrs: u64, causes: &LossCaus
         if let Some(e) = &causes.decode_sample {
             msg.push_str(&format!(" (first error: {})", e.text));
         }
-        msg
+        // Both spellings are about THIS machine or the copies on the
+        // server, never about the post being short - which is what the
+        // string classifier's catch-all already answers here. Stated so
+        // the answer no longer depends on the catch-all staying put.
+        (FailKind::Local, msg)
     }
 }
 
@@ -1039,6 +1197,21 @@ pub(crate) fn missing_articles_proven_stale(msg: &str) -> bool {
         // `a_server_that_left_mid_run_is_never_proven_stale` (audit 20
         // Aug, A3).
         && !msg.contains("served for part of the run and then stopped")
+        // Sixth exclusion, and the same physical event as the fifth
+        // reached through the other latch. `MissingCause::Unasked` is
+        // the pool SAYING that a departure decided these segments,
+        // where the fifth exclusion infers it from a server having
+        // left; the two normally fire together, and this one covers the
+        // run that reached a terminal unasked verdict while already
+        // aborting or draining, where `note_server_dark` skips the
+        // `left_mid_run` latch and nothing else here would notice. Same
+        // direction as all five above - preserve the one automatic
+        // retry, because a suppressed retry is also FINAL (indexer
+        // dead-report, FailureLink re-grab, duplicate promotion) - and
+        // preserving it is exactly right for a loss no complete fleet
+        // ever voted on. The clause text IS the contract; the round
+        // trip is pinned by `an_unasked_loss_is_never_proven_stale`.
+        && !msg.contains("written off while the fleet was short")
 }
 
 /// A zip an extraction pass reported and could not produce, with the

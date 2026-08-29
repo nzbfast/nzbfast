@@ -37,12 +37,15 @@ pub(super) fn mask_spool_from_recovery(g: &mut Job) {
 
 pub(super) fn m_queue(
     d: &Arc<Daemon>,
-    _req: &mut tiny_http::Request,
+    req: &mut tiny_http::Request,
     params: &std::collections::HashMap<String, String>,
     _ctx: &ApiCtx<'_>,
-    _api_body: &mut Option<Vec<u8>>,
+    api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some({
+        // A bulk selection's id list outgrows the 8 KB request line
+        // (one Show more page is 250 ids) - see `merge_body_params`.
+        let params = &merge_body_params(req, params, api_body);
         let value = params.get("value").cloned().unwrap_or_default();
         // Trimmed, like the delete path's busy guard: a comma list with
         // spaces in it ("nzo_1, nzo_2") otherwise matched the guard and
@@ -215,8 +218,34 @@ pub(super) fn m_queue(
                     // The rationale lives on the helper, which the
                     // JSON-RPC delete variants share.
                     note_queue_idle_unless_active(d, stopped_active);
+                    json!({"status": true, "removed": count})
+                } else {
+                    // A refusal SAYS SOMETHING. This arm answered
+                    // `{"status": false, "removed": 0}` with no `error`
+                    // key for as long as it has existed, and the three
+                    // bulk controls on the dashboard report in red only
+                    // when one is present - `if(j.status===false &&
+                    // j.error)` - so every refusal it could produce fell
+                    // through to the SUCCESS branch: a GREEN "Removed 0
+                    // from the queue.", the selection cleared and the bar
+                    // gone, over a write that never happened. The page
+                    // was hardened at the same time, but the sentence
+                    // belongs HERE: this is the one place that knows why,
+                    // and one `error` lights up every door onto this arm
+                    // at once (the bulk bar, the row's own X, and the
+                    // clear-everything button, which reaches it through
+                    // `mustOk` and had nothing to print but "rejected").
+                    //
+                    // Worded without a plural noun, like `toast.qCleared`
+                    // beside it, so one sentence covers one id, a
+                    // 250-id selection and `value=all` in every locale -
+                    // and every one of those cases really is this: the
+                    // row finished, or another tab (or an *arr) took it
+                    // between the paint and the click.
+                    json!({"status": false, "removed": 0,
+                        "error": "nothing in the queue matched that - it may have \
+                                  just finished, or been removed already"})
                 }
-                json!({"status": count > 0, "removed": count})
             }
             Some(op @ ("pause" | "resume")) => {
                 if op == "pause" {
@@ -336,6 +365,12 @@ pub(super) fn m_queue(
             // there is also what holds `m_queue` under the §106
             // function ceiling.
             Some("promote_file") => super::files::promote_arm(d, params),
+            // TODO 304 stage 2: insure this row, or stop insuring it -
+            // the explicit statement the add-time stamp is deliberately
+            // too narrow to infer. One line for the same reason
+            // `promote_file` is: the whole transaction, and every belt
+            // it shares with the picker, lives in `serve::insurance`.
+            Some("insure") => crate::serve::insurance::insure_arm(d, params),
             Some("rename") => super::super::remote::rename_arm(d, params),
             Some("sort") => super::super::remote::sort_arm(d, params),
             Some("change_complete_action") => super::super::remote::complete_action_arm(params),
@@ -394,12 +429,15 @@ pub(super) fn m_queue(
 
 pub(super) fn m_history(
     d: &Arc<Daemon>,
-    _req: &mut tiny_http::Request,
+    req: &mut tiny_http::Request,
     params: &std::collections::HashMap<String, String>,
     _ctx: &ApiCtx<'_>,
-    _api_body: &mut Option<Vec<u8>>,
+    api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
     Some({
+        // Same POST-body door as `m_queue`: two history Show more pages
+        // put the id list past the request line.
+        let params = &merge_body_params(req, params, api_body);
         let value = params.get("value").cloned().unwrap_or_default();
         let find = |id: &str| {
             d.history
@@ -758,7 +796,29 @@ pub(super) fn m_history(
                 // false as an error toast (§18). A per-id delete keeps
                 // reporting the miss - an unknown id is diagnosable.
                 let class_sweep = matches!(value.as_str(), "all" | "completed" | "failed");
-                json!({"status": count > 0 || class_sweep, "removed": count})
+                if count > 0 || class_sweep {
+                    json!({"status": true, "removed": count})
+                } else {
+                    // ...and a per-id miss says WHY, for the reason the
+                    // queue arm above sets out at length: with no `error`
+                    // key the dashboard's two bulk history controls take
+                    // their SUCCESS branch and land a green "Cleared 0
+                    // from the list." over a write that was refused.
+                    //
+                    // Its own sentence rather than a share of the queue's:
+                    // "may have just finished" is true of a queued row and
+                    // false of a history row, which by definition finished
+                    // long ago - the same reason `bbc5b0f84` would not
+                    // reuse `toast.nochange` here. That commit put this
+                    // sentence on the PAGE, in `delHist`/`delHistFiles`
+                    // only; the bulk pair two controls away had no way to
+                    // reach it, so it lives here now and every door onto
+                    // this arm inherits it. Also without a plural noun:
+                    // one id and a 250-id selection get the same words.
+                    json!({"status": false, "removed": 0,
+                        "error": "nothing in your history matched that - it may \
+                                  have been removed already"})
+                }
             }
             _ => history_json(d, params),
         }

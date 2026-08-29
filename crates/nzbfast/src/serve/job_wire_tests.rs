@@ -297,6 +297,12 @@ fn maximal_versionless() -> Value {
         "alt_why": "the first release was missing 40 articles",
         "alt_to_name": "Show.S01E02.1080p.WEB-DL",
         "fail_message": "boom",
+        // TODO 307 item 1. Deliberately a kind the SENTENCE beside it
+        // does not classify to ("boom" is `Local`): the fixture's whole
+        // job is to notice a key that stopped being read, and a code
+        // agreeing with its own message would still round-trip if the
+        // reader dropped it on the floor.
+        "fail_code": "gone",
         "fail_detail": "a longer explanation",
         "delete_status": "DUPE",
         "priority": 1,
@@ -437,6 +443,97 @@ fn a_maximally_populated_record_keeps_its_values() {
         Some(std::path::Path::new("/final/ep1.mkv"))
     );
     assert!(j.early_published[1].dest.is_none());
+    assert_eq!(j.fail_code, Some(FailKind::Gone));
+    // ...and it is what the job ANSWERS with, over a sentence that
+    // classifies to something else. A field read back into a struct and
+    // then ignored by every reader would pass the line above alone.
+    assert_eq!(j.fail_kind(), FailKind::Gone);
+    assert_eq!(crate::failkind::fail_kind(&j.fail_message), FailKind::Local);
     assert_eq!(j.whyslow.as_ref().map(|w| w.layer.as_str()), Some("disk"));
     assert!(j.filed && j.tv_sort && j.paused && j.library && j.cleaned_trash);
+}
+
+// ---- the failure code (TODO 307 item 1) ----
+
+/// The compatibility claim for the new key, which is the whole reason it
+/// did not bump `JOB_SCHEMA_VERSION`: a record written before it existed
+/// loads unchanged, and reads as "nobody classified this", which is the
+/// truth about such a record.
+#[test]
+fn a_record_written_before_the_failure_code_reads_as_unclassified() {
+    let mut v = maximal_versionless();
+    v.as_object_mut().expect("object").remove("fail_code");
+    let j = job_from_json(&v).expect("parses");
+    assert_eq!(j.fail_code, None);
+    // And the answer it gives is EXACTLY the one it gave before the
+    // field existed - the string classifier over its own sentence.
+    assert_eq!(
+        j.fail_kind(),
+        crate::failkind::fail_kind(&j.fail_message),
+        "a version-less record must not change its classification"
+    );
+}
+
+/// Every kind survives the wire, in the record rather than in isolation:
+/// `failkind::tests::job_carry` pins the token pair, this pins that
+/// `job_json` and `job_from_json` are the ones spelling it.
+#[test]
+fn every_failure_code_round_trips_through_the_record() {
+    for kind in [
+        FailKind::MissingArticles,
+        FailKind::Transport,
+        FailKind::Unrepairable,
+        FailKind::PreflightImpossible,
+        FailKind::Gone,
+        FailKind::Local,
+    ] {
+        let mut j = job_from_json(&minimal()).expect("parses");
+        j.fail_code = Some(kind);
+        let back = job_from_json(&job_json(&j)).expect("re-parses");
+        assert_eq!(back.fail_code, Some(kind), "{kind:?}");
+    }
+}
+
+/// An unset code is written as `null` and read back as `None` - not as
+/// an absent key, and not as some default kind. The key is always
+/// present in what this binary writes, so the reader's absence rule is
+/// only ever exercised by records from before the field existed.
+#[test]
+fn an_unset_failure_code_is_written_null_and_reads_back_none() {
+    let mut j = job_from_json(&minimal()).expect("parses");
+    j.fail_code = None;
+    let out = job_json(&j);
+    assert_eq!(out["fail_code"], Value::Null);
+    assert_eq!(job_from_json(&out).expect("re-parses").fail_code, None);
+}
+
+/// A token this build has never heard of - which can only come from a
+/// NEWER one - costs the code and nothing else. `JOB_SCHEMA_VERSION`'s
+/// rule is that an additive key must never refuse a record, and the
+/// alternative here is a downgrade silently deleting a user's history
+/// row over a classification it could not spell.
+#[test]
+fn a_failure_code_this_build_cannot_spell_costs_only_the_code() {
+    for tok in [json!("quarantined"), json!(""), json!(7), json!(true)] {
+        let mut v = maximal_versionless();
+        v["fail_code"] = tok.clone();
+        let j = job_from_json(&v).unwrap_or_else(|| panic!("{tok} must not refuse the record"));
+        assert_eq!(j.fail_code, None, "{tok}");
+        assert_eq!(j.nzo_id, "SABnzbd_nzo_fixture", "{tok}");
+    }
+}
+
+/// Clearing a failure clears BOTH halves. A code outliving the message
+/// it explains would classify the job's NEXT failure by its previous
+/// one - silently, on the auto-retry gate and the dead-post report both
+/// - and `Job::clear_failure` exists so the pair cannot be half-cleared
+/// by a caller that only remembered the sentence.
+#[test]
+fn clearing_a_failure_clears_the_code_with_the_message() {
+    let mut j = job_from_json(&maximal_versionless()).expect("parses");
+    assert!(!j.fail_message.is_empty() && j.fail_code.is_some());
+    j.clear_failure();
+    assert!(j.fail_message.is_empty());
+    assert_eq!(j.fail_code, None);
+    assert_eq!(job_json(&j)["fail_code"], Value::Null);
 }

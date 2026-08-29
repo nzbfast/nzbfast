@@ -1068,6 +1068,17 @@ pub fn parse_nzbget_conf(text: &str) -> Vec<ServerConfig> {
     out
 }
 
+/// NZBGet's `DownloadRate` is documented as kilobytes/sec, and NZBGet's
+/// own C++ source uses 1024-byte kilobytes throughout (the same
+/// convention its `FreeDiskSpaceMB` field uses) - NOT the 1000-byte
+/// kilobytes nzbfast's own size-string parser gives a "K" suffix
+/// (that one is SAB-style/decimal). Converted here, as its own named
+/// step, so the two conventions can never be silently mixed up at an
+/// import call site.
+pub fn nzbget_rate_kb_to_bps(kb: u64) -> u64 {
+    kb.saturating_mul(1024)
+}
+
 #[cfg(test)]
 mod address_family_tests {
     use super::*;
@@ -1556,6 +1567,34 @@ mod tests {
         assert_eq!(s[1].retention_days, 4000);
     }
 
+    /// A malformed or garbage nzbget.conf must never yield a partial
+    /// server - `host.is_empty()` already refuses any Server block
+    /// missing one, but this pins the whole-file shape too: no panic,
+    /// no line misread as a server key by accident.
+    #[test]
+    fn a_malformed_conf_refuses_cleanly_rather_than_importing_partial_servers() {
+        for garbage in [
+            "",
+            "not even close to a conf file\n\u{0}\u{1}garbage \u{fffd} bytes",
+            "Server1.Host=\nServer1.Port=563\n",
+            "ServerX.Host=news.example.com\n", // non-numeric index
+            "Server1Host=news.example.com\n",  // missing the dot
+        ] {
+            let s = parse_nzbget_conf(garbage);
+            assert!(s.is_empty(), "{garbage:?} -> {s:?}");
+        }
+    }
+
+    /// NZBGet's own convention (1024-byte kilobytes), asserted against
+    /// the documented example value from nzbget.conf.
+    #[test]
+    fn nzbget_rate_kb_to_bps_uses_1024_not_1000() {
+        assert_eq!(nzbget_rate_kb_to_bps(0), 0);
+        assert_eq!(nzbget_rate_kb_to_bps(1000), 1_024_000);
+        // Saturates rather than panics or wrapping on an absurd input.
+        assert_eq!(nzbget_rate_kb_to_bps(u64::MAX), u64::MAX);
+    }
+
     use super::*;
 
     const SAB_INI: &str = r#"
@@ -1869,26 +1908,28 @@ mod obf_tests {
     }
 }
 
-/// One SABnzbd category, reduced to the two fields that have a home in
-/// nzbfast: its name, and where finished downloads in it should land.
+/// One imported category (from a SABnzbd or NZBGet config), reduced to
+/// the two fields that have a home in nzbfast: its name, and where
+/// finished downloads in it should land.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SabCategory {
+pub struct ImportedCategory {
     /// The category name, already reduced to a single path component -
     /// nzbfast's `enqueue` and `refile_out_dir` both sanitize it into
     /// one, so `movies/anime` would become the literal folder
     /// `movies_anime` rather than a nested path. The nesting, when there
     /// is any, lives in `dir` instead.
     pub name: String,
-    /// Absolute destination for this category, or `None` when SAB's
-    /// layout already matches what nzbfast does by default and an
-    /// override would change nothing.
+    /// Absolute destination for this category, or `None` when the
+    /// source's layout already matches what nzbfast does by default and
+    /// an override would change nothing.
     pub dir: Option<String>,
 }
 
-/// What [`parse_sabnzbd_categories`] found, and what it could not carry.
+/// What [`parse_sabnzbd_categories`] or [`parse_nzbget_categories`]
+/// found, and what it could not carry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SabCategories {
-    pub cats: Vec<SabCategory>,
+pub struct ImportedCategories {
+    pub cats: Vec<ImportedCategory>,
     /// Human-readable notes about fields that were present in the file
     /// and deliberately not imported. Surfaced to the user rather than
     /// dropped silently: an import that looks complete when it is not is
@@ -1924,7 +1965,7 @@ pub struct SabCategories {
 /// - a `dir` that is just the category's own name needs no entry at all:
 ///   nzbfast already files a category into its own subfolder, so an
 ///   override would say what the default already says.
-pub fn parse_sabnzbd_categories(text: &str) -> SabCategories {
+pub fn parse_sabnzbd_categories(text: &str) -> ImportedCategories {
     use std::collections::HashMap;
 
     let mut complete_dir = String::new();
@@ -1998,7 +2039,7 @@ pub fn parse_sabnzbd_categories(text: &str) -> SabCategories {
     // perfectly valid destination (Codex sweep 5 Aug L2).
     let complete_dir = resolve_sab_dir(&complete_dir, "");
 
-    let mut out = SabCategories::default();
+    let mut out = ImportedCategories::default();
     let mut saw_star_flag = false;
     let saw = |set: &mut Vec<String>, note: &str| {
         if !set.iter().any(|s| s == note) {
@@ -2054,7 +2095,7 @@ pub fn parse_sabnzbd_categories(text: &str) -> SabCategories {
         } else {
             Some(resolve_sab_dir(raw_dir, &complete_dir))
         };
-        out.cats.push(SabCategory { name: cat, dir });
+        out.cats.push(ImportedCategory { name: cat, dir });
     }
 
     if saw_star_flag {
@@ -2081,6 +2122,166 @@ pub fn parse_sabnzbd_categories(text: &str) -> SabCategories {
             Some(d) if !is_absolute_path(d) => c.dir = None,
             _ => {}
         });
+    }
+    out
+}
+
+/// Parse the `CategoryN.*` family of an NZBGet `nzbget.conf` (plus the
+/// `MainDir`/`DestDir` keys their values are commonly built from).
+///
+/// Only `Name` and `DestDir` come over, the same two fields
+/// [`parse_sabnzbd_categories`] carries over from a sabnzbd.ini: `Unpack`
+/// (a per-category unpack override), `Extensions` (per-category
+/// post-processing scripts) and `Aliases` (matching external category
+/// names onto this one) have nowhere to go here and are reported in
+/// `dropped` rather than silently discarded.
+///
+/// NZBGet builds `DestDir`, and a category's own `DestDir`, out of
+/// `${MainDir}` / `${DestDir}` substitution (e.g. `DestDir=${MainDir}/dst`)
+/// - resolved here so a category lands on the same absolute path NZBGet
+/// itself would use. `~` expands the way [`resolve_sab_dir`] expands one
+/// out of a sabnzbd.ini.
+pub fn parse_nzbget_categories(text: &str) -> ImportedCategories {
+    use std::collections::{BTreeMap, HashMap};
+
+    let mut main_dir_raw = String::new();
+    let mut dest_dir_raw = String::new();
+    let mut by_idx: BTreeMap<u32, HashMap<String, String>> = BTreeMap::new();
+
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        let v = v.trim().to_string();
+        if k == "MainDir" {
+            main_dir_raw = v;
+            continue;
+        }
+        if k == "DestDir" {
+            dest_dir_raw = v;
+            continue;
+        }
+        let Some(rest) = k.strip_prefix("Category") else {
+            continue;
+        };
+        let Some((idx, field)) = rest.split_once('.') else {
+            continue;
+        };
+        let Ok(idx) = idx.parse::<u32>() else {
+            continue;
+        };
+        by_idx
+            .entry(idx)
+            .or_default()
+            .insert(field.to_ascii_lowercase(), v);
+    }
+
+    let main_dir = resolve_sab_dir(&resolve_nzbget_var(&main_dir_raw, &[]), "");
+    let dest_dir = resolve_sab_dir(
+        &resolve_nzbget_var(&dest_dir_raw, &[("MainDir", &main_dir)]),
+        &main_dir,
+    );
+
+    let mut out = ImportedCategories::default();
+    let saw = |set: &mut Vec<String>, note: &str| {
+        if !set.iter().any(|s| s == note) {
+            set.push(note.to_string());
+        }
+    };
+
+    let mut unresolved = 0usize;
+    for m in by_idx.values() {
+        for (key, note) in [
+            ("unpack", "the per-category unpack override"),
+            ("extensions", "the per-category post-processing scripts"),
+            ("aliases", "matching external category names onto this one"),
+        ] {
+            if m.get(key).is_some_and(|v| !v.is_empty()) {
+                saw(&mut out.dropped, note);
+            }
+        }
+
+        let name = m.get("name").map(String::as_str).unwrap_or("");
+        let cat = crate::disk::sanitize_filename(name);
+        if cat.is_empty() {
+            continue;
+        }
+
+        let raw_dir = m.get("destdir").map(String::as_str).unwrap_or("");
+        let dir = if raw_dir.is_empty() {
+            None
+        } else {
+            let vars = [
+                ("MainDir", main_dir.as_str()),
+                ("DestDir", dest_dir.as_str()),
+            ];
+            let resolved = resolve_sab_dir(&resolve_nzbget_var(raw_dir, &vars), &dest_dir);
+            // Nothing to override: this is exactly the folder nzbfast's
+            // own default filing would already put the category in.
+            let default = format!("{}/{cat}", dest_dir.trim_end_matches('/'));
+            if resolved.is_empty() || resolved == default || resolved == cat {
+                None
+            } else if !is_absolute_path(&resolved) {
+                unresolved += 1;
+                None
+            } else {
+                Some(resolved)
+            }
+        };
+        out.cats.push(ImportedCategory { name: cat, dir });
+    }
+    if unresolved > 0 {
+        saw(
+            &mut out.dropped,
+            "folders for some categories, because nzbget.conf has no MainDir \
+             to resolve them against",
+        );
+    }
+    out
+}
+
+/// NZBGet's `${Name}` substitution - the only two variables an ordinary
+/// nzbget.conf ever defines by the time a category's `DestDir` references
+/// one.
+///
+/// **An EMPTY value is not a substitution.** This was a plain
+/// `str::replace` over every pair, so a value that resolved to nothing
+/// was pasted in anyway and the placeholder vanished: a conf carrying
+/// `DestDir=${MainDir}/dst` with no `MainDir` line (or an empty one)
+/// resolved to `/dst`, which the caller's `resolve_sab_dir` then KEPT
+/// because it is absolute, and every category built on it landed
+/// somewhere under the filesystem ROOT. On a container running as root -
+/// the docker/Synology/QNAP migration audience this importer exists for
+/// - `create_dir_all` succeeds there, the import reports success, and
+/// every finished job in that category is filed outside any mounted
+/// volume and gone at the next container recreate. Skipping the empty
+/// value leaves the placeholder LITERAL, which is not an absolute path,
+/// so the category parser takes its existing unresolved branch: `dir`
+/// None, the unresolved counter incremented, and the note it already
+/// writes ("folders for some categories, because nzbget.conf has no
+/// MainDir to resolve them against") reaches the user. Do NOT instead
+/// special-case a leading `/` downstream - `/dst` is a perfectly valid
+/// destination for someone who really wrote it, and the defect is the
+/// substitution.
+///
+/// The skip is per-pair and so deliberately WIDER than the `MainDir`
+/// case that found it: the same helper resolves the `${DestDir}` half of
+/// the chain, so a category `DestDir=${DestDir}/x` in a conf where
+/// `DestDir` itself resolved to nothing (neither key set) now lands on
+/// that same unresolved branch instead of becoming `/x`. That is the
+/// correct answer for the same reason.
+fn resolve_nzbget_var(v: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = v.to_string();
+    for (name, value) in vars {
+        if value.is_empty() {
+            continue;
+        }
+        out = out.replace(&format!("${{{name}}}"), value);
     }
     out
 }
@@ -2166,7 +2367,7 @@ name = bare
 host = news.example.com
 "#;
 
-    fn cats(text: &str) -> SabCategories {
+    fn cats(text: &str) -> ImportedCategories {
         parse_sabnzbd_categories(text)
     }
 
@@ -2324,5 +2525,177 @@ host = news.example.com
         let c = cats(INI);
         assert!(!c.cats.iter().any(|c| c.name.contains("news")));
         assert_eq!(c.cats.len(), 5, "{:?}", c.cats);
+    }
+}
+
+#[cfg(test)]
+mod nzbget_category_tests {
+    use super::*;
+
+    const CONF: &str = "\
+MainDir=~/nzbget-downloads
+DestDir=${MainDir}/dst
+InterDir=${MainDir}/inter
+DownloadRate=1500
+Category1.Name=Movies
+Category1.DestDir=${DestDir}/Archive/Movies
+Category1.Unpack=yes
+Category2.Name=TV
+Category2.DestDir=
+Category3.Name=Books
+Category3.Aliases=book*, ebook*
+Category4.Name=flat
+Category4.DestDir=${DestDir}/flat
+";
+
+    /// A category's `DestDir` is commonly built out of `${MainDir}` /
+    /// `${DestDir}` substitution, and both of those are themselves
+    /// resolved through `~` expansion - this pins the whole chain
+    /// against a real HOME, the same way the SAB tilde tests above do.
+    #[test]
+    fn name_and_destdir_come_over_with_variable_substitution() {
+        let home = super::home_dir().expect("test needs HOME or USERPROFILE");
+        let c = parse_nzbget_categories(CONF);
+        let movies = c.cats.iter().find(|c| c.name == "Movies").unwrap();
+        assert_eq!(
+            movies.dir,
+            Some(format!(
+                "{}/nzbget-downloads/dst/Archive/Movies",
+                home.trim_end_matches('/')
+            )),
+            "dropped: {:?}",
+            c.dropped
+        );
+    }
+
+    /// An empty `CategoryN.DestDir` (NZBGet's own "use the default"
+    /// spelling) is not an override - same as no key at all.
+    #[test]
+    fn an_empty_destdir_is_no_override() {
+        let c = parse_nzbget_categories(CONF);
+        let tv = c.cats.iter().find(|c| c.name == "TV").unwrap();
+        assert_eq!(tv.dir, None, "dropped: {:?}", c.dropped);
+        let books = c.cats.iter().find(|c| c.name == "Books").unwrap();
+        assert_eq!(books.dir, None, "dropped: {:?}", c.dropped);
+    }
+
+    /// `${DestDir}/<category name>` is exactly the folder nzbfast's own
+    /// default filing already puts the category in - nothing to
+    /// override, the same "no-op dir" rule the SAB parser applies.
+    #[test]
+    fn a_destdir_matching_our_own_default_filing_is_no_override() {
+        let c = parse_nzbget_categories(CONF);
+        let flat = c.cats.iter().find(|c| c.name == "flat").unwrap();
+        assert_eq!(flat.dir, None, "{:?}", flat.dir);
+    }
+
+    /// `Unpack` and `Aliases` have nowhere to go and must be reported,
+    /// not silently discarded - `Extensions` never appears in this
+    /// fixture and must not show up as a false "dropped" claim either.
+    #[test]
+    fn fields_with_nowhere_to_go_are_reported_dropped() {
+        let c = parse_nzbget_categories(CONF);
+        assert!(
+            c.dropped.iter().any(|d| d.contains("unpack override")),
+            "{:?}",
+            c.dropped
+        );
+        assert!(
+            c.dropped
+                .iter()
+                .any(|d| d.contains("external category names")),
+            "{:?}",
+            c.dropped
+        );
+        assert!(
+            !c.dropped.iter().any(|d| d.contains("post-processing")),
+            "Extensions was never set, so it must not be reported dropped: {:?}",
+            c.dropped
+        );
+    }
+
+    /// A malformed or category-less nzbget.conf must not panic and must
+    /// not invent a category out of noise.
+    #[test]
+    fn a_conf_with_no_categories_yields_nothing_and_does_not_panic() {
+        for garbage in [
+            "",
+            "MainDir=/data\n",
+            "not a conf file at all\n\u{fffd}\u{0}",
+            "Category1Name=Movies\n",  // missing the dot
+            "CategoryX.Name=Movies\n", // non-numeric index
+        ] {
+            let c = parse_nzbget_categories(garbage);
+            assert!(c.cats.is_empty(), "{garbage:?} -> {c:?}");
+        }
+    }
+
+    /// An unresolvable `${MainDir}` must NOT resolve to nothing. The
+    /// substitution was a plain `str::replace`, so an absent or empty
+    /// `MainDir` was pasted in as the empty string and
+    /// `DestDir=${MainDir}/dst` became `/dst` - absolute, therefore kept,
+    /// therefore every category in the import filed under the filesystem
+    /// ROOT. On a container running as root that directory is creatable,
+    /// the import reports success, and the finished jobs are outside any
+    /// mounted volume. Both spellings are driven because they arrive by
+    /// different routes: an absent key never assigns `main_dir_raw` at
+    /// all, an empty one assigns `""`.
+    #[test]
+    fn an_unresolvable_maindir_leaves_the_category_unresolved_not_at_the_root() {
+        for (label, conf) in [
+            (
+                "absent MainDir",
+                "\
+DestDir=${MainDir}/dst
+Category1.Name=Movies
+Category1.DestDir=${DestDir}/Archive/Movies
+",
+            ),
+            (
+                "empty MainDir",
+                "\
+MainDir=
+DestDir=${MainDir}/dst
+Category1.Name=Movies
+Category1.DestDir=${DestDir}/Archive/Movies
+",
+            ),
+        ] {
+            let c = parse_nzbget_categories(conf);
+            let movies = c
+                .cats
+                .iter()
+                .find(|c| c.name == "Movies")
+                .unwrap_or_else(|| panic!("{label}: the category itself still imports: {c:?}"));
+            assert_eq!(
+                movies.dir, None,
+                "{label}: no MainDir means no resolvable folder, not one at the root: {c:?}"
+            );
+            assert!(
+                c.dropped.iter().any(|d| d.contains("no MainDir")),
+                "{label}: the user must be told why the folder did not come over: {:?}",
+                c.dropped
+            );
+        }
+    }
+
+    /// The same skip, one link further down the chain: with neither key
+    /// set, `${DestDir}` resolves to nothing too, and pasting that in
+    /// turned `${DestDir}/Archive` into `/Archive`. Same root, same loss.
+    #[test]
+    fn an_unresolvable_destdir_is_unresolved_too() {
+        let c = parse_nzbget_categories(
+            "\
+Category1.Name=Movies
+Category1.DestDir=${DestDir}/Archive
+",
+        );
+        let movies = c.cats.iter().find(|c| c.name == "Movies").unwrap();
+        assert_eq!(movies.dir, None, "{c:?}");
+        assert!(
+            c.dropped.iter().any(|d| d.contains("no MainDir")),
+            "{:?}",
+            c.dropped
+        );
     }
 }

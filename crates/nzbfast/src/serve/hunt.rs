@@ -302,6 +302,16 @@ pub(super) struct HuntRequest {
     pub name: String,
     pub origin: String,
     pub fail_message: String,
+    /// The classification the failure's producer stated, where there was
+    /// one - TODO 307 item 1. Carried in the snapshot for the same
+    /// reason the message is: the gates below are answered off this
+    /// record and not off a job that has since moved on.
+    ///
+    /// `None` on the QUEUE road, and honestly so: that road synthesises
+    /// its sentence from `altcand::terminal_reason` for a job that has
+    /// not failed yet, so no producer has classified anything and the
+    /// string classifier is the only evidence there is.
+    pub fail_code: Option<FailKind>,
     /// The spooled .nzb of the job that failed. Survives park (the retry
     /// path reads it back), and it is where both the post's age and its
     /// message-id set come from.
@@ -393,8 +403,8 @@ pub(super) fn post_age_days(fail_message: &str, nzb_path: &Path, now: i64) -> Op
 /// Every other post-unavailability verdict (a repair that could not
 /// complete, a recovery set that could not be fetched) carries no such
 /// clause, so it is judged on the age alone.
-fn age_gate_open(fail_message: &str, nzb_path: &Path, now: i64) -> bool {
-    if fail_kind(fail_message) == crate::failkind::FailKind::MissingArticles {
+fn age_gate_open(kind: FailKind, fail_message: &str, nzb_path: &Path, now: i64) -> bool {
+    if kind == FailKind::MissingArticles {
         return crate::diag::missing_articles_proven_stale(fail_message);
     }
     post_age_days(fail_message, nzb_path, now).is_some_and(|d| d >= crate::diag::GONE_MIN_AGE_DAYS)
@@ -457,10 +467,15 @@ pub(super) fn hunt_gates(
     if trigger == Trigger::Auto && !policy.enabled {
         return Err(NoHunt::Disabled);
     }
-    if !fail_kind(&req.fail_message).post_unavailable() {
+    // TODO 307 item 1: the producer's own verdict where it stated one,
+    // and only then the sentence. Both gates take the SAME kind - asking
+    // twice is how one gate ends up answering about a code and the other
+    // about the prose.
+    let kind = crate::failkind::job_kind(req.fail_code, &req.fail_message);
+    if !kind.post_unavailable() {
         return Err(NoHunt::LocalFault);
     }
-    if !age_gate_open(&req.fail_message, &req.nzb_path, now) {
+    if !age_gate_open(kind, &req.fail_message, &req.nzb_path, now) {
         return Err(NoHunt::StillPropagating);
     }
     let p = crate::wall::parse_release(&req.name);
@@ -624,6 +639,7 @@ impl Daemon {
                 name: g.name.clone(),
                 origin: g.origin.clone(),
                 fail_message: g.fail_message.clone(),
+                fail_code: g.fail_code,
                 nzb_path: g.nzb_path.clone(),
                 category: g.category.clone(),
             }
@@ -917,10 +933,12 @@ impl Daemon {
         // spends no indexer allowance and cannot be rate limited.
         #[cfg(feature = "indexer")]
         {
+            // Complete-only IN the SQL: filtering after the newest-first
+            // LIMIT loses a complete copy older than 500 incompletes.
             let hits = self
-                .with_index_read(|ix| ix.search(&p.title, 500).ok())
+                .with_index_read(|ix| ix.search_complete(&p.title, 500).ok())
                 .unwrap_or_default();
-            for r in hits.iter().filter(|r| r.complete) {
+            for r in hits.iter() {
                 let stem = r.display_name().to_string();
                 if !keep(&stem) {
                     continue;
@@ -1433,9 +1451,22 @@ impl Daemon {
             found
         };
         // With NO job lock held, and outside the history lock:
-        // `history_upsert_if_present` takes both itself.
+        // `history_publish` takes both itself. The rescuing publish and
+        // not the raw upsert: the write above DISARMED an overdue
+        // auto-retry stamp, so a refused append the rewrite could still
+        // rescue would reload the stamp at the next start and re-queue
+        // the abandoned row beside the replacement this search just
+        // added (Codex C11). Its present-check keeps a delete that
+        // landed since from being resurrected.
         if let Some(failed) = failed {
-            let _ = self.history_upsert_if_present(&failed);
+            self.history_publish(&failed, || {
+                format!(
+                    "{}: the replaced row's disarmed retry did not reach the \
+                     store - after a restart its overdue auto-retry queues it \
+                     again beside the replacement",
+                    failed.lock_ok().name
+                )
+            });
         }
         true
     }
@@ -1534,6 +1565,8 @@ impl Daemon {
             name: g.name.clone(),
             origin: g.origin.clone(),
             fail_message: format!("{lead}: {why}"),
+            // Synthesised for a job that has not failed - see the field.
+            fail_code: None,
             nzb_path: g.nzb_path.clone(),
             category: g.category.clone(),
         })
@@ -1563,6 +1596,7 @@ impl Daemon {
             // The row's OWN verdict, not a synthesis: see the note on
             // the queue road above.
             fail_message: g.fail_message.clone(),
+            fail_code: g.fail_code,
             nzb_path: g.nzb_path.clone(),
             category: g.category.clone(),
         })

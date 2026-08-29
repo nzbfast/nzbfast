@@ -1955,3 +1955,119 @@ fn env_u64(k: &str, d: u64) -> u64 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(d)
 }
+
+/// The card names itself after the copy its `complete` badge is about.
+///
+/// A card badges `MAX(complete)` over the whole title group, and its
+/// name pick used to be the NEWEST release - so a title whose complete
+/// copy is older than one obfuscated dupe badged as complete while every
+/// identity-derived field came off the dupe. Two of those are real
+/// harm rather than presentation: the enrichment seed parses `rep_stem`
+/// and WRITES the result to `titles`, so a hex stem leaves the card
+/// permanently unmatched, and the wall's have-badge runs `dupe_key` over
+/// the same string, which needs a title plus a year or an SxxEyy and
+/// answers None on a hex stem - so a copy you own reads as one you do
+/// not. The name pick leads with `complete`; the GROUP pick does not,
+/// because the wall pairs it with `latest` for the retention verdict.
+#[test]
+fn a_card_names_itself_after_a_complete_copy_not_a_newer_dupe() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-cardrep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ix = Index::open(&dir.join("index.db")).unwrap();
+
+    // One title, two releases under one key. The COMPLETE one is named
+    // and older; the newer one is an obfuscated dupe in another group.
+    let put = |stem: &str, grp: &str, complete: i32, posted: i64| {
+        ix.db
+            .execute(
+                "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                      first_seen, total_bytes, have_parts, need_parts,
+                                      title_key, kind, res)
+                 VALUES(?1, 'p@x', ?2, 1, ?3, ?4, ?4, 4000000000, ?5, 100,
+                        'm:the film:2019', 'movie', '1080p')",
+                rusqlite::params![
+                    stem,
+                    grp,
+                    complete,
+                    posted,
+                    if complete == 1 { 100 } else { 5 }
+                ],
+            )
+            .unwrap();
+    };
+    put(
+        "The.Film.2019.1080p.BluRay.x264-GRP",
+        "alt.binaries.movies",
+        1,
+        100,
+    );
+    put("a7f3c9e1b2d4", "alt.binaries.boneless", 0, 900);
+
+    let (cards, _) = ix
+        .browse_cards(
+            &BrowseQuery::default(),
+            CardSort::Latest,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    let c = cards
+        .iter()
+        .find(|c| c.title_key == "m:the film:2019")
+        .unwrap();
+    assert!(c.any_complete, "the badge is about the complete copy");
+    assert_eq!(
+        c.rep_stem, "The.Film.2019.1080p.BluRay.x264-GRP",
+        "so the name must be too"
+    );
+    // And the freshness half is untouched: the group still comes off
+    // the NEWEST release, because the wall reads its retention verdict
+    // by pairing that group's family with `latest`.
+    assert_eq!(c.rep_grp, "alt.binaries.boneless");
+    assert_eq!(c.latest_posted, 900);
+    teardown(&dir, ix);
+}
+
+/// With nothing complete under the key, the name pick is the newest -
+/// exactly as before. The complete-first term must not reorder a card
+/// it has no opinion about.
+#[test]
+fn a_card_with_no_complete_copy_still_names_the_newest() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-cardrep0-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ix = Index::open(&dir.join("index.db")).unwrap();
+    let put = |stem: &str, posted: i64| {
+        ix.db
+            .execute(
+                "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                      first_seen, total_bytes, have_parts, need_parts,
+                                      title_key, kind, res)
+                 VALUES(?1, 'p@x', 'alt.binaries.movies', 1, 0, ?2, ?2, 4000000000, 5, 100,
+                        'm:the film:2019', 'movie', '1080p')",
+                rusqlite::params![stem, posted],
+            )
+            .unwrap();
+    };
+    put("The.Film.2019.1080p.BluRay.x264-OLD", 100);
+    put("The.Film.2019.2160p.WEB.x265-NEW", 900);
+
+    let (cards, _) = ix
+        .browse_cards(
+            &BrowseQuery::default(),
+            CardSort::Latest,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
+    let c = cards
+        .iter()
+        .find(|c| c.title_key == "m:the film:2019")
+        .unwrap();
+    assert!(!c.any_complete);
+    assert_eq!(c.rep_stem, "The.Film.2019.2160p.WEB.x265-NEW");
+    teardown(&dir, ix);
+}

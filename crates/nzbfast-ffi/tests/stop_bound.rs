@@ -74,11 +74,14 @@ fn a_stop_that_runs_out_of_time_says_so_and_keeps_the_engine_claimed() {
     assert_eq!(nzbfast_ffi::nzbfast_stop(), -1, "stop before any start");
 
     assert_eq!(
-        // SAFETY: both pointers come from `CString`s that live for the
-        // whole test, so each is a valid NUL-terminated UTF-8 string
-        // for the duration of the call - the whole of
-        // `nzbfast_start`'s safety contract.
-        unsafe { nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), port, key_c.as_ptr()) },
+        // SAFETY: both non-NULL pointers come from `CString`s that live
+        // for the whole test, so each is a valid NUL-terminated UTF-8
+        // string for the duration of the call, and a NULL `out_dir` is
+        // explicitly allowed - the whole of `nzbfast_start`'s safety
+        // contract.
+        unsafe {
+            nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), std::ptr::null(), port, key_c.as_ptr(), 0)
+        },
         0,
         "start"
     );
@@ -105,8 +108,11 @@ fn a_stop_that_runs_out_of_time_says_so_and_keeps_the_engine_claimed() {
         "the engine thread is still alive after a timed-out stop, so is_up must say so"
     );
     assert_eq!(
-        // SAFETY: the same two live `CString`s as the start above.
-        unsafe { nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), port, key_c.as_ptr()) },
+        // SAFETY: the same two live `CString`s (and the same NULL
+        // `out_dir`) as the start above.
+        unsafe {
+            nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), std::ptr::null(), port, key_c.as_ptr(), 0)
+        },
         -1,
         "start must REFUSE while the timed-out engine's thread is alive - re-arming the \
          process-global stop baseline underneath it is the failure this guards"

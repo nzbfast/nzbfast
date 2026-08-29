@@ -24,6 +24,7 @@ PKG=$(cd "$(dirname "$0")/.." && pwd)
 REPO=$(cd "$PKG/.." && pwd)
 SCRIPT=$PKG/leak-check.sh
 HOOK=$REPO/.githooks/pre-push
+SPLITTER=$REPO/tools/site-leak-scan.py
 [ -f "$SCRIPT" ] || { echo "cannot find leak-check.sh"; exit 1; }
 
 PASS=0
@@ -44,10 +45,15 @@ CLEAN='a 10-core laptop'
 # exercised for real rather than against a stub.
 make_repo() {
   local root=$1
-  mkdir -p "$root/packaging" "$root/crates/nzbkit/src" "$root/research"
+  mkdir -p "$root/packaging" "$root/crates/nzbkit/src" "$root/research" "$root/tools"
   cp "$SCRIPT" "$root/packaging/leak-check.sh"
   cp "$PKG/private-patterns.txt" "$root/packaging/private-patterns.txt"
   cp "$PKG/PUBLIC_MANIFEST" "$root/packaging/PUBLIC_MANIFEST"
+  # The region decomposer. leak-check resolves it as ROOT/tools, so a
+  # fixture without it exercises the no-decomposer FALLBACK rather than
+  # the split - which is a case below, deliberately, and must not be the
+  # accidental state of every other one.
+  [ -f "$SPLITTER" ] && cp "$SPLITTER" "$root/tools/site-leak-scan.py"
   chmod +x "$root/packaging/leak-check.sh"
   git -C "$root" init -q -b main
   git -C "$root" config user.name t
@@ -138,6 +144,166 @@ expect "--all still reads the worktree" "$ROOT" 1 --all
 git -C "$ROOT" add crates/nzbkit/src/thing.rs >/dev/null 2>&1
 echo "// benchmarked on $CLEAN" > "$SRC"
 expect "--staged still reads the index" "$ROOT" 1 --staged
+rm -rf "$TMP"
+
+# ------------------------------------------------- raw bytes vs content
+# 26 Aug 2026. leak-check used to build ONE alternation out of
+# private-patterns.txt and grep it over the raw bytes of every manifest
+# file, binary included. Three of those patterns are three characters
+# long - the block the pattern file marks `decompressed-only` - so they
+# hit BY CHANCE inside compressed bytes, and this scan runs in
+# pre-commit, in pre-push and on every push to every branch. The
+# identical defect in tools/publish-site.sh refused the v1.2.4 site
+# publish over three characters of zlib entropy inside a clean
+# screenshot, with the release already live.
+#
+# The fix is the REGION split, not "stop scanning binaries", and these
+# cases pin BOTH directions of that - a planted name in a container's
+# METADATA must still be refused, and the same name in its raw
+# compressed bytes must not be. Get either half wrong and the change is
+# worthless in one direction or dangerous in the other.
+echo "raw container bytes get the strong set; content gets the full one"
+
+# The markers are assembled at runtime for the same reason $LEAK is:
+# packaging/ ships publicly and is scanned by the tool under test.
+BARE=$(printf '%s' 'J''ez')
+
+# A minimal PNG built to order. `where` decides which region the marker
+# lands in, and `pixels` is the one that matters: DEFLATE level 0 STORES
+# the bytes literally, so the marker is deterministically present in the
+# raw container bytes without hunting for a real entropy collision -
+# nothing here can go flaky on a future zlib.
+make_png() {   # $1 = destination  $2 = text|ztxt|pixels|none  $3 = marker
+  python3 - "$1" "$2" "$3" <<'PYEOF'
+import struct, sys, zlib
+dest, where, marker = sys.argv[1], sys.argv[2], sys.argv[3]
+m = marker.encode()
+out = bytearray(b"\x89PNG\r\n\x1a\n")
+def chunk(t, p):
+    out.extend(struct.pack(">I", len(p)))
+    out.extend(t + p)
+    out.extend(struct.pack(">I", zlib.crc32(t + p) & 0xFFFFFFFF))
+raw = b"\x00" + bytes(range(256))
+if where == "pixels":
+    raw = b"\x00" + b"padding " + m + b" padding"
+chunk(b"IHDR", struct.pack(">IIBBBBB", len(raw) - 1, 1, 8, 0, 0, 0, 0))
+if where == "text":
+    chunk(b"tEXt", b"Author\x00" + m)
+elif where == "ztxt":
+    chunk(b"zTXt", b"Author\x00\x00" + zlib.compress(m))
+# Level 0 for the pixel case so the marker is stored verbatim; the CRC
+# is computed over whatever we write, so the file stays a valid PNG.
+comp = zlib.compress(raw, 0 if where == "pixels" else 6)
+if where == "pixels" and m not in comp:
+    raise SystemExit("fixture is broken: level 0 did not store the marker")
+chunk(b"IDAT", comp)
+chunk(b"IEND", b"")
+open(dest, "wb").write(bytes(out))
+PYEOF
+}
+
+# Something no decomposer here can take apart, which is what 531 of the
+# manifest's binary files actually are: archive fixtures and libFuzzer
+# crash seeds. The marker sits in the raw bytes with nothing around it
+# that could be called text.
+make_blob() {   # $1 = destination  $2 = marker
+  python3 - "$1" "$2" <<'PYEOF'
+import sys
+dest, marker = sys.argv[1], sys.argv[2]
+body = bytes(range(256)) * 4
+i = 64
+open(dest, "wb").write(b"Rar!\x1a\x07\x00" + body[:i] + marker.encode() + body[i:])
+PYEOF
+}
+
+# 15. A bare name in a PNG's UNCOMPRESSED text chunk. The old scan caught
+#     this by accident (tEXt is plain bytes); it has to keep catching it
+#     on purpose.
+new_repo
+make_png "$ROOT/web/logo.png" text "$BARE" 2>/dev/null || mkdir -p "$ROOT/web" && make_png "$ROOT/web/logo.png" text "$BARE"
+expect "bare name in a PNG tEXt chunk: refused" "$ROOT" 1 web/logo.png
+rm -rf "$TMP"
+
+# 16. The same name in a COMPRESSED text chunk. No grep over raw bytes
+#     can reach this - it is deflated - so this is coverage the scan did
+#     not have before, not coverage it is keeping.
+new_repo
+mkdir -p "$ROOT/web"
+make_png "$ROOT/web/logo.png" ztxt "$BARE"
+if grep -aqE "$BARE" "$ROOT/web/logo.png" 2>/dev/null; then
+  bad "fixture: the zTXt marker is visible in the raw bytes, so this case proves nothing"
+else
+  ok "fixture: the zTXt marker really is invisible to a raw grep"
+fi
+expect "bare name in a PNG zTXt chunk: refused" "$ROOT" 1 web/logo.png
+rm -rf "$TMP"
+
+# 17. THE DEFECT. The same three characters in the raw pixel stream, with
+#     nothing text-bearing anywhere in the file. Before the split this
+#     refused; a chance collision in a real fixture is exactly this
+#     shape, and it refuses an ordinary commit.
+new_repo
+mkdir -p "$ROOT/web"
+make_png "$ROOT/web/logo.png" pixels "$BARE"
+if grep -aqE "$BARE" "$ROOT/web/logo.png" 2>/dev/null; then
+  ok "fixture: the marker really is in the PNG's raw bytes"
+else
+  bad "fixture: the marker is not in the raw bytes, so this case proves nothing"
+fi
+expect "bare name only in a PNG's raw pixel bytes: allowed" "$ROOT" 0 web/logo.png
+rm -rf "$TMP"
+
+# 18. ...and the split must not have been bought by simply not looking. A
+#     STRONG marker in that same pixel stream is still refused, because
+#     the strong set runs over raw container bytes.
+new_repo
+mkdir -p "$ROOT/web"
+make_png "$ROOT/web/logo.png" pixels "$LEAK"
+expect "a strong marker in the same raw pixel bytes: refused" "$ROOT" 1 web/logo.png
+rm -rf "$TMP"
+
+# 19. A format nothing can decompose - the fuzz-seed and archive-fixture
+#     case, which is 531 of the manifest's binary files. Strong set only
+#     over its raw bytes.
+new_repo
+make_blob "$ROOT/crates/nzbkit/seed.bin" "$BARE"
+expect "bare name in a raw archive-shaped blob: allowed" "$ROOT" 0 crates/nzbkit/seed.bin
+rm -rf "$TMP"
+
+new_repo
+make_blob "$ROOT/crates/nzbkit/seed.bin" "$LEAK"
+expect "strong marker in a raw archive-shaped blob: refused" "$ROOT" 1 crates/nzbkit/seed.bin
+rm -rf "$TMP"
+
+# 20. TEXT IS UNTOUCHED. The bare name is the one thing this change
+#     narrows, so a plain source file has to keep refusing it - that is
+#     the whole population the pattern exists for.
+new_repo
+printf '// written by %s\n' "$BARE" > "$SRC"
+expect "bare name in a source file: still refused" "$ROOT" 1 crates/nzbkit/src/thing.rs
+rm -rf "$TMP"
+
+# 21. VERIFIED TO BITE. Take the decomposer away and case 17 goes back to
+#     refusing - which pins two things at once: the split is really what
+#     changed that verdict, and the fallback fails in the SAFE direction
+#     (it can over-report, never under-report) rather than silently
+#     scanning nothing.
+new_repo
+mkdir -p "$ROOT/web"
+make_png "$ROOT/web/logo.png" pixels "$BARE"
+rm -f "$ROOT/tools/site-leak-scan.py"
+expect "no decomposer: falls back to the full set over raw bytes" "$ROOT" 1 web/logo.png
+rm -rf "$TMP"
+
+# 22. The split itself is checked on every run, not assumed. Collapse the
+#     sentinels in the pattern file and the strong set becomes the full
+#     set - which is the state the whole change exists to avoid, so the
+#     script must refuse to render a verdict at all rather than report a
+#     tree clean under a scanner it can no longer describe.
+new_repo
+grep -v 'decompressed-only' "$PKG/private-patterns.txt" > "$ROOT/packaging/private-patterns.txt"
+printf '// nothing to see\n' > "$SRC"
+expect "sentinels removed, so the two sets are identical: refuses to judge" "$ROOT" 1 --all
 rm -rf "$TMP"
 
 # ------------------------------------------------------------------ hook

@@ -44,17 +44,49 @@ mkdir -p "$DATA_DIR"
 # runtime.json beside its settings; that file is rewritten on every start
 # and can be stale after a crash, which is why the port it names is
 # probed rather than trusted.
+#
+# An explicitly set NZBFAST_PORT does NOT overrule that here, and the
+# escape hatch below is why it does not have to: the recorded port is
+# probed first for ATTACH, and only once that port turns out to hold a
+# stranger is the requested one tried instead. Letting the environment
+# win outright would put back the exact bug this file records - a saved
+# port of 6790 with NZBFAST_PORT still naming 6789 would probe a dead
+# port, decide nothing was running, and start a second daemon into a
+# failed bind.
 RUNTIME="$DATA_DIR/runtime.json"
 PORT="${NZBFAST_PORT:-6789}"
 SCHEME=http
+# The port the user ASKED for, empty unless they set one. Kept apart
+# from PORT because "unset" and "set to the default" are different
+# instructions here: only an explicit request may re-aim the probe.
+# Validated the same way the recorded port is, so a typo'd value cannot
+# steer anything.
+WANT=""
+case "${NZBFAST_PORT:-}" in
+    ''|*[!0-9]*) ;;
+    *) [ "$NZBFAST_PORT" -ge 1 ] && [ "$NZBFAST_PORT" -le 65535 ] && WANT="$NZBFAST_PORT" ;;
+esac
+# The daemon also writes a per-start secret beside the port. It is what
+# turns "something answered in our shape" into "this is the daemon that
+# wrote this file" - see port_is_ours. A token proves nothing about a
+# port it was not written about, so the port it came with is kept and
+# checked against the port actually probed.
+TOKEN=""
+_rtport=""
 if [ -r "$RUNTIME" ]; then
     _p=$(grep -o '"port":[0-9]*' "$RUNTIME" | head -1 | cut -d: -f2)
     case "$_p" in
         ''|*[!0-9]*) ;;                      # absent or not a number: keep the default
-        *) PORT="$_p" ;;
+        *) PORT="$_p"; _rtport="$_p" ;;
     esac
     grep -q '"tls":true' "$RUNTIME" && SCHEME=https
+    _t=$(grep -o '"token":"[0-9a-f]*"' "$RUNTIME" | head -1 | cut -d'"' -f4)
+    case "$_t" in
+        ''|*[!0-9a-f]*) ;;                   # absent, empty or not hex: no proof to ask for
+        *) TOKEN="$_t" ;;
+    esac
 fi
+[ "$_rtport" = "$PORT" ] || TOKEN=""
 
 # The user's real Downloads folder, which on a localised desktop is not
 # called "Downloads". xdg-user-dir cannot answer this inside the sandbox:
@@ -95,55 +127,207 @@ port_is_up() {
 # in the user's browser by us. INSTALLER-SPEC.md is explicit: attach
 # only when the port answers mode=version and reports nzbfast.
 #
-# mode=version is answered without an API key by design (the container
-# healthcheck depends on it), and the reply carries an "nzbfast" field
-# that SABnzbd's does not, which is what makes it an identity check
-# rather than a liveness one. Same /dev/tcp as above, because the
-# runtime has neither curl nor wget; read with a timeout so a socket
-# that accepts and says nothing cannot hang the launcher.
-port_is_nzbfast() {
-    local line body=""
-    exec 3<>/dev/tcp/127.0.0.1/"$PORT" 2>/dev/null || return 1
-    printf 'GET /api?mode=version&output=json HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' >&3 2>/dev/null || {
-        exec 3<&- 3>&- 2>/dev/null; return 1; }
+# AND ANSWERING IN OUR SHAPE IS NOT IDENTITY EITHER. mode=version is
+# answered without an API key by design (the container healthcheck
+# depends on it), so any local process at all can print the word
+# nzbfast into a reply and be attached to - and attaching means opening
+# it in the user's browser under our name. The daemon's own note on
+# write_runtime_file says this in as many words. So the probe carries a
+# CHALLENGE: it sends `mode=version&hs=<nonce>` and the daemon answers
+# `hs_proof = sha256(token:nonce)`, where the token is the per-start
+# secret it wrote into runtime.json - 0600, inside this app's own
+# private config directory. The token never crosses the wire in either
+# direction, so sending the challenge to an impostor teaches it
+# nothing, and only a process that can read our runtime.json can
+# produce the answer. Same wire format and same reasoning as the
+# Windows tray's probe (crates/nzbtray/src/probe_body.rs,
+# `proof_matches`), which arrived at it from the other side: an
+# attached engine dying and something else taking the port.
+#
+# Same /dev/tcp as port_is_up, because the runtime has neither curl nor
+# wget; read with a timeout so a socket that accepts and says nothing
+# cannot hang the launcher.
+
+# sha256 of stdin, hex, bare. sha256sum is coreutils, which is what the
+# Flatpak runtime has. The shasum fallback is not for the sandbox: it is
+# so packaging/tests/flatpak-launcher.sh can drive this script on the
+# dev Mac, where the alternative is a gate that cannot exercise the one
+# thing it exists for.
+sha256_hex() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | cut -d' ' -f1
+    else
+        return 1
+    fi
+}
+
+# A fresh challenge per launch, so a proof captured off an earlier one
+# is worth nothing. Minted from /dev/urandom rather than $RANDOM, which
+# is 15 bits seeded from pid and time and so is guessable by whatever
+# else is on this machine. Empty when there is no sha256 to hand, which
+# is also the case where no proof could be checked anyway.
+NONCE=""
+mint_nonce() {
+    NONCE=$(head -c 32 /dev/urandom 2>/dev/null | sha256_hex 2>/dev/null | cut -c1-32) || NONCE=""
+    case "$NONCE" in
+        *[!0-9a-f]*) NONCE="" ;;
+    esac
+    [ "${#NONCE}" -eq 32 ] || NONCE=""
+}
+
+# The answer the daemon that wrote runtime.json would give.
+challenge_proof() {
+    printf '%s:%s' "$TOKEN" "$NONCE" | sha256_hex
+}
+
+# Ask the port in plaintext and keep whatever came back, headers and
+# all. Sets PROBE_BODY rather than printing it so the caller stays in
+# this shell and can correct SCHEME.
+#
+# THE BRACES AROUND EVERY BARE `exec` HERE ARE LOAD-BEARING. `exec` with
+# no command applies its redirections to the SHELL, permanently, so the
+# obvious `exec 3<>/dev/tcp/... 2>/dev/null` sends this script's stderr
+# to /dev/null for the rest of its life the moment the connect succeeds.
+# That is not theoretical: it is what the version before this one did,
+# and it meant the foreign-listener refusal below - the whole of what the
+# user is told about why nothing opened - was printed into /dev/null.
+# Exit 1 and not one word on the terminal. A brace group scopes the
+# redirection to the group and still leaves fd 3 open in this shell,
+# which is the one thing a subshell could not do.
+probe_close() { { exec 3<&- 3>&-; } 2>/dev/null; }
+
+PROBE_BODY=""
+plaintext_probe() {
+    local line="" hs=""
+    PROBE_BODY=""
+    [ -n "$NONCE" ] && hs="&hs=$NONCE"
+    { exec 3<>/dev/tcp/127.0.0.1/"$PORT"; } 2>/dev/null || return 1
+    printf 'GET /api?mode=version&output=json%s HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' "$hs" >&3 2>/dev/null || {
+        probe_close; return 1; }
     # `|| [ -n "$line" ]` is load-bearing: the body's last line carries no
     # trailing newline, and a plain `read` returns false on that EOF -
     # dropping the one line the JSON is on. Without it this probe says
     # "not nzbfast" about a real daemon, which would break attach for
     # every user instead of only the ones with a port conflict.
-    while IFS= read -r -t 3 line <&3 || [ -n "$line" ]; do
-        body="$body$line"
+    # `2>/dev/null` on the READ, not on a bare `exec` - see probe_close.
+    # A listener that closes abruptly (which is what a stranger on the
+    # port does) makes bash print "read error: Connection reset by peer",
+    # and that is a HANDLED condition: it means the same thing to us as a
+    # clean EOF. Before the redirection bug above was fixed it was hidden
+    # by accident, because the bare exec had already silenced the whole
+    # script; with stderr working again it would print raw bash
+    # diagnostics ahead of our own refusal message and make a handled
+    # case look like a crash.
+    while IFS= read -r -t 3 line <&3 2>/dev/null || [ -n "$line" ]; do
+        PROBE_BODY="$PROBE_BODY$line"
         line=""
     done
-    exec 3<&- 3>&- 2>/dev/null
-    case "$body" in
-        *'"nzbfast"'*) return 0 ;;
-        *) return 1 ;;
-    esac
+    probe_close
 }
 
-# §129 2a: port_is_nzbfast cannot pass against a native-TLS daemon. It
-# writes plaintext HTTP down /dev/tcp, a TLS listener accepts the TCP
-# connection but never returns the plaintext mode=version body it looks
-# for, and there is no openssl (or curl) in this runtime to speak TLS
-# instead - so a healthy daemon that has TLS on would read as a stranger
-# on the port and get refused on every second launch.
+# §129 2a: THE TLS ARM IS WEAKER THAN THE PLAINTEXT ONE, AND SAYING SO
+# HERE IS THE POINT OF THIS BLOCK.
 #
-# runtime.json is what stands in. It lives inside this app's own
-# private config directory - nothing else on the system can have
-# written it - and is rewritten with the port the daemon actually bound
-# on every start, which is why PORT and SCHEME above are read from it
-# rather than assumed. There is no live pid check to fall back on
-# either: this sandbox gets a fresh pid namespace on every `flatpak
-# run`, so a second launch's /proc cannot see the first launch's daemon
-# at all, TLS or not. So when it says tls, a live TCP accept on the
-# exact port it named (already established by port_is_up before this
-# runs) is the whole of the ownership fact available without a TLS
-# client - and it is trusted. A local process that answers in plaintext
-# still goes through port_is_nzbfast below and can still be refused.
+# A plaintext probe cannot get a sensible answer out of a native-TLS
+# daemon: the listener accepts the TCP connection and then answers a
+# plaintext HTTP request with a TLS alert or nothing at all. There is no
+# openssl, curl or wget in this runtime to speak TLS instead, and no pid
+# to fall back on either - the sandbox gets a fresh pid namespace on
+# every `flatpak run`, so a second launch's /proc cannot see the first
+# launch's daemon at all. So under TLS the challenge above cannot be
+# sent, and what is left is a NEGATIVE test:
+#
+#   * anything that answers this probe with readable text is NOT our TLS
+#     daemon, whatever it says about itself, and is refused - unless it
+#     proves the token, which means runtime.json's scheme is stale
+#     rather than the listener being a stranger;
+#   * silence, or bytes that are not text, is consistent with our TLS
+#     daemon and is accepted.
+#
+# What that CANNOT tell apart is our TLS daemon from some other TLS
+# service on the port, or from a socket that accepts and says nothing.
+# Both are accepted. That is strictly weaker than the http case, where
+# a listener must prove it holds the secret from our own private config
+# directory, and it is the price of having no TLS client in the
+# sandbox. It is not silent: it is written here, and the earlier version
+# of this arm - which accepted ANY listener the moment runtime.json said
+# tls, including a plaintext one - is what this replaced.
 port_is_ours() {
-    [ "$SCHEME" = https ] && return 0
-    port_is_nzbfast
+    local want got
+    [ -n "$TOKEN" ] && mint_nonce
+    plaintext_probe || PROBE_BODY=""
+
+    case "$PROBE_BODY" in
+        # Nothing came back, or what came back is not text. See above.
+        ""|*[![:print:][:space:]]*)
+            [ "$SCHEME" = https ] && return 0
+            return 1
+            ;;
+    esac
+
+    # Text came back, so something here speaks plaintext - and plaintext
+    # is therefore what we would be opening, whatever runtime.json says
+    # the scheme is. It has to prove itself first.
+    if [ -n "$TOKEN" ] && [ -n "$NONCE" ]; then
+        want=$(challenge_proof) || want=""
+        # The daemon writes this compact (httputil.rs, json_resp is
+        # serde_json's Value::to_string), so the space is not there today.
+        # Tolerated anyway because the failure mode of an extraction that
+        # stops matching is not a wrong answer, it is a permanent refusal
+        # to attach - the lockout this whole block exists to end.
+        got=$(printf '%s' "$PROBE_BODY" | grep -o '"hs_proof": *"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$want" ] && [ "$want" = "$got" ]; then
+            # Proven ours. If runtime.json said tls, it is stale - a
+            # daemon that stopped serving TLS and could not rewrite the
+            # file. Open what actually answered, not what the file
+            # remembers.
+            SCHEME=http
+            return 0
+        fi
+        return 1
+    fi
+
+    # No token to hold it to: runtime.json is missing, names another
+    # port, or was written by a daemon whose key mint failed. The reply
+    # shape is all there is, which is the pre-handshake daemon the
+    # tray's probe calls "adopted" - permissive on purpose, because
+    # refusing would break attaching to a release older than the
+    # handshake.
+    case "$PROBE_BODY" in
+        *'"nzbfast"'*) SCHEME=http; return 0 ;;
+    esac
+    return 1
+}
+
+# The two halves of the foreign-listener refusal, shared because it is
+# printed from two places and a user who hits the second one has already
+# read the first.
+#
+# The suggested port is derived rather than fixed: the old message always
+# said 6790, which is useless advice to somebody who is already on 6790,
+# and it named `com.nzbfast.nzbfast`, which is not this application - the
+# id is io.github.nzbfast.nzbfast, so the one command the user was handed
+# could not run at all.
+refuse_head() {
+    echo "nzbfast: something else is already listening on port $1," >&2
+    echo "  and it is not nzbfast, so there is nothing here to attach to." >&2
+}
+# PORT is only known to be a number when it came from runtime.json or
+# passed the NZBFAST_PORT check above; a hand-set NZBFAST_PORT=6789x
+# reaches here as itself, and `$((PORT + 1))` on that is a bash syntax
+# error, which under `set -e` would kill the script in the middle of
+# explaining itself.
+refuse_tail() {
+    local _sug
+    case "$PORT" in
+        ''|*[!0-9]*) _sug=6790 ;;
+        *) _sug=$((PORT + 1)); [ "$_sug" -le 65535 ] || _sug=6790 ;;
+    esac
+    echo "  Ask for a free port and start again:" >&2
+    echo "    flatpak run --env=NZBFAST_PORT=$_sug $APP_ID" >&2
+    echo "  (a port saved in settings.json beats that on later runs)." >&2
 }
 
 open_dashboard() {
@@ -209,14 +393,52 @@ if port_is_up; then
     fi
     # Somebody else owns the port. Do NOT open it in the browser: that
     # would hand the user a stranger's service under our name. Do not
-    # kill it either - "never kill a daemon you didn't spawn". Say what
-    # is wrong and how to move, then stop.
-    echo "nzbfast: something else is already listening on port $PORT," >&2
-    echo "  and it is not nzbfast, so there is nothing here to attach to." >&2
-    echo "  Set a different port and start again:" >&2
-    echo "    flatpak run --env=NZBFAST_PORT=6790 com.nzbfast.nzbfast" >&2
-    echo "  (a port saved in settings.json beats that on later runs)." >&2
-    exit 1
+    # kill it either - "never kill a daemon you didn't spawn".
+    #
+    # THE ESCAPE HATCH, and the reason this is not simply a refusal. The
+    # port just refused came from runtime.json in the case that matters,
+    # and runtime.json is rewritten on every start - so a user whose last
+    # daemon ran on the now-squatted port gets that port named again on
+    # every launch. Refusing here and telling them to set NZBFAST_PORT
+    # was advice that could not work: the block at the top would read
+    # runtime.json over the top of it, probe the squatted port again, and
+    # reprint the same message forever, with the only way out - deleting
+    # runtime.json - never mentioned. Measured 27 Aug 2026.
+    #
+    # So a port the user explicitly ASKED for is tried now. Attaching is
+    # still runtime.json's job and has already had its turn; what is left
+    # is where to START, and the start below has always used
+    # NZBFAST_PORT. This makes the probe agree with it instead of
+    # contradicting it.
+    #
+    # The token and the scheme do NOT carry over. Both were written about
+    # the recorded port, and a proof proves nothing about a port it was
+    # not written about - the same rule as `[ "$_rtport" = "$PORT" ]`
+    # above. Under http a listener has to look like us to be attached to,
+    # which is the stronger of the two arms in port_is_ours.
+    if [ -n "$WANT" ] && [ "$WANT" != "$PORT" ]; then
+        _held="$PORT"
+        PORT="$WANT"
+        TOKEN=""
+        SCHEME=http
+        if port_is_up; then
+            if port_is_ours; then
+                open_dashboard
+                exit 0
+            fi
+            refuse_head "$PORT"
+            echo "  Port $_held, where nzbfast last ran, is taken too." >&2
+            refuse_tail
+            exit 1
+        fi
+        # Free: fall through and start there.
+    else
+        refuse_head "$PORT"
+        [ "$_rtport" = "$PORT" ] && \
+            echo "  That is where nzbfast last ran, recorded in $RUNTIME." >&2
+        refuse_tail
+        exit 1
+    fi
 fi
 
 mkdir -p "$OUT" "$WATCH"

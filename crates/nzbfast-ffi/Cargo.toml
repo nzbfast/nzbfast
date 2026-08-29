@@ -15,8 +15,16 @@ workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-# Slim on purpose: the phones ship without the indexer stack, and the
-# ffi feature is what turns nzbfast's lib root from empty into the real
-# module tree.
+# Slim on purpose: the phones ship without the indexer stack OR the
+# browser-facing pages (TODO 281 IO3b - `dashboard` is a default
+# feature, and this is the store binary), and the ffi feature is what
+# turns nzbfast's lib root from empty into the real module tree.
+#
+# `default-features = false` here is the WHOLE of what keeps the pages
+# out, and cargo resolves features PER INVOCATION - so it holds only
+# while this crate is built on its own. A `--workspace` build, or one
+# naming `-p nzbfast` alongside it, unifies with the bin's `default`
+# and hands the staticlib the dashboard back. packaging/ios/build-ffi.sh
+# builds `-p nzbfast-ffi` alone for that reason and says so.
 nzbfast = { path = "../nzbfast", default-features = false, features = ["ffi"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }

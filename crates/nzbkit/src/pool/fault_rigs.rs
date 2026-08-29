@@ -19,6 +19,8 @@
 use super::rig_tests::{payout_leg, payout_server};
 use super::*;
 
+mod linecap_rigs;
+
 /// Gauntlet leg: like `payout_leg` but returns the outcome tallies
 /// AND the LiveStats. The mocks all answer to the host string
 /// "127.0.0.1", so per-server claims (which server got clamped, who
@@ -686,6 +688,7 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -761,6 +764,7 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -909,6 +913,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -945,6 +950,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -979,6 +985,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -1068,6 +1075,7 @@ fn bound_guard_straggler(shared: &Arc<Shared>, id: &str, tried_fail: u32, age: D
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -1452,6 +1460,7 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -1907,11 +1916,13 @@ async fn payout_prebyte_escalation_saves_cold_storage_articles() {
 /// and refusing BARE, so the alignment fence arms on its first refusal
 /// and every dispatch after that carries a DATE.
 ///
-/// Returns the outcomes, the live-note ring, and the server itself -
-/// `date_log` (the `served` count at each DATE) against the final
-/// `served` is the only place from which "is this server still being
-/// fenced" is observable, since a fence leaves no client-side trace a
-/// test can reach.
+/// Returns the outcomes, the live-note ring, the server itself and the
+/// run's per-server stats. `date_log` (the `served` count at each DATE)
+/// against the final `served` is where "is this server still being
+/// fenced" is read; `PoolStats::fence_retired` is the CLIENT's own
+/// answer to the same question, and it is reported rather than merely
+/// observable because a CLI leg reads no live-note ring at all - see
+/// that field's doc, and the g25L leg it was added for.
 async fn fence_leg(
     n_articles: usize,
     missing_every: usize,
@@ -1921,6 +1932,7 @@ async fn fence_leg(
     Vec<String>,
     crate::mock::MockServer,
     std::collections::HashSet<String>,
+    Vec<PoolStats>,
 ) {
     let data: Vec<u8> = (0..(n_articles as u32) * 4_000).map(|i| i as u8).collect();
     let mut articles = std::collections::HashMap::new();
@@ -1971,7 +1983,7 @@ async fn fence_leg(
         }
         out
     });
-    tokio::time::timeout(Duration::from_secs(120), fetch)
+    let stats = tokio::time::timeout(Duration::from_secs(120), fetch)
         .await
         .expect("fence leg hung")
         .unwrap();
@@ -1983,7 +1995,7 @@ async fn fence_leg(
         .iter()
         .map(|e| format!("{} {}", e.kind, e.detail))
         .collect();
-    (outcomes, notes, srv, absent_out)
+    (outcomes, notes, srv, absent_out, stats)
 }
 
 /// §129 3g: a provider that reads DATE and answers nothing must stop
@@ -1999,7 +2011,7 @@ async fn fence_leg(
 /// again" half of this assertion catches.
 #[tokio::test(flavor = "multi_thread")]
 async fn fence_retires_on_a_date_silent_provider_and_never_comes_back() {
-    let (outcomes, notes, srv, _) = fence_leg(
+    let (outcomes, notes, srv, _, stats) = fence_leg(
         160,
         4,
         crate::mock::Chaos {
@@ -2021,6 +2033,17 @@ async fn fence_retires_on_a_date_silent_provider_and_never_comes_back() {
         notes.iter().filter(|n| n.starts_with("fence-off")).count(),
         1,
         "retirement must be announced exactly once, not once per cycle: {notes:?}"
+    );
+    // The same fact the note carries, REPORTED rather than left on a
+    // ring only a daemon reads. A CLI leg has no reader for that ring,
+    // so on a bench log the retirement was invisible and its absence
+    // proved nothing - which is exactly the ambiguity the 28 Aug 2026
+    // g25L question ran into, since a bare-heavy refusal split means
+    // one thing under a fence that held and another under one that was
+    // gone (research/SLOW-SOCKET-430-CAUSAL-READ-2026-08-28.md).
+    assert!(
+        stats.iter().any(|st| st.fence_retired),
+        "a retired fence must be REPORTED in the run stats, not only noted"
     );
     // Retirement is two duds deep, one per session, so the fences on
     // the wire are bounded by a couple of pipelines' worth. What makes
@@ -2055,7 +2078,7 @@ async fn fence_retires_on_a_date_silent_provider_and_never_comes_back() {
 /// first fence, `fence_ok` latches, and no dud is ever counted again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_desyncing_provider_keeps_its_fence() {
-    let (outcomes, notes, srv, absent) = fence_leg(
+    let (outcomes, notes, srv, absent, stats) = fence_leg(
         160,
         4,
         crate::mock::Chaos {
@@ -2075,6 +2098,15 @@ async fn a_desyncing_provider_keeps_its_fence() {
         served - last_date < served / 4,
         "fencing stopped early on a desyncing server: last DATE at {last_date} of {served} served"
     );
+    // The reported half of the same claim, and the direction that
+    // matters most: a run whose refusals are all bare AND whose stats
+    // say the fence held is one whose Missing verdicts still rest on
+    // proven attribution. A `fence_retired` that were true here would
+    // read as misattribution on a leg that had none.
+    assert!(
+        stats.iter().all(|st| !st.fence_retired),
+        "a desyncing server's fence must not read as retired in the run stats"
+    );
     // And the fence's own job, unchanged: no article the server holds
     // may be declared Missing off a misattributed refusal.
     let held: Vec<&Arc<str>> = outcomes
@@ -2088,385 +2120,6 @@ async fn a_desyncing_provider_keeps_its_fence() {
         held.is_empty(),
         "present article(s) declared Missing by a desynced session: {held:?}"
     );
-}
-
-/// TODO 208 item 1: the in-run half of the fleet cap. A fleet spawned
-/// at sixteen under a cap of ten sheds to it in ONE step, not the
-/// walker's one-per-seven-epochs. The cap is a constant (§208 Rounds A
-/// and B), so nothing here is divided out of the line - but the shed
-/// still needs the install's link anchor to run at all, which is what
-/// this rig gives it and the sibling rig below takes away. Assertions:
-/// `connected` falls to at most the cap and stays there, nobody retires
-/// (the shed parks; `workers_live` is the fleet), and every article
-/// still gets its outcome.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_line_cap_sheds_a_fleet_to_the_constant_in_one_step() {
-    let (srv, ids, want) = line_cap_fixture().await;
-    let target = ConnTarget::new(16);
-    let (sc, mut cfg) = payout_server(&srv, 16, PoolConfig::default());
-    cfg.live_target = Some(target.clone());
-    cfg.line_cap_fleet = 10;
-    cfg.line_anchor_bps = 2_400_000;
-    let servers = vec![(sc, cfg)];
-    let live = LiveStats::for_servers(&servers);
-    let servers: Vec<(ServerConfig, PoolConfig)> = servers
-        .into_iter()
-        .map(|(s, mut c)| {
-            c.live = Some(live.clone());
-            (s, c)
-        })
-        .collect();
-    let (tx, mut rx) = mpsc::channel(64);
-    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
-    let collect = tokio::spawn(async move {
-        let mut done = 0usize;
-        while let Some(o) = rx.recv().await {
-            if matches!(o, FetchOutcome::Done { .. }) {
-                done += 1;
-            }
-        }
-        done
-    });
-    let connected = || live.servers[0].connected.load(Ordering::Relaxed);
-    // The pool was handed sixteen - the seed lives in the daemon, not
-    // here - and the shed's first tick walks the target to the cap in
-    // one step. Then the top slots park behind it.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
-    while target.get() > 10 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "target stuck at {}",
-            target.get()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    while connected() > 10 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "connected stuck at {} (target {})",
-            connected(),
-            target.get()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let shed_to = target.get();
-    assert!((1..=10).contains(&shed_to), "target {shed_to} is not a cap");
-    assert_eq!(
-        live.servers[0].budget.load(Ordering::Relaxed),
-        shed_to,
-        "the dashboard's 'using M of N' did not follow the shed"
-    );
-    // It stays shed: the cap is a constant, so nothing the smaller
-    // fleet then measures can raise it, and a parked slot must not
-    // flap back.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(
-        target.get() <= 10 && connected() <= 10,
-        "the cap loosened on the shed fleet: target {} connected {}",
-        target.get(),
-        connected()
-    );
-    tokio::time::timeout(Duration::from_secs(180), fetch)
-        .await
-        .expect("run hung across the shed")
-        .unwrap();
-    assert_eq!(collect.await.unwrap(), want);
-}
-
-/// TODO 208 item 1, the regression that bought the anchor requirement
-/// (22 Aug 2026, when the cap was still divided out of the measured
-/// line). The rig above with the anchor taken away and nothing else
-/// changed: sixteen sockets throttled to 150 KB/s EACH, so the fleet
-/// moves 2.4 MB/s whatever the line underneath it is. Read as a
-/// statement about the line, that was "19 Mbit", the rule made it a
-/// cap of ten, and the shed took it - costing 37% of a fleet whose
-/// throughput is exactly proportional to its connection count, and
-/// costing it unrecoverably, because the peak is monotone and the
-/// smaller fleet can never argue its way back up. On the daemon the
-/// same shape shed a live job 4 -> 1 and doubled its wall clock
-/// (`prefetch_borrows_from_the_busy_server_when_no_healthy_idle`).
-///
-/// A constant cap cannot make that arithmetic mistake, so what the
-/// anchor requirement carries now is the narrower rule it left behind:
-/// a run with no independent estimate of its line - a CLI run, or a
-/// daemon's first job - is dialled once and never resized mid-flight.
-/// The cap here would bite (ten against sixteen) if the gate let it.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_line_cap_never_sheds_a_fleet_that_has_no_anchor() {
-    let (srv, ids, want) = line_cap_fixture().await;
-    let target = ConnTarget::new(16);
-    let (sc, mut cfg) = payout_server(&srv, 16, PoolConfig::default());
-    cfg.live_target = Some(target.clone());
-    cfg.line_cap_fleet = 10;
-    // No `line_anchor_bps`: the CLI shape, and a daemon's first job.
-    let servers = vec![(sc, cfg)];
-    let live = LiveStats::for_servers(&servers);
-    let servers: Vec<(ServerConfig, PoolConfig)> = servers
-        .into_iter()
-        .map(|(s, mut c)| {
-            c.live = Some(live.clone());
-            (s, c)
-        })
-        .collect();
-    let (tx, mut rx) = mpsc::channel(64);
-    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
-    let collect = tokio::spawn(async move {
-        let mut done = 0usize;
-        while let Some(o) = rx.recv().await {
-            if matches!(o, FetchOutcome::Done { .. }) {
-                done += 1;
-            }
-        }
-        done
-    });
-    let connected = || live.servers[0].connected.load(Ordering::Relaxed);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while connected() < 16 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "fleet never dialled"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // Well past the ~7 s the gauge needs to train a plateau, and past
-    // the 8 s at which the daemon job was shed.
-    for _ in 0..24 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(
-            target.get(),
-            16,
-            "a fleet with no line anchor was resized mid-run (connected {})",
-            connected()
-        );
-    }
-    assert_eq!(connected(), 16, "connections parked without a line to cap");
-    tokio::time::timeout(Duration::from_secs(180), fetch)
-        .await
-        .expect("run hung")
-        .unwrap();
-    assert_eq!(collect.await.unwrap(), want);
-}
-
-/// The two line-cap rigs' shared fixture: 36 MB in 50 kB articles from
-/// a server that throttles every connection to 150 KB/s, so a fleet of
-/// sixteen moves 2.4 MB/s - about 19 Mbit - for roughly 15 s. Returns
-/// the server, the requests, and how many outcomes to expect.
-async fn line_cap_fixture() -> (crate::mock::MockServer, Vec<ArticleReq>, usize) {
-    let data: Vec<u8> = (0..36_000_000u32).map(|i| (i * 7) as u8).collect();
-    let mut articles = std::collections::HashMap::new();
-    let segs = crate::mock::make_file_articles("lc.bin", &data, 50_000, "lc", &mut articles);
-    let ids: Vec<ArticleReq> = segs
-        .iter()
-        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
-        .collect();
-    let srv = crate::mock::MockServer::start(
-        articles,
-        crate::mock::Chaos {
-            throttle: crate::mock::Throttle {
-                per_conn_bps: 150_000,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    )
-    .await;
-    (srv, ids, segs.len())
-}
-
-/// TODO 208 item 1, the other side of the shed: a run whose rate is
-/// set by the CONNECTIONS, not by a line, must not be shed at all.
-///
-/// Eight sockets throttled to 150 KB/s each read as ~1.2 MB/s, about
-/// 9.6 Mbit, and the retired per-Mbit rule made that a cap of five - so
-/// it took three sockets off a fleet that would have gone FASTER with
-/// more, and nothing downstream could undo it: the gauge's peak is
-/// monotone, so the survivors could never read a higher number and the
-/// raise-back arm was dead for the rest of the run. That is the shape
-/// that doubled the daemon suite's borrow test (24.6 s against
-/// ~12.5 s) when the cap first landed, and a `LINE_CAP_FLOOR` of eight
-/// was bolted under the rule to bound it.
-///
-/// The SHIPPED constant is what holds it now, which is why this rig
-/// runs at the real default rather than at a number chosen for it: a
-/// fleet of eight is under the cap outright, so the shed has no
-/// surplus to take and no reading of the line can invent one. The
-/// anchor is set, so the shed is armed and this is not passing for the
-/// sibling rig's reason. The other half of the same defect - the
-/// arithmetic the constant removes - is
-/// `the_line_cap_never_sheds_a_fleet_that_has_no_anchor`.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_line_cap_leaves_a_connection_bound_fleet_alone() {
-    let data: Vec<u8> = (0..18_000_000u32).map(|i| (i * 7) as u8).collect();
-    let mut articles = std::collections::HashMap::new();
-    let segs = crate::mock::make_file_articles("lcf.bin", &data, 50_000, "lcf", &mut articles);
-    drop(data);
-    let ids: Vec<ArticleReq> = segs
-        .iter()
-        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
-        .collect();
-    let srv = crate::mock::MockServer::start(
-        articles,
-        crate::mock::Chaos {
-            throttle: crate::mock::Throttle {
-                per_conn_bps: 150_000,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    )
-    .await;
-    let target = ConnTarget::new(8);
-    let (sc, mut cfg) = payout_server(&srv, 8, PoolConfig::default());
-    cfg.live_target = Some(target.clone());
-    cfg.line_cap_fleet = linecap::LINE_CAP_DEFAULT_FLEET;
-    // An anchor, so the shed is ARMED and it is the cap and not the
-    // gate that this rig measures. Under the old rule 9.6 Mbit at
-    // 0.5/Mbit was five, and five would have shed this fleet.
-    cfg.line_anchor_bps = 1_200_000;
-    let servers = vec![(sc, cfg)];
-    let live = LiveStats::for_servers(&servers);
-    let servers: Vec<(ServerConfig, PoolConfig)> = servers
-        .into_iter()
-        .map(|(s, mut c)| {
-            c.live = Some(live.clone());
-            (s, c)
-        })
-        .collect();
-    let (tx, mut rx) = mpsc::channel(64);
-    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
-    let collect = tokio::spawn(async move {
-        let mut done = 0usize;
-        while let Some(o) = rx.recv().await {
-            if matches!(o, FetchOutcome::Done { .. }) {
-                done += 1;
-            }
-        }
-        done
-    });
-    let connected = || live.servers[0].connected.load(Ordering::Relaxed);
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while connected() < 8 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "fleet never dialled"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    // Well past the gauge's ~7 s training point and several shed ticks
-    // in: the shed HAS run by now and had nothing to take.
-    tokio::time::sleep(Duration::from_secs(12)).await;
-    assert!(
-        live.servers[0].bytes.load(Ordering::Relaxed) > 0,
-        "nothing was delivered, so the gauge never read a line at all"
-    );
-    assert!(
-        connected() == 8 && target.get() == 8,
-        "a connection-bound fleet was shed: target {} connected {}",
-        target.get(),
-        connected()
-    );
-    tokio::time::timeout(Duration::from_secs(300), fetch)
-        .await
-        .expect("run hung")
-        .unwrap();
-    assert_eq!(collect.await.unwrap(), segs.len());
-}
-
-/// TODO 277: the in-run GOVERNOR, which is the half of the fleet curve
-/// that runs after the seed has already dialled.
-///
-/// The seed sizes the fleet from whatever line reading the process had
-/// at job build, and on a run that had none - a CLI `get`, a daemon's
-/// first job - that is the curve's floor. This rig is the case where
-/// the run then learns better: a fleet dialled small against a line the
-/// evidence says is multi-gig, with the cap left on `auto` because
-/// nobody typed `NZBFAST_LINE_CAP`. The governor must raise the cap and
-/// the walk must hand the new share to the target, waking the parked
-/// slots.
-///
-/// It drives the governor from the ANCHOR rather than from the trained
-/// peak on purpose: they are the same input to `fleet_step` (the tick
-/// takes the larger of the two, both being achieved rates and so lower
-/// bounds on the line), and the anchor is available at the first tick
-/// where a trained peak needs ~7 s of plateau first - so this rig
-/// measures the rule and not the gauge's warm-up, which
-/// `the_stall_bound_survives_the_gauges_warm_up` already owns.
-///
-/// The numbers are synthetic - a real 9 Gbps anchor would have seeded
-/// the fleet at the knee and left nothing to raise - because what is
-/// under test is the wiring: that `line_cap_auto` reaches the tick,
-/// that the raise is not behind the shed's anchor gate, and that a
-/// target sitting on the seed's own share is one the governor may move
-/// UP. The ceiling still binds: the fleet only ever reaches the eight
-/// slots that were spawned, which is the limit the module doc sets out.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_line_cap_raises_a_fleet_when_the_line_reads_faster_than_it() {
-    let data: Vec<u8> = (0..12_000_000u32).map(|i| (i * 11) as u8).collect();
-    let mut articles = std::collections::HashMap::new();
-    let segs = crate::mock::make_file_articles("lcr.bin", &data, 50_000, "lcr", &mut articles);
-    drop(data);
-    let ids: Vec<ArticleReq> = segs
-        .iter()
-        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
-        .collect();
-    let srv = crate::mock::MockServer::start(
-        articles,
-        crate::mock::Chaos {
-            throttle: crate::mock::Throttle {
-                per_conn_bps: 150_000,
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    )
-    .await;
-    // Eight slots spawned, four of them admitted: the shape the seed
-    // leaves behind whenever the cap cut the dial.
-    let target = ConnTarget::new(4);
-    let (sc, mut cfg) = payout_server(&srv, 8, PoolConfig::default());
-    cfg.live_target = Some(target.clone());
-    cfg.line_cap_fleet = 4;
-    cfg.line_cap_auto = true;
-    // ~9 Gbps, the line the 24 Aug mummy round measured and the one the
-    // curve answers with its ceiling.
-    cfg.line_anchor_bps = 1_125_000_000;
-    let servers = vec![(sc, cfg)];
-    let live = LiveStats::for_servers(&servers);
-    let servers: Vec<(ServerConfig, PoolConfig)> = servers
-        .into_iter()
-        .map(|(s, mut c)| {
-            c.live = Some(live.clone());
-            (s, c)
-        })
-        .collect();
-    let (tx, mut rx) = mpsc::channel(64);
-    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, ids, tx).await });
-    let collect = tokio::spawn(async move {
-        let mut done = 0usize;
-        while let Some(o) = rx.recv().await {
-            if matches!(o, FetchOutcome::Done { .. }) {
-                done += 1;
-            }
-        }
-        done
-    });
-    // Three agreeing ticks at one a second, plus the dial and the first
-    // deliveries that drive the fold at all.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while target.get() < 8 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the governor never raised the fleet: target {}",
-            target.get()
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(target.get(), 8, "raised past the slots that were spawned");
-    tokio::time::timeout(Duration::from_secs(300), fetch)
-        .await
-        .expect("run hung")
-        .unwrap();
-    assert_eq!(collect.await.unwrap(), segs.len());
 }
 
 /// TODO 208.2, the warm-up gap. A starved share looks like this on the

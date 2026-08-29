@@ -39,6 +39,156 @@ pub(super) fn has_steer_peer(servers: &[ServerConfig]) -> bool {
     })
 }
 
+/// Everything the last job taught this hub about the line, for the
+/// fleet rules below: the link anchor in bytes/s, whether that anchor
+/// was MEASURED rather than typed into Settings (TODO 275 item 1
+/// part 1), and the per-socket carry the last job actually held (part
+/// 2). All three are `0` / false off the daemon hub - a CLI `get`, a
+/// prefetch sidecar - which is the no-evidence case every rule below
+/// already treats as the behaviour that shipped.
+///
+/// The runner writes all three at job start, together, so they describe
+/// one moment; reading them in one place is what keeps them describing
+/// one moment here too.
+fn line_evidence(hub: &Option<Arc<StreamHub>>) -> (u64, bool, u64) {
+    use std::sync::atomic::Ordering;
+    let Some(h) = hub.as_ref() else {
+        return (0, false, 0);
+    };
+    (
+        h.line_anchor_bps.load(Ordering::Relaxed),
+        h.line_anchor_measured.load(Ordering::Relaxed),
+        h.line_carry_bps.load(Ordering::Relaxed),
+    )
+}
+
+/// TODO 112: the live connection tuner's handle for ONE server ROW,
+/// minted on the hub the first time that row is built and reused by
+/// every job after it - which is the whole point of the map living on
+/// the hub rather than per job: the epoch controller's belief has to
+/// survive a job boundary.
+///
+/// KEYED BY THE ROW, NEVER BY `s.host`. Two accounts on one provider
+/// are supported and tested (`nzbkit`'s
+/// `duplicate_host_entries_edge_trigger_independently`) - a flat-rate
+/// account beside a small block fill at the same host is the ordinary
+/// shape - and keyed by host this map handed both rows ONE
+/// `ConnTarget`. The `ceiling` clamp below then pulled the shared
+/// target down to whichever row was built last, so a 24-connection
+/// account parked at 4 sockets; one epoch controller advanced on two
+/// accounts' measurements; and configuration ORDER decided whose
+/// pin/ceiling/block policy governed both. Re-applied on every build,
+/// so a walk-up earned during job N was undone at the start of job
+/// N+1. The shape that reintroduces it is any `entry()` here or in
+/// `serve/tasks/tuner.rs` taking a hostname. See
+/// `nzbkit::pool::row_keys` for how the key is minted and why
+/// `handoff::ConnBudget::key` will not do.
+fn live_target_for_row(
+    hub: &StreamHub,
+    row_key: &str,
+    seed: usize,
+    ceiling: usize,
+) -> Arc<nzbkit::pool::ConnTarget> {
+    let t = hub
+        .live_targets
+        .lock_ok()
+        .entry(row_key.to_string())
+        .or_insert_with(|| nzbkit::pool::ConnTarget::new(seed))
+        .clone();
+    // A ceiling that moved between jobs clamps the surviving belief; a
+    // belief the controller earned above the prior survives the job
+    // boundary.
+    if t.get() > ceiling {
+        t.set(ceiling);
+    }
+    t
+}
+
+/// What the FLEET CAP is allowed to cut from this server, for
+/// `PoolConfig::line_cap_uncapped` - which is the sum
+/// `linecap::seed_uncapped` folds into
+/// `LiveStats::line_cap_configured`, whose only consumer is whyslow's
+/// `fleet_bound`.
+///
+/// 0 FOR A PINNED SERVER, and that is the fix rather than a shortcut.
+/// That arm fires on `configured > cap`, i.e. "the cap is taking
+/// sockets away". `pin_connections` is the documented escape FROM the
+/// cap - the builder skips `line_share` for it entirely and keeps the
+/// user's own number - so the cap takes nothing from a pinned account,
+/// and counting its ceiling in the sum told a user whose single server
+/// is pinned to 50 that a fleet cap of 25 was holding them back, and
+/// offered to raise the very cap their pin had already lifted.
+///
+/// `uncapped` itself is NOT zeroed at the call site:
+/// `conntune::line_cap_spawn_slots` needs the account's real ceiling to
+/// bound TODO 277's spawn headroom with, so parking a surplus can never
+/// ask an account for more than it grants. The shape that reintroduces
+/// the defect is stamping that number into the field unconditionally.
+///
+/// An all-pinned fleet therefore sums to 0, which `fleet_bound`'s first
+/// line already reads as "no claim" and never as "you configured
+/// nothing".
+fn cap_exposed(pinned: bool, uncapped: usize) -> usize {
+    match pinned {
+        true => 0,
+        false => uncapped,
+    }
+}
+
+/// Say that the FLEET CAP is what lowered this server, and name the
+/// three ways out of it.
+///
+/// Hoisted out of `build_fleet` when TODO 312 item 7 took that function
+/// past its 500-line ceiling; the reasoning below travels with the
+/// message it is about, which is the point of moving both together.
+///
+/// §275 item 2: the escape this line names must be one a user can
+/// actually reach. It used to name only NZBFAST_LINE_CAP=0, an env var
+/// that needs a daemon restart; the designed per-server escape is the
+/// pin (it bypasses this cap, the conntune knee AND the live walker,
+/// all three guard on `pin_connections`), and it is a dashboard edit.
+/// Found the hard way on a box with one provider whose 25-socket cap
+/// WAS the rate: that route serves ~10-13 Mbps per connection cold, so
+/// the fleet cap held ~0.35 Gbps on a line that had recorded a 2.5 Gbps
+/// peak the same half hour.
+///
+/// The head of this line - through `across N servers` - is parsed
+/// POSITIONALLY by the bench rig's fleet guard (it stamps
+/// `linecap=<fleet>:<allowed>of<asked>` on a leg line from it), so TODO
+/// 277's line reading is APPENDED after it and nothing before it moves.
+/// TODO 312 item 1 named the Settings escape first.
+fn note_line_cap(
+    host: &str,
+    share: usize,
+    base: usize,
+    line_cap: usize,
+    n_servers: usize,
+    anchor_bps: u64,
+) {
+    info!(target: "tune", "line cap: {host} {share} of {base} (fleet cap {line_cap} \
+           across {n_servers} servers, sized from a {:.0} Mbit line; set the fleet size in \
+           Settings to name your own, pin this server's connections to lift it \
+           for that server, or NZBFAST_LINE_CAP=0 turns it off)",
+          anchor_bps as f64 * 8.0 / 1e6);
+}
+
+/// How many config rows each host carries.
+///
+/// The conntune store is host-keyed on disk, so its one bucket cannot
+/// say WHICH account's target it recorded, and `seed_connections` caps
+/// but never raises - seeding both rows of a duplicated host from it
+/// starts the 24-connection account at the 4-connection one's learned
+/// target, every job. A row whose host counts more than one here seeds
+/// from its own typed number instead; the tuner skips the write-back
+/// for such hosts too (`serve/tasks/tuner.rs::flush_bucket`).
+fn host_row_counts(servers: &[ServerConfig]) -> std::collections::HashMap<&str, usize> {
+    let mut host_rows: std::collections::HashMap<&str, usize> = Default::default();
+    for s in servers {
+        *host_rows.entry(s.host.as_str()).or_default() += 1;
+    }
+    host_rows
+}
+
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn build_fleet(
     cfg_all: &Config,
@@ -111,6 +261,18 @@ pub(super) async fn build_fleet(
     let live_tune = hub.as_ref().is_some_and(|h| {
         h.live_tune.load(std::sync::atomic::Ordering::Relaxed) || crate::conntune::live_tune_on()
     });
+    // Resolved HERE rather than beside the server map below, because
+    // the knee notes underneath need `line_share` to say whether the
+    // knee they are announcing is the thing that actually binds. Both
+    // reads are of `hub` and of settings.json + the environment, so
+    // nothing between here and the map can change either answer.
+    let (anchor_bps, anchor_measured, carry_bps) = line_evidence(hub);
+    let LineCapPlan {
+        line_cap,
+        line_cap_auto,
+        line_share,
+        headroom_share,
+    } = line_cap_plan(config, anchor_bps, carry_bps, cfg_all.servers.len());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -149,8 +311,12 @@ pub(super) async fn build_fleet(
                 true => ", overdue for re-measurement",
                 false => "",
             };
+            // And say when this knee, not the fleet cap, is the thing
+            // that binds; see `conntune::knee_under_cap_note`.
+            let under_cap =
+                crate::conntune::knee_under_cap_note(t.connections, line_share, line_cap);
             Some(format!(
-                "{} capped at {} of {asked}, probed {age} ago{overdue}",
+                "{} capped at {} of {asked}, probed {age} ago{overdue}{under_cap}",
                 s.host, t.connections
             ))
         })
@@ -234,42 +400,19 @@ pub(super) async fn build_fleet(
     } else {
         Default::default()
     };
-    // TODO 208 item 1: the fleet cap (`nzbkit::pool::linecap` has the
-    // measurements). The SEED half: the whole fleet is capped at a
-    // small CONSTANT, split equally across the servers and still under
-    // each account's own number. Enters as a `min` on `base`, the same
-    // seam `host_caps` uses, so a pin still wins and a knee or a live
-    // seed still only lowers it. It binds on every run now that the cap
-    // is no longer divided out of the line: a CLI run and a daemon's
-    // first job, which have no `anchor`, are capped here like any
-    // other. The anchor is still stamped on every server's pool config
-    // - the in-run shed stands down without one
-    // (`Shared::line_cap_tick`), and the stall bound sizes an article's
-    // share from it.
-    let anchor_bps = hub
-        .as_ref()
-        .map(|h| h.line_anchor_bps.load(std::sync::atomic::Ordering::Relaxed))
-        .unwrap_or(0);
-    // TODO 277: the fleet is a curve on that anchor now, not a flat
-    // constant. An anchor of 0 - a CLI run, a sidecar, a daemon that
-    // has not finished a job yet - is the curve's floor, which is the
-    // number that shipped, so nothing about those runs changes.
-    let line_cap = crate::conntune::line_cap_fleet(anchor_bps);
-    let line_share = crate::conntune::line_cap_share(cfg_all.servers.len(), anchor_bps);
-    // TODO 277: the seed SPAWNS slots for a bigger fleet than it runs,
-    // and parks the surplus, so that the in-run governor's raise has
-    // somewhere to land - a `ConnTarget` above the spawned fleet wakes
-    // nothing. `conntune::line_cap_headroom_fleet` carries the whole
-    // argument and the three scoping rules.
-    let headroom_share = nzbkit::pool::linecap::server_share(
-        crate::conntune::line_cap_headroom_fleet(line_cap, crate::conntune::line_cap_is_auto()),
-        cfg_all.servers.len(),
-    );
     let seed_bucket = crate::conntune::bucket_of(crate::conntune::local_hour());
+    // The per-ROW identity of this fleet, in fleet order. Two accounts
+    // on one hostname are supported, so `s.host` is not an identity -
+    // see `nzbkit::pool::row_keys`, which carries the whole argument and
+    // is the SAME function `LiveStats::for_servers` mints
+    // `ServerLive::row_key` with, off this same list in this same order.
+    let row_keys = nzbkit::pool::row_keys(cfg_all.servers.iter().map(|s| s.host.as_str()));
+    let host_rows = host_row_counts(&cfg_all.servers);
     let mut servers: Vec<_> = cfg_all
         .servers
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(row, s)| {
             let mut base = connections.min(s.connections.max(1) as usize);
             if let Some(cap) = host_caps.get(&s.host) {
                 base = base.min((*cap).max(1));
@@ -279,31 +422,28 @@ pub(super) async fn build_fleet(
             // headroom is held to below, so that parking a surplus can
             // never ask an account for more than it grants.
             let uncapped = base;
+            // The same ceilings with the knee applied, which is a
+            // different number answering a different question; see
+            // `conntune::dialable_ceiling`.
+            let dialable = crate::conntune::dialable_ceiling(
+                uncapped,
+                s.pin_connections,
+                live_tune,
+                tuned.get(&s.host),
+                now,
+            );
             if let Some(share) = line_share
                 && !s.pin_connections
                 && share < base
             {
-                // §275 item 2: the escape this line names must be one a
-                // user can actually reach. It used to name only
-                // NZBFAST_LINE_CAP=0, an env var that needs a daemon
-                // restart; the designed per-server escape is the pin
-                // (it bypasses this cap, the conntune knee AND the live
-                // walker, all three guard on `pin_connections`), and it
-                // is a dashboard edit. Found the hard way on a
-                // giganews-only box whose 25-socket cap WAS the rate:
-                // cold giganews serves ~10-13 Mbps per connection, so
-                // the fleet cap held ~0.35 Gbps on a line that had
-                // recorded a 2.5 Gbps peak the same half hour.
-                // The head of this line - through `across N servers` -
-                // is parsed POSITIONALLY by the bench rig's fleet guard
-                // (it stamps `linecap=<fleet>:<allowed>of<asked>` on a
-                // leg line from it), so TODO 277's line reading is
-                // APPENDED after it and nothing before it moves.
-                info!(target: "tune", "line cap: {} {share} of {base} (fleet cap {line_cap} \
-                       across {} servers, sized from a {:.0} Mbit line; pin this server's \
-                       connections in Settings to lift it for that server, or \
-                       NZBFAST_LINE_CAP=0 turns it off)",
-                      s.host, cfg_all.servers.len(), anchor_bps as f64 * 8.0 / 1e6);
+                note_line_cap(
+                    &s.host,
+                    share,
+                    base,
+                    line_cap,
+                    cfg_all.servers.len(),
+                    anchor_bps,
+                );
                 base = share;
             }
             let applied = crate::conntune::applied_connections(
@@ -312,26 +452,25 @@ pub(super) async fn build_fleet(
                 tuned.get(&s.host),
                 now,
             );
+            // TODO 312 item 7: what a STALE knee is costing this
+            // server, the evidence behind whyslow's `Knee` verdict.
+            // Asked of `base` AFTER the cap's share, so the figure is
+            // what lifting the knee would really buy; `stale_knee` has
+            // the rest, including why a FRESH knee is not this.
+            let line_cap_knee = crate::conntune::stale_knee(
+                base,
+                s.pin_connections,
+                live_tune,
+                tuned.get(&s.host),
+                now,
+            );
             let (conns, live_target) = match (live_tune && !s.pin_connections && base > 1, hub) {
                 (true, Some(h)) => {
-                    let seed = crate::conntune::seed_connections(
-                        seed_store.get(&s.host),
-                        seed_bucket,
-                        now,
-                        base,
-                    );
-                    let t = h
-                        .live_targets
-                        .lock_ok()
-                        .entry(s.host.clone())
-                        .or_insert_with(|| nzbkit::pool::ConnTarget::new(seed))
-                        .clone();
-                    // A ceiling that moved between jobs clamps the
-                    // surviving belief; a belief the controller earned
-                    // above the prior survives the job boundary.
-                    if t.get() > base {
-                        t.set(base);
-                    }
+                    let tune = (host_rows.get(s.host.as_str()) == Some(&1))
+                        .then(|| seed_store.get(&s.host))
+                        .flatten();
+                    let seed = crate::conntune::seed_connections(tune, seed_bucket, now, base);
+                    let t = live_target_for_row(h, &row_keys[row], seed, base);
                     // TODO 277's spawn headroom belongs on THIS arm too
                     // (sweep 9, finding 6). It was only ever written on
                     // the `_` arm below, on the reading that live_tune
@@ -421,8 +560,16 @@ pub(super) async fn build_fleet(
                 lease,
                 handoff,
                 line_cap_fleet: line_cap,
-                line_cap_auto: crate::conntune::line_cap_is_auto(),
+                line_cap_auto,
+                // Only what the fleet cap may cut, so a pinned server
+                // contributes nothing: see `cap_exposed`. The value it
+                // wraps is `dialable`, the knee-INCLUDED counterfactual
+                // (28 Aug 2026), not the pre-knee `uncapped` the spawn
+                // headroom asks for.
+                line_cap_uncapped: cap_exposed(s.pin_connections, dialable),
+                line_cap_knee,
                 line_anchor_bps: anchor_bps,
+                line_anchor_measured: anchor_measured,
                 window,
                 // The get pipeline's drain releases this charge
                 // (drain_outcome_batch); see the field doc for why only
@@ -440,11 +587,38 @@ pub(super) async fn build_fleet(
                 race_escape,
                 stall_live,
                 peak_arrivals,
-                // §5.7, and the one place the setting meets the pool:
+                // §5.7, and the one place the economics meet the pool:
                 // per-server, never OR-folded across the fleet, because
-                // the whole point of the flag is that one account's
+                // the whole point of the setting is that one account's
                 // billing says nothing about another's.
-                block_account: s.block_account,
+                //
+                // `may_spend_on_measurement()` and NOT the bare
+                // `block_account` flag, which is what this read until
+                // 27 Aug 2026. Every other spend decision in the tree
+                // asks that predicate - `check.rs::probe_order`,
+                // `nettools`' capability probes, `scan`'s header sweep -
+                // and it honours BOTH the explicit flag and the older
+                // inference from a configured prepaid block, which the
+                // config's own test states outright ("a configured block
+                // is metered even without the flag"). The pool asked the
+                // narrower question, so a server declared only by its
+                // Block size reached the racing gates as UNMETERED: it
+                // was protected from header scans and connection ladders
+                // and then raced for duplicate BODIES at per-gigabyte
+                // rates, which is the expensive half. Measured on
+                // origin/main that day - `{"block_bytes":500000000000}`
+                // came out of this builder with `may_spend_on_measurement
+                // = false` beside `block_account = false`.
+                //
+                // That config is the one the server editor's own hint
+                // asks for ("Block size (GB) ... give it a tier of 1 or
+                // more"), and a tier is the only thing that was actually
+                // stopping the spend - `speculative_blocked` is
+                // `level > 0 || flagged`, so a block account left at the
+                // default level 0 had neither guard. Design and the
+                // routing half that is NOT fixed here:
+                // research/BLOCK-ACCOUNT-ECONOMICS-2026-08-27.md.
+                block_account: !s.may_spend_on_measurement(),
                 budget_bytes: host_budgets.get(&s.host).copied(),
                 hedge,
                 ttfb_hedge,
@@ -668,6 +842,78 @@ mod block_account_wiring {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A server declared ONLY by its Block size is metered to the pool
+    /// too, and this is the case that was wrong until 27 Aug 2026.
+    ///
+    /// `ServerConfig::may_spend_on_measurement` is the tree's one answer
+    /// to "do these bytes cost money", and it deliberately honours two
+    /// things: the explicit `block_account` flag, and the older
+    /// inference from a configured prepaid block. Every other spend
+    /// decision asks it. This builder asked for the FLAG alone, so a
+    /// `{"block_bytes": 500e9}` server with no flag reached the racing
+    /// gates as an unlimited backbone - kept off header scans and
+    /// connection ladders by the predicate, and then raced for duplicate
+    /// BODIES at per-gigabyte rates by the gate that never saw it.
+    /// `speculative_blocked` is `level > 0 || flagged`, so at the
+    /// default level 0 that config had NEITHER guard, and it is exactly
+    /// the config the server editor's Block size hint asks a user to
+    /// create.
+    ///
+    /// The flat server in the same fleet is the other half of the
+    /// assertion: this must stay a reading of each server's own
+    /// economics, never an OR-fold that a single block account drags the
+    /// whole fleet into.
+    #[tokio::test]
+    async fn a_block_size_alone_reaches_the_pool_as_metered() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"servers":[
+                 {"host":"flat.example"},
+                 {"host":"blockonly.example","block_bytes":500000000000},
+                 {"host":"flagged.example","block_account":true}
+               ]}"#,
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("nzbfast-ba-size-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let fleet = build_fleet(
+            &cfg,
+            &dir.join("config.local.json"),
+            4,
+            4,
+            &None,
+            None,
+            "",
+            &nzbkit::mem::MemBudget::with_total(1 << 30),
+        )
+        .await;
+        let flags: Vec<(String, bool)> = fleet
+            .servers
+            .iter()
+            .map(|(s, p)| (s.host.clone(), p.block_account))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("flat.example".to_string(), false),
+                ("blockonly.example".to_string(), true),
+                ("flagged.example".to_string(), true),
+            ],
+            "a configured block is metered to the pool even without the flag"
+        );
+        // The pool's reading and the predicate every other spend
+        // decision asks must not be able to part company again.
+        for (s, p) in fleet.servers.iter() {
+            assert_eq!(
+                p.block_account,
+                !s.may_spend_on_measurement(),
+                "{}: the pool must read metered exactly as the rest of \
+                 the tree does",
+                s.host
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
@@ -839,5 +1085,423 @@ mod line_cap_seed {
                 .all(|(h, _, target)| *target == if h == "e.example" { None } else { Some(5) }),
             "{got:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod row_identity {
+    use super::*;
+
+    /// One temp directory per case, and no settings.json in it - so
+    /// every knob resolves to the shipped default and no conntune store
+    /// exists to seed a live target from.
+    async fn build(cfg: &Config, hub: &Option<Arc<StreamHub>>, tag: &str) -> Fleet {
+        let dir = std::env::temp_dir().join(format!("nzbfast-rowid-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let fleet = build_fleet(
+            cfg,
+            &dir.join("config.local.json"),
+            100,
+            4,
+            hub,
+            None,
+            "",
+            &nzbkit::mem::MemBudget::with_total(1 << 30),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        fleet
+    }
+
+    /// TWO ACCOUNTS ON ONE PROVIDER GET TWO LIVE TARGETS.
+    ///
+    /// `hub.live_targets` was keyed by `s.host`, and two rows on one
+    /// hostname are supported and tested
+    /// (`nzbkit`'s `duplicate_host_entries_edge_trigger_independently`) -
+    /// a big flat-rate account beside a small block fill at the same
+    /// provider is the ordinary shape. So the second row found the
+    /// first's handle, and the `t.get() > base` clamp just below the
+    /// `entry()` call then pulled the SHARED target down to the smaller
+    /// account's ceiling: the 24-connection account parked at 4 sockets.
+    /// Re-applied on every job build, so a walk-up the epoch controller
+    /// earned during job N was undone at the start of job N+1.
+    ///
+    /// The 10 Gbit anchor is here to keep the fleet cap out of the way -
+    /// its per-server share at two servers is well above 24 - so the
+    /// only thing that can move these numbers is the aliasing.
+    ///
+    /// Asserted by Arc IDENTITY as well as by value, per the house rule:
+    /// an equality-only test passes on the copying implementation, and
+    /// the defect here IS sharing.
+    #[tokio::test]
+    async fn two_accounts_on_one_host_do_not_share_a_live_target() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"servers":[
+                 {"host":"dup.example","connections":24},
+                 {"host":"dup.example","connections":4}
+               ]}"#,
+        )
+        .unwrap();
+        let hub = Arc::new(StreamHub {
+            line_anchor_bps: std::sync::atomic::AtomicU64::new(1_250_000_000),
+            live_tune: std::sync::atomic::AtomicBool::new(true),
+            ..Default::default()
+        });
+        let fleet = build(&cfg, &Some(hub.clone()), "dup").await;
+        let targets: Vec<Arc<nzbkit::pool::ConnTarget>> = fleet
+            .servers
+            .iter()
+            .map(|(s, p)| {
+                p.live_target
+                    .clone()
+                    .unwrap_or_else(|| panic!("{} got no live target", s.host))
+            })
+            .collect();
+        assert!(
+            !Arc::ptr_eq(&targets[0], &targets[1]),
+            "the two accounts must not share one ConnTarget"
+        );
+        assert_eq!(
+            targets.iter().map(|t| t.get()).collect::<Vec<_>>(),
+            vec![24, 4],
+            "each account keeps its own base - the small one must not \
+             clamp the large one"
+        );
+        assert_eq!(
+            hub.live_targets.lock_ok().len(),
+            2,
+            "one entry per configured account, not per hostname"
+        );
+        // And the identity really is the row: the same fleet rebuilt on
+        // the same hub reuses both handles rather than minting new ones,
+        // which is the whole reason the map lives on the hub.
+        let again = build(&cfg, &Some(hub.clone()), "dup2").await;
+        for (i, (_, p)) in again.servers.iter().enumerate() {
+            assert!(
+                Arc::ptr_eq(p.live_target.as_ref().unwrap(), &targets[i]),
+                "row {i}'s belief must survive the job boundary"
+            );
+        }
+        assert_eq!(hub.live_targets.lock_ok().len(), 2);
+    }
+
+    /// A PINNED SERVER IS NOT SOMETHING THE FLEET CAP CAN CUT.
+    ///
+    /// `line_cap_uncapped` is summed by `linecap::seed_uncapped` into
+    /// `LiveStats::line_cap_configured`, whose only consumer is
+    /// whyslow's `fleet_bound`, and that arm fires on `configured >
+    /// cap` - i.e. "the cap is taking sockets away". `pin_connections`
+    /// is the documented escape from the cap (this builder skips
+    /// `line_share` for it and keeps the user's own number), so a
+    /// pinned account's ceiling in that sum was a claim the cap was
+    /// cutting something it had never touched: one server pinned to 50
+    /// under a fleet typed to 25 got reported as held back by the cap
+    /// the pin had already lifted, with an offer to raise it.
+    ///
+    /// The unpinned rows in the same fleet are the other half of the
+    /// assertion - this must stay a reading of each row's own exposure
+    /// to the cap, never a fleet-wide fold.
+    #[tokio::test]
+    async fn a_pinned_server_is_not_something_the_cap_can_cut() {
+        let hub = Arc::new(StreamHub {
+            line_anchor_bps: std::sync::atomic::AtomicU64::new(12_500_000),
+            ..Default::default()
+        });
+        // `line_cap_seed::five()`'s shape, spelled out here rather than
+        // reached for across the module wall: four ordinary accounts and
+        // one pinned, all at 100.
+        let cfg: Config = serde_json::from_str(
+            r#"{"servers":[
+                 {"host":"a.example","connections":100},
+                 {"host":"b.example","connections":100},
+                 {"host":"c.example","connections":100},
+                 {"host":"d.example","connections":100},
+                 {"host":"e.example","connections":100,"pin_connections":true}
+               ]}"#,
+        )
+        .unwrap();
+        let fleet = build(&cfg, &Some(hub), "pin").await;
+        let got: Vec<(String, usize)> = fleet
+            .servers
+            .iter()
+            .map(|(s, p)| (s.host.clone(), p.line_cap_uncapped))
+            .collect();
+        let want: Vec<(String, usize)> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|h| (format!("{h}.example"), 100))
+            .chain(std::iter::once(("e.example".to_string(), 0)))
+            .collect();
+        assert_eq!(
+            got, want,
+            "only what the cap is ALLOWED to cut belongs in the sum"
+        );
+        // The whole point of the field: the fleet's own claim. Four
+        // unpinned accounts at 100 apiece, and the pin contributing
+        // nothing.
+        assert_eq!(got.iter().map(|(_, n)| n).sum::<usize>(), 400);
+    }
+}
+
+#[cfg(test)]
+mod knee_under_the_fleet_cap {
+    use super::*;
+
+    /// A knee UNDER the fleet cap's share must not leave the pool
+    /// publishing a fleet nothing was ever going to dial.
+    ///
+    /// `PoolConfig::line_cap_uncapped` is a counterfactual - what this
+    /// server would dial with the fleet cap taking nothing out - and it
+    /// is the denominator of TODO 312 item 3's whyslow verdict, which
+    /// fires on `configured > cap`. Fed the ceilings WITHOUT the knee it
+    /// answers 40 here while the pool dials 20 and would still dial 20
+    /// with the cap switched off entirely: the cap costs this server
+    /// nothing, and the number said it cost twenty sockets.
+    ///
+    /// The fixture is the shape TODO 275's 5 Gbit ladder hit
+    /// (`research/KNEE-UNDER-FLEET-CAP-2026-08-28.md`), reduced so the
+    /// knee sits under the cap rather than over it: rungs of 50, 77 and
+    /// 100 all ran 32 sockets and landed within 0.4 MB/s of each other,
+    /// and every instrument read clean while it happened.
+    #[tokio::test]
+    async fn a_knee_below_the_cap_share_is_in_the_published_ceiling() {
+        // The fleet cap arm is selected by the environment on every
+        // §208-family bench leg, and it outranks the setting this
+        // fixture writes; under one of those shells the fixture is not
+        // the configuration under test. Same for live tuning, where the
+        // knee seeds instead of capping.
+        for k in ["NZBFAST_LINE_CAP", "NZBFAST_LIVE_TUNE"] {
+            if std::env::var_os(k).is_some() {
+                eprintln!("skipped: {k} overrides the fixture");
+                return;
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("nzbfast-knee-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.local.json");
+        // Written, never inherited: an absent config sends
+        // `Config::load` hunting for a SABnzbd install in $HOME, which
+        // is this box and not this test (tools/host-config-gate.py).
+        std::fs::write(
+            &config,
+            r#"{"servers":[{"host":"knee.example","connections":40}]}"#,
+        )
+        .unwrap();
+        // A fleet cap of 25 for one server: a 25-socket share, above
+        // the knee below it.
+        std::fs::write(
+            config.with_file_name("settings.json"),
+            r#"{"line_cap_fleet":25}"#,
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Fresh, corroborated, and well inside EXPIRE_SECS: this is a
+        // knee the product applies, not a stale one being argued about.
+        std::fs::write(
+            config.with_file_name("conntune.json"),
+            format!(
+                r#"{{"knee.example":{{"connections":20,"granted":20,"gbps":1.0,"checked":{now},"source":"manual"}}}}"#
+            ),
+        )
+        .unwrap();
+        let cfg: Config = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        let fleet = build_fleet(
+            &cfg,
+            &config,
+            40,
+            4,
+            &None,
+            None,
+            "",
+            &nzbkit::mem::MemBudget::with_total(1 << 30),
+        )
+        .await;
+        let got = &fleet.servers[0].1;
+        assert_eq!(
+            got.connections, 20,
+            "the knee is what this fleet dials; the fixture is wrong if it is not"
+        );
+        assert_eq!(
+            got.line_cap_uncapped, 20,
+            "line_cap_uncapped must be what this server would dial with the FLEET CAP \
+             taking nothing out, which still has the knee in it - published as {} it \
+             convicts our own cap of holding back sockets the account never granted",
+            got.line_cap_uncapped
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One fixture for the two `line_cap_knee` cases below: one server
+    /// at 40 connections under a fleet cap of 25, with whatever
+    /// `conntune.json` the caller wants, built into its own directory.
+    ///
+    /// Written and never inherited, like the two cases above: an absent
+    /// config sends `Config::load` hunting for a SABnzbd install in
+    /// $HOME, which is this box and not this test
+    /// (`tools/host-config-gate.py`).
+    async fn built_with(tag: &str, conntune: &str) -> nzbkit::pool::PoolConfig {
+        let dir = std::env::temp_dir().join(format!("nzbfast-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.local.json");
+        std::fs::write(
+            &config,
+            r#"{"servers":[{"host":"knee.example","connections":40}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config.with_file_name("settings.json"),
+            r#"{"line_cap_fleet":25}"#,
+        )
+        .unwrap();
+        std::fs::write(config.with_file_name("conntune.json"), conntune).unwrap();
+        let cfg: Config = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        let fleet = build_fleet(
+            &cfg,
+            &config,
+            40,
+            4,
+            &None,
+            None,
+            "",
+            &nzbkit::mem::MemBudget::with_total(1 << 30),
+        )
+        .await;
+        let got = fleet.servers[0].1.clone();
+        let _ = std::fs::remove_dir_all(&dir);
+        got
+    }
+
+    /// A `conntune.json` whose one knee of 20 was measured `age_secs`
+    /// ago, so a case can name the age it is really about rather than a
+    /// timestamp a reader has to do arithmetic on.
+    fn knee_json(age_secs: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let checked = now - age_secs;
+        format!(
+            r#"{{"knee.example":{{"connections":20,"granted":20,"gbps":1.0,"checked":{checked},"source":"manual"}}}}"#
+        )
+    }
+
+    /// TODO 312 item 7: a STALE knee under the cap's share must reach
+    /// the pool as one, with the figure lifting it would really buy.
+    ///
+    /// THE NUMBER IS 5 AND NOT 20, which is the whole point of measuring
+    /// `takes` against the POST-cap ceiling. The account allows 40, the
+    /// fleet cap's share is 25, the knee is 20: lifting the knee gets
+    /// this server to 25, not to 40, and the larger figure would be a
+    /// promise the product cannot keep. `takes > 0` is also the only
+    /// statement whyslow's `knee_bound` needs of the ordering - it IS
+    /// "the knee, not the cap, is the lower of the two".
+    #[tokio::test]
+    async fn a_stale_knee_reaches_the_pool_with_what_lifting_it_would_buy() {
+        for k in ["NZBFAST_LINE_CAP", "NZBFAST_LIVE_TUNE"] {
+            if std::env::var_os(k).is_some() {
+                eprintln!("skipped: {k} overrides the fixture");
+                return;
+            }
+        }
+        let got = built_with(
+            "stale-knee",
+            &knee_json(crate::conntune::STALE_SECS + 86_400),
+        )
+        .await;
+        assert_eq!(
+            got.connections, 20,
+            "the knee is what this fleet dials; the fixture is wrong if it is not"
+        );
+        let k = got
+            .line_cap_knee
+            .expect("a knee eight days past its re-probe appointment is stale");
+        assert_eq!(k.at, 20, "the knee itself, as the Providers card shows it");
+        assert_eq!(
+            k.takes, 5,
+            "sockets lifting the knee would really buy: the cap's share of 25 \
+             less the knee of 20, never the account's 40 less the knee"
+        );
+        assert!(
+            k.age_secs >= crate::conntune::STALE_SECS,
+            "the age travels with it: {}",
+            k.age_secs
+        );
+    }
+
+    /// The negative control, and the one this arm cannot do without: the
+    /// SAME knee, same cap, same account, measured an hour ago. It is
+    /// still what the fleet dials - `connections` is 20 either way - and
+    /// it must reach the pool as NO claim, because a fresh knee is
+    /// auto-tune doing its job and convicting it would train users to
+    /// switch the thing off. See `conntune::stale_knee` for the argument.
+    #[tokio::test]
+    async fn a_fresh_knee_is_not_a_claim_however_hard_it_binds() {
+        for k in ["NZBFAST_LINE_CAP", "NZBFAST_LIVE_TUNE"] {
+            if std::env::var_os(k).is_some() {
+                eprintln!("skipped: {k} overrides the fixture");
+                return;
+            }
+        }
+        let got = built_with("fresh-knee", &knee_json(3_600)).await;
+        assert_eq!(got.connections, 20, "it still binds - that is the point");
+        assert!(
+            got.line_cap_knee.is_none(),
+            "a knee inside its re-probe appointment is a measurement we stand by"
+        );
+    }
+
+    /// The other direction, so the assertion above cannot be satisfied
+    /// by a builder that simply reports the number it dialled: with no
+    /// knee on file the ceiling is the account's own number, ABOVE the
+    /// cap that is holding the fleet down, and the difference between
+    /// the two is the claim TODO 312 item 3 exists to make.
+    #[tokio::test]
+    async fn with_no_knee_the_published_ceiling_is_still_above_the_cap() {
+        for k in ["NZBFAST_LINE_CAP", "NZBFAST_LIVE_TUNE"] {
+            if std::env::var_os(k).is_some() {
+                eprintln!("skipped: {k} overrides the fixture");
+                return;
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("nzbfast-nokneecap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("config.local.json");
+        std::fs::write(
+            &config,
+            r#"{"servers":[{"host":"knee.example","connections":40}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            config.with_file_name("settings.json"),
+            r#"{"line_cap_fleet":25}"#,
+        )
+        .unwrap();
+        let cfg: Config = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+        let fleet = build_fleet(
+            &cfg,
+            &config,
+            40,
+            4,
+            &None,
+            None,
+            "",
+            &nzbkit::mem::MemBudget::with_total(1 << 30),
+        )
+        .await;
+        let got = &fleet.servers[0].1;
+        assert_eq!(
+            got.connections, 25,
+            "the fleet cap's share is what binds here"
+        );
+        assert_eq!(
+            got.line_cap_uncapped, 40,
+            "with nothing else capping, the published ceiling is the account's own number"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -36,6 +36,64 @@ pub struct LiveStats {
     /// state, for `report_diagnostics`' consumers and the "Why is this
     /// slow?" panel. See `steer::RaceLive`.
     pub race: steer::RaceLive,
+    /// TODO 312 item 3: the fleet cap in FORCE, in sockets. 0 = the
+    /// rule is off. Seeded from the pool configs and moved by the
+    /// in-run governor, so a surface reading it never describes a cap
+    /// the run left behind three rungs ago.
+    ///
+    /// Run-level rather than per-server for the reason the cap itself
+    /// is: it is a whole-fleet socket budget, and `ServerLive::budget`
+    /// already carries this server's share of it.
+    pub line_cap_fleet: AtomicUsize,
+    /// TODO 312 item 3: what the fleet would dial with the cap taking
+    /// nothing out (`linecap::seed_uncapped`). 0 = no claim.
+    ///
+    /// This is the number that makes the cap's cost sayable. `budget`
+    /// says what is in force and nothing about what was given up for
+    /// it, so "held at 25 of the 100 you configured" cannot be composed
+    /// from the gauges that existed before this one.
+    pub line_cap_configured: AtomicUsize,
+    /// TODO 312 item 3: is the cap the curve's own number (true) or one
+    /// somebody typed (false)? `linecap::seed_auto`'s fold.
+    ///
+    /// Load-bearing for the verdict and not decoration: an AUTO cap
+    /// below the ceiling is one the governor is still free to grow, so
+    /// naming it as the binding constraint would convict a rule that is
+    /// three ticks from fixing itself. A TYPED one never grows, so it
+    /// binds at whatever number it holds.
+    pub line_cap_auto: std::sync::atomic::AtomicBool,
+    /// TODO 312 item 7: the STALE auto-tune knee holding this fleet
+    /// under its own ceiling, `None` when none is
+    /// ([`super::linecap::seed_knee`]).
+    ///
+    /// A PLAIN field and not a gauge, unlike the three above it, and
+    /// the difference is real rather than an oversight: the cap is
+    /// walked by the in-run governor, so a surface has to read what it
+    /// holds NOW, while a knee is applied when the fleet is BUILT and
+    /// nothing in the run moves it. An atomic for a value that cannot
+    /// change is an invitation to a writer, and a knee that moved
+    /// mid-run would be describing a fleet that had already been
+    /// spawned against the old one.
+    pub line_cap_knee: Option<super::linecap::FleetKnee>,
+    /// TODO 275 item 1 part 2: the best per-socket carry this run has
+    /// been SEEN to hold, in bytes/s, 0 = nothing measured yet.
+    ///
+    /// The same quantity `fleet_for_supply` sizes off - the fleet's
+    /// achieved rate over `Shared::workers_dialling`, never the cap and
+    /// never the spawn count - published here so the daemon can persist
+    /// it and the NEXT job's seed can start where this one ended
+    /// instead of re-walking the climb from `LINE_CAP_SOCKET_BPS`'s
+    /// assumption every time.
+    ///
+    /// MAX over the run, and the direction is the safety argument: a
+    /// carry read HIGH asks for FEWER sockets, so the max is the
+    /// conservative summary of a run, exactly as `linkpeak`'s peak is
+    /// for a link. Readings taken past queue-dry are excluded upstream
+    /// (the F6 tail guard), because a short queue is not a slow socket.
+    ///
+    /// Written only by `Shared::line_cap_tick`, once a second, under
+    /// the CAS that already serializes that tick.
+    pub line_carry_bps: AtomicU64,
 }
 
 /// One thing that happened to the pool, at a moment.
@@ -106,12 +164,73 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The per-ROW identity of a fleet, in fleet order: one key per
+/// configured account, `<nth-row-on-this-host>#<host>`.
+///
+/// A HOSTNAME IS NOT AN IDENTITY HERE, and that is the whole reason
+/// this exists. Two accounts on one provider are supported and tested
+/// (`crates/nzbkit/src/pool/block_threshold_tests.rs::
+/// duplicate_host_entries_edge_trigger_independently`) - a flat-rate
+/// account plus a small block fill at the same host is the ordinary
+/// shape - so a map keyed by `s.host` ALIASES them. The live connection
+/// tuner did exactly that: the two rows shared one `ConnTarget`, so the
+/// second row's smaller base clamped the first's (a 24-connection
+/// account parked at 4 sockets), one controller advanced on two
+/// accounts' measurements, and configuration ORDER decided whose
+/// pin/ceiling/block policy won. Re-applied on every job build, so a
+/// walk-up during job N was undone at the start of job N+1.
+///
+/// THE ORDINAL COMES FIRST so the encoding is injective whatever a
+/// hostname contains: the key is a decimal run, one `#`, then the host
+/// verbatim, so two keys are equal only when both halves are. Spelled
+/// the other way round a host containing `#` could collide.
+///
+/// WHY THE ORDINAL IS PER HOST rather than a bare position in the
+/// list. The two places that mint these keys see differently filtered
+/// lists: the fleet build gets a config with switched-off servers and
+/// hosts excluded for this job already removed (`get/plan.rs`), while
+/// the tuner's stand-down reloads the config from disk. A bare list
+/// index is therefore a different number in the two places the moment
+/// any server is switched off. An ordinal counted WITHIN a host is not:
+/// the exclusion filter is per HOST, so it removes all of a host's rows
+/// together and disturbs no other host's numbering, and the
+/// switched-off filter only ever renumbers later rows OF THE SAME HOST
+/// - which the stand-down applies too. It is also the key that survives
+/// a settings edit best, which matters because the tuner's belief is
+/// meant to outlive a job boundary.
+///
+/// Never logged and never put in an API body: it carries a host, and
+/// `handoff::ConnBudget::key` was rejected as the identity here for the
+/// stronger version of the same reason - that key is
+/// host:port:username, where port has a serde default and username
+/// defaults to `None`, so two plainly duplicated rows collapse to ONE
+/// key and the aliasing comes straight back.
+pub fn row_keys<'a>(hosts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut seen: std::collections::HashMap<&'a str, usize> = std::collections::HashMap::new();
+    hosts
+        .into_iter()
+        .map(|h| {
+            let n = seen.entry(h).or_insert(0);
+            let key = format!("{n}#{h}");
+            *n += 1;
+            key
+        })
+        .collect()
+}
+
 /// `Default` so the field list lives in exactly one place: this struct
 /// has grown past twenty gauges and every test rig that built one by
 /// literal had to be edited whenever an unrelated counter was added.
 #[derive(Default)]
 pub struct ServerLive {
     pub host: String,
+    /// This ROW's identity in the fleet - see [`row_keys`], which mints
+    /// it and carries the whole argument for why a hostname is not one.
+    ///
+    /// Empty on a `ServerLive` built by hand (the ring rigs use
+    /// `..Default::default()`), which is correct: nothing keyed by it
+    /// exists on those paths.
+    pub row_key: String,
     /// Connection budget: the number of workers the run intends to use
     /// on this server. Atomic because the live tuner (TODO 112) moves
     /// its [`ConnTarget`] mid-run and this gauge must follow; without a
@@ -119,6 +238,32 @@ pub struct ServerLive {
     pub budget: AtomicUsize,
     /// Workers currently holding an open NNTP session.
     pub connected: AtomicUsize,
+    /// The MOST sessions this server ever served us at once over the
+    /// life of this [`LiveStats`] - "the provider let us hold N at
+    /// once", which is what the word GRANTED means at every call site
+    /// that reads it.
+    ///
+    /// Recorded at the one place the concurrency can rise, so it is
+    /// EXACT rather than sampled. `nzbkit::sysbench::timed_fetch_multi`
+    /// used to approximate it by peak-sampling `connected` every
+    /// 100 ms, which can only ever see a fleet that outlives a tick: a
+    /// carry rung asking for 13 sockets and draining in ~0.45 s
+    /// reported 3, the daemon carry probe's rungs of 5 and 10 both
+    /// reported 1 against an unpaced loopback provider, and a fleet of
+    /// six gone inside one tick reported 0 (TODO 312 item 3, whose
+    /// fixtures are in `sysbench`'s own tests). That under-read is not
+    /// only a wrong figure in the panel - `conntune::knee_of` CLAMPS
+    /// the recommended connection count to it, so it caps real
+    /// downloads on exactly the fast lines that trigger it.
+    ///
+    /// Not [`ServerLive::granted_hi`], which is a different quantity:
+    /// that one is sampled ONLY at a capacity refusal and stays 0 while
+    /// the provider has never refused us. This one is the plain
+    /// high-water mark and needs no refusal to have a value.
+    ///
+    /// Distinct from `budget`: this counts sessions we really got, so
+    /// an idle provider sitting below its ceiling reads low, correctly.
+    pub connected_peak: AtomicUsize,
     /// Raw bytes fetched by this server this run.
     pub bytes: AtomicU64,
     /// Article dispatches sent to this server this run (reliability
@@ -346,11 +491,18 @@ pub struct Refusal {
 
 impl LiveStats {
     pub fn for_servers(servers: &[(ServerConfig, PoolConfig)]) -> Arc<LiveStats> {
+        // Minted here from the SAME list, in the same order, that the
+        // fleet build keyed its live-tune targets from - so the tuner
+        // can read a row's key off the row rather than re-deriving it
+        // and getting a different answer. See `row_keys`.
+        let keys = row_keys(servers.iter().map(|(s, _)| s.host.as_str()));
         Arc::new(LiveStats {
             servers: servers
                 .iter()
-                .map(|(s, cfg)| ServerLive {
+                .zip(keys)
+                .map(|((s, cfg), row_key)| ServerLive {
                     host: s.host.clone(),
+                    row_key,
                     // With a live target in force the number in use is
                     // the target, not the spawn count - slots above it
                     // park immediately. `PoolConfig::dialled` is that
@@ -359,6 +511,7 @@ impl LiveStats {
                     // number for the same reason.
                     budget: AtomicUsize::new(cfg.dialled()),
                     connected: AtomicUsize::new(0),
+                    connected_peak: AtomicUsize::new(0),
                     refusal: std::sync::Mutex::new(None),
                     bytes: AtomicU64::new(0),
                     articles_tried: AtomicU64::new(0),
@@ -387,6 +540,11 @@ impl LiveStats {
                 .collect(),
             events: std::sync::Mutex::new(std::collections::VecDeque::new()),
             race: Default::default(),
+            line_cap_fleet: AtomicUsize::new(super::linecap::seed_cap(servers)),
+            line_cap_configured: AtomicUsize::new(super::linecap::seed_uncapped(servers)),
+            line_cap_auto: std::sync::atomic::AtomicBool::new(super::linecap::seed_auto(servers)),
+            line_cap_knee: super::linecap::seed_knee(servers),
+            line_carry_bps: AtomicU64::new(0),
         })
     }
 
@@ -486,5 +644,94 @@ impl LiveStats {
             .lock()
             .map(|r| r.iter().rev().take(limit).cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod row_key_tests {
+    use super::*;
+
+    /// The one property everything downstream rests on: one key per
+    /// ROW, and two accounts on one provider are two rows.
+    ///
+    /// A host-keyed map is what aliased the live connection tuner - two
+    /// rows on one provider shared one `ConnTarget`, so the smaller
+    /// account's base clamped the larger one's and one epoch controller
+    /// advanced on both accounts' measurements. Nothing about the key
+    /// may collapse two rows again.
+    #[test]
+    fn every_row_gets_its_own_key() {
+        let keys = row_keys(["a.example", "dup.example", "b.example", "dup.example"]);
+        assert_eq!(
+            keys,
+            [
+                "0#a.example",
+                "0#dup.example",
+                "0#b.example",
+                "1#dup.example"
+            ]
+        );
+        let mut uniq = keys.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), keys.len(), "a key may never cover two rows");
+        assert!(row_keys(std::iter::empty()).is_empty());
+    }
+
+    /// The ordinal counts WITHIN a host, so another host's rows appearing
+    /// or vanishing cannot renumber this one's. That is what lets the
+    /// fleet build (whose config has switched-off and excluded servers
+    /// already removed) and the tuner's stand-down (which reloads from
+    /// disk) mint the same key for the same row.
+    #[test]
+    fn another_hosts_rows_do_not_renumber_this_ones() {
+        assert_eq!(
+            row_keys(["dup.example", "gone.example", "dup.example"])
+                .into_iter()
+                .filter(|k| k.ends_with("dup.example"))
+                .collect::<Vec<_>>(),
+            row_keys(["dup.example", "dup.example"]),
+        );
+    }
+
+    /// The ordinal leads, so the encoding is injective whatever a
+    /// hostname contains. Spelled `<host>#<n>` a host holding a `#`
+    /// could collide with a different (host, ordinal) pair; spelled this
+    /// way the split point is unambiguous.
+    #[test]
+    fn a_hash_in_a_hostname_cannot_forge_another_rows_key() {
+        let keys = row_keys(["a#1", "a", "a"]);
+        assert_eq!(keys, ["0#a#1", "0#a", "1#a"]);
+        assert_ne!(keys[0], keys[2]);
+    }
+
+    /// `for_servers` stamps the key it mints onto the row, so the tuner
+    /// reads it off `ServerLive` rather than re-deriving it and getting
+    /// a different answer.
+    #[test]
+    fn for_servers_stamps_the_row_key_onto_each_row() {
+        // Through the deserializer rather than a struct literal:
+        // `ServerConfig` has no `Default`, and spelling out its twenty
+        // fields here would make this test fail whenever an unrelated
+        // one is added - the reasoning `event_ring_tests.rs` records for
+        // building its rows by hand instead.
+        let servers: Vec<(ServerConfig, PoolConfig)> =
+            ["one.example", "dup.example", "dup.example"]
+                .iter()
+                .map(|h| {
+                    (
+                        serde_json::from_str(&format!(r#"{{"host":"{h}"}}"#)).unwrap(),
+                        PoolConfig::default(),
+                    )
+                })
+                .collect();
+        let live = LiveStats::for_servers(&servers);
+        assert_eq!(
+            live.servers
+                .iter()
+                .map(|s| s.row_key.as_str())
+                .collect::<Vec<_>>(),
+            ["0#one.example", "0#dup.example", "1#dup.example"]
+        );
     }
 }

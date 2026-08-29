@@ -91,11 +91,25 @@ rsync -a --delete "$crate/src/" "$dest/src/"
 mkdir -p "$dest/tests/fixtures"
 rsync -a --delete "$crate/tests/fixtures/" "$dest/tests/fixtures/"
 
-# COPYING lives at the fork repo root (the crate dir has none); prefer a
-# crate-local copy if the upstream layout ever grows one.
-if   [ -f "$crate/COPYING" ]; then cp "$crate/COPYING" "$dest/COPYING"
-elif [ -f "$fork/COPYING"  ]; then cp "$fork/COPYING"  "$dest/COPYING"
-else echo "warning: no COPYING found in fork — leaving vendor/rars/COPYING as-is" >&2
+# COPYING IS OURS NOW AND IS NOT SYNCED. Until 26 Aug 2026 this script
+# copied the fork's repo-root COPYING over ours on every sync, which is
+# correct only while our COPYING is upstream's. It no longer is: this
+# fork is stated MIT OR Apache-2.0 (see vendor/rars/COPYING for why, and
+# LICENSE-MIT / LICENSE-APACHE beside it), so copying upstream's WTFPL
+# file back over it would silently revert a deliberate licence decision
+# and put the tree back to asserting two licences at once.
+#
+# Upstream's own COPYING is still worth WATCHING rather than ignoring -
+# if bitplane ever resolves his repo's own contradiction, we want to know.
+# So report a change instead of applying one.
+if   [ -f "$crate/COPYING" ]; then up="$crate/COPYING"
+elif [ -f "$fork/COPYING"  ]; then up="$fork/COPYING"
+else up=""
+fi
+if [ -n "$up" ] && ! cmp -s "$up" "$dest/.upstream-COPYING.seen" 2>/dev/null; then
+  cp "$up" "$dest/.upstream-COPYING.seen"
+  echo "note: upstream COPYING changed - read it and decide whether vendor/rars/COPYING" >&2
+  echo "      should follow; it is NOT copied automatically (see the block above)." >&2
 fi
 
 n_src=$(find "$dest/src" -type f | wc -l | tr -d ' ')

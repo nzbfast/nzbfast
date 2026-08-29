@@ -582,13 +582,88 @@ fn set_index_evict_order_membership() {
 #[test]
 fn set_index_evict_kinds_validates_and_dedups() {
     let (_t, d) = daemon_in("evictkinds");
-    let e = set_index_evict_kinds(&d, "index_evict_kinds", "movie,junk").unwrap_err();
+    // A slug-shaped token ("junk") is a valid custom kind since the
+    // 27 Aug 2026 widening; only a malformed one is refused.
+    let e = set_index_evict_kinds(&d, "index_evict_kinds", "movie,ju nk").unwrap_err();
     assert!(e.contains("unknown kind"), "{e}");
     assert_eq!(
         set_index_evict_kinds(&d, "index_evict_kinds", "Movie, tv, movie").unwrap(),
         (true, json!(["movie", "tv"]))
     );
     assert_eq!(*d.index_evict_kinds.lock_ok(), vec!["movie", "tv"]);
+}
+
+#[cfg(feature = "indexer")]
+#[test]
+fn set_index_keep_kinds_validates_and_dedups() {
+    let (_t, d) = daemon_in("keepkinds");
+    let e = set_index_keep_kinds(&d, "index_keep_kinds", "tv,ju nk").unwrap_err();
+    assert!(e.contains("index_keep_kinds"), "{e}");
+    assert!(
+        d.index_keep_kinds.lock_ok().is_empty(),
+        "refused = unstored"
+    );
+    assert_eq!(
+        set_index_keep_kinds(&d, "index_keep_kinds", "TV, movie, tv").unwrap(),
+        (true, json!(["tv", "movie"]))
+    );
+    assert_eq!(*d.index_keep_kinds.lock_ok(), vec!["tv", "movie"]);
+    // Clearing the exemption is spelling it empty.
+    assert_eq!(
+        set_index_keep_kinds(&d, "index_keep_kinds", "").unwrap(),
+        (true, json!([] as [&str; 0]))
+    );
+    assert!(d.index_keep_kinds.lock_ok().is_empty());
+}
+
+#[cfg(feature = "indexer")]
+#[test]
+fn set_index_evict_scope_membership() {
+    let (_t, d) = daemon_in("evictscope");
+    *d.index_evict_scope.lock_ok() = "all".to_string();
+    let e = set_index_evict_scope(&d, "index_evict_scope", "sideways").unwrap_err();
+    assert!(e.contains("index_evict_scope"), "{e}");
+    assert_eq!(*d.index_evict_scope.lock_ok(), "all");
+    assert_eq!(
+        set_index_evict_scope(&d, "index_evict_scope", "Junk_Incomplete").unwrap(),
+        (true, json!("junk_incomplete"))
+    );
+    assert_eq!(*d.index_evict_scope.lock_ok(), "junk_incomplete");
+    // "" is a hand-edited file's spelling of the default; stored canonical.
+    assert_eq!(
+        set_index_evict_scope(&d, "index_evict_scope", "").unwrap(),
+        (true, json!("all"))
+    );
+}
+
+#[cfg(feature = "indexer")]
+#[test]
+fn set_index_evict_headroom_range() {
+    let (_t, d) = daemon_in("evicthr");
+    let e = set_index_evict_headroom(&d, "index_evict_headroom", "60").unwrap_err();
+    assert!(e.contains("at most 50"), "{e}");
+    assert_eq!(
+        d.index_evict_headroom.load(Ordering::Relaxed),
+        10,
+        "refused = unstored, the seeded default stands"
+    );
+    assert!(set_index_evict_headroom(&d, "index_evict_headroom", "ten").is_err());
+    assert_eq!(
+        set_index_evict_headroom(&d, "index_evict_headroom", "0").unwrap(),
+        (true, json!(0))
+    );
+    assert_eq!(
+        set_index_evict_headroom(&d, "index_evict_headroom", "25").unwrap(),
+        (true, json!(25))
+    );
+    assert_eq!(d.index_evict_headroom.load(Ordering::Relaxed), 25);
+    // And the policy the engine sees carries all three new controls.
+    *d.index_keep_kinds.lock_ok() = vec!["tv".into()];
+    *d.index_evict_scope.lock_ok() = "junk_incomplete".to_string();
+    let p = d.evict_policy();
+    assert_eq!(p.headroom_pct, Some(25));
+    assert_eq!(p.keep_kinds, vec!["tv"]);
+    assert_eq!(p.scope, nzbkit::index::EvictScope::JunkOrIncomplete);
 }
 
 /// The requests-per-day dial can only ever spend LESS. Every path in
@@ -891,6 +966,89 @@ fn a_half_edited_masked_feed_url_is_refused() {
         real,
         "a refused save changes nothing"
     );
+}
+
+/// F8: two rows with the same address are refused, and the refusal names
+/// the offending row by its MASKED url.
+///
+/// What it prevents: the poller keys the next-poll deadline, the health
+/// row and the on-disk seen scope by URL, so a second row with the same
+/// address is skipped on every pass forever while displaying the FIRST
+/// row's health - a silent permanent starvation that the UI positively
+/// asserts is fine. Two rows with disjoint Accept rules could not both
+/// work.
+///
+/// Confirmed to fail before the fix: on the old code `set_feeds` accepted
+/// the two-row list and returned `Ok`, so the `unwrap_err` below panics
+/// with "called `Result::unwrap_err()` on an `Ok` value" - and the final
+/// `d.feeds` assertion would have found two rows stored.
+#[test]
+fn two_feed_rows_with_the_same_url_are_refused() {
+    let (_t, d) = daemon_in("feeddup");
+    let real = "https://idx.example/rss?t=tvsearch&cat=5030&apikey=b8f3c1d9e7a24601";
+    let e = set_feeds(
+        &d,
+        "feeds",
+        &json!([
+            {"url": real, "category": "tv", "rules": ["Accept: *1080p*"]},
+            {"url": real, "category": "movies", "rules": ["Accept: *2160p*"]}
+        ])
+        .to_string(),
+    )
+    .unwrap_err();
+    // The url is named, MASKED - this string reaches the settings UI and
+    // the log ring, and the raw one carries the indexer's apikey.
+    assert!(
+        !e.contains("b8f3c1d9e7a24601"),
+        "the refusal must not leak the key: {e}"
+    );
+    assert!(
+        e.contains(&crate::rss::mask_feed_url(real)),
+        "the refusal must name the offending row: {e}"
+    );
+    // And it says what to do instead, which is the whole point of
+    // refusing at the moment of the mistake rather than starving later.
+    assert!(e.contains("Accept(category="), "{e}");
+    assert!(
+        d.feeds.lock_ok().is_empty(),
+        "a refused save stores nothing"
+    );
+
+    // One row of that address is fine, and stays fine on a round trip -
+    // the check sits AFTER the id-keyed mask merge, so an untouched row
+    // coming back as its mask is compared as the url it stands for, not
+    // as `***`. Two untouched rows of two DIFFERENT feeds can mask to the
+    // same string, so a check placed before the merge would refuse an
+    // ordinary save of a perfectly good list.
+    set_feeds(&d, "feeds", &json!([{"url": real}]).to_string()).unwrap();
+    let id = d.feeds.lock_ok()[0].id.clone();
+    let other = "https://idx.example/rss?t=tvsearch&cat=5040&apikey=00001111aaaabbbb";
+    set_feeds(
+        &d,
+        "feeds",
+        &json!([{"id": id, "url": crate::rss::mask_feed_url(real)}, {"url": other}]).to_string(),
+    )
+    .unwrap();
+    assert_eq!(d.feeds.lock_ok().len(), 2);
+    assert_eq!(d.feeds.lock_ok()[0].url, real, "the stored url is kept");
+
+    // A row that says "keep the stored url" for an id that no longer
+    // exists is dropped by the empty-url retain, so it can never be the
+    // row a duplicate is reported against - the check sits after that
+    // retain too, and a blank url would otherwise duplicate-match every
+    // other blank.
+    set_feeds(
+        &d,
+        "feeds",
+        &json!([
+            {"url": real},
+            {"id": "deadbeefdeadbeef", "url": ""},
+            {"id": "feedfeedfeedfeed", "url": ""}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    assert_eq!(d.feeds.lock_ok().len(), 1);
 }
 
 #[test]

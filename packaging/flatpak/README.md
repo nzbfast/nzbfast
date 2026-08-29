@@ -17,7 +17,7 @@ it. The daemon detects the sandbox and the dashboard's update chip shows
 ## Install
 
 ```sh
-flatpak install --user ./nzbfast-1.2.3-x86_64.flatpak
+flatpak install --user ./nzbfast-1.2.4-x86_64.flatpak
 flatpak run io.github.nzbfast.nzbfast
 ```
 

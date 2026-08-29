@@ -1017,6 +1017,12 @@ pub(super) async fn handle_body(
 ) -> BodyStep {
     let w = inflight.pop_front().expect("response without command");
     shared.release_wire(1);
+    // TODO 315: if this article was holding a late re-ask, that re-ask
+    // has now been answered - with the article itself, which is the
+    // outcome the hold exists to buy - so give its slot back. Answered
+    // is answered whichever way it went; the refusal path releases at
+    // its own verdict.
+    shared.release_recheck(&w);
     *session_bytes += buf.len() as u64;
     shared.bytes[ctx.idx].fetch_add(buf.len() as u64, Ordering::Relaxed);
     // M7b.2 speed signal: fold the same delivered bytes into the
@@ -1107,14 +1113,36 @@ pub(super) async fn handle_body(
                     c.hand_off();
                 }
             }
-            Err(TrySendError::Closed(_)) => {
-                // Never entered the channel; the outcome (and its
-                // buffer) drops here at teardown, and so does the charge.
+            Err(TrySendError::Closed(done)) => {
+                // Never entered the channel. The charge drops with this
+                // arm; the BUFFER has to be given back by hand, because
+                // it was disarmed for the send and a bare `Vec`'s drop
+                // releases nothing - the pool's outstanding gauge would
+                // carry these bytes for the rest of the run, since
+                // `BufPool::Drop` reconciles only the free list.
+                // Reachable only when the consumer is gone early (it
+                // drains to closed-and-empty otherwise), which is why
+                // this sat unnoticed in the hand-`give` era too (v1.2.4
+                // tranche sweep, 27 Aug 2026).
+                if let (FetchOutcome::Done { raw, .. }, Some(p)) = (done, &cfg.buf_pool) {
+                    p.give(raw);
+                }
                 delivered = false;
             }
             Err(TrySendError::Full(done)) => {
                 let waited = std::time::Instant::now();
-                delivered = out.send(done).await.is_ok();
+                delivered = match out.send(done).await {
+                    Ok(()) => true,
+                    // Same as the Closed arm above: the failed send
+                    // hands the outcome back, and the disarmed buffer
+                    // owes the pool its outstanding release.
+                    Err(tokio::sync::mpsc::error::SendError(done)) => {
+                        if let (FetchOutcome::Done { raw, .. }, Some(p)) = (done, &cfg.buf_pool) {
+                            p.give(raw);
+                        }
+                        false
+                    }
+                };
                 if delivered && let Some(c) = chan_charge {
                     c.hand_off();
                 }
@@ -1271,6 +1299,11 @@ pub(super) async fn handle_missing(
     let mut w = inflight.pop_front().expect("response without command");
     shared.release_wire(1);
     drop(buf); // returned to the pool here, not at scope end
+    // Proven-vs-bare tally: one count per WIRE ANSWER, like the oracle
+    // miss below, so a run summary can say what kind of evidence its
+    // Missing verdicts rest on. A fence is the same proof as an echoed
+    // id, arrived at differently (see the dup branch below).
+    shared.note_miss_answer(ctx.idx, echoed || w.fenced);
     // Reliability: this server said "no such article" -
     // charged even for dups (the response is authoritative
     // for this server regardless of who owns the outcome).
@@ -1310,6 +1343,14 @@ pub(super) async fn handle_missing(
         // endgame fan-out is dead weight against a non-echoing
         // backbone, spending a dispatch that can never become evidence.
         if !echoed && !w.fenced {
+            // The dropped dup still spent the article's one hedge: it
+            // dies here without a verdict, exactly like a shed or a
+            // connection death (26 Aug #13), and leaving `dups` charged
+            // bars every later stale/TTFB rescue for the article's
+            // whole life. `uncharge_dup` handles the entry already
+            // being gone. The do-not-merge half above stays: unproven
+            // evidence never reaches the mask.
+            shared.uncharge_dup(&w);
             return;
         }
         // A charged refusal that named the removal leaves its hint
@@ -1327,11 +1368,16 @@ pub(super) async fn handle_missing(
         // the original to walk the rest of the ladder.
         let live = shared.live_mask();
         let mut unanimous = false;
+        // The mask the verdict was taken on, kept so the report can say
+        // WHY it went terminal (27 Aug sweep finding 8): live-unanimous
+        // is not the same claim as gone - see `Shared::missing_cause`.
+        let mut verdict_mask = 0u32;
         {
             let mut m = shared.inflight.lock_ok();
             if let Some(inf) = m.get_mut(&w.id) {
                 inf.tried_430 |= ctx.group_bits;
                 unanimous = inf.tried_430 & live == live;
+                verdict_mask = inf.tried_430;
             }
         }
         // The fold can open a ladder pick for other servers - wake
@@ -1345,16 +1391,13 @@ pub(super) async fn handle_missing(
             if let Some(qi) = q.iter_mut().find(|x| x.id == w.id) {
                 qi.tried_430 |= ctx.group_bits;
                 unanimous = qi.tried_430 & live == live;
+                verdict_mask = qi.tried_430;
             }
         }
         if unanimous && shared.claim_done(&w.id, w.ord) {
             let td = shared.take_takedown(&w.id) != 0;
-            let _ = out
-                .send(FetchOutcome::Missing {
-                    id: w.id,
-                    cause: MissingCause::Gone { takedown: td },
-                })
-                .await;
+            let cause = shared.missing_cause(verdict_mask, td);
+            let _ = out.send(FetchOutcome::Missing { id: w.id, cause }).await;
             shared.complete_one();
         }
         return;
@@ -1432,6 +1475,13 @@ pub(super) async fn handle_missing(
     // before reinserting; the inflight entry is already deregistered
     // above, so returning here strands nothing.
     if shared.done.lock_ok().contains(w.ord) {
+        // TODO 315: this article is resolved and its Work is leaving
+        // flight here without being requeued, so a late-re-ask slot it
+        // was holding has to come back. Without this the budget leaks
+        // one slot per held article that a dup finished first - and a
+        // leaked budget does not fail loudly, it silently retires the
+        // whole mechanism once `recheck_430_max` slots are gone.
+        shared.release_recheck(&w);
         return;
     }
     if !echoed && !w.fenced && w.soft_430 & ctx.group_bits != ctx.group_bits {
@@ -1470,14 +1520,73 @@ pub(super) async fn handle_missing(
     }
     let live = shared.live_mask();
     if w.tried_430 & live == live {
+        // TODO 315: the refusal in hand is the LAST evidence this
+        // article needs, and there is nobody left to ask - so before it
+        // is spent, ask THIS backbone once more, later. The doubt is
+        // not about attribution (an echoed id settles that, and
+        // `soft_430` above is the pass that exists for the case where
+        // nothing does); it is about whether the answer was TRUE. A
+        // cold backend answers 430 for articles it holds, measured at
+        // 231 of 250 refused articles served on the very next pass off
+        // the same account nine minutes later - see
+        // `PoolConfig::recheck_430`.
+        //
+        // The bit is cleared for the group being re-asked, so the
+        // requeued item is not live-unanimous any more and `next_work`'s
+        // own scan does not declare it Missing before the re-ask can
+        // happen. Every other server's evidence stays, so the ladder
+        // ordering is untouched. `recheck_430` remembers the hold was
+        // spent, which is what makes this happen at most once.
+        //
+        // The MIDPOINT of the queue, where `soft_430` puts its repeat
+        // at the FRONT: that pass only has to prove the socket was
+        // aligned and converges one round trip later, and this one is
+        // buying TIME. It went to the BACK until 29 Aug 2026, which is
+        // not the long delay it reads as - the queue only shrinks, so
+        // the back IS drain-end and the verdict landed with no download
+        // left for the M2c.5 prefetch to overlap or for a parked chase
+        // to be freed by. Two e2e tests caught it and no per-push job
+        // runs them; the measurement is at `recheck::recheck_slot`.
+        // Nothing is charged - not `attempts`, not a dup - because no
+        // attempt failed here.
+        //
+        // TWO EXCLUSIONS, both about not making something else worse.
+        // A PROMOTED article is the playhead: the branch below exists
+        // because sending one to the queue back strands a player behind
+        // gigabytes, and a delayed re-ask would do exactly that with a
+        // better excuse. And a TAKEDOWN-flavoured refusal is not this
+        // fault - the server said REMOVED, which a cold backend's "no
+        // such article" never does (`crate::nntp::takedown_flavoured`,
+        // and the M29 oracle trains harder on it for the same reason),
+        // so re-asking
+        // buys nothing and costs a dispatch on every article of a
+        // DMCA'd post.
+        if !w.promoted && !takedown && shared.take_recheck(&mut w, cfg, ctx.group_bits) {
+            w.tried_430 &= !ctx.group_bits;
+            // Counted like `soft_430`'s deferral for the same reason: a
+            // caller's stall watchdog reads bytes and outstanding count,
+            // and a pass that resolves nothing for a while is otherwise
+            // indistinguishable from a wedged pool (the 31 Jul abort).
+            shared.deferred.fetch_add(1, Ordering::Relaxed);
+            // The MIDPOINT of the remaining queue, not its back: the
+            // back is not a long delay, it is the end of the run, and
+            // its verdict lands with no download left to overlap. The
+            // measured cost of getting this wrong, and why
+            // `recheck_430_max` cannot cover it, are at
+            // `recheck::recheck_slot`.
+            let mut q = shared.queue.lock().await;
+            let at = recheck::recheck_slot(&q);
+            q.insert(at, w);
+            return;
+        }
+        shared.release_recheck(&w);
         if shared.claim_done(&w.id, w.ord) {
             let td = shared.take_takedown(&w.id) != 0;
-            let _ = out
-                .send(FetchOutcome::Missing {
-                    id: w.id,
-                    cause: MissingCause::Gone { takedown: td },
-                })
-                .await;
+            // Live-unanimous ends the article; whether that is GONE or a
+            // fleet that shrank past it is `missing_cause`'s to say (27
+            // Aug sweep finding 8).
+            let cause = shared.missing_cause(w.tried_430, td);
+            let _ = out.send(FetchOutcome::Missing { id: w.id, cause }).await;
             shared.complete_one();
         }
     } else if w.promoted {
@@ -1569,6 +1678,7 @@ pub(super) async fn done_before_dial(
     cfg: &PoolConfig,
     server: &ServerConfig,
     shared: &Shared,
+    idx: usize,
     preclaimed: &mut Option<Connection>,
 ) -> bool {
     if shared.pending.load(Ordering::Acquire) == 0 {
@@ -1584,7 +1694,7 @@ pub(super) async fn done_before_dial(
         // under load, which is when a fleet is most likely to have one
         // worker finish everything before its siblings start.
         if let Some(c) = preclaimed.take() {
-            park_or_quit(cfg, server, c).await;
+            release_drained_conn(cfg, server, shared, idx, c).await;
         }
         return true; // every article is terminal
     }
@@ -1599,7 +1709,7 @@ pub(super) async fn done_before_dial(
         // [`stand_down`] is the same decision at the session loop's own
         // abort exit, and carries the incident it comes from.
         if let Some(c) = preclaimed.take() {
-            park_or_quit(cfg, server, c).await;
+            release_drained_conn(cfg, server, shared, idx, c).await;
         }
         return true; // user abort
     }
@@ -1903,14 +2013,30 @@ async fn session_stalled_mid_read(
 /// SOCKETS reach the pool, never how long the pool keeps one. A session
 /// parked here ages out on `max_idle` and is trimmed by its server's
 /// release policy exactly as one parked by a finished job is.
+///
+/// **`drained` is necessary and not sufficient**, since 27 Aug 2026, and
+/// that is the one correction to everything above. Where the session
+/// GOES once this has decided it is reusable is
+/// [`release_drained_conn`], which quits a host whose prepaid block is
+/// spent - and it has to be asked HERE and not only at the shed, because
+/// the inner loop reads the abort flag BEFORE it reaches the shed's own
+/// `over_budget` test. So a worker whose pipeline drains in the same
+/// pass a sibling's bytes push the fleet over budget arrives here, and
+/// until that date it parked on a host `release_shed_conn`'s rule
+/// (`9b442b1ce`) already said must quit - one slot per racing worker,
+/// held against a capped account until the 300 s idle reap. Nothing
+/// above changes for a server with no block: `over_budget` is false for
+/// every one of them.
 pub(super) async fn stand_down(
     cfg: &PoolConfig,
     server: &ServerConfig,
+    shared: &Shared,
+    idx: usize,
     conn: Connection,
     drained: bool,
 ) {
     if drained {
-        park_or_quit(cfg, server, conn).await;
+        release_drained_conn(cfg, server, shared, idx, conn).await;
     } else {
         conn.quit().await;
     }
@@ -1959,11 +2085,11 @@ async fn idle_turn(
     quiet_since: &mut Instant,
 ) -> IdleTurn {
     if shared.pending.load(Ordering::Acquire) == 0 {
-        park_or_quit(cfg, server, conn).await;
+        release_drained_conn(cfg, server, shared, ctx.idx, conn).await;
         return IdleTurn::Retire; // truly drained
     }
     if shared.draining.load(Ordering::Acquire) {
-        park_or_quit(cfg, server, conn).await;
+        release_drained_conn(cfg, server, shared, ctx.idx, conn).await;
         return IdleTurn::Retire; // graceful pause: in-flight done, queue left for resume
     }
     // Keepalive probe, ahead of the throttle arm below on purpose: a
@@ -2005,7 +2131,7 @@ async fn idle_turn(
     // the same conclusion at once. See `claim_handoff`.
     if shared.claim_handoff(ctx.idx) {
         shared.note_session_end(ctx.idx, 4);
-        park_or_quit(cfg, server, conn).await;
+        release_drained_conn(cfg, server, shared, ctx.idx, conn).await;
         return IdleTurn::Retire;
     }
     // Idle but articles are still in flight elsewhere and may requeue
@@ -2177,7 +2303,7 @@ pub(super) fn surplus_here(
 /// argument, so the session arriving here is drained and parkable - and it
 /// was quit outright until 26 Aug 2026, which made the shed the last exit
 /// in this pool that threw a provably reusable session away. Whether it
-/// should is the one question [`stand_down`]'s rule does not settle,
+/// should is the one question `drained` alone does not settle,
 /// because a shed carries a judgement a stop does not: the live target is
 /// what this RUN may hold, so parking keeps an account slot occupied at
 /// the moment somebody asked for fewer of them. The two reasons
@@ -2229,11 +2355,12 @@ async fn release_shed_conn(
     // Re-read rather than taken from `surplus_here`: the budget latch only
     // ever goes one way, so a spent block seen there is spent here too,
     // and reading it at the decision keeps the two reasons from drifting.
-    if shared.over_budget(idx) {
-        conn.quit().await;
-    } else {
-        park_or_quit(cfg, server, conn).await;
-    }
+    // The read itself is `release_drained_conn`'s, which is this rule
+    // hoisted so that every drained exit asks it (27 Aug 2026, sweep
+    // finding R3) - the shed keeps its own door because the LIVE-TARGET
+    // half documented above it is the shed's alone and has nothing to
+    // say at any other exit.
+    release_drained_conn(cfg, server, shared, idx, conn).await;
 }
 
 /// The consuming half of [`surplus_here`]: the caller has drained its
@@ -2423,7 +2550,7 @@ pub(super) async fn session_loop(
         {
             return;
         }
-        if done_before_dial(cfg, server, &shared, &mut preclaimed).await {
+        if done_before_dial(cfg, server, &shared, ctx.idx, &mut preclaimed).await {
             return;
         }
 
@@ -2521,7 +2648,7 @@ pub(super) async fn session_loop(
         loop {
             if shared.aborted.load(Ordering::Acquire) {
                 shared.release_wire(inflight.len());
-                stand_down(cfg, server, conn, inflight.is_empty()).await;
+                stand_down(cfg, server, &shared, ctx.idx, conn, inflight.is_empty()).await;
                 return; // user abort
             }
             // M11 stream mode: while a player is attached, run shallow

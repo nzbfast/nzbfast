@@ -42,6 +42,17 @@ pub(super) struct PreLock {
     pub(super) stall: Option<(String, Instant)>,
     pub(super) pool_view: Vec<(String, usize, u64)>,
     pub(super) outages: Vec<ServerOutage>,
+    /// TODO 309(b): `(nzo_id, cost)` for each job on the wire whose
+    /// pause would cost its next run something, so the dashboard can say
+    /// so BEFORE the click rather than after. EMPTY on every ordinary
+    /// poll - see `Daemon::pause_cost`, which screens on bytes moved
+    /// before it will look at a journal at all. Matched to its slot by
+    /// id during the walk, the way `live_shape` and `sc` are.
+    ///
+    /// A LIST because the hand-over puts two jobs on the wire at once
+    /// and pausing stops both - see `PauseCostState::owners`. At most
+    /// two entries, and empty is the common case.
+    pub(super) pause_cost: Vec<(String, crate::serve::requeue::RequeueCost)>,
 }
 
 pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
@@ -154,6 +165,11 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
     // Same instant as the pool view above, and read the same way: once,
     // before the queue lock.
     let outages = server_outages(d);
+    // TODO 309(b), and it belongs in here rather than in the walk for
+    // this module's own reason: it must not reach into the queue, and it
+    // does not - the runner leaves the out_dir it needs beside the wire
+    // owner.
+    let pause_cost = d.pause_cost();
     PreLock {
         live_shape,
         pw_wanted,
@@ -172,5 +188,6 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
         stall,
         pool_view,
         outages,
+        pause_cost,
     }
 }

@@ -37,6 +37,73 @@ pub(super) struct FleetKnobs {
     pub(super) crc_steer: bool,
 }
 
+/// TODO 208 item 1 / 275 / 277 / 312: everything `build_fleet` needs
+/// from the fleet cap, resolved ONCE. See [`line_cap_plan`].
+pub(super) struct LineCapPlan {
+    pub(super) line_cap: usize,
+    pub(super) line_cap_auto: bool,
+    pub(super) line_share: Option<usize>,
+    pub(super) headroom_share: usize,
+}
+
+/// TODO 208 item 1: the fleet cap (`nzbkit::pool::linecap` has the
+/// measurements). The SEED half: the whole fleet is capped at a small
+/// budget, split equally across the servers and still under each
+/// account's own number. It enters `build_fleet` as a `min` on `base`,
+/// the same seam `host_caps` uses, so a pin still wins and a knee or a
+/// live seed still only lowers it. It binds on every run now that the
+/// cap is no longer divided out of the line: a CLI run and a daemon's
+/// first job, which have no anchor, are capped like any other. The
+/// anchor is still stamped on every server's pool config - the in-run
+/// shed stands down without one (`Shared::line_cap_tick`), and the
+/// stall bound sizes an article's share from it.
+///
+/// TODO 277: the fleet is a CURVE on that anchor, not a flat constant.
+/// An anchor of 0 - a CLI run, a sidecar, a daemon that has not
+/// finished a job yet - is the curve's floor, which is the number that
+/// shipped, so nothing about those runs changes. And the seed SPAWNS
+/// slots for a bigger fleet than it runs, parking the surplus, so that
+/// the in-run governor's raise has somewhere to land: a `ConnTarget`
+/// above the spawned fleet wakes nothing.
+/// `conntune::line_cap_headroom_fleet` carries that argument and its
+/// three scoping rules.
+///
+/// TODO 275 item 1 part 2: `carry_bps` is the per-socket carry a
+/// previous job MEASURED on this link, folded into the seed as a second
+/// candidate beside the curve. `conntune::line_cap_fleet` carries that
+/// argument and why a TYPED fleet is untouched by it.
+///
+/// ONE resolution, and TODO 312 item 1 is why it had to become one.
+/// The cap is no longer an environment variable alone - it is also a
+/// setting read off settings.json (`conntune::line_cap_setting`) - so
+/// each of the three questions below used to open that file again, and
+/// the auto question was being asked once PER SERVER inside
+/// `build_fleet`'s own map. Resolving here costs one read for all
+/// three, and means the three answers cannot come from two different
+/// versions of the file.
+pub(super) fn line_cap_plan(
+    config: &Path,
+    anchor_bps: u64,
+    carry_bps: u64,
+    n_servers: usize,
+) -> LineCapPlan {
+    let setting = crate::conntune::line_cap_setting(config);
+    let env = std::env::var("NZBFAST_LINE_CAP").ok();
+    let line_cap =
+        crate::conntune::line_cap_resolve(env.as_deref(), setting, anchor_bps, carry_bps);
+    let line_cap_auto = crate::conntune::line_cap_auto_resolve(env.as_deref(), setting);
+    LineCapPlan {
+        line_cap,
+        line_cap_auto,
+        line_share: nzbkit::pool::linecap::fleet_cap(line_cap)
+            .map(|f| nzbkit::pool::linecap::server_share(f, n_servers)),
+        headroom_share: nzbkit::pool::linecap::server_share(
+            crate::conntune::line_cap_headroom_fleet(line_cap, line_cap_auto),
+            n_servers,
+        ),
+    }
+}
+
 /// An on-by-default A/B knob: unset, or anything but `0`, is on.
 fn env_knob_on(var: &str) -> bool {
     std::env::var(var).ok().is_none_or(|v| v != "0")

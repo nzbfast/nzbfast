@@ -187,6 +187,40 @@ fn keep_media_only_spares_all_episodes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The daemon's own `.nzbfast.*` namespace is not the job's clutter.
+///
+/// `keep_media_only` sweeps everything that is not media, companion or
+/// archive, and neither `.nzbfast.journal` (the live resume record) nor
+/// `.nzbfast.manifest` (the settle checksums a later verify reads) is
+/// any of the three - so before the guard this sweep deleted both. It
+/// was the ONLY directory walker in the tree that did not honour the
+/// prefix; diag.rs, repair.rs and the three sites in unpack.rs all do.
+///
+/// The path that reaches it is the SECOND pass: an unlock re-runs the
+/// whole tail over a directory the first pass already wrote them into.
+#[test]
+fn keep_media_only_spares_the_daemon_namespace() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepns-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("movie.mkv"), vec![0u8; 4096]).unwrap();
+    std::fs::write(dir.join(".nzbfast.manifest"), b"{\"v\":1}").unwrap();
+    std::fs::write(dir.join(".nzbfast.journal"), b"resume state").unwrap();
+    std::fs::write(dir.join("poster.jpg"), b"x").unwrap();
+    let n = keep_media_only(&dir);
+    assert_eq!(n, 1, "only the poster goes");
+    assert!(
+        dir.join(".nzbfast.manifest").exists(),
+        "the settle manifest is ours, not the job's clutter"
+    );
+    assert!(
+        dir.join(".nzbfast.journal").exists(),
+        "the resume journal is ours too"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Regression: keep-media-only deleted every non-video file, so an
 /// archive we could not unpack - the ONLY copy of the payload - was
 /// destroyed by the tidy-up that ran right after we told the user to

@@ -422,6 +422,12 @@ pub(super) fn spawn(daemon: &std::sync::Arc<super::daemon::Daemon>) {
             // §129 4b rides the same readings: the learner and the
             // attribution can never disagree about what the link did.
             super::whyslow::feed(&d, bps, throttle, line);
+            // TODO 275 item 1 part 2 rides this loop too, for the same
+            // reason and one level down: what a SOCKET carried, banked
+            // for the next job's fleet seed. It reads the pool's own
+            // published maximum rather than these bytes - the divisor
+            // is `workers_dialling`, which only the pool knows.
+            super::linecarry::feed(&d);
         }
     });
 }

@@ -35,6 +35,18 @@ pub(in crate::serve) fn spawn_index_compact(
     // Not `index_db` - the scan-loop task above owns that binding now.
     let db = daemon.index_db.clone();
     tokio::spawn(async move {
+        // Seed the space ledger BEFORE the first sleep. The loop below
+        // reconciles it every minute, which is soon enough for a write
+        // and far too late for a READ: until the stored figures are
+        // back, `last_compact` is None, and None is what the dashboard
+        // renders as "it has not been compacted yet" - a false sentence
+        // about a database that was compacted last night, on the one
+        // card whose whole job is not to say things like that. A
+        // failure here is not retried on the spot; the loop takes it.
+        {
+            let dl = d.clone();
+            let _ = tokio::task::spawn_blocking(move || dl.sync_index_ledger()).await;
+        }
         // Rate-limit the "no room" line: this ticks every minute and
         // a small NAS volume can stay full for days.
         let mut last_moan = std::time::Instant::now()
@@ -42,6 +54,16 @@ pub(in crate::serve) fn spawn_index_compact(
             .unwrap_or_else(std::time::Instant::now);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            // Reconcile the space ledger with the database before the
+            // early returns below. This is the index's background tick
+            // and the ledger's only trip to disk: the stats poll reads
+            // its in-memory mirror, because a poll may never take the
+            // index mutex (TODO 166). A no-op when nothing has changed,
+            // and when the database is not open it simply comes back.
+            {
+                let dl = d.clone();
+                let _ = tokio::task::spawn_blocking(move || dl.sync_index_ledger()).await;
+            }
             // `compact_pending` is sticky, so a prune that raised it
             // just before the indexer was switched off would still
             // rewrite a multi-GB file - the loudest disk work there
@@ -188,6 +210,10 @@ pub(in crate::serve) fn spawn_index_compact(
                     .is_some();
                 let after = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 if ok {
+                    // Charged outside the `with_index` closure above:
+                    // the ledger mutex is taken before the index mutex
+                    // everywhere, never after it.
+                    d2.note_compact(before.saturating_sub(after));
                     info!(
                         target: "index",
                         "compacted at idle - {:.0} MB reclaimed",
@@ -287,6 +313,10 @@ async fn chunked_compact(d: &Arc<Daemon>, db: &std::path::Path) {
         return;
     }
     let mb = freed as f64 / (1u64 << 20) as f64;
+    // Both arms below reclaimed and COMMITTED `freed` bytes - standing
+    // down is not "nothing happened" here (see the note in the message
+    // itself), so both count as a compaction.
+    d.note_compact(freed);
     if stood_down {
         // Unlike the VACUUM path, this is not "nothing happened": the
         // chunks that did run are committed and the file is already
@@ -913,8 +943,21 @@ pub(in crate::serve) fn spawn_oracle_sampler(daemon: &Arc<Daemon>, config: &std:
                     }
                     conn.flush().await?;
                     let (mut hits, mut misses) = (0u64, 0u64);
-                    for _ in &ids {
-                        match conn.read_stat().await? {
+                    // `read_stat_checked` and not the bare `read_stat`
+                    // this used until 28 Aug 2026: every STAT went out
+                    // before the first reply was read, so replies are
+                    // attributed POSITIONALLY. One reply lost upstream
+                    // and every later one is filed against the id behind
+                    // it, which silently turns a hit into a miss in the
+                    // availability sample this oracle is built from. A
+                    // mismatch errors, and the arm below already drops
+                    // the connection and reconnects next tick on any
+                    // error, which is exactly the right answer for a
+                    // desynced socket - the whole sample is discarded
+                    // rather than banked half-shifted. A server that
+                    // echoes no id at all still passes.
+                    for id in &ids {
+                        match conn.read_stat_checked(Some(id.as_str())).await? {
                             true => hits += 1,
                             false => misses += 1,
                         }

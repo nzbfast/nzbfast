@@ -21,6 +21,80 @@
 
 use super::*;
 
+/// The index space ledger: when the database was last compacted and what
+/// that handed back, plus how much eviction has removed over the life of
+/// the FILE. Two facts the space readout was designed around and which
+/// nothing recorded - a user could see the cap, the file size and the
+/// free pages inside it, but not whether the reclaim had ever run or
+/// what the cap had cost them so far.
+///
+/// Kept in two places on purpose. It is mirrored in `Daemon` so the
+/// stats poll can read it without touching the index mutex (TODO 166 -
+/// that poll runs every couple of seconds on every open dashboard), and
+/// persisted in the index's own `kv` so a restart does not answer "never
+/// compacted" about a file that was compacted last night. The database
+/// outlives the process, so facts about the database have to as well.
+///
+/// `evicted_bytes` is the LIVE-bytes delta, not the file delta: deleting
+/// rows hands pages to the freelist without shortening the file, so the
+/// file delta of an eviction is zero and would report every trim as
+/// having saved nothing.
+#[cfg(feature = "indexer")]
+#[derive(Default, Clone, Copy)]
+pub struct IndexLedger {
+    /// Has the persisted half been read back yet? False until the
+    /// maintenance loop's first successful `sync_index_ledger`.
+    pub loaded: bool,
+    /// Something happened that has not reached the database yet.
+    pub dirty: bool,
+    /// Unix seconds of the last completed compaction, or None if this
+    /// database has never had one.
+    pub last_compact_at: Option<i64>,
+    /// Bytes that compaction returned to the volume. Can legitimately be
+    /// 0 for a compaction that found nothing to reclaim.
+    pub last_compact_freed: u64,
+    /// Releases eviction has removed, all passes, all runs.
+    pub evicted_rows: u64,
+    /// Live bytes those removals freed inside the file.
+    pub evicted_bytes: u64,
+}
+
+#[cfg(feature = "indexer")]
+impl IndexLedger {
+    /// One key per fact rather than a blob: these are read by hand when
+    /// a user's index is being diagnosed, and a half-written blob would
+    /// lose all four where a missing key loses one.
+    const K_AT: &'static str = "idxspace_last_compact_at";
+    const K_FREED: &'static str = "idxspace_last_compact_freed";
+    const K_ROWS: &'static str = "idxspace_evicted_rows";
+    const K_BYTES: &'static str = "idxspace_evicted_bytes";
+
+    /// Whatever the database has. An unreadable or unparseable key is
+    /// simply absent - a ledger is a narration, and refusing to answer
+    /// the whole card over one bad row would be the wrong trade.
+    fn read(ix: &nzbkit::index::Index) -> Self {
+        let n = |k: &str| ix.kv_get(k).and_then(|v| v.parse::<u64>().ok());
+        Self {
+            loaded: true,
+            dirty: false,
+            last_compact_at: ix.kv_get(Self::K_AT).and_then(|v| v.parse::<i64>().ok()),
+            last_compact_freed: n(Self::K_FREED).unwrap_or(0),
+            evicted_rows: n(Self::K_ROWS).unwrap_or(0),
+            evicted_bytes: n(Self::K_BYTES).unwrap_or(0),
+        }
+    }
+
+    fn write(&self, ix: &nzbkit::index::Index) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(at) = self.last_compact_at {
+            ix.kv_set(Self::K_AT, &at.to_string())?;
+            ix.kv_set(Self::K_FREED, &self.last_compact_freed.to_string())?;
+        }
+        ix.kv_set(Self::K_ROWS, &self.evicted_rows.to_string())?;
+        ix.kv_set(Self::K_BYTES, &self.evicted_bytes.to_string())?;
+        Ok(())
+    }
+}
+
 /// Why a pooled read could not produce a trustworthy answer. The name is
 /// about the CALLER's options rather than the cause: either way the
 /// honest reply is "not right now, ask again", and every endpoint
@@ -292,9 +366,16 @@ impl Daemon {
     #[cfg(feature = "indexer")]
     pub(in crate::serve) fn evict_policy(&self) -> nzbkit::index::EvictPolicy {
         let order_s = self.index_evict_order.lock_ok().clone();
+        let scope_s = self.index_evict_scope.lock_ok().clone();
         nzbkit::index::EvictPolicy {
             order: parse_evict_order(&order_s).unwrap_or(nzbkit::index::EvictOrder::Ladder),
             kinds: self.index_evict_kinds.lock_ok().clone(),
+            keep_kinds: self.index_keep_kinds.lock_ok().clone(),
+            scope: parse_evict_scope(&scope_s).unwrap_or_default(),
+            // Always explicit: the setting defaults to the engine's own
+            // 10 and the setter clamps to 0..=50, so the min here only
+            // guards a hand-edited settings.json.
+            headroom_pct: Some(self.index_evict_headroom.load(Ordering::Relaxed).min(50) as u32),
         }
     }
 
@@ -348,9 +429,10 @@ impl Daemon {
             // just this category's keys would hand evict_to a set that
             // no longer protects it.
             // index-lock-gate: TODO 166 - assembling the protected set is
-            // part of the evict/shrink admin action, and its only callers
-            // are `evict_to` and the background maintenance pass. The user
-            // asked for the work; waiting for it is the honest answer.
+            // part of the evict/shrink/preview admin actions, and its only
+            // callers are `evict_to`, `evict_preview_at` and the background
+            // maintenance pass. The user asked for the work; waiting for it
+            // is the honest answer.
             self.with_index(|ix| {
                 for kind in &whole_custom {
                     match ix.title_keys_for_kind(kind) {
@@ -454,6 +536,140 @@ impl Daemon {
         ))
     }
 
+    /// Record a completed compaction. Memory only - the trip to the
+    /// database is `sync_index_ledger`, on the maintenance loop.
+    ///
+    /// Call this AFTER the index handle has been released. Everything
+    /// in this pair takes the ledger mutex and then, later, the index
+    /// mutex; taking them the other way round is the one thing that
+    /// could invert the order.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn note_compact(&self, freed: u64) {
+        let mut g = self.index_ledger.lock_ok();
+        g.last_compact_at = Some(unix_now());
+        g.last_compact_freed = freed;
+        g.dirty = true;
+    }
+
+    /// Record what an eviction pass removed. Cumulative over the life of
+    /// the database, not of this process - see `IndexLedger`.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn note_evicted(&self, rows: u64, bytes: u64) {
+        if rows == 0 && bytes == 0 {
+            return;
+        }
+        let mut g = self.index_ledger.lock_ok();
+        g.evicted_rows = g.evicted_rows.saturating_add(rows);
+        g.evicted_bytes = g.evicted_bytes.saturating_add(bytes);
+        g.dirty = true;
+    }
+
+    /// The ledger as the stats poll should see it. A plain mutex read:
+    /// no index handle, so this cannot park an HTTP worker behind a scan
+    /// batch, which is the whole reason the facts are mirrored here.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn index_ledger_snapshot(&self) -> IndexLedger {
+        *self.index_ledger.lock_ok()
+    }
+
+    /// A wipe deletes the database, so every fact in the ledger is about
+    /// a file that no longer exists. Reset rather than carry them over -
+    /// "3.2M releases evicted" beside an empty index is the kind of
+    /// number that makes a user distrust the whole card.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn reset_index_ledger(&self) {
+        *self.index_ledger.lock_ok() = IndexLedger {
+            // The kv rows went with the file; nothing to read back.
+            loaded: true,
+            ..Default::default()
+        };
+    }
+
+    /// The shutdown flush. `sync_index_ledger` runs once a minute, which
+    /// is soon enough for a fact nobody is waiting on and too late for a
+    /// daemon that stops inside that minute: a compaction stamp lost
+    /// there is lost for good, and the card then says "it has not been
+    /// compacted yet" about a file that has - permanently, not for a
+    /// minute, because nothing raises the fact again until the NEXT
+    /// compaction.
+    ///
+    /// BOUNDED, and it has to be. `wind_down` is reached from
+    /// `mode=shutdown` and `mode=restart`, so this is on an HTTP path
+    /// (TODO 166); and the exit cannot queue behind a whole ingest pass
+    /// whatever door it uses - that is the hazard `close_index_for_exit`
+    /// spends a try_lock timer avoiding one step later. So it is
+    /// best-effort by construction: busy or unavailable means the record
+    /// waits for the next run's loop, which is exactly where it was
+    /// before this existed.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn flush_index_ledger_for_exit(&self) {
+        let out = {
+            let mut g = self.index_ledger.lock_ok();
+            if !g.dirty {
+                return;
+            }
+            g.dirty = false;
+            *g
+        };
+        if !matches!(
+            self.index_write_checked(|ix| out.write(ix).ok()),
+            Ok(Some(_))
+        ) {
+            self.index_ledger.lock_ok().dirty = true;
+        }
+    }
+
+    /// The ledger's only trip to disk: load the persisted half once, then
+    /// write back whatever this run has added.
+    ///
+    /// Rides the index maintenance loop because that is already the
+    /// index's background tick, and it takes the index handle - which is
+    /// exactly why no HTTP handler may call it (TODO 166). The stats poll
+    /// reads `index_ledger_snapshot` instead.
+    ///
+    /// The load MERGES rather than overwrites: a compaction or an
+    /// eviction can land before the first tick, and taking the stored
+    /// totals wholesale would throw that away, while skipping the load
+    /// would throw away everything before this restart.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn sync_index_ledger(&self) {
+        let snap = self.index_ledger_snapshot();
+        if snap.loaded && !snap.dirty {
+            return;
+        }
+        if !snap.loaded {
+            // None = the database is not open (or not wanted) right now.
+            // Leave `loaded` false and try again on the next tick: a
+            // half-loaded ledger would then be written back over the
+            // stored one.
+            let Some(saved) = self.with_index(|ix| Some(IndexLedger::read(ix))) else {
+                return;
+            };
+            let mut g = self.index_ledger.lock_ok();
+            g.evicted_rows = g.evicted_rows.saturating_add(saved.evicted_rows);
+            g.evicted_bytes = g.evicted_bytes.saturating_add(saved.evicted_bytes);
+            if g.last_compact_at.is_none() {
+                g.last_compact_at = saved.last_compact_at;
+                g.last_compact_freed = saved.last_compact_freed;
+            }
+            g.loaded = true;
+            g.dirty = true;
+        }
+        // Cleared BEFORE the write, the same way `compact_pending` is:
+        // a `note_*` landing mid-write re-raises it and comes back next
+        // tick, whereas clearing afterwards would swallow that record.
+        // Every write is the FULL running total, so a repeat is a no-op
+        // and a delayed one loses nothing.
+        let out = {
+            let mut g = self.index_ledger.lock_ok();
+            g.dirty = false;
+            *g
+        };
+        if self.with_index(|ix| out.write(ix).ok()).is_none() {
+            self.index_ledger.lock_ok().dirty = true;
+        }
+    }
+
     /// Prune the index down to `target` bytes under the current policy,
     /// protecting the four categories above. Returns the engine's report
     /// plus how many protected keys/ids stood in the way, or None when
@@ -512,6 +728,15 @@ impl Daemon {
         if rep.needs_compact {
             self.compact_pending.store(true, Ordering::Relaxed);
         }
+        // The one choke point for eviction: `evict_pass` delegates here
+        // and both admin doors reach it, so the ledger is charged once,
+        // here, rather than at three call sites that would drift. The
+        // LIVE delta, for the reason `IndexLedger` gives - the file
+        // cannot shrink until the compact runs, so its own delta is zero.
+        self.note_evicted(
+            rep.removed as u64,
+            rep.live_before.saturating_sub(rep.live_after),
+        );
         let mb = |b: u64| b as f64 / (1u64 << 20) as f64;
         if rep.live_after > target {
             // Protection is absolute: the engine stops rather than delete
@@ -552,6 +777,37 @@ impl Daemon {
             );
         }
         EvictOutcome::Ran(rep, n_prot)
+    }
+
+    /// What an eviction to `target` WOULD remove, without removing it -
+    /// the engine's `evict_preview` under the daemon's current policy
+    /// and full protected set, so the answer can never disagree with
+    /// what the evict button would then do. `None` when the index is
+    /// unavailable or the protected set could not be fully assembled
+    /// (same rule as eviction itself: a partial set must not shape an
+    /// answer, even a read-only one - it would promise less deletion
+    /// than the real pass performs).
+    ///
+    /// Returns the preview plus the protected-set size, which is the
+    /// half of "why so little" the engine cannot see.
+    #[cfg(feature = "indexer")]
+    pub(in crate::serve) fn evict_preview_at(
+        &self,
+        target: u64,
+    ) -> Option<(nzbkit::index::EvictPreview, usize)> {
+        let policy = self.evict_policy();
+        let protected = self.protected_set()?;
+        let n_prot = protected.title_keys.len() + protected.release_ids.len();
+        // index-lock-gate: TODO 166 - the preview is the evict/shrink
+        // admin family's dry run, reached only from mode=index_evict_preview,
+        // and it walks the same candidate pages the real eviction would
+        // hold the lock for. The user asked; waiting is the honest answer,
+        // and EVICT_PREVIEW_MAX_EXAMINE bounds the walk itself.
+        let pv = self.with_index(|ix| {
+            ix.evict_preview(target, &policy, &protected, EVICT_PREVIEW_MAX_EXAMINE)
+                .ok()
+        })?;
+        Some((pv, n_prot))
     }
 
     /// One automatic eviction pass, exactly as the scan loop runs it.

@@ -474,6 +474,10 @@ fn job_round_trip_preserves_fields() {
         "cleaned_trash": true,
         "whyslow": {"layer": "provider", "detail": "news.example.invalid",
                     "held_secs": 640u64, "total_secs": 900u64},
+        "resume_route": {"mapped": false, "restored_bytes": 2_236_500_000u64,
+                         "budget_bytes": 970_000_000u64,
+                         "widest_slot_bytes": 256_000_000u64,
+                         "seatable_bytes": 270_000_000u64},
     });
     let j = job_from_json(&v).expect("parses");
     assert_eq!(j.nzo_id, "n42");
@@ -542,6 +546,16 @@ fn job_round_trip_preserves_fields() {
     assert_eq!(why.layer, "provider");
     assert_eq!(why.detail, "news.example.invalid");
     assert_eq!((why.held_secs, why.total_secs), (640, 900));
+    // TODO 309: and so does the resume route, which is persisted for
+    // the same reason - the report is asked for after the fact, often
+    // for a history row and often after a restart, by which time the
+    // engine's log line about the decision is long gone.
+    let route = j.resume_route.expect("the route survives the wire");
+    assert!(!route.mapped);
+    assert_eq!(route.restored_bytes, 2_236_500_000);
+    assert_eq!(route.budget_bytes, 970_000_000);
+    assert_eq!(route.widest_slot_bytes, 256_000_000);
+    assert_eq!(route.seatable_bytes, 270_000_000);
 
     // Serialize and parse again: the persisted form is a fixed point.
     let v1 = job_json(&j);
@@ -558,6 +572,24 @@ fn job_round_trip_preserves_fields() {
 #[test]
 fn a_record_from_before_the_verdict_field_reads_as_absent() {
     let pre = minimal_job_value();
+    assert!(
+        pre.get("resume_route").is_none(),
+        "the fixture is pre-field"
+    );
+    let pre_j = job_from_json(&pre).expect("parses");
+    assert!(
+        pre_j.resume_route.is_none(),
+        "TODO 309: no field means no route, and no route means the \
+         report says nothing - never that the run took the cheap path"
+    );
+    assert_eq!(job_json(&pre_j)["resume_route"], Value::Null);
+    // `mapped` is the discriminator and has no default: a record
+    // carrying figures but no verdict is not a mapped run, it is a
+    // record that never had one.
+    let mut half = minimal_job_value();
+    half["resume_route"] = json!({"restored_bytes": 8_000_000u64});
+    assert!(job_from_json(&half).expect("parses").resume_route.is_none());
+
     assert!(pre.get("whyslow").is_none(), "the fixture is pre-field");
     let j = job_from_json(&pre).expect("parses");
     assert!(j.whyslow.is_none(), "no field means no verdict");

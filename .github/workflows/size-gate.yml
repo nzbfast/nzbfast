@@ -691,6 +691,15 @@ on:
       - 'tools/host-config-gate.py'
       - 'tools/js-scope-gate.py'
       - 'tools/api-contract-gate.py'
+      - 'tools/checkjs-gate.py'
+      - 'tools/checkjs-prelude.d.ts'
+      # For `checkjs-gate`, which resolves its compiler by path out of
+      # node_modules and REFUSES a version other than the one pinned here.
+      # Neither file matches any other pattern in this list, so without
+      # these two lines a bump of the pin - the one edit that can change
+      # every verdict the gate has ever given - would not fire it.
+      - 'package.json'
+      - 'package-lock.json'
       - 'tools/selftest-roster.py'
       - 'tools/workflow_scan.py'
       - 'tools/bench-report-selftests.py'
@@ -699,6 +708,13 @@ on:
       - 'web/screens/**'
       - 'tools/icons-derived-gate.py'
       - 'tools/cfg-safety-gate.py'
+      - 'tools/cfg-symbol-gate.py'
+      - 'tools/cpu-workers-gate.py'
+      - 'tools/journeys-gate.py'
+      # For `journeys-gate`, whose subject is the journeys/ suite's own
+      # `.ts` files and playwright.config.ts - none of them .rs, .py, .sh
+      # or root-level .md, so nothing else in this list matches them.
+      - 'journeys/**'
       # For `cfg-safety-gate`, whose roster is DERIVED from the crate
       # manifests: which packages opt into `[workspace.lints]`, and which
       # carry its waiver. Nothing else in this list matches a Cargo.toml,
@@ -952,6 +968,133 @@ jobs:
       # private vocabulary and this file ships to the public repo.
       - name: stall mark identity gate
         run: tools/stall-mark-gate.py --selftest && tools/stall-mark-gate.py
+  pool-select-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: pool-select-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A leg log is not guaranteed to hold exactly one `[pool] run` line
+      # - the download pool emits one and so does every auxiliary pool the
+      # job starts (par2 side-fetch, repair, sidecar), so a leg that ran
+      # the repair path emits several. Measured 27 Aug 2026: 205 of 325
+      # leg logs on one bench box, correlating with the damaged fixtures.
+      # Two committed readers each collapsed that set to one line and did
+      # it DIFFERENTLY - `c208parse.py` took the FIRST, `ll208report.py`
+      # the LAST - and on the ceiling ladder's fleet-77 leg both land on a
+      # 1.5 MB/s auxiliary pool instead of the 96.0 MB/s download pool,
+      # because that leg's download pool is in the MIDDLE of three. `line
+      # peak`, `saturated %`, `dup spend`, `art`, `run` and `line cap N (K
+      # sheds)` all come out of the selected line and all get printed into
+      # tables read as round results. Same family and same argument as the
+      # leg-warn gate one construct over: standalone copy-paste
+      # descendants with no shared module, so the next one is a copy of
+      # one of these. It is NOT a rule that largest-run always wins - a
+      # multi-JOB daemon leg log wants the LAST job and a max-run selector
+      # there would publish a warm-up, which is why the one waiver on the
+      # tree is `linecap208d.sh` saying so in words. Build-free, well
+      # under a second, and no new `paths:` entry: `**/*.py`, `**/*.sh`
+      # and `**/*.zsh` are already triggers above and are exactly the
+      # files it reads.
+      - name: pool line selection gate
+        run: tools/pool-select-gate.py --selftest && tools/pool-select-gate.py
+  fleet-census-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: fleet-census-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A bench driver that pins a fleet and stamps per-leg records must
+      # also record the fleet the WIRE held. Measured 28 Aug 2026: a
+      # stored conntune knee of 32 sat under fleet rungs of 50/77/100,
+      # all three rungs ran 32 sockets and landed within 0.4 MB/s, and
+      # the dial line reported the rung ASKED for - three ladder rungs,
+      # one fleet, three labels. The exposed population was the nine CLI
+      # fault drivers that never source rig-lib at all, each carrying a
+      # "guard 9 cannot see this file" comment - a declaration, not a
+      # measurement - and they are hand-copied siblings, so the tenth
+      # will be a copy of one of them. The population is computed (five
+      # pin spellings x an own-record fingerprint), evidence must be the
+      # file's own scan or scoped census, a comment mention is not an
+      # invocation, loopback rigs are exempt mechanically, and the
+      # waivers (provenance copies, api self-report, deliberately
+      # unpinned) each carry their reason at the site. Build-free, well
+      # under a second, and no new `paths:` entry: `**/*.py`, `**/*.sh`
+      # and `**/*.zsh` are already triggers above and are exactly the
+      # files it reads.
+      - name: fleet census gate
+        run: tools/fleet-census-gate.py --selftest && tools/fleet-census-gate.py
+  stale-heading-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: stale-heading-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A backlog HEADING that still describes finished work as open is
+      # what a work-selection pass reads, and it costs a whole duplicated
+      # session rather than a typo: a lane reads it, takes the item, and
+      # rebuilds something that landed weeks ago. The claims ledger cannot
+      # stop that - it locks an item, it does not know the item is
+      # finished. Six instances were found in ONE planning document on
+      # 28 Aug 2026, including one whose own text said the work had
+      # shipped 285 lines below the heading, and a second lane landed the
+      # identical class of fix on two other items the same day.
+      # Two arms, each scoped to where it MEASURED precise: a
+      # self-contradiction arm (heading unmarked, body opens with a
+      # bolded whole-section closure) and a cross-section arm restricted
+      # to DISTINCTIVE milestone identifiers. The cross-section arm is
+      # deliberately not run against bare section NUMBERS - measured, a
+      # naive match reports 82 hits and the narrower house reference
+      # forms still report 39, of which 7 of the first 9 read false,
+      # because a sub-item finishing is not a section finishing.
+      # Verified against the real pre-fix tree rather than fixtures: it
+      # names every one of the seven, and is green after the fixes.
+      # The gate names its own documents; they are private, so this job
+      # does not spell them - the same reason the rig selftest rides a
+      # wrapper. Build-free, well under a second, and no new `paths:`
+      # entry: `*.md` and `**/*.py` above are already triggers and are
+      # exactly the files it reads.
+      - name: stale backlog heading gate
+        run: tools/stale-heading-gate.py --selftest && tools/stale-heading-gate.py
+  ffi-cutout-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: ffi-cutout-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # `default-features = false` on the `nzbfast` dependency in
+      # crates/nzbfast-ffi/Cargo.toml is the WHOLE mechanism that keeps
+      # the iOS store staticlib's ~10.5 MB of dashboard pages out (TODO
+      # 281 IO3b). Cargo resolves features PER INVOCATION, so it holds
+      # only while that crate is built ALONE - a `--workspace` build, or
+      # one naming `-p nzbfast` beside it, unifies with the bin crate's
+      # `default` and hands the pages back with nothing to say so.
+      # packaging/ios/build-ffi.sh's cargo line is the other half of the
+      # mechanism, `-p nzbfast-ffi` alone. Both were guarded by nothing
+      # but a comment. Two arms: the manifest (either TOML shape for the
+      # dependency, refusing `true` or an omitted key), and every cargo
+      # line in the build script naming nzbfast-ffi (refusing
+      # `--workspace` or a second `-p`, checked through a simple literal
+      # shell variable too). `--features nzbfast/dashboard` in
+      # build-harness.sh and build-apk.sh's WebView kit are out of scope
+      # on purpose - neither is a release path, and this gate never
+      # opens either file. Build-free, well under a second, no new
+      # `paths:` entry - `crates/**/Cargo.toml` and `packaging/**` above
+      # are already triggers.
+      - name: ios ffi dashboard compile-out gate
+        run: tools/ffi-cutout-gate.py --selftest && tools/ffi-cutout-gate.py
   shell-selftests:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -995,11 +1138,20 @@ jobs:
       # is `#!/bin/sh` and was verified under REAL dash locally, because
       # ubuntu's /bin/sh is dash while this fleet's is bash in posix mode -
       # the other half of the same trap.
+      #
+      # build-release-apk.sh's arm is hermetic for a reason worth knowing
+      # before touching it: every one of its seven cases is a READ (the
+      # crate version, two properties of app/build.gradle.kts, the tracked
+      # tree, its own asset name), plus one sub-invocation that is refused
+      # at the keystore check before it can reach cargo, gradle, the NDK
+      # or a JDK. None of that is on a runner and none of it needs to be.
+      # Verified under real dash locally, per the trap above.
       - name: shell selftests
         run: |
           .claude/tools/bench-accounts.sh --selftest
           packaging/freebsd/smoke.sh --self-test
           tools/publish-site.sh --self-test
+          packaging/android/build-release-apk.sh --self-test
   rig-selftest-paths:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1228,6 +1380,68 @@ jobs:
       # `**/*.py` above already reach every file it reads.
       - name: chunk narrow gate
         run: tools/chunk-narrow-gate.py --selftest && tools/chunk-narrow-gate.py
+  metrics-roster-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: metrics-roster-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Holds `crates/nzbfast/src/serve/metrics.rs` (the `/metrics`
+      # Prometheus renderer) to `crates/nzbfast/tests/daemon_metrics/
+      # mod.rs` (the test that pins every family by name and TYPE):
+      # a family declared but never pinned, a pin left behind by a
+      # rename, or a gauge/counter flip on either side, are each a
+      # REFUSAL. A metric name is a published contract - someone's
+      # Grafana panel is written against the string - and none of that
+      # has a symptom anywhere else in this repo: no compile error, no
+      # clippy lint, the daemon still starts.
+      # Here rather than relying on the test alone for the reason no
+      # other job covers it: `daemon_metrics` is a module of the `daemon`
+      # integration binary, one of the seven heavy-tests targets this
+      # repo's own CI sweep line excludes by name
+      # (`not binary(daemon)`), gated behind the `heavy-tests` feature so
+      # an ordinary `cargo test` never compiles it. A rename would sit
+      # unnoticed until someone runs that suite by hand or nightly's
+      # `long-suites` gets to it. This is build-free and runs on every
+      # branch push, so the same rename is caught on the author's own
+      # push instead.
+      # `--selftest` first, and it is the gate rather than the house
+      # habit: 20 cases, each pinned by the message it must name, plus
+      # three mutations driven against the REAL files (a renamed family,
+      # a type flip, a deleted pin) that all redden. It needs no new
+      # `paths:` entry - `**/*.rs` and `**/*.py` above already reach
+      # every file it reads.
+      - name: metrics roster gate
+        run: tools/metrics-roster-gate.py --selftest && tools/metrics-roster-gate.py
+  cpu-workers-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: cpu-workers-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A CPU worker pool sized from `available_parallelism` rather than
+      # from `nzbkit::mem::cpu_workers`, which is the one place an outside
+      # caller can cap one (`NZBFAST_CPU_WORKERS`, TODO 281 AN4).
+      # Here rather than only in ci-private for the reason no test job can
+      # cover it: the uncapped spelling is CORRECT on every box this fleet
+      # owns, and the only symptom is a phone running hot on one pool out
+      # of sixteen - and nothing here compiles for a phone, let alone
+      # measures one. These pools are hand-copied siblings, so the next one
+      # is a copy of one of them: fine if it copies the helper, silently
+      # wrong if it copies the standard library call.
+      # `--selftest` first, and it is the gate rather than the house habit:
+      # a scanner that has quietly stopped matching reports a clean tree
+      # forever, which is what nav-regen's dead picker arm did for months.
+      # It needs no new `paths:` entry beyond its own file - `**/*.rs`
+      # above already reaches every source it reads.
+      - name: cpu workers gate
+        run: tools/cpu-workers-gate.py --selftest && tools/cpu-workers-gate.py
   host-config-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1291,6 +1505,40 @@ jobs:
       # is a change this job never runs on.
       - name: cfg safety gate
         run: tools/cfg-safety-gate.py --selftest && tools/cfg-safety-gate.py
+  cfg-symbol-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: cfg-symbol-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # A reference to an item defined under one `#[cfg(target_os = ..)]`
+      # from a site that does not share it. It compiles perfectly on the
+      # box it was written on and is `E0425` on every other target, so
+      # every host-native gate on this fleet is green on a tree that
+      # reddens four CI jobs. That is what `d49f5ab32` did on 28 Aug 2026
+      # with `4 * super::TRASH_DEADLINE` inside a `#[cfg(test)]` fn -
+      # `cfg(test)` compiles on every target, which is why it is not an
+      # exemption here. Neither neighbour covers it: `cfg-safety-gate` is
+      # about the SAFETY comment above a cfg arm, and
+      # `win-portability-gate` only scans `libc::` and `std::os::unix`,
+      # so it was green on the tree that was red.
+      # Belongs on the AUTHOR's own push rather than on main, and the
+      # reason is coordination rather than compile time: that one defect
+      # minted FIVE separate red claims across lanes and two were still
+      # open hours later, because a red on main is a broadcast and every
+      # lane that looks races every other lane that looks.
+      # `--selftest` first and it is the gate rather than the habit - the
+      # arms are a hand-written Rust lexer, a per-target three-valued cfg
+      # evaluator and a four-arm name resolver, and one that quietly
+      # stops matching reports a clean tree forever. It prints how many
+      # files, item definitions, cfg-exclusive definitions, candidate
+      # references and RESOLVED references it reached and REFUSES below a
+      # floor on each, so an inert scan shows a zero and not a green.
+      - name: cfg symbol gate
+        run: tools/cfg-symbol-gate.py --selftest && tools/cfg-symbol-gate.py
   wedge-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1425,6 +1673,76 @@ jobs:
       # what nav-regen's dead picker arm did for months.
       - name: js scope gate
         run: tools/js-scope-gate.py --selftest && tools/js-scope-gate.py
+  checkjs-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: checkjs-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The ONE step in this workflow that installs anything, and it is a
+      # single package pinned to an exact version with an integrity hash.
+      # No `actions/setup-node`: the runner's preinstalled node is a HOST
+      # here, and tsc's diagnostics are a function of the TYPESCRIPT
+      # version, which package-lock.json fixes. `npm ci` rather than
+      # `npm install` because ci refuses to move the lockfile - an install
+      # that quietly resolved a different compiler is the whole thing the
+      # pin exists to stop. The i18n-gate job's `node web/i18n/extract.js`
+      # is the precedent for using node in a build-free gate at all.
+      - name: install the pinned compiler
+        run: npm ci --no-audit --no-fund
+      # `tsc --checkJs` over the inline JavaScript of web/dashboard.html and
+      # web/wall.html, in place - no bundler, no modules, no build step, and
+      # the pages ship exactly as they are on disk. It is the first stage
+      # of a costed modularization plan whose remaining stages were closed
+      # as answered on 26 Aug 2026: the page is near feature-complete, so
+      # the tooling tax of a module split would not be repaid.
+      # It exists because tools/js-scope-gate.py cannot hold all of the
+      # class it was written for and says so: it screens a call to a name
+      # declared SOMEWHERE ELSE in the file, so a name declared NOWHERE is
+      # outside its population. One was live on main - `loadStatus&&loadStatus()`
+      # in saveSetupLine, where the guard that reads as "call it if it
+      # exists" is itself the ReferenceError, so the line-speed save threw
+      # on its SUCCESS path and the "Line speed saved." toast never fired.
+      # Found by this gate on its first run, in the very function whose
+      # comment records the last fix to this class. Here rather than only in
+      # ci-private because the failure mode is a green screen telling the
+      # user a write happened: nothing turns red, so the push that
+      # introduces it is the only moment anyone will look. `--selftest`
+      # first, and it is the gate - a compiler that has quietly stopped
+      # checking reports a clean page forever, which is what nav-regen's
+      # dead picker arm did for months, so a LIVE PROBE runs on every
+      # invocation and refuses the whole run if the same binary, flags and
+      # prelude stop reporting a name declared nowhere.
+      - name: checkjs gate
+        run: tools/checkjs-gate.py --selftest && tools/checkjs-gate.py
+  journeys-gate:
+    if: github.repository != 'nzbfast/nzbfast'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: journeys-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # journeys/README.md's "House rules for adding one" and a comment at
+      # the head of journeys/tests/complete.spec.ts write down three rules
+      # for the browser-journey suite that exists to catch what the source
+      # scans over web/dashboard.html cannot: no `page.waitForTimeout` (a
+      # fixed wait on this box is a guess about another session's cargo
+      # build), `retries: 0` in playwright.config.ts (CLAUDE.md's
+      # FORTY-FIRST gate's argument one suite over - a journey that only
+      # passes on the second go has found something), and no test hook
+      # added to the shipped markup. VERIFIED on origin/main 27 Aug 2026:
+      # `git grep -ln journeys -- tools/` returned nothing - the rules
+      # lived only in prose. Build-free: no npm, no cargo. `--selftest`
+      # first, and it is the gate rather than the habit: a scanner that
+      # has quietly stopped matching reports a clean suite forever, which
+      # is what nav-regen's dead picker arm did for months.
+      - name: journeys house-rules gate
+        run: tools/journeys-gate.py --selftest && tools/journeys-gate.py
   api-contract-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1958,6 +2276,14 @@ jobs:
         run: packaging/tests/synology-compose-parity.sh
       - name: docker entrypoint key gate
         run: packaging/tests/docker-entrypoint-key.sh
+      # The Flatpak launcher's attach decision. Both ways of getting it
+      # wrong have shipped: a healthy native-TLS daemon read as a
+      # stranger and locked the user out (TODO 290 F-17), and the first
+      # fix for that trusted ANY listener the moment runtime.json said
+      # tls. Needs no Flatpak - the launcher is a bash script driven by
+      # XDG_CONFIG_HOME and a port, with `nzbfast` and `xdg-open` stubbed.
+      - name: flatpak launcher attach gate
+        run: packaging/tests/flatpak-launcher.sh
       - name: offline manual gate
         run: packaging/tests/offline-manual.sh
       # Private-only, and the reason this job carries the repository
@@ -2087,6 +2413,18 @@ jobs:
         run: .claude/tools/memory-write.py --selftest
       - name: bench accounts parse
         run: .claude/tools/bench-accounts-parse.py --selftest
+      # The leak scan over the bytes tools/publish-site.sh pushes to
+      # gh-pages, split into raw container bytes and the content they
+      # carry. It runs at the WORST moment in a release - after the
+      # GitHub Release is live, while every download button on the site
+      # is still 404 - so a false refusal there is a person under
+      # pressure to loosen a leak gate. 36 cases, both directions, plus a
+      # real-tree case over all 173 published files, which makes this
+      # step a gate over website/ as well as over the scanner: a private
+      # name committed to a page reddens the AUTHOR's push instead of the
+      # next release. Build-free, about 2.8 s.
+      - name: site leak scan
+        run: tools/site-leak-scan.py --selftest
       # The five analysis report selftests, through a RUNNER in tools/
       # rather than as five steps naming their own directory. That is not
       # tidiness: this file is in packaging/PUBLIC_MANIFEST and ships

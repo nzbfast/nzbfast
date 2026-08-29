@@ -63,17 +63,133 @@ BASELINE_FILES = {
     # completion, the ENOSPC republish, and the prompt that must not
     # leave the archive packed - are one subject and moved whole to
     # tests/daemon_password/. 10,030.
-    "crates/nzbfast/tests/daemon.rs": 10030,
+    # Still 10,030 on 29 Aug 2026 - 68 lines of margin, and the narrowest
+    # of the two entries left after that day's round took the other four
+    # off (research/SIZE-GATE-BASELINED-MARGINS-2026-08-29.md). Nothing
+    # about 68 was safe: pool.rs went from 31 lines of margin to ONE
+    # inside two hours the same day while an ordinary module landed from
+    # another lane, and this file has already crossed its own ceiling by
+    # MERGE ARITHMETIC between two lanes who each saw a green gate on
+    # their own branch. The remaining 134 inline tests do NOT cluster by
+    # name - grouping every one by its first two name segments gives a
+    # long tail whose largest group is THREE - so the seam was found by
+    # reading what they are ABOUT, which is how all 37 existing children
+    # were found. WHAT A CLIENT SEES is one subject: the daemon carries
+    # TWO client vocabularies over one queue (the SABnzbd-compatible API
+    # and the NZBGet JSON-RPC one), and four of the six legs were written
+    # because those two had drifted apart - which client type the user
+    # happened to configure decided whether a documented verb worked at
+    # all (the priority write that releases a duplicate hold,
+    # `change_cat`, the idle edge a lifecycle hook listens for). The
+    # other two pin the payload SHAPE each side's parser expects, key by
+    # key and with the type that side sends. All six moved whole to
+    # tests/daemon_facade/, byte-identical, no helper following them: the
+    # fourteen top-level helpers in daemon.rs are each still reached by
+    # what stayed, so nothing became dead code. 9,132, which is 182 lines
+    # of margin rather than 68. THE ENTRY STAYS: the flat ceiling is
+    # 3,000 and this file is three times that, so no single seam can
+    # delete it - the pattern here is a subject per round, ratcheting,
+    # for a long while yet. The bigger remaining seams a reading turned
+    # up and this round did NOT take, named so the next lane does not
+    # rediscover them as oversights: WHAT SURVIVES A RESTART (~890 lines
+    # over six tests) and THE ARCHIVE SHAPES THE DAEMON MEETS (~790, four
+    # of them contiguous at the zip payload posts).
+    "crates/nzbfast/tests/daemon.rs": 9132,
     # 7471 when first measured; two concurrent 5 Aug sessions landed
     # test growth (one-pass rigs + the round-6 crc-retry pricing leg).
-    "crates/nzbfast/tests/e2e.rs": 7641,
+    # 7,746 by 29 Aug 2026 - 47 lines of margin, the NARROWEST in this
+    # table once daemon.rs had ratcheted, and the busier of the two by a
+    # long way: 29 commits touched this file on origin/main in the seven
+    # days to 29 Aug. It was held off deliberately while the
+    # red-e2e-ffad4ab3 red was open (two of its tests were the subject),
+    # so a size split would not put two lanes in one file; that red
+    # landed in b92b74927 and both formerly-failing tests were re-run
+    # green before this seam was cut, rather than taking the ledger's
+    # word for it.
+    # Unlike daemon.rs the names here DO cluster a little - encrypted_
+    # store (5), kill9_resume (4), store_rar (4), par_only (4) - but the
+    # seam taken is a subject none of those spell: A POST WHOSE PAR2
+    # FILES DO NOT ANNOUNCE THEMSELVES. Its recovery volumes carry no
+    # `.par2` extension and no findable name, so nothing can be
+    # classified from the NZB and the offset-0 magic sniff has to
+    # reclassify each slot in-stream. Public issue #9 is where it starts
+    # (a repairable download failed while SABnzbd repaired it), #14 is
+    # the resume half (a journal-completed head never re-decodes, so run
+    # 2 recognises restored volumes by reading their first bytes off
+    # disk) and #23 is the coverage rule that came out of it. The last
+    # three legs are the MIRROR of the same question - payload that
+    # looks like PAR2 to the sniff and is not, which must be un-deferred
+    # and delivered byte-exact rather than recreated from recovery
+    # blocks - and belong with it rather than beside the named-PAR2 legs
+    # they happened to sit next to. Nine tests and one private fixture
+    # builder, 862 contiguous lines, moved whole to
+    # tests/e2e_sniffedpar2/. `par2_shaped_payload_fixture` went with
+    # them because it is defined AND used entirely inside the block; the
+    # three helpers a reader would expect to follow - `incompressible`,
+    # `sevenz_container`, `sevenz_store_container` - deliberately did
+    # NOT, because e2e_resume, e2e_chaseresume, e2e_tar and e2e_zipsplit
+    # reach them through `super::` and moving them would respell a path
+    # in four sibling files. 6,888.
+    # THE ENTRY STAYS, and the arithmetic says how long for: the flat
+    # ceiling is 3,000, so 3,888 lines have still to leave, and an
+    # entry's slack is 2% of ITSELF - which is the thing to understand
+    # before sizing the next seam. Cutting MORE does not buy more
+    # margin, it buys less (862 lines here leaves 137; a 1,600-line cut
+    # would have left 123), so the only reason to cut deep is distance
+    # from 3,000, never headroom. A subject per round.
+    # The other seams read and NOT taken, named so the next lane does
+    # not rediscover them as oversights: THE NON-RAR CONTAINERS AT THE
+    # TOP LEVEL (7z and zip, ~786 contiguous lines at what is now
+    # ~4,500) - a clean subject, and the reason it was passed over is
+    # that its three helpers above are shared with four siblings, so the
+    # block is three ranges rather than one; and THE ENCRYPTED ARCHIVES
+    # (~400 contiguous plus scattered legs).
+    "crates/nzbfast/tests/e2e.rs": 6888,
     # 7165 when first measured, 7375, then 7629 after the 8 Aug burst.
     # Two concurrent sessions emptied it in turn, both on the
     # cleanup_mode_tests pattern: `trash_tests` + `out_umask_tests` to
     # smart/, then the 3,268-line inline `mod tests` to smart/tests.rs
     # + sweep_rename_tests.rs (one file of them would have been over
     # the ceiling on its own). 3,966 with both.
-    "crates/nzbfast/src/smart.rs": 3966,
+    # Regrown to 4,023 by 29 Aug 2026 - 22 lines under its own limit,
+    # and out of test code to move: both rounds above emptied an inline
+    # `mod tests`, and what is left is production. So this round takes
+    # the first of two production seams. PUTTING A FINISHED JOB WHERE IT
+    # BELONGS - `move_tree`'s rename, the staged copy it falls back to
+    # across filesystems, `copy_tree`, the background-I/O demotion a NAS
+    # copy runs under, the two error wrappers that name the failing
+    # syscall, the collision reservation and the fsync ladder - is one
+    # subject end to end and moved whole to smart/movetree.rs. The
+    # surviving smart.rs names exactly ONE thing in it (`move_tree`, from
+    # `tv_organize`), which is what made it a seam rather than a slice;
+    # the five public doors are re-exported so no caller changed, and the
+    # nine items smart/tests.rs reaches took `pub(super)`. 3,370 with it,
+    # still over the ceiling, so a SECOND seam went in the same commit:
+    # WHAT A FINISHED JOB'S FILES END UP CALLED, AND WHERE - `tv_organize`
+    # and `tv_rename`, the three doors that give a name to a payload that
+    # arrived without a usable one, and the four private helpers that
+    # exist only for those five - to smart/filing.rs. The two are one
+    # commit rather than the one-seam-per-commit shape daemon.rs's
+    # burn-down used, and the reason is mechanical: this checkout is
+    # shared and there is no safe way to stage half of one file, so
+    # splitting the commit would have meant a smart.rs in the index that
+    # matched neither the tree nor its own baseline. What a filed episode
+    # is CALLED - EpisodeTitles, FiledTail, filed_bases, the
+    # length-fitting - deliberately stayed behind: that is the vocabulary
+    # and the delete path reads it too.
+    # 2,772 - UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE, with 228
+    # lines of margin rather than the ~67 that re-baselining after either
+    # seam alone would have bought. The trash half (remove_user_* through
+    # `delete_to_trash`, ~850 lines) is the obvious next seam and was NOT
+    # taken: it moves the `TRASH` process-global and `mod deferred_trash`
+    # across a module-unit boundary, which is a tools/test-global-gate.py
+    # question rather than a size one, and the entry is off without it.
+    # The narrative above is kept rather than deleted with the entry,
+    # exactly as serve/tasks.rs's and daemon.rs's are.
+    # One repair rode along: `move_tree`'s doc comment had been stranded
+    # above `MOVE_SEQ` by an earlier hoist, and it is a shape
+    # tools/doc-gate.py cannot see - the two blocks ABUT with no blank
+    # line between them, so its scanner reads one block, not two.
     # 7081 when first measured; peaked at 10,828 during the fault/tuner
     # campaign. TODO 113 ratchet: the payout/safety rigs moved to
     # pool/rig_tests.rs (their own child module), 10,828 -> 7,855, then
@@ -113,7 +229,24 @@ BASELINE_FILES = {
     # pool/runlife.rs, which already owns `worker` (holds one for its
     # whole life) and `note_server_dark` (what both of its exits call):
     # 3,389.
-    "crates/nzbkit/src/pool.rs": 3389,
+    # Regrown to 3,455 by 29 Aug 2026 - ONE line under the limit, so the
+    # next line anyone added to it reddened main. Fifteen rounds of this
+    # file have taken a BEHAVIOUR seam out of `impl Shared`; the seam
+    # left is not behaviour at all. `PoolConfig` is 406 lines of struct,
+    # 80 of `Default` and 57 of `shipped()` - every knob the pool has,
+    # its neutral posture and the one the daemon actually runs - with no
+    # method that does work and no reference to any private pool item
+    # except the type names in its own fields. It moved whole to
+    # pool/config.rs and is re-exported, so `pool::PoolConfig` is spelled
+    # exactly as it always was. `ConnTarget` stayed behind deliberately:
+    # its own doc says the target is STATE and not configuration, and a
+    # module named for the second must not quietly acquire the first.
+    # 2,919 - UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE, which is
+    # what a 543-line seam buys and a smaller one could not: an entry's
+    # slack is 2% of ITSELF, so re-baselining at 3,455 would have handed
+    # the next lane 69 lines and the same tripwire. The narrative above
+    # is kept rather than deleted with the entry, exactly as
+    # serve/tasks.rs's and daemon.rs's are.
     # rig_tests.rs was here at 2,988 (born in the TODO 113 split of the
     # pool's payout/safety rigs), then 3,125 when the §114 consumer-steer
     # rigs replaced the pool-gate ones, then 3,372 through the §129
@@ -316,7 +449,29 @@ BASELINE_FILES = {
     # whole-file fast path and the sliding scan - went the same way to
     # par2repair/adopt.rs when R2 fanned it out across candidates:
     # 3,596. Still over the ceiling, so the entry stays, ratcheted.
-    "crates/nzbkit/src/par2repair.rs": 3596,
+    # Regrown to 3,662 by 29 Aug 2026 - FIVE lines under its own limit,
+    # which refused an unrelated 32-line addition that day; the two
+    # recovery-slice finders went to par2repair/slices.rs (cca7c1f42) to
+    # get that commit in at all, and that bought ten lines. This round is
+    # the fix rather than the stopgap. THE GF(2^16) ARITHMETIC - folding
+    # present slices into syndromes (fold_chunk_tiled/_multi, the tile
+    # geometry constants, fold_parallel, FeedBatch, fold_batches) and
+    # inverting the repair matrix (invert_vandermonde and the
+    # Gauss-Jordan pair behind it) - moved whole to par2repair/linalg.rs.
+    # The pairing was already in the tree: `bench_fold` and `bench_invert`
+    # are the crate's two benchmark doors, one per half, and
+    # examples/par2_fold_bench.rs drives both; they are re-exported, so no
+    # example changed. Neither half opens a file, parses a packet or knows
+    # what a recovery set is.
+    # WHICH ENGINE computes the syndromes stayed behind, deliberately -
+    # the NTT gates, the divergence probe, `run_with_ntt_fallback` and the
+    # `FAST_PAR_*` process-globals are a policy question answered before
+    # any arithmetic runs, and moving them would move a contested global
+    # (tools/test-global-gate.py's `FAST_PAR_TRIPPED` family) across a
+    # module-unit boundary for no size reason.
+    # 2,868 - UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE. The narrative
+    # above is kept rather than deleted with the entry, exactly as
+    # serve/tasks.rs's and daemon.rs's are.
     # rar.rs was here at 4,088 and reached 4,363 as the shatter-fold and
     # fuzz-crash rounds landed. Its inline `mod tests` (1,255 lines) moved
     # to rar/tests.rs beside v4_header_tests.rs, and the fixture writers
@@ -334,7 +489,41 @@ BASELINE_FILES = {
     # the pattern the five `mod *_tests;` declarations at the foot of that
     # file already are. 3,349 with the note in. The baseline stays 3339:
     # it is the recorded low and only ever goes down.
-    "crates/nzbkit/src/nntp.rs": 3339,
+    # Regrown to 3,396 by 29 Aug 2026 - NINE lines under its own limit,
+    # the tightest of the six baselined files, on a file taking a couple
+    # of commits a day. Both rounds above bought that margin by moving
+    # TEST code, and there was no third `mod *_tests` big enough to buy
+    # it again, so this one took the production seam instead: everything
+    # about the TLS SESSION rather than about NNTP - the suite and
+    # trust-anchor policy (aes_accelerated/is_chacha/is_aes128/
+    # tls_provider), the extra-CA path and the root store, the shared
+    # `ClientConfig` cache keyed on both, the handshake ladder, the
+    # `probe_tls` diagnostic, and the Linux kernel offload with its
+    # `probe_tls` diagnostic - moved whole to nntp/tls.rs, beside the
+    # tlswire.rs that already owns the socket UNDER rustls, and the Linux
+    # kernel offload with its `KtlsWire` to nntp/ktls.rs beside it.
+    # `Connection` reached into that whole 776-line region exactly three
+    # times (tls_full_host, mark_tls_full_host, tls_handshake), which is
+    # what made it one subject rather than a slice: those three took
+    # `pub(super)` and the three PUBLIC doors (set_extra_ca,
+    # shared_tls_client_config, probe_tls) are re-exported, so no caller
+    # anywhere changed. THE KERNEL OFFLOAD IS ITS OWN CHILD and not a
+    # block inside tls.rs, which is a judgement worth keeping: it is one
+    # platform and one cargo feature, so the `#[cfg]` moves to the `mod`
+    # declaration and every item inside sheds its own copy - and folding
+    # it in instead put `KtlsWire::new` in a file whose only other `fn
+    # new` it was, which is a shape tools/cfg-symbol-gate.py mis-resolves
+    # (its same-file arm does not look at the qualifier, so every
+    # `OnceLock::new()` and `Arc::new()` in the file then reads as a
+    # linux-only call). Reported separately; the seam here is the better
+    # one either way. 2,628 -
+    # UNDER THE 3,000 CEILING, SO ITS ENTRY IS GONE, which is the whole
+    # point of taking a 776-line seam rather than a 400-line one: an
+    # entry's slack is 2% of ITSELF, so re-baselining at 3,396 would have
+    # bought 67 lines and left the next lane exactly where this one was.
+    # The narrative is kept rather than deleted with the entry, exactly
+    # as serve/tasks.rs's and daemon.rs's are: it is the record of which
+    # subject went where.
     # release.rs was here at 3,505 and reached 3,586 as the dark-verdict
     # and year-is-an-extension rounds landed. Its inline `mod tests` was
     # 1,427 lines - nearly half the file - and moved whole to

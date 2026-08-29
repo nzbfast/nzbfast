@@ -1409,3 +1409,72 @@ fn multipart_fields_parses_and_skips_files() {
     // The file part is still the file parser's to find.
     assert_eq!(super::multipart_file(&body, b).unwrap().1, b"<nzb/>");
 }
+
+/// The ledger's whole reason for existing is that it survives a
+/// restart: a database compacted last night must not report "never
+/// compacted" because the process was restarted since. So the load has
+/// to MERGE with whatever this run has already recorded, not overwrite
+/// it in either direction - a compaction can land before the first
+/// maintenance tick reads the stored figures back.
+#[cfg(feature = "indexer")]
+#[test]
+fn the_space_ledger_survives_a_restart_and_merges_rather_than_clobbers() {
+    let dir = std::env::temp_dir().join(format!("nzbf-ledger-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = crate::serve::testutil::test_daemon(&dir);
+    d.index_enabled.store(true, Ordering::Relaxed);
+
+    // Run one: two evictions and a compaction, written through.
+    d.note_evicted(30, 3_000);
+    d.note_evicted(12, 1_200);
+    d.note_compact(9_999);
+    d.sync_index_ledger();
+    let one = d.index_ledger_snapshot();
+    assert_eq!((one.evicted_rows, one.evicted_bytes), (42, 4_200));
+    assert_eq!(one.last_compact_freed, 9_999);
+    assert!(one.last_compact_at.is_some());
+    // Written through: a second sync has nothing left to do.
+    assert!(!one.dirty && one.loaded);
+
+    // Run two, same database. An eviction lands BEFORE the first
+    // maintenance tick - the case a naive load loses.
+    let d2 = crate::serve::testutil::test_daemon(&dir);
+    d2.index_enabled.store(true, Ordering::Relaxed);
+    d2.note_evicted(8, 800);
+    assert!(!d2.index_ledger_snapshot().loaded);
+    d2.sync_index_ledger();
+    let two = d2.index_ledger_snapshot();
+    assert_eq!(
+        (two.evicted_rows, two.evicted_bytes),
+        (50, 5_000),
+        "the stored totals and this run's must be added, not one dropped"
+    );
+    // The compaction is a fact about the FILE and comes back with it.
+    assert_eq!(two.last_compact_at, one.last_compact_at);
+    assert_eq!(two.last_compact_freed, 9_999);
+
+    // A wipe deletes that file, so its ledger goes with it - and does
+    // not then reload the rows of a database that no longer exists.
+    d2.reset_index_ledger();
+    let after = d2.index_ledger_snapshot();
+    assert_eq!((after.evicted_rows, after.evicted_bytes), (0, 0));
+    assert_eq!(after.last_compact_at, None);
+    assert!(after.loaded, "a wiped ledger must not read the old kv back");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A pass that removed nothing must not touch the ledger at all: the
+/// automatic evictor calls it after every scan pass, and a `dirty`
+/// raised by a no-op would put a database write on every one of them.
+#[cfg(feature = "indexer")]
+#[test]
+fn an_eviction_that_removed_nothing_leaves_the_ledger_alone() {
+    let dir = std::env::temp_dir().join(format!("nzbf-ledger-noop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let d = crate::serve::testutil::test_daemon(&dir);
+    d.note_evicted(0, 0);
+    let g = d.index_ledger_snapshot();
+    assert!(!g.dirty, "a no-op pass must not schedule a write");
+    assert_eq!((g.evicted_rows, g.evicted_bytes), (0, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}

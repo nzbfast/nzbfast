@@ -68,6 +68,7 @@ fn work(id: &str) -> Work {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -223,7 +224,7 @@ async fn both_exits_above_the_dial_park_their_unused_session() {
     let (drained, _) = Shared::new(Vec::new(), &servers);
     let (c, _) = Connection::connect(&sc).await.expect("dial the mock");
     let mut held = Some(c);
-    assert!(done_before_dial(&cfg, &sc, &drained, &mut held).await);
+    assert!(done_before_dial(&cfg, &sc, &drained, 0, &mut held).await);
     assert!(held.is_none(), "the claimed connection was handed on");
     assert_eq!(
         warm.stats.parked.load(Ordering::Relaxed),
@@ -238,7 +239,7 @@ async fn both_exits_above_the_dial_park_their_unused_session() {
     aborted.aborted.store(true, Ordering::Release);
     let (c, _) = Connection::connect(&sc).await.expect("dial the mock");
     let mut held = Some(c);
-    assert!(done_before_dial(&cfg, &sc, &aborted, &mut held).await);
+    assert!(done_before_dial(&cfg, &sc, &aborted, 0, &mut held).await);
     assert!(held.is_none());
     assert_eq!(
         warm.stats.parked.load(Ordering::Relaxed),
@@ -256,11 +257,111 @@ async fn both_exits_above_the_dial_park_their_unused_session() {
     offline.aborted.store(true, Ordering::Release);
     let (c, _) = Connection::connect(&sc).await.expect("dial the mock");
     let mut held = Some(c);
-    assert!(done_before_dial(&cfg, &sc, &offline, &mut held).await);
+    assert!(done_before_dial(&cfg, &sc, &offline, 0, &mut held).await);
     assert_eq!(
         warm.stats.parked.load(Ordering::Relaxed),
         2,
         "a pool that has gone offline takes no more parks"
+    );
+}
+
+/// §96.5, and the one thing `drained` does not settle: an abort exit
+/// must NOT hand its session on when the prepaid block that paid for it
+/// is spent.
+///
+/// The rule is `release_shed_conn`'s, from `9b442b1ce` - `over_budget`
+/// latches for the run, and the daemon's runner rules a spent host out
+/// of the NEXT job's pool outright, so a session parked there is a
+/// provider slot held for a job that will never take it. That commit
+/// gave it to the shed and left `stand_down` asking only
+/// `inflight.is_empty()`, and the two are not merely inconsistent on
+/// paper: the inner loop reads the abort flag BEFORE it reaches the
+/// shed, so a worker whose pipeline drains in the same pass a sibling's
+/// bytes push the fleet over budget arrives at the abort exit, not the
+/// shed, and parked. One slot per racing worker, held against a capped
+/// account until the 300 s idle reap (v1.2.4 sweep, finding R3).
+///
+/// Driven at the exits rather than through a fleet ON PURPOSE. That
+/// race is a race - inside the pool the shed handles every worker whose
+/// pipeline empties a pass later, so a whole-fleet rig would be pinning
+/// its own timing rather than the rule. The three exits below are every
+/// door a leaving worker can put a drained session through with the
+/// budget latched, and each is asked directly.
+///
+/// The A/B is what makes it an assertion and not an accident: the SAME
+/// call, on a run with no block, must still park - `over_budget` is
+/// false for every server without one, which is every server on an
+/// unmetered account and every server on a CLI run.
+#[tokio::test]
+async fn an_abort_exit_does_not_park_a_session_on_a_spent_block() {
+    let srv = MockServer::start(std::collections::HashMap::new(), Chaos::default()).await;
+    let sc = srv.server_config();
+    let warm = WarmPool::new(Duration::from_secs(60), 8);
+    let cfg = PoolConfig {
+        warm: Some(warm.clone()),
+        ..Default::default()
+    };
+    // A server carrying a prepaid block, and a run that has spent it.
+    let spent_cfg = PoolConfig {
+        budget_bytes: Some(1_000),
+        ..cfg.clone()
+    };
+    let spent_servers = vec![(server("s"), spent_cfg)];
+    let (spent, _) = Shared::new(fresh(&["<a@x>"]), &spent_servers);
+    spent.bytes[0].store(1_000, Ordering::Relaxed);
+    assert!(
+        spent.over_budget(0),
+        "the fixture must actually be over its block, or every arm below          passes for the wrong reason"
+    );
+    // The same run without a block, which is every unmetered server.
+    let open_servers = vec![(server("s"), cfg.clone())];
+    let (open, _) = Shared::new(fresh(&["<a@x>"]), &open_servers);
+    assert!(!open.over_budget(0), "no block configured, no budget");
+
+    let dial = async || Connection::connect(&sc).await.expect("dial the mock").0;
+
+    // 1. The session loop's own abort exit, drained. THE finding.
+    stand_down(&cfg, &sc, &spent, 0, dial().await, true).await;
+    assert_eq!(
+        warm.stats.parked.load(Ordering::Relaxed),
+        0,
+        "an abort must not park a drained session on a host whose block          is spent - the shed already quits one, and the abort flag is          read first"
+    );
+    stand_down(&cfg, &sc, &open, 0, dial().await, true).await;
+    assert_eq!(
+        warm.stats.parked.load(Ordering::Relaxed),
+        1,
+        "and the 25-26 Aug rule is untouched where there is no block: a          drained session still goes back to the pool"
+    );
+
+    // 2. The abort exit ABOVE the dial, holding a preclaimed session.
+    let mut held = Some(dial().await);
+    spent.aborted.store(true, Ordering::Release);
+    assert!(done_before_dial(&cfg, &sc, &spent, 0, &mut held).await);
+    assert!(held.is_none(), "the claimed connection was disposed of");
+    assert_eq!(
+        warm.stats.parked.load(Ordering::Relaxed),
+        1,
+        "the pre-dial abort exit asks the same question - it is reached          with the budget latched whenever the block runs out inside          `pre_dial_gates`' own awaits"
+    );
+
+    // 3. The queue-dry exit above the dial, which is the same door one
+    //    flag earlier and must not be the one that leaks the slot.
+    let dry_servers = vec![(
+        server("s"),
+        PoolConfig {
+            budget_bytes: Some(1_000),
+            ..cfg.clone()
+        },
+    )];
+    let (dry, _) = Shared::new(Vec::new(), &dry_servers);
+    dry.bytes[0].store(1_000, Ordering::Relaxed);
+    let mut held = Some(dial().await);
+    assert!(done_before_dial(&cfg, &sc, &dry, 0, &mut held).await);
+    assert_eq!(
+        warm.stats.parked.load(Ordering::Relaxed),
+        1,
+        "a queue that emptied under a spent block is still a spent block"
     );
 }
 
@@ -1194,6 +1295,54 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
     );
 }
 
+/// 27 Aug sweep finding 23: an un-echoed, unfenced dup 430 is dropped
+/// as evidence AND gives the article its hedge budget back. It is a dup
+/// dying without a verdict, exactly like a shed or a connection death
+/// (26 Aug #13), and leaving `dups` charged bars every later stale/TTFB
+/// rescue for the rest of the article's life.
+#[tokio::test]
+async fn an_unproven_dup_refusal_returns_the_hedge_budget() {
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let cfg = PoolConfig::default();
+    let (sh, _) = Shared::new(fresh(&["<u@x>"]), &servers);
+    let ctx = ctx_for(&servers, 0);
+    sh.alive[0].store(1, Ordering::SeqCst);
+    let (tx, mut rx) = mpsc::channel(8);
+    let original = work("<u@x>");
+    sh.register_inflight(&original, 0);
+    // The hedge was spent at pick time.
+    sh.inflight
+        .lock_ok()
+        .get_mut("<u@x>")
+        .expect("inflight")
+        .dups = 1;
+    let mut w = work("<u@x>");
+    w.dup = true;
+    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    sh.charge_wire();
+    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
+    handle_missing(
+        &cfg,
+        ctx,
+        &sh,
+        &tx,
+        &mut inflight,
+        PooledBuf::unpooled(Vec::new()),
+        false,
+        false,
+        &mut bare,
+    )
+    .await;
+    assert!(rx.try_recv().is_err(), "a bare dup refusal decides nothing");
+    let inf = sh.inflight.lock_ok();
+    let entry = inf.get("<u@x>").expect("original still out reading");
+    assert_eq!(entry.dups, 0, "the unspent rescue comes back");
+    assert_eq!(
+        entry.tried_430, 0,
+        "and the do-not-merge half stays: unproven evidence never reaches the mask"
+    );
+}
+
 /// The takedown hint rides the refusal ladder to the terminal verdict:
 /// one backbone naming the removal ("430 ... DMCA", Giganews's 451)
 /// flavours the final Missing even when every other backbone answered a
@@ -1205,7 +1354,14 @@ async fn a_takedown_flavoured_refusal_flavours_the_terminal_missing() {
         (server("a"), PoolConfig::default()),
         (server("b"), PoolConfig::default()),
     ];
-    let cfg = PoolConfig::default();
+    // TODO 315's late re-ask is OFF here: this test is about what a
+    // TERMINAL verdict carries, and the re-ask puts one more hop in
+    // front of the refusal that becomes terminal. Its own behaviour is
+    // pinned in `pool::unit_tests::recheck_tests`.
+    let cfg = PoolConfig {
+        recheck_430: false,
+        ..PoolConfig::default()
+    };
     let (sh, _) = Shared::new(fresh(&["<t@x>", "<p@x>"]), &servers);
     sh.alive[0].store(1, Ordering::SeqCst);
     sh.alive[1].store(1, Ordering::SeqCst);
@@ -1874,5 +2030,69 @@ fn a_body_that_never_entered_the_channel_releases_its_charge() {
         cur(Sub::Channel),
         0,
         "an outcome that dropped at teardown must not leave the gauge charged"
+    );
+}
+
+/// The session's own 430 path takes the same verdict the queue scan
+/// does, so it must reach it the same way (27 Aug sweep finding 8).
+/// Server b served for part of this run and then went out; server a's
+/// refusal is now live-unanimous, which ENDS the article - nobody left
+/// can fetch it and rotating it deadlocks the run - but it does not make
+/// the article gone, because the server that might have held it was
+/// never asked. The report says which of the two happened.
+#[tokio::test]
+async fn a_refusal_that_only_looks_unanimous_because_a_server_left_says_so() {
+    let servers = vec![
+        (server("a"), PoolConfig::default()),
+        (server("b"), PoolConfig::default()),
+    ];
+    // TODO 315's late re-ask is OFF here: this test is about what a
+    // TERMINAL verdict carries, and the re-ask puts one more hop in
+    // front of the refusal that becomes terminal. Its own behaviour is
+    // pinned in `pool::unit_tests::recheck_tests`.
+    let cfg = PoolConfig {
+        recheck_430: false,
+        ..PoolConfig::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<lost@x>"]), &servers);
+    sh.connected[0].store(true, Ordering::SeqCst);
+    sh.connected[1].store(true, Ordering::SeqCst);
+    sh.alive[0].store(1, Ordering::SeqCst);
+    // b's last worker has already left; it never saw this article.
+    sh.alive[1].store(0, Ordering::SeqCst);
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
+    let w = sh.queue.lock().await.pop_front().expect("queued");
+    let mut inflight: VecDeque<Work> = [w].into_iter().collect();
+    sh.charge_wire();
+    handle_missing(
+        &cfg,
+        ctx_for(&servers, 0),
+        &sh,
+        &tx,
+        &mut inflight,
+        PooledBuf::unpooled(Vec::new()),
+        true,
+        false,
+        &mut bare,
+    )
+    .await;
+    match rx.try_recv() {
+        Ok(FetchOutcome::Missing { id, cause }) => {
+            assert_eq!(&*id, "<lost@x>");
+            assert_eq!(
+                cause,
+                MissingCause::Unasked {
+                    takedown: false,
+                    dark: 1
+                },
+                "one live refusal is not every participant's answer"
+            );
+        }
+        other => panic!("expected a terminal Missing, got {other:?}"),
+    }
+    assert!(
+        sh.queue.lock().await.is_empty(),
+        "the article is still terminal - the fleet has nobody who could take it"
     );
 }

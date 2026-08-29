@@ -38,7 +38,7 @@ impl Write for CapSink {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.set(self.0.get().saturating_add(buf.len()));
         if self.0.get() > 8 * 1024 * 1024 {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "output cap"));
+            return Err(std::io::Error::other("output cap"));
         }
         Ok(buf.len())
     }

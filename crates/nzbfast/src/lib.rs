@@ -65,6 +65,7 @@ mod listsrc;
 // serve/ by TODO 276 item 3 so the CLI sysbench can ask without the daemon.
 mod locallink;
 pub mod logging;
+mod manifest;
 mod nettools;
 // Outbound HTTP for third-party URLs - the SSRF guard, the shared agents
 // and URL credential redaction. Hoisted out of serve/ by TODO 276 item 3.
@@ -131,10 +132,28 @@ use streamhub::*;
 /// defaults, a loopback bind (the host process owns the only client),
 /// everything else settings-driven - `apply_saved_settings` overlays
 /// settings.json exactly as it does for the daemon.
+///
+/// `mem_limit` is the host's answer in BYTES, or `None` for
+/// [`nzbkit::mem::MemBudget::auto`] - a quarter of physical RAM, which
+/// is a DESKTOP figure and the one default in this function that a
+/// phone must not take. `MemBudget::auto` reads the machine's RAM, and
+/// on a 12 GB phone that is a 3 GB budget for a process the platform is
+/// willing to kill for being large; `MemBudget::with_total` clamps
+/// whatever arrives to the engine's own 64 MB floor, so a host that
+/// passes something silly gets a small engine rather than a broken one.
+/// See `nzbfast_start`'s `mem_limit_bytes` for why this is a parameter
+/// and not an environment variable, and TODO 281 IO2 for the
+/// measurement the iOS figure comes from.
+///
+/// A saved `mem_limit` in settings.json still overrides it: `serve`
+/// runs `apply_saved_settings` before it publishes the process budget,
+/// so this is the platform's DEFAULT and an explicit user setting wins,
+/// which is the same precedence `--mem-limit` has on a desktop.
 pub fn embedded_serve_opts(
     port: u16,
     apikey: Option<String>,
     out_root: PathBuf,
+    mem_limit: Option<u64>,
 ) -> serve::ServeOpts {
     serve::ServeOpts {
         port,
@@ -166,7 +185,7 @@ pub fn embedded_serve_opts(
         speedlimit: None,
         schedule: None,
         auto_speed: false,
-        mem_budget: nzbkit::mem::MemBudget::auto(),
+        mem_budget: embedded_budget(mem_limit),
         group_desc_isc: false,
         #[cfg(feature = "indexer")]
         index_db: PathBuf::from("index.db"),
@@ -183,14 +202,34 @@ pub fn embedded_serve_opts(
     }
 }
 
+/// The budget an embedded host gets, in one place because TWO callers
+/// need the identical answer: [`embedded_init`] publishes the process
+/// budget before the engine thread exists, and [`embedded_serve_opts`]
+/// puts it in the opts `serve` republishes from. Written twice, a host
+/// that passed a phone-sized limit would still spend the window between
+/// those two calls advertising a desktop one.
+fn embedded_budget(mem_limit: Option<u64>) -> nzbkit::mem::MemBudget {
+    match mem_limit {
+        // `with_total` clamps to MemBudget::MIN and fits the address
+        // space, so a host that asks for 1 byte gets the 64 MB floor
+        // rather than an engine whose every tier rounds to nothing.
+        Some(bytes) => nzbkit::mem::MemBudget::with_total(bytes),
+        None => nzbkit::mem::MemBudget::auto(),
+    }
+}
+
 /// Process-wide one-time setup the CLI's `run()` does before serving,
 /// minus the pieces that make no sense in a host app (power-throttling
 /// opt-out is Windows-only and harmless; the allocator stays the
 /// system's - mimalloc is cfg'd to macOS + Linux).
-pub fn embedded_init() {
+///
+/// `mem_limit` is the same argument [`embedded_serve_opts`] takes and
+/// must be the SAME VALUE: this is the budget in force from here until
+/// `serve` republishes its own, and the repair and extract paths read
+/// the process budget rather than the opts.
+pub fn embedded_init(mem_limit: Option<u64>) {
     logging::init(logging::Style::Daemon);
     nzbkit::disk::raise_fd_limit();
     nzbkit::mem::opt_out_of_power_throttling();
-    let budget = nzbkit::mem::MemBudget::auto();
-    nzbkit::mem::set_process_budget(budget);
+    nzbkit::mem::set_process_budget(embedded_budget(mem_limit));
 }

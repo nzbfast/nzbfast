@@ -29,6 +29,47 @@ impl FetchCounters {
     }
 }
 
+/// Which route a RESUMED run took through §94 A's admission gate
+/// (`get::plan::resume_map_admitted`), and the figures that gate weighed
+/// to decide it.
+///
+/// TODO 309, mitigation 3's open half. The two routes are the largest
+/// per-job cost difference this engine has - 1.02x payload of device I/O
+/// for the replay against 2.53x for rebuilding the volumes on disk - and
+/// nothing chooses between them but the gate, so a user never pressed
+/// anything to land on either. Until this existed the only trace was one
+/// `info!` on the `resume` target, hours earlier in a busy daemon log
+/// with nothing tying it to the job; the download report, which is the
+/// artefact somebody actually sends when a job was slow, could not
+/// answer "did this one pay 2.5x, and why".
+///
+/// Reported only where the gate had something to weigh, i.e. where the
+/// journal described bytes to replay. A fresh run has none, and neither
+/// does a resumed COMPRESSED set - its output bytes are DECODED bytes,
+/// so no fragment can be described as sitting on disk and the journal
+/// holds one record (measured: 72 bytes for a 2.1 GB `-m3` set). Absent
+/// therefore reads as "this run replayed nothing", which is what keeps a
+/// non-resumed job's report unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResumeRoute {
+    /// True: the restored spans were replayed back through the extractor
+    /// and the run finished in one pass. False: the restore materialized
+    /// volume files and the run unpacked them from disk.
+    pub mapped: bool,
+    /// `ResumeState::placement_bytes()` - every fragment of every
+    /// placement record, which is what arm 1 of the gate weighs.
+    pub restored_bytes: u64,
+    /// The raw held-span budget arm 1 weighed `restored_bytes` against.
+    pub budget_bytes: u64,
+    /// The widest single restored slot, which is what arm 2 weighs -
+    /// TODO 309(a) measured the replay's held peak tracking ONE VOLUME
+    /// and not the total, by up to 200x.
+    pub widest_slot_bytes: u64,
+    /// What a pipeline joining the process holds ledger now could seat
+    /// of the budget, which is the quantity arm 2 spends.
+    pub seatable_bytes: u64,
+}
+
 /// Live handle the daemon's streaming endpoint uses to reach the active
 /// download's output writers (M11). `get` installs its extractor here for
 /// the duration of the run.
@@ -144,8 +185,23 @@ pub(crate) struct StreamHub {
     /// the fleet builder). Latched when that run's fleet starts going
     /// idle after queue-dry - the runner's cue to start the next job.
     pub handoff: std::sync::Mutex<Option<Arc<nzbkit::pool::handoff::HandoffSignal>>>,
-    /// Hosts the daemon has ruled out for the NEXT download (exhausted
-    /// block accounts); get_with_progress skips them at pool build.
+    /// Hosts the daemon has ruled out for the NEXT download;
+    /// get_with_progress skips them at pool build.
+    ///
+    /// The block-account entries are per HOST but decided over that
+    /// host's ENABLED config rows as a set: a host lands here only when
+    /// every one of them is a prepaid block that is used up. One
+    /// exhausted row used to exclude the whole host, which took a
+    /// funded sibling - or an unlimited flat-rate account sharing the
+    /// hostname - out of the pool with it, and left `get::plan` bailing
+    /// "no usable servers" while Settings still showed that sibling
+    /// healthy. `serve::Daemon::block_pool_rules` is the rule; a
+    /// disabled row contributes nothing to it, because `plan` drops
+    /// disabled servers BEFORE it applies this list.
+    ///
+    /// The sidecar puts two more reasons in the same list (busy with
+    /// the active job, auth-refused), which is why `plan`'s log line
+    /// names all three rather than saying "exhausted".
     pub excluded_hosts: std::sync::Mutex<Vec<String>>,
     /// Per-host connection caps for THIS hub's pool build. Set only on a
     /// prefetch sidecar's hub when it BORROWS a slice of a server that is
@@ -156,11 +212,25 @@ pub(crate) struct StreamHub {
     pub host_conn_caps: std::sync::Mutex<std::collections::HashMap<String, usize>>,
     /// §96.5: remaining prepaid bytes per host for the NEXT download's
     /// pool build - the configured block minus what the ledger says is
-    /// already spent, only for hosts with bytes left (a spent block
-    /// goes in `excluded_hosts` instead). The fleet build seeds each
-    /// server's mid-run budget from this, so a block that runs out
-    /// DURING a job releases the server there and then. Recomputed by
-    /// the runner at every job start, like `excluded_hosts`.
+    /// already spent, only for hosts with bytes left (a host whose
+    /// every enabled account is a spent block goes in `excluded_hosts`
+    /// instead). The fleet build seeds each server's mid-run budget
+    /// from this, so a block that runs out DURING a job releases the
+    /// server there and then. Recomputed by the runner at every job
+    /// start, like `excluded_hosts`.
+    ///
+    /// TWO THINGS ABOUT A HOST WITH SEVERAL ENABLED ROWS, because
+    /// `get::fleet` copies one value here onto EVERY row on that host.
+    /// The figure is the LARGEST remaining across the host's block
+    /// rows, not whichever the config happens to list last - spend is
+    /// host-aggregated, so the host can keep serving while any account
+    /// on it still has allowance, and the maximum is the only
+    /// order-independent answer. And a host carrying any enabled
+    /// FLAT-RATE row gets NO entry at all: capping it would enforce a
+    /// limit on an unlimited account that the user never configured.
+    /// `serve::Daemon::block_pool_rules` is the rule, and states the
+    /// residue that two block rows on one host still share one
+    /// host-aggregated spend figure.
     pub host_byte_budgets: std::sync::Mutex<std::collections::HashMap<String, u64>>,
     /// TODO 112 (dark, NZBFAST_LIVE_TUNE=1): per-host live connection
     /// targets, shared between each job's pool build and the epoch
@@ -178,6 +248,21 @@ pub(crate) struct StreamHub {
     /// stays 0 on a CLI run and on a prefetch sidecar's fresh hub, where
     /// the pool's own gauge does the capping within the run instead.
     pub line_anchor_bps: std::sync::atomic::AtomicU64,
+    /// TODO 275 item 1 part 1: was `line_anchor_bps` MEASURED on this
+    /// link, or is it the line speed a user TYPED into Settings?
+    /// `linkpeak.effective` returns both and the runner used to keep
+    /// only the number. Stamped onto every server's `PoolConfig` beside
+    /// the anchor; false on a CLI run and on a sidecar's fresh hub,
+    /// where there is no anchor at all.
+    pub line_anchor_measured: std::sync::atomic::AtomicBool,
+    /// TODO 275 item 1 part 2: the per-socket carry the LAST job
+    /// measured, bytes/s, 0 = none. Written by the runner at every job
+    /// start beside `line_anchor_bps`, out of the daemon's persisted
+    /// `line_carry` store, and read by the fleet build so a job seeds
+    /// from what a socket was last seen to hold rather than from the
+    /// curve's planned 150 Mbit. Stays 0 on a CLI run and on a prefetch
+    /// sidecar's fresh hub.
+    pub line_carry_bps: std::sync::atomic::AtomicU64,
     /// The `live_tune` setting, mirrored here by the daemon (settings
     /// apply + restart restore) because the pool build in get/fleet.rs
     /// reaches the hub, not the daemon. False on a CLI run and on a
@@ -246,6 +331,18 @@ pub(crate) struct StreamHub {
     /// of those with a rate no line has ever run at. Set once, before
     /// the pool starts; the daemon zeroes it per job.
     pub resume_seeded: std::sync::atomic::AtomicU64,
+    /// TODO 309: this run's [`ResumeRoute`], tagged with the nzo_id that
+    /// owns it, published by `get::get_with_progress` once the gate has
+    /// spoken. Owner-tagged for the same reason [`Self::extractor`] is:
+    /// a job transition must never hand one job's verdict to the next,
+    /// and the tail that reads this runs on the lane, after the next
+    /// job may already have claimed the hub.
+    ///
+    /// `None` while a run has not reached the gate, and left `None` by a
+    /// run with nothing to replay. The daemon clears it at every job
+    /// start (`tasks/runner.rs`), so a job that dies before the gate
+    /// cannot inherit its own previous attempt's verdict.
+    pub resume_route: std::sync::Mutex<Option<(String, ResumeRoute)>>,
     /// M24 late attach (C1): a password set via mode=set_password AFTER
     /// the active download started, tagged with its owning nzo_id. The
     /// download task captures `j.password` once at the Downloading
@@ -760,6 +857,17 @@ impl StreamHub {
         (tag == owner).then(|| pw.clone())
     }
 
+    /// TODO 309: this job's resume route, when the cell belongs to
+    /// `owner` - same ownership rule and the same single-lock
+    /// owner-check-and-clone as [`Self::extractor_for`], so a job
+    /// transition can never answer one job's report with another job's
+    /// verdict.
+    pub fn resume_route_for(&self, owner: &str) -> Option<ResumeRoute> {
+        let g = self.resume_route.lock_ok();
+        let (tag, r) = g.as_ref()?;
+        (tag == owner).then_some(*r)
+    }
+
     /// §99: the NZB source host for `owner`, same ownership rule - a
     /// stale hint must never order another job's candidates.
     pub fn pw_assoc_site_for(&self, owner: &str) -> Option<String> {
@@ -1072,3 +1180,48 @@ impl SeekCtl {
 #[cfg(test)]
 #[path = "streamhub_tailfiles_tests.rs"]
 mod streamhub_tailfiles_tests;
+
+/// TODO 309: the resume route's owner tag, which is the only thing
+/// standing between a job transition and one download's report carrying
+/// another download's verdict.
+///
+/// This cell is published EARLY - at intake, before the first article -
+/// and read LATE, on the postproc lane, so a cross-job hand-over sits
+/// squarely between the two and the tag is doing real work rather than
+/// being copied from [`StreamHub::extractor_for`] out of habit.
+#[cfg(test)]
+mod resume_route_tests {
+    use super::*;
+
+    fn route(restored: u64) -> ResumeRoute {
+        ResumeRoute {
+            mapped: true,
+            restored_bytes: restored,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_route_is_answered_to_its_owner_and_to_nobody_else() {
+        let h = StreamHub::default();
+        // Nothing published: a run that never reached the gate has no
+        // route, and that is what a fresh daemon looks like too.
+        assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast1"), None);
+
+        *h.resume_route.lock_ok() = Some(("SABnzbd_nzo_nzbfast1".into(), route(8_000_000)));
+        assert_eq!(
+            h.resume_route_for("SABnzbd_nzo_nzbfast1")
+                .expect("its owner reads it")
+                .restored_bytes,
+            8_000_000
+        );
+        // The next job asks while the previous job's verdict is still
+        // installed - the hand-over window - and gets nothing rather
+        // than a route belonging to a download it is not.
+        assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast2"), None);
+        // And a PREFIX of the owner is not the owner: these ids are
+        // minted off a plain counter, so `...nzbfast1` is a strict
+        // prefix of `...nzbfast10` through `19` and of `...100` up.
+        assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast10"), None);
+    }
+}

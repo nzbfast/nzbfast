@@ -26,6 +26,23 @@ crates/nzbkit/testdata/**          -text
 crates/nzbkit/tests/fixtures/**    -text
 vendor/rars/tests/fixtures/**      -text
 
+# Same exposure, one directory over: `crates/nzbkit/fuzz/seeds/**` holds
+# committed corpus entries and crash repros for the cargo-fuzz targets,
+# several of them CRLF yEnc control-line framing (the `=y` protocol is
+# CRLF-terminated) with no NUL early enough to trip git's binary
+# heuristic - `git add` on this Mac warned it would silently replace
+# their CRLF with LF on the very commit that added them (27 Aug 2026,
+# the post-v1.2.4 fuzz campaign), which is the exact corruption the rule
+# above exists to prevent, just undiscovered here because nothing had
+# committed a CRLF-bearing seed under this directory before. It was
+# never actually mangled - the `-text` below landed before the commit -
+# but the pre-existing `seeds/rar_recovery_scan/` and `seeds/rar_name_probe/`
+# corpora were exposed to the identical risk on any checkout that
+# resolves `text=auto` differently (a Windows clone with
+# `core.autocrlf=true` in particular) for however long they have been
+# committed; this rule closes that retroactively as well as prospectively.
+crates/nzbkit/fuzz/seeds/**        -text
+
 # cmd.exe's own format. `Start nzbfast.bat` has labels and a `goto` out of
 # a `for` block, which is the construct where an LF-only batch file misfires
 # on some cmd.exe versions, so this is pinned CRLF rather than left to the

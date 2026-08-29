@@ -53,6 +53,7 @@ mod listsrc;
 // serve/ by TODO 276 item 3 so the CLI sysbench can ask without the daemon.
 mod locallink;
 mod logging;
+mod manifest;
 mod nettools;
 // Outbound HTTP for third-party URLs - the SSRF guard, the shared agents
 // and URL credential redaction. Hoisted out of serve/ by TODO 276 item 3.
@@ -604,12 +605,18 @@ enum Command {
     Stream {
         /// Path to a .nzb file, or an http(s) URL to one.
         nzb: String,
-        /// Daemon to submit to.
+        /// Daemon to submit to: a host name (plain HTTP, on --port), or
+        /// a full base URL. A daemon started with --tls-cert/--tls-key
+        /// serves one listener and one scheme, so it is reachable only
+        /// as `--host https://nas.local`. Self-signed pair: point this
+        /// client at it with NZBFAST_EXTRA_CA=<cert.pem>.
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Daemon port. A port inside a --host URL wins over this.
         #[arg(long, default_value_t = 6789)]
         port: u16,
-        /// API key (or NZB key), if the daemon requires one.
+        /// API key (or NZB key), if the daemon requires one. Sent as an
+        /// X-Api-Key header, never in the request target.
         #[arg(long)]
         apikey: Option<String>,
         /// Print the URLs only; don't launch the player.
@@ -1164,7 +1171,29 @@ async fn run() -> Result<()> {
             fast,
         } => run_check(&cli.config, &nzb, sample, connections, window, fast).await,
         Command::Verify { dir } => {
-            verify_dir(&dir)?;
+            // PAR2 stays the first choice - it can REPAIR, the manifest
+            // can only judge. The manifest arm exists for the day the
+            // cleanup default has already deleted the .par2 files,
+            // which is exactly when a user reaches for verify.
+            //
+            // THE TWO ARMS DISAGREE ON EXIT CODE, deliberately and only
+            // for now. `verify_dir` returns one bool for two different
+            // answers - `false` is both "damaged" and "there was nothing
+            // to verify" (no PAR2, over the scan cap, parse failed) - so
+            // the caller cannot act on it and has always discarded it:
+            // the PAR2 arm exits 0 on damage today. The manifest arm has
+            // a bool that means one thing, so it exits 1, which is the
+            // contract a script wants. Making them agree means splitting
+            // that return, and changing a shipped command's exit code is
+            // a compatibility call rather than a tidy-up - TODO 310 item
+            // 1 carries it.
+            if !dir_has_par2(&dir).unwrap_or(false) && dir.join(manifest::MANIFEST_NAME).is_file() {
+                if !manifest::verify_cli(&dir)? {
+                    std::process::exit(1);
+                }
+            } else {
+                verify_dir(&dir)?;
+            }
             Ok(())
         }
         Command::Extract { dir, password } => {

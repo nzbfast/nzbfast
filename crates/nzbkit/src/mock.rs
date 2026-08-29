@@ -32,6 +32,18 @@ pub struct Chaos {
     /// stalls only its FIRST request - retries succeed, so tests prove
     /// recovery rather than permanent failure.
     pub stall: HashSet<String>,
+    /// TODO 315: ids answered 430 on their FIRST request and SERVED on
+    /// every one after it - a refusal that was never true.
+    ///
+    /// A measured fault and not a hypothetical: on a cold-storage
+    /// backbone reached over a slow long-haul route, one 17 GB slice
+    /// lost 250 of 23,103 segments to refusals that ALL carried an
+    /// echoed message-id, and a re-run of the same slice nine minutes
+    /// later on the same account lost 19 (see
+    /// `PoolConfig::recheck_430`). `missing` is the permanent shape and
+    /// says the article is gone; this is the shape nothing on the wire
+    /// can tell apart from it, which is the entire difficulty.
+    pub missing_once: HashSet<String>,
     /// Drop the connection after this many successful BODY responses
     /// (0 = never). Tests reconnect + requeue.
     pub drop_after: u64,
@@ -148,6 +160,21 @@ pub struct Chaos {
     /// greets with the 502 capacity text (a refusal the client can
     /// classify); here there is nothing to classify. 0 = off.
     pub refuse_connect_ms: u64,
+    /// The same hard outage as `refuse_connect_ms`, held open until the
+    /// TEST releases it ([`MockServer::outage_control`]) rather than
+    /// until a wall clock runs out.
+    ///
+    /// `refuse_connect_ms` is measured from the mock's own start, which
+    /// is fine for a client the test drives itself and is a coin flip
+    /// for one that has to boot first: a daemon rig starts the mock,
+    /// spawns a process, waits for it to bind, uploads a queue and only
+    /// then lets it run, so the window has to be guessed long enough to
+    /// outlive all of that on the slowest box it will ever run on - and
+    /// guessing wrong is a flake in both directions, healing before the
+    /// client ever dials, or never healing inside the test's budget.
+    /// This is `pause`'s argument (no wall-clock races) applied to the
+    /// dial rather than to the command loop.
+    pub outage: bool,
     /// Ids whose FIRST request hangs BEFORE the status line (the
     /// dead-air shape a flat read timeout waits full length on, and the
     /// adaptive TTFB budget cuts short). Retries succeed, like `stall`.
@@ -730,6 +757,9 @@ pub struct MockServer {
     /// Lets ordering tests freeze the world, land a queue reorder at a
     /// known point in `body_log`, and then release - no wall-clock races.
     pub pause: Arc<std::sync::atomic::AtomicBool>,
+    /// The test-held hard outage - see [`Chaos::outage`] and
+    /// [`MockServer::outage_control`].
+    outage: Arc<std::sync::atomic::AtomicBool>,
     /// The header plane, so a test can keep posting after the server is
     /// up - see [`MockServer::post_overview`].
     plane: Arc<HeaderPlane>,
@@ -745,6 +775,24 @@ pub struct MockServer {
 impl Drop for MockServer {
     fn drop(&mut self) {
         self.handle.abort();
+    }
+}
+
+/// See [`MockServer::outage_control`].
+#[derive(Clone)]
+pub struct OutageControl(Arc<std::sync::atomic::AtomicBool>);
+
+impl OutageControl {
+    /// The provider is back: the next dial is greeted normally.
+    pub fn end_outage(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    /// The provider is gone: every further dial is torn down before a
+    /// byte. Settable as well as clearable so a rig can open a second
+    /// episode without rebuilding the server.
+    pub fn begin_outage(&self) {
+        self.0.store(true, Ordering::Release);
     }
 }
 
@@ -809,8 +857,12 @@ impl MockServer {
             Arc::new(std::sync::Mutex::new(chaos.stall_pre.clone()));
         let gap_once: Arc<std::sync::Mutex<HashSet<String>>> =
             Arc::new(std::sync::Mutex::new(chaos.gap.clone()));
+        let missing_once: Arc<std::sync::Mutex<HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(chaos.missing_once.clone()));
         let pause: Arc<std::sync::atomic::AtomicBool> = Default::default();
         let pause2 = pause.clone();
+        let outage = Arc::new(std::sync::atomic::AtomicBool::new(chaos.outage));
+        let outage2 = outage.clone();
         let accepted = Arc::new(AtomicU64::new(0));
         let accepted2 = accepted.clone();
         let counters: Arc<Counters> = Default::default();
@@ -846,9 +898,11 @@ impl MockServer {
                 let served = served2.clone();
                 let body_log = body_log2.clone();
                 let stall_once = stall_once.clone();
+                let missing_once = missing_once.clone();
                 let stall_pre_once = stall_pre_once.clone();
                 let gap_once = gap_once.clone();
                 let pause = pause2.clone();
+                let outage = outage2.clone();
                 let counters = counters.clone();
                 let ts = throttle_state.clone();
                 ts.active.fetch_add(1, Ordering::Relaxed);
@@ -859,8 +913,9 @@ impl MockServer {
                     // no greeting, no refusal text. The client's dial
                     // fails hard, indistinguishable from the network
                     // going away under it.
-                    if chaos.refuse_connect_ms > 0
-                        && (ts.started.elapsed().as_millis() as u64) < chaos.refuse_connect_ms
+                    if outage.load(Ordering::Acquire)
+                        || (chaos.refuse_connect_ms > 0
+                            && (ts.started.elapsed().as_millis() as u64) < chaos.refuse_connect_ms)
                     {
                         drop(sock);
                         ts.active.fetch_sub(1, Ordering::Relaxed);
@@ -922,6 +977,7 @@ impl MockServer {
                         stall_once,
                         stall_pre_once,
                         gap_once,
+                        missing_once,
                         pause,
                         counters,
                         ts.clone(),
@@ -945,6 +1001,7 @@ impl MockServer {
             bytes_out,
             body_log,
             pause,
+            outage,
             plane: plane2,
             throttle_state: throttle_state2,
             articles: articles_handle,
@@ -982,6 +1039,19 @@ impl MockServer {
     /// cannot borrow the server.
     pub fn line_control(&self) -> LineControl {
         LineControl(self.throttle_state.clone())
+    }
+
+    /// A cloneable, 'static handle for the test-held hard outage
+    /// ([`Chaos::outage`]), for the same reason [`LineControl`] exists:
+    /// the rig that has to decide WHEN the provider comes back is
+    /// usually a polling closure that cannot borrow the server.
+    ///
+    /// Only the accept path reads it, so releasing it heals the NEXT
+    /// dial and resurrects no socket the outage already tore down -
+    /// which is what a provider coming back looks like, and is the same
+    /// rule `brownout_heal_ms` states for its own half.
+    pub fn outage_control(&self) -> OutageControl {
+        OutageControl(self.outage.clone())
     }
 
     /// Sessions this server has open RIGHT NOW, as the far end counts
@@ -1208,6 +1278,7 @@ async fn serve_article(
     stall_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     stall_pre_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     gap_once: &Arc<std::sync::Mutex<HashSet<String>>>,
+    missing_once: &Arc<std::sync::Mutex<HashSet<String>>>,
     throttle: &Arc<ThrottleState>,
 ) -> std::io::Result<Served> {
     // Stamped HERE, before every chaos sleep below, so the record is
@@ -1254,6 +1325,15 @@ async fn serve_article(
         return Ok(Served::Skip);
     }
     if chaos.missing.contains(id) {
+        refuse_delay(chaos).await;
+        w.write_all(refusal(chaos, id).as_bytes()).await?;
+        return Ok(Served::Skip);
+    }
+    // TODO 315: refused ONCE, served ever after. Same wire bytes as the
+    // permanent arm above and the same `echo_missing_id` shape, because
+    // that is the point - a client cannot tell the two apart from the
+    // response, only from asking again later.
+    if missing_once.lock_ok().remove(id) {
         refuse_delay(chaos).await;
         w.write_all(refusal(chaos, id).as_bytes()).await?;
         return Ok(Served::Skip);
@@ -1383,6 +1463,7 @@ async fn serve_conn(
     stall_once: Arc<std::sync::Mutex<HashSet<String>>>,
     stall_pre_once: Arc<std::sync::Mutex<HashSet<String>>>,
     gap_once: Arc<std::sync::Mutex<HashSet<String>>>,
+    missing_once: Arc<std::sync::Mutex<HashSet<String>>>,
     pause: Arc<std::sync::atomic::AtomicBool>,
     counters: Arc<Counters>,
     throttle: Arc<ThrottleState>,
@@ -1642,6 +1723,7 @@ async fn serve_conn(
                 &stall_once,
                 &stall_pre_once,
                 &gap_once,
+                &missing_once,
                 &throttle,
             )
             .await?
@@ -1673,6 +1755,7 @@ async fn serve_conn(
                 &stall_once,
                 &stall_pre_once,
                 &gap_once,
+                &missing_once,
                 &throttle,
             )
             .await?
@@ -1767,6 +1850,26 @@ pub fn make_file_articles(
         out.insert(format!("<{id}>"), article);
     }
     segs
+}
+
+/// [`make_file_articles`] over a real file's bytes rather than a
+/// synthetic buffer, so a rig can serve media-shaped fixtures (a real
+/// small .mkv, an actual PAR2 volume) instead of only generated
+/// content. The name posted is the file's own basename - callers that
+/// need a different posted name should read the file themselves and
+/// call [`make_file_articles`] directly.
+pub fn make_file_articles_from_path(
+    path: &std::path::Path,
+    art_size: usize,
+    idtag: &str,
+    out: &mut HashMap<String, Vec<u8>>,
+) -> std::io::Result<Vec<(String, u64, u32)>> {
+    let data = std::fs::read(path)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file.bin".to_string());
+    Ok(make_file_articles(&name, &data, art_size, idtag, out))
 }
 
 #[cfg(test)]

@@ -478,3 +478,55 @@ fn a_refused_placeholder_cancels_nothing() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A queue delete replaces the fail sentence, and the CODE that
+/// classified the previous failure must go with it (TODO 307's
+/// invariant): a job whose tail already stamped Unrepairable and that
+/// the user then deletes is a user deletion, not an unrepairable post -
+/// left behind, the stale code steers fail_kind(), the history row's
+/// fail_action, and altcand's replacement offer.
+#[test]
+fn a_queue_delete_clears_the_failure_code_with_the_sentence() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-delcode-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let d = crate::serve::testutil::test_daemon(&dir);
+
+    let job = Arc::new(Mutex::new(
+        job_from_json(&json!({
+            "nzo_id": "SABnzbd_nzo_4471", "name": "Dead.Post",
+            "out_dir": dir.join("out").to_string_lossy(),
+            "nzb_path": dir.join("d.nzb").to_string_lossy(), "state": "Failed",
+        }))
+        .expect("job"),
+    ));
+    {
+        // The shape postproc leaves: a classified tail failure.
+        let mut g = job.lock_ok();
+        g.fail_message = "unrepairable: 12 blocks short".into();
+        g.fail_code = Some(FailKind::Unrepairable);
+    }
+    d.queue.lock_ok().push_back(job.clone());
+
+    let mut rpc_error = None;
+    let answer = jr_editqueue(
+        &d,
+        &[json!("GroupDelete"), json!(0), json!([4471])],
+        &mut rpc_error,
+    );
+    assert!(rpc_error.is_none(), "the delete was refused: {rpc_error:?}");
+    assert_eq!(answer, json!(true));
+
+    let g = job.lock_ok();
+    assert_eq!(g.fail_message, "deleted from the queue");
+    assert_eq!(
+        g.fail_code,
+        Some(FailKind::Local),
+        "the deletion is classified as the user's own act, not by the \
+         failure it replaced"
+    );
+    assert_eq!(g.fail_kind(), FailKind::Local, "and fail_kind agrees");
+    drop(g);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

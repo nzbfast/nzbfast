@@ -663,7 +663,7 @@ fn history_summary(d: &Daemon, j: &Job) -> Value {
         "fail_kind": if deleted {
             "local"
         } else if j.state == JobState::Failed {
-            fail_kind_token(fail_kind(&j.fail_message))
+            fail_kind_token(j.fail_kind())
         } else {
             ""
         },
@@ -671,7 +671,7 @@ fn history_summary(d: &Daemon, j: &Job) -> Value {
             "retry"
         } else if j.state == JobState::Failed {
             fail_action(
-                fail_kind(&j.fail_message),
+                j.fail_kind(),
                 fail_hint(&j.fail_message),
                 &j.fail_message,
                 j.password_required,
@@ -901,7 +901,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
                 // A local fact - the post is fine (see the summary row).
                 "local"
             } else if j.state == JobState::Failed {
-                fail_kind_token(fail_kind(&j.fail_message))
+                fail_kind_token(j.fail_kind())
             } else {
                 ""
             },
@@ -934,7 +934,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
                 "retry"
             } else if j.state == JobState::Failed {
                 fail_action(
-                    fail_kind(&j.fail_message),
+                    j.fail_kind(),
                     fail_hint(&j.fail_message),
                     &j.fail_message,
                     j.password_required,
@@ -951,7 +951,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
             "retry": deleted
                 || (j.state == JobState::Failed
                     && fail_action(
-                        fail_kind(&j.fail_message),
+                        j.fail_kind(),
                         fail_hint(&j.fail_message),
                         &j.fail_message,
                         j.password_required,

@@ -154,16 +154,21 @@ pub(super) fn build_fetch_plan(
             resume_sniffed_slots.push(idx);
         }
         slot_file.push(fi);
+        // Lenient on purpose (issue #55): a poster who quotes nothing
+        // still usually writes the real filename in the subject, and
+        // `file{idx:03}` is what discarding it costs - every downstream
+        // namer (PAR2 FileDesc aside) then has nothing to work from.
+        let posted_name = f.filename_hint_lenient();
         slots.push(Arc::new(FileSlot {
-            // Lenient on purpose (issue #55): a poster who quotes
-            // nothing still usually writes the real filename in the
-            // subject, and `file{idx:03}` is what discarding it costs -
-            // every downstream namer (PAR2 FileDesc aside) then has
-            // nothing to work from.
-            hint: f
-                .filename_hint_lenient()
+            hint: posted_name
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("file{idx:03}")),
+            // GH #63: whether the subject gave a name worth defending
+            // against a hash arriving later, decided HERE because the
+            // placeholder above is indistinguishable from a real name
+            // once it is in the string.
+            hint_is_posted_name: posted_name.is_some_and(nzbkit::release::stem_is_a_name),
+            name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main,
             sample_skipped,
             par2_sniffed: std::sync::atomic::AtomicBool::new(resume_sniffed),
@@ -478,6 +483,21 @@ pub(super) struct Intake {
     /// one-pass path? Decided in `build_intake` because the restore
     /// itself depends on it - see `resume_map_admitted`.
     pub(super) resume_map: bool,
+    /// TODO 309: the same decision as `resume_map`, with the figures the
+    /// gate weighed, for the daemon to put on the job's download report.
+    /// `None` where the gate had nothing to weigh - a fresh run, or a
+    /// resumed compressed set, whose journal describes no bytes on disk.
+    /// Purely reportorial: nothing in the engine reads it.
+    pub(super) resume_route: Option<crate::streamhub::ResumeRoute>,
+    /// The journal state the restore above was built FROM, kept for one
+    /// consumer: a §293 donation lands after this intake and forces the
+    /// run off the mapped shape, and the restore then has to be re-run
+    /// MATERIALISING - the map-shape restore wrote no volume bytes, and
+    /// the adopt path hands every restored seed to the extractor as
+    /// spans sitting in the volume files. `completed` has already been
+    /// moved out of it (`restore_for` never reads that field); `get()`
+    /// drops this right after the donation step.
+    pub(super) resume_state: nzbkit::journal::ResumeState,
 }
 
 /// M29 routing: sink every predicted-gone server to one tier below the
@@ -699,7 +719,7 @@ pub(super) fn build_intake(
     for name in nzbkit::journal::unquarantine_partials(out_dir) {
         info!(target: "resume", "{name}: restoring the previous attempt's partial for resume");
     }
-    let (journal, resume_state) =
+    let (journal, mut resume_state) =
         crate::persist::blocking_db(|| nzbkit::journal::Journal::open(out_dir, &xml))?;
     let journal = Arc::new(journal);
     // §94 A: the resume-mapping decision has to be made HERE, before
@@ -717,13 +737,21 @@ pub(super) fn build_intake(
     // the held-span cap, and a set that cannot afford it takes the
     // ordinary materialize-and-extract path instead of mapping, filling
     // the cap and paying for the demote on top.
-    let resume_map = resume_map_admitted(&resume_state, out_dir, no_extract);
+    let (resume_map, resume_route) = resume_map_admitted(
+        &resume_state,
+        out_dir,
+        no_extract,
+        nzbkit::mem::process_budget(),
+    );
     // Plaintext-once (`D`) records re-encrypt through the password; with
     // no password those articles refetch instead - never guessed.
     let mut restored = crate::persist::blocking_db(|| {
         nzbkit::journal::restore_for(out_dir, &resume_state, password.as_deref(), !resume_map)
     });
-    let mut completed = resume_state.completed;
+    // Taken rather than moved: `resume_state` rides the Intake so a
+    // donation can re-run the restore materialising (see the field's
+    // doc), and `restore_for` never reads `completed`.
+    let mut completed = std::mem::take(&mut resume_state.completed);
     if !restored.ids.is_empty() {
         let moved: u64 = restored
             .seeds
@@ -742,6 +770,37 @@ pub(super) fn build_intake(
         // of every restored id alive for the whole run. The len() above is
         // read BEFORE the take, so the banner is unchanged.
         completed.extend(std::mem::take(&mut restored.ids));
+    }
+    // TODO 309(b), 28 Aug 2026. The restore is allowed to refuse an
+    // article whose bytes are not where the journal says - that is the
+    // safe answer and the article simply refetches. What it was not
+    // allowed to do is refuse it in SILENCE, which is what it did: the
+    // banner above reports what was restored, so a job whose partial
+    // output had been moved, truncated or deleted by something outside
+    // nzbfast between the pause and the unpause resumed looking exactly
+    // like an ordinary resume, one with fewer articles on disk. The
+    // bytes went back on the wire and nothing named the reason.
+    //
+    // Two lines rather than one because the two causes are answered
+    // differently by whoever reads them: the first is a question about
+    // this machine's disk, the second is a question about the password.
+    if restored.dropped_source.0 > 0 {
+        warn!(
+            target: "resume",
+            "{} article(s) ({:.1} MB) were recorded on disk by the previous run but their \
+             bytes are no longer there - the file was moved, shortened or deleted since, so \
+             they are fetched from the wire again",
+            restored.dropped_source.0,
+            restored.dropped_source.1 as f64 / 1e6
+        );
+    }
+    if restored.dropped_crypto > 0 {
+        warn!(
+            target: "resume",
+            "{} article(s) recorded on disk cannot be restored without the archive password \
+             the previous run used - they are fetched from the wire again",
+            restored.dropped_crypto
+        );
     }
     // Computed while `completed` is still whole - `get()` drops it as soon
     // as the fetch plan is built.
@@ -807,6 +866,8 @@ pub(super) fn build_intake(
         bootstrap_vol,
         resume_vols,
         resume_map,
+        resume_route,
+        resume_state,
     })
 }
 
@@ -827,33 +888,189 @@ pub(super) fn build_intake(
 /// every placement record, before `restore` decides which articles are
 /// actually admissible, and against the whole cap rather than the ~40%
 /// of the replay that is held at the peak in practice.
+///
+/// **The total is not the only way in, since TODO 309(a) (27 Aug 2026),
+/// and the reason is measured.** A job that cannot fit its whole restored
+/// set under the cap can still fit what the replay will actually HOLD,
+/// and those are different quantities by up to 200x. See
+/// [`resume_map_admits`] for the rule and the ladder behind it.
+///
+/// Returns the decision, and beside it the [`crate::streamhub::ResumeRoute`]
+/// the daemon puts on the job's download report (TODO 309). The second
+/// half is reportorial only - nothing in the engine reads it, and it is
+/// `None` wherever the gate had nothing to weigh.
+///
+/// `budget` is passed in rather than read from
+/// [`nzbkit::mem::process_budget`] here, so the gate can be driven both
+/// ways over a real journal from a test without moving a process-global
+/// static (which two tests sharing it would then read out of each
+/// other). The one production caller passes exactly what this used to
+/// read, so the decision is unchanged.
 fn resume_map_admitted(
     resume: &nzbkit::journal::ResumeState,
     out_dir: &Path,
     no_extract: bool,
-) -> bool {
+    budget: nzbkit::mem::MemBudget,
+) -> (bool, Option<crate::streamhub::ResumeRoute>) {
+    // The two overrides answer FIRST and report NOTHING, and the order
+    // is deliberate rather than incidental. It keeps the decision itself
+    // byte-identical to what it was before this returned a route at all
+    // - `resume_map` also selects `restore_for`'s materialize flag, so a
+    // reordering that let a v1-form journal (placements empty, articles
+    // trusted in place) take a different early answer under `no_extract`
+    // would be a real behaviour change made for a report line. And
+    // neither override has a route worth reporting: `no_extract` is the
+    // retention-insurance banking run, which never unpacks anything, so
+    // "unpacked from volumes on disk" would be flatly wrong for it, and
+    // the kill switch is a developer override whose reader already knows
+    // they set it.
     if no_extract || std::env::var("NZBFAST_NO_RESUME_MAP").is_ok_and(|v| v == "1") {
-        return false;
+        return (false, None);
     }
     let restored_bytes = resume.placement_bytes();
     if restored_bytes == 0 {
         // Nothing to replay: either a fresh run or a v1-form journal
         // whose articles are all trusted in place. `resume_map` still
-        // says "map this run" - there is simply no replay to do.
-        return true;
+        // says "map this run" - there is simply no replay to do, and no
+        // route to report either, which is what keeps a non-resumed
+        // job's download report unchanged. A resumed COMPRESSED set
+        // lands here too: its output bytes are decoded bytes, so no
+        // fragment can be described as sitting on disk (TODO 309(b)).
+        //
+        // That second shape is the one worth a sentence (TODO 309(b)'s
+        // warning half): a previous attempt exists - the journal has
+        // records - yet shields no placed payload, so its wire spend is
+        // spent again. Measured 27 Aug 2026 (RESUME-ONEPASS-EDGES
+        // section 7.5): a 2.1 GB compressed set SIGKILLed mid-run
+        // leaves a 72-byte journal and the rerun refetches 100% of the
+        // set. The sentence names what IS shielded, so it stays true
+        // for the other record-bearing shape that lands here, a v1-form
+        // journal whose completed articles are all trusted in place.
+        if !resume.completed.is_empty() {
+            info!(
+                target: "resume",
+                "the previous attempt's journal shields {} article(s) and no placed \
+                 payload - a set that unpacks as it downloads leaves nothing on disk \
+                 for a resume to pick up, so everything else it fetched is fetched \
+                 from the wire again",
+                resume.completed.len()
+            );
+        }
+        return (true, None);
     }
-    let cap = nzbkit::mem::process_budget().holds_cap() as u64;
+    let cap = budget.holds_cap() as u64;
+    // What a budget joining the daemon's ledger right now would keep of
+    // that cap. `None` for `nzbfast get`, the repair path and the unit
+    // tests, which install no ledger and see the raw cap - so a CLI leg
+    // is byte-identical to reading `holds_cap()` directly. The TOTAL arm
+    // deliberately keeps reading the RAW cap, so every job this gate
+    // admitted before TODO 309(a) is still admitted on the same terms;
+    // only the new volume arm spends the remainder.
+    let seatable = nzbkit::extract::process_ledger()
+        .map_or(cap, |l| cap.saturating_sub(l.live_bytes() as u64));
+    let route = crate::streamhub::ResumeRoute {
+        mapped: resume_map_admits(restored_bytes, resume.largest_slot_bytes(), cap, seatable),
+        restored_bytes,
+        budget_bytes: cap,
+        widest_slot_bytes: resume.largest_slot_bytes(),
+        seatable_bytes: seatable,
+    };
+    if route.mapped {
+        return (true, Some(route));
+    }
+    // TODO 309(d): the cost is named, not merely the decision. This line
+    // and the demotion watchdog's `defer_reason` clause
+    // (`serve/tasks/stall.rs`) are the two ends of the same fact - one
+    // says a requeue WILL be expensive, this one says a rerun IS - and
+    // before they existed a job could take this route with nothing
+    // anywhere saying what it had cost.
+    info!(
+        target: "resume",
+        "{:.1} MB restored over the {:.1} MB held-span budget, and its widest volume ({:.1} MB) does not fit {RESUME_MAP_VOLUME_MARGIN}x into the {:.1} MB a new pipeline could seat - extracting from volumes on disk rather than mapping in-stream (TODO 94 A: 2.53x payload of device I/O against 1.02x)",
+        restored_bytes as f64 / 1e6,
+        cap as f64 / 1e6,
+        resume.largest_slot_bytes() as f64 / 1e6,
+        seatable as f64 / 1e6
+    );
+    let _ = out_dir;
+    (false, Some(route))
+}
+
+/// How many times the widest replayed volume must fit the holds budget
+/// before the volume arm of [`resume_map_admits`] will spend it.
+///
+/// Measured, not chosen. On the F4 rig (4.000 GiB store RAR5 set,
+/// SIGKILL at ~0.51, resume under one device counter) the mapped route
+/// beats the disk route until the budget drops to about ONE volume, and
+/// then loses:
+///
+/// | volumes | budget | budget / volume | mapped | declined |
+/// | --- | --- | ---: | --- | --- |
+/// | 256 MB | 1930 MB | 7.5 | **1.02-1.04** | 2.53-2.54 |
+/// | 256 MB | 970 MB | 3.8 | **1.03-1.03** | 2.53 |
+/// | 256 MB | 500 MB | 1.95 | **1.03-1.20** | 2.53-2.56 |
+/// | 256 MB | 400 MB | 1.56 | **1.03-1.37** | - |
+/// | 256 MB | 300 MB | 1.17 | **1.03-1.28** | - |
+/// | 256 MB | 250 MB | 0.98 | 1.06 / **2.89** / **3.00** | 2.54-2.55 |
+/// | 64 MB | 250 MB | 3.9 | **1.06-1.10** | 2.55-2.56 |
+/// | 64 MB | 50 MB | 0.78 | 1.04 / **2.99** / **2.99** | 2.54 |
+///
+/// Two volume sizes, the same crossover in `budget / volume` and not in
+/// `budget / restored`, which is what makes this a margin on the VOLUME.
+/// A margin of 2 sits a full octave above the highest budget that ever
+/// lost (0.98) and one step above the lowest that won (1.17), and the
+/// rows at 1.17 and 1.56 are why it is not 4: they win, so 2 is already
+/// conservative rather than merely safe.
+const RESUME_MAP_VOLUME_MARGIN: u64 = 2;
+
+/// TODO 94 A's admission rule, as a pure function so the decision is
+/// testable without a journal on disk.
+///
+/// `cap` is the raw holds budget and `seatable` what a pipeline joining
+/// the process ledger now would keep of it (equal to `cap` outside the
+/// daemon). Two independent ways in:
+///
+/// 1. **The total fits.** Unchanged since TODO 94 A, and read against the
+///    RAW cap so nothing this gate used to admit stops being admitted.
+/// 2. **The widest volume fits [`RESUME_MAP_VOLUME_MARGIN`] times over.**
+///    TODO 309(a). The replay's held bytes track ONE VOLUME, not the
+///    total: at a fixed ~2.1 GB replayed over 48 F4 legs the peak went
+///    from 9 MB at 32 MB volumes to 1782 MB at 256 MB volumes, a 200x
+///    spread in a number arm 1 sees as constant. That is what the
+///    per-slot deferral predicts - `rig.rs ReplayPending::try_drain`
+///    feeds a slot only once `slot_can_place` says its bytes will be
+///    placed - so what can be resident is bounded by the volumes that
+///    cannot yet place, and never by how much was restored in total.
+///    This arm reads `seatable` because it is the one spending headroom
+///    the gate has not got a seat for yet.
+///
+/// The arm is a UNION and not a replacement, which is what makes it
+/// never-worse by construction: it can only turn a decline into an
+/// admission, and every admission it adds was measured on the rig at
+/// 1.02-1.37x payload of device I/O against the 2.53x the decline costs.
+/// The one place the mapped route is worse - a budget under one volume -
+/// is the place the margin refuses.
+///
+/// `pub(crate)` for exactly one second reader: the demotion watchdog's
+/// `requeue_cost` (`serve/tasks/stall.rs`), which predicts this gate's
+/// answer before causing the requeue that will ask it for real. It
+/// passes `seatable == cap`, because at demote time the judged job's
+/// own pipeline still holds the ledger's bytes and the rerun-time
+/// ledger is unknowable; erring toward "it will map" only softens a
+/// warning, while the rerun's own call here still decides with the
+/// real ledger.
+pub(crate) fn resume_map_admits(
+    restored_bytes: u64,
+    widest_slot: u64,
+    cap: u64,
+    seatable: u64,
+) -> bool {
     if restored_bytes <= cap {
         return true;
     }
-    info!(
-        target: "resume",
-        "{:.1} MB restored is over the {:.1} MB held-span budget - extracting from volumes on disk rather than mapping in-stream",
-        restored_bytes as f64 / 1e6,
-        cap as f64 / 1e6
-    );
-    let _ = out_dir;
-    false
+    // A journal with placements but no slot size to read is not something
+    // this arm can judge, so it declines to - arm 1 has already spoken.
+    widest_slot > 0 && widest_slot.saturating_mul(RESUME_MAP_VOLUME_MARGIN) <= seatable
 }
 
 /// The B4 small-RAM concurrency clamp and the rotational-output
@@ -889,6 +1106,9 @@ pub(super) fn clamp_concurrency(
     // lanes stop being seek lanes. See disk::decoders_for_storage for why
     // it is gated on the box as well as the disk.
     let decoders = {
+        // cpu-workers-gate: how BIG this box is, which is what the
+        // rotational-storage rule is gated on, and what the log line then
+        // prints. Not a pool width - `decoders_for_storage` decides that.
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
         let storage = nzbkit::disk::detect_storage(out_dir);
         let picked = nzbkit::disk::decoders_for_storage(storage, cores, decoders);
@@ -939,6 +1159,60 @@ mod tests {
             skip_samples,
             &[],
         )
+    }
+
+    /// GH #63: the plan decides, once, whether the SUBJECT gave this
+    /// slot a name worth defending against a hash arriving later in a
+    /// yEnc header or a PAR2 FileDesc.
+    ///
+    /// It has to be decided here because the answer is not recoverable
+    /// from `hint` afterwards: a subject that names nothing falls back
+    /// to `file{idx:03}`, and that placeholder reads as a perfectly good
+    /// name to `stem_is_a_name`. The three subject shapes below are the
+    /// three that exist - a real name in the clear (#63's own post, and
+    /// #55's), a real name quoted (every honest post), and prose that
+    /// names nothing.
+    #[test]
+    fn the_plan_records_whether_the_subject_named_the_file() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject="01-duo_something_bi-noir.mp3 (1/0)" date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">a@t</segment></segments>
+ </file>
+ <file subject='"Some.Film.2026-GRP.part01.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">b@t</segment></segments>
+ </file>
+ <file subject="Great Album Name yEnc (1/15)" date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">c@t</segment></segments>
+ </file>
+ <file subject="2137d880a074c9f1e0b3a5d6c7e8f901 yEnc (1/1)" date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">d@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan(&n, &HashSet::new(), None, &HashMap::new());
+
+        // Unquoted and real - the shape that lost every name on #63.
+        assert_eq!(p.slots[0].hint, "01-duo_something_bi-noir.mp3");
+        assert!(p.slots[0].hint_is_posted_name);
+
+        // Quoted and real - the ordinary honest post, unchanged.
+        assert_eq!(p.slots[1].hint, "Some.Film.2026-GRP.part01.rar");
+        assert!(p.slots[1].hint_is_posted_name);
+
+        // Prose names nothing, so the placeholder stands - and must NOT
+        // be defended, or an obfuscated post gets strictly worse names
+        // than before the guard existed.
+        assert_eq!(p.slots[2].hint, "file002");
+        assert!(!p.slots[2].hint_is_posted_name);
+
+        // A subject that IS the hash: #43/#47/#55's polarity, where the
+        // yEnc name and the FileDesc are the only evidence there is and
+        // both must keep winning.
+        assert!(!p.slots[3].hint_is_posted_name);
     }
 
     /// §129 4b: the post's own date reaches the hub, so the LIVE
@@ -1758,6 +2032,219 @@ mod tests {
         demote_predicted_gone(&mut pair, &["a.example".to_string()], "hdtv", 20);
         assert_eq!(levels(&pair), vec![("a.example", 1), ("b.example", 0)]);
         assert!(!crate::get::fleet::has_steer_peer(&pair));
+    }
+
+    /// TODO 94 A's original rule, unchanged: the whole restored set under
+    /// the RAW cap admits, whatever the volumes look like. Pinned because
+    /// TODO 309(a) added a second arm beside it and the never-worse claim
+    /// is that this one still answers first.
+    #[test]
+    fn the_whole_restored_set_under_the_cap_still_admits_on_its_own() {
+        // Widest slot deliberately absurd: arm 1 must not consult it.
+        assert!(resume_map_admits(1_000, u64::MAX, 2_000, 2_000));
+        // And a seatable of zero cannot take arm 1 away - a total that
+        // fits the raw cap was admitted before the ledger existed.
+        assert!(resume_map_admits(1_000, u64::MAX, 2_000, 0));
+    }
+
+    /// TODO 309(a): the volume arm, at the two shipping budgets the
+    /// section's table complains about. 256 MB volumes, ~2.2 GB restored
+    /// - far over the cap either way, so arm 1 declines both.
+    #[test]
+    fn a_set_over_the_cap_still_maps_when_its_widest_volume_fits_twice() {
+        let restored = 2_236_500_000;
+        let vol = 256_000_000;
+        // 8 GB box: cap 0.97 GB. 2 x 256 MB = 512 MB, fits.
+        assert!(!resume_map_admits(restored, 0, 970_000_000, 970_000_000));
+        assert!(resume_map_admits(restored, vol, 970_000_000, 970_000_000));
+        // 16 GB box: more room again.
+        assert!(resume_map_admits(
+            restored,
+            vol,
+            1_930_000_000,
+            1_930_000_000
+        ));
+    }
+
+    /// The half the measurement exists to protect: at a budget under one
+    /// volume the mapped route was measured at 2.89-3.00x against the
+    /// decline's 2.53x, so the margin must refuse it. The boundary is
+    /// stated in `RESUME_MAP_VOLUME_MARGIN`'s own ladder.
+    #[test]
+    fn a_budget_that_cannot_hold_two_volumes_declines() {
+        let restored = 2_236_500_000;
+        let vol = 256_000_000;
+        // 250 MB - under one volume, the budget that lost on the rig.
+        assert!(!resume_map_admits(restored, vol, 250_000_000, 250_000_000));
+        // 500 MB - just under two volumes, so still refused. Conservative
+        // on purpose: this budget WON on the rig (1.03-1.20x), and the
+        // margin buys the octave rather than the last decibel.
+        assert!(!resume_map_admits(restored, vol, 500_000_000, 500_000_000));
+        // Exactly two fits.
+        assert!(resume_map_admits(restored, vol, 512_000_000, 512_000_000));
+        // 64 MB volumes at the same 50 MB budget that lost on the rig.
+        assert!(!resume_map_admits(
+            restored, 64_000_000, 50_000_000, 50_000_000
+        ));
+        assert!(resume_map_admits(
+            restored,
+            64_000_000,
+            250_000_000,
+            250_000_000
+        ));
+    }
+
+    /// The volume arm spends the LEDGER remainder, not the raw cap: in
+    /// the daemon a predecessor pipeline is still holding while the
+    /// resumed job sets up, and admitting against a cap somebody else is
+    /// occupying is how a mapped resume breaches and pays twice.
+    #[test]
+    fn the_volume_arm_declines_when_a_predecessor_is_holding_the_budget() {
+        let restored = 2_236_500_000;
+        let vol = 256_000_000;
+        let cap = 970_000_000;
+        assert!(resume_map_admits(restored, vol, cap, cap));
+        // Same cap, but 700 MB of it is held by a senior seat.
+        assert!(!resume_map_admits(restored, vol, cap, cap - 700_000_000));
+    }
+
+    /// A placement journal that names no slot size cannot be judged by
+    /// the volume arm, and a gate that cannot judge must not admit.
+    #[test]
+    fn a_journal_with_no_slot_size_falls_back_to_the_total_arm_alone() {
+        assert!(!resume_map_admits(2_000, 0, 1_000, 1_000));
+        // Overflow is not an admission either.
+        assert!(!resume_map_admits(2_000, u64::MAX, 1_000, 1_000));
+    }
+
+    fn route_scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-resroute-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The resume state a rerun would read: `n` placed articles of `len`
+    /// bytes in ONE slot whose recorded size is the whole of them, which
+    /// is the volume the gate's second arm weighs.
+    ///
+    /// Written and then re-opened, because it is the SECOND open that
+    /// parses the records back into a `ResumeState` - the same thing a
+    /// resumed run does. Same fingerprint both times, or the open would
+    /// truncate what the first one wrote.
+    fn resume_state_of(dir: &Path, n: usize, len: u64) -> nzbkit::journal::ResumeState {
+        let size = n as u64 * len;
+        {
+            let (j, _) = nzbkit::journal::Journal::open(dir, b"<nzb/>").unwrap();
+            for i in 0..n {
+                j.record_placed(
+                    0,
+                    &format!("<a{i}@x>"),
+                    None,
+                    "vol.part01.rar",
+                    size,
+                    &[nzbkit::extract::Frag::identity(
+                        "vol.part01.rar",
+                        i as u64 * len,
+                        len,
+                    )],
+                );
+            }
+            j.flush();
+        }
+        nzbkit::journal::Journal::open(dir, b"<nzb/>").unwrap().1
+    }
+
+    /// TODO 309: the ADMITTED half of the report's fact, over a real
+    /// journal. The gate says map, and the route it hands back says the
+    /// same thing with the figures beside it - a route whose `mapped`
+    /// disagreed with the decision would put a sentence in the download
+    /// report about a run that took the other path.
+    #[test]
+    fn a_resume_that_maps_reports_the_one_pass_route_and_what_the_gate_weighed() {
+        let dir = route_scratch("mapped");
+        // 8 MB placed against a ~30 MB replay budget: arm 1 admits.
+        let st = resume_state_of(&dir, 8, 1_000_000);
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+        let cap = budget.holds_cap() as u64;
+        assert!(cap > 8_000_000, "the fixture must be under the budget");
+
+        let (map, route) = resume_map_admitted(&st, &dir, false, budget);
+        assert!(map);
+        let r = route.expect("a journal with placements always has a route");
+        assert!(r.mapped);
+        assert_eq!(r.restored_bytes, 8_000_000);
+        assert_eq!(r.budget_bytes, cap);
+        // The whole of it is one slot, so the widest part IS the total.
+        assert_eq!(r.widest_slot_bytes, 8_000_000);
+        // No process ledger in a unit test, so nothing is holding a seat
+        // and the volume arm sees the raw cap - the CLI leg's case.
+        assert_eq!(r.seatable_bytes, cap);
+    }
+
+    /// ...and the DECLINED half, which is the one the report exists for:
+    /// this is the 2.53x route, and until the report carried it the only
+    /// trace was one `info!` hours before anybody complained.
+    ///
+    /// Both arms have to refuse for the decision to be a decline, so the
+    /// fixture is over the total budget AND its single volume is the
+    /// whole of that total, which cannot fit the margin twice over.
+    #[test]
+    fn a_resume_that_declines_reports_the_on_disk_route_and_what_the_gate_weighed() {
+        let dir = route_scratch("declined");
+        // 60 MB in one volume against a ~30 MB replay budget. The
+        // FRAGMENT LENGTHS are what the gate weighs, so this is a few KB
+        // of actual file.
+        let st = resume_state_of(&dir, 60, 1_000_000);
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+        let cap = budget.holds_cap() as u64;
+        assert!(cap < 60_000_000, "the fixture must be over the budget");
+
+        let (map, route) = resume_map_admitted(&st, &dir, false, budget);
+        assert!(!map);
+        let r = route.expect("a journal with placements always has a route");
+        assert!(!r.mapped);
+        assert_eq!(r.restored_bytes, 60_000_000);
+        assert_eq!(r.budget_bytes, cap);
+        assert_eq!(r.widest_slot_bytes, 60_000_000);
+    }
+
+    /// A run with nothing to replay reports NO route, which is what
+    /// keeps a non-resumed job's download report byte-for-byte what it
+    /// was. A resumed COMPRESSED set lands here too - its output bytes
+    /// are decoded bytes, so the journal describes no fragment on disk
+    /// (TODO 309(b)) - and saying "one pass" for either would be a claim
+    /// about a gate that never weighed anything.
+    #[test]
+    fn a_run_with_nothing_restored_reports_no_route_at_all() {
+        let dir = route_scratch("fresh");
+        let st = nzbkit::journal::Journal::open(&dir, b"<nzb/>").unwrap().1;
+        assert_eq!(st.placement_bytes(), 0);
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+
+        let (map, route) = resume_map_admitted(&st, &dir, false, budget);
+        assert!(map, "nothing to replay still maps - there is no replay");
+        assert!(route.is_none());
+    }
+
+    /// The two overrides answer before the gate and report nothing, and
+    /// that is deliberate at both ends. `no_extract` is the retention
+    /// insurance banking run, which never unpacks anything, so "unpacked
+    /// from volumes on disk" would be flatly wrong on its report; the
+    /// kill switch is a developer override. Both must also leave the
+    /// DECISION exactly as it was before this function returned a route,
+    /// because `resume_map` selects `restore_for`'s materialize flag.
+    #[test]
+    fn the_overrides_decline_without_reporting_a_route() {
+        let dir = route_scratch("noextract");
+        let st = resume_state_of(&dir, 8, 1_000_000);
+        let budget = nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN);
+        // The very same state maps when nothing overrides it.
+        assert!(resume_map_admitted(&st, &dir, false, budget).0);
+        let (map, route) = resume_map_admitted(&st, &dir, true, budget);
+        assert!(!map);
+        assert!(route.is_none());
     }
 }
 

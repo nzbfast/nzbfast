@@ -51,21 +51,39 @@ fn start_stop_cycles_release_the_port() {
 
     for cycle in 0..3 {
         assert_eq!(
-            // SAFETY: both pointers come from `CString`s that live for
-            // the whole test, so each is a valid NUL-terminated UTF-8
-            // string for the duration of the call - the whole of
+            // SAFETY: both non-NULL pointers come from `CString`s that
+            // live for the whole test, so each is a valid NUL-terminated
+            // UTF-8 string for the duration of the call, and a NULL
+            // `out_dir` is explicitly allowed - the whole of
             // `nzbfast_start`'s safety contract.
-            unsafe { nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), port, key_c.as_ptr()) },
+            unsafe {
+                nzbfast_ffi::nzbfast_start(
+                    dir_c.as_ptr(),
+                    std::ptr::null(),
+                    port,
+                    key_c.as_ptr(),
+                    0,
+                )
+            },
             0,
             "start (cycle {cycle})"
         );
         // Double start must refuse, not wedge.
         assert_eq!(
-            // SAFETY: both pointers come from `CString`s that live for
-            // the whole test, so each is a valid NUL-terminated UTF-8
-            // string for the duration of the call - the whole of
+            // SAFETY: both non-NULL pointers come from `CString`s that
+            // live for the whole test, so each is a valid NUL-terminated
+            // UTF-8 string for the duration of the call, and a NULL
+            // `out_dir` is explicitly allowed - the whole of
             // `nzbfast_start`'s safety contract.
-            unsafe { nzbfast_ffi::nzbfast_start(dir_c.as_ptr(), port, key_c.as_ptr()) },
+            unsafe {
+                nzbfast_ffi::nzbfast_start(
+                    dir_c.as_ptr(),
+                    std::ptr::null(),
+                    port,
+                    key_c.as_ptr(),
+                    0,
+                )
+            },
             -1,
             "second start refused (cycle {cycle})"
         );

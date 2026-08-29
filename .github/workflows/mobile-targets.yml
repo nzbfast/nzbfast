@@ -1,0 +1,555 @@
+# Compile the engine for the two PHONE targets. Nothing in CI ever has.
+#
+# TODO 281's MOB-CI box. Verified on origin/main 27 Aug 2026:
+#
+#     grep -rn aarch64-apple-ios .github/          -> one gate COMMENT
+#     grep -rln aarch64-linux-android .github/     -> nothing
+#
+# THE EXPOSURE. Both mobile shells run the SLIM engine
+# (`--no-default-features`), and the only job that compiles that
+# configuration is `slim-check` in ci-private.yml, which builds it for
+# the HOST. So an ordinary change under crates/ can break the iOS app,
+# the Android app, or both, with every gate in CLAUDE.md's numbered list
+# green. That is macapp.yml's argument for Swift and `slim-check`'s own
+# history for `--no-default-features`, one platform further out: a
+# configuration nobody compiles is a configuration that is already
+# broken and nobody knows yet.
+#
+# It is not a theoretical surface. These arms exist today and NOTHING on
+# this fleet compiles any of them:
+#
+#   crates/nzbfast/src/smart.rs
+#       #[cfg(any(target_os = "android", target_os = "ios"))] - the
+#       no-system-trash arm. Its two siblings are compiled by the mac
+#       and Linux jobs; this one by neither.
+#   crates/nzbfast/src/serve/fsutil.rs
+#       #[cfg_attr(any(target_os = "ios", target_os = "android"),
+#                  expect(unused_mut))]
+#       An `#[expect]` is a CLAIM that a lint fires here, and rustc
+#       reports `unfulfilled_lint_expectation` the day it stops being
+#       true - but only when compiling for that target. This one has
+#       never been judged by anything. That is exactly the class
+#       CLAUDE.md's FIFTEENTH gate exists for, in the one configuration
+#       that gate cannot reach.
+#   crates/nzbkit/src/nntp.rs
+#       the bionic keepalive arms (TCP_KEEPIDLE, TCP_USER_TIMEOUT) and
+#       the Apple TCP_KEEPALIVE arm. Android shares the Linux arm and
+#       iOS shares the macOS one, so those two are covered by proxy -
+#       but only while the grouping stays as it is.
+#
+# The measured demonstration is smaller than any of those and is the
+# reason to believe the whole thing. Widening ONE cfg in smart.rs from
+# `not(any(macos, android, ios))` to `not(macos)` - the tidy-up anybody
+# might make - leaves the host slim check at exit 0 and takes BOTH legs
+# here red with `error[E0433]: cannot find module or crate 'trash'`,
+# because the `trash` dependency is not built for a phone at all. Run
+# 33062803034, and the same tree green on the host locally.
+#
+# ---------------------------------------------------------------------
+# WHY ITS OWN WORKFLOW
+#
+# Third time this question has been settled here and the answer has not
+# moved. size-gate.yml's every-branch placement is earned by being
+# BUILD-FREE, and its `on: push: paths:` list is a union covering
+# `crates/**`, `**/*.py`, `**/*.sh` and `*.md`, so a job added there
+# fires on very nearly every push in the repo. ci-private.yml is
+# main-only and, on a main taking a push every ~90 seconds, its verdicts
+# are routinely superseded - which is why tools/ci-verdict.py has to
+# exist at all to dig a real verdict out from under the cancellations.
+# A cross-compile that takes minutes should not have its result buried
+# that way. So: a dedicated workflow with a NATIVE path filter, the
+# arrangement macapp.yml reached on 24 Aug 2026 and android-lint.yml on
+# 25 Aug.
+#
+# One thing that placement buys beyond runner minutes, worth naming
+# because it is a reason even setting cost aside: gates landing in
+# size-gate.yml COLLIDE. Two lanes adding a job there in the same hour
+# produce a union merge with two job headers over one body, which is
+# broken yaml. A new file merges clean.
+#
+# ---------------------------------------------------------------------
+# THE PATH FILTER, PRICED RATHER THAN GUESSED
+#
+# The honest input to a phone build is `crates/**`, and that is a large
+# fraction of this repo's traffic. Measured 27 Aug 2026:
+#
+#   size-gate.yml runs, last 3 days              400   (~133 pushes/day)
+#   of those, on `main`                          364   (91%)
+#   commits to origin/main, last 14 days       2,613
+#   of those touching crates/**                  891   (34%)
+#
+# So `branches: [main]` is not a cost lever here - 91% of pushes are to
+# main already - and a crates/** filter is somewhere around 60 runs a
+# day once merge commits are counted, against macapp.yml's "handful of
+# pushes a week".
+#
+# What that buys is settled by what a run COSTS, and both legs came in
+# well under what the chip that commissioned this assumed. Measured on
+# the runners 27 Aug 2026 in the shape below, cold, no cargo cache
+# (run 33063562149):
+#
+#   ios-check       job 2m07s   `cargo check` 1m31s   canary  2s
+#   android-build   job 4m16s   `cargo build` 2m58s   canary 42s
+#
+# The canary is an INCREMENTAL check, never a second cold run - 2s on
+# the iOS leg, where the step before it was itself a check. It is 42s
+# on the Android leg because the step before it was a BUILD, so the
+# workspace crates have no `.rmeta` yet and the check has to emit it;
+# still one crate's worth of work against a 2m58s build, and worth
+# knowing before reading that number as a regression.
+#
+# Two to four minutes a leg at ~60 pushes a day is small beside what
+# ci-private.yml already spends on every push to main (four Windows
+# jobs, four linux-tests shards, unit-one-process and slim-check), and
+# it is the price of a signal that lands on the AUTHOR rather than on
+# whoever pushes next. That is the whole trade, and it is why neither
+# leg is left to the nightly schedule alone.
+#
+# The filter carries `vendor/**` (rars, tiny_http and rapidyenc are
+# compiled into the same binaries), the two manifests, the toolchain pin
+# - which is where a target could be added or dropped from under this -
+# and `packaging/android/compose-app/app/build.gradle.kts`, because the
+# android job reads `minSdk` out of it. That last one is 9 commits in 14
+# days and is the difference between deriving the API level and
+# hardcoding a second copy of it.
+#
+# THE SCHEDULE IS NOT A DUPLICATE OF THE PUSH TRIGGER, and it is the one
+# trigger a `paths:` filter cannot express. Everything above is about
+# changes to THIS repo; the other half of what these jobs depend on is
+# the RUNNER IMAGE - the preinstalled NDK below, the Xcode and iOS SDK
+# on the macOS image - which GitHub rotates without any commit here.
+# `schedule` ignores `paths:` entirely, so a nightly run is the floor
+# that reports an image bump on its own rather than on whoever pushes
+# next.
+#
+# ---------------------------------------------------------------------
+# ANDROID BUILDS, iOS ONLY CHECKS, AND BOTH HALVES OF THAT ARE MEASURED
+#
+# The Android artefact is a linked EXECUTABLE: fetch-engine.sh stages
+# the bin as `libnzbfast.so` and EngineService execs it. A symbol that
+# bionic declares but does not export at API 26 is a LINK error, and
+# `cargo check` cannot see one. The first cut of this file did the check
+# per push and left the link to the nightly schedule, on the assumption
+# that a build was the expensive option. Measured, it is not: the build
+# is 3m37s against the check's 1m39s on the same ubuntu runner (runs
+# 33063017135 and 33062247305, each the only cargo step in its job), so
+# taking the link on every push costs about a hundred seconds and folds
+# two jobs into one. It also removes a second copy of the NDK
+# resolution below, which is exactly the kind of hand-copied sibling
+# CLAUDE.md's ELEVENTH and FOURTEENTH gates exist because of.
+#
+# iOS stays a `cargo check`, and that is a trade rather than a saving:
+#
+#   * There is no link to do. The artefact is a `staticlib`, an
+#     archive, and the real link happens in Xcode where no runner here
+#     can follow it.
+#   * What `cargo build` would add is CODEGEN - the aarch64 NEON paths
+#     in nzbkit among them - and that is already covered by proxy, on
+#     every release build and every macOS job, because
+#     aarch64-apple-darwin codegens the same instruction set.
+#   * The macOS runner is the expensive one, and this is the leg that
+#     runs on it.
+#
+# If an `#[cfg(target_os = "ios")]` ever appears around an `asm!` block
+# or a target-feature intrinsic, that third bullet stops being true and
+# this leg should become a build. Nothing like that exists today.
+#
+# Build scripts RUN under `cargo check`, which is worth knowing before
+# reading either leg as thinner than it is: aws-lc-rs compiles C through
+# the NDK toolchain from its build script, so the cross-toolchain is
+# genuinely exercised whichever verb is used.
+#
+# ---------------------------------------------------------------------
+# NO CARGO CACHE, DELIBERATELY, AND THIS IS THE ONE TO READ TWICE
+#
+# The reflex is to cache `~/.cargo/registry` and `target/` keyed on the
+# lockfile. Do not add it here. ci-private.yml's own cache note records
+# that this repo is at 11.85 GB against GitHub's 10 GB per-repo cache
+# limit WITH LRU EVICTION ALREADY ACTIVE. Two more multi-GB archives -
+# one macOS, one ubuntu, each holding a target tree nothing else shares
+# - would evict the caches the load-bearing gates restore from, and the
+# cost of that lands on `check`, `linux-tests` and the four Windows
+# jobs, not here. A cold run of this workflow is two to four minutes; an
+# evicted ci-private archive is a cold build of everything, on somebody
+# else's push.
+#
+# The house cache key (tools/dep-cache-key.py, which normalises the
+# workspace members' own version lines out of Cargo.lock so a release
+# bump does not throw ~600 compiled crates) is ALSO unavailable to this
+# file, for a second and independent reason: `.github` ships to the
+# public repo verbatim, `tools/` does not, and publish-public.sh REFUSES
+# an export whose files reach back into the private tree. ci-private.yml
+# is the one workflow that gets a rewrite on the way out; nothing else
+# may rely on that.
+#
+# ---------------------------------------------------------------------
+# NO `github.repository` GUARD
+#
+# macapp.yml's and android-lint.yml's reasoning, unchanged: this needs
+# no private tooling, and every path it reads - crates, vendor, the
+# manifests, the toolchain pin, packaging/android - is in
+# PUBLIC_MANIFEST. A phone target that will not compile is exactly as
+# broken on the public repo, where standard runners are free.
+#
+# ---------------------------------------------------------------------
+# THE CANARIES
+#
+# A gate that cannot fail is a rubber stamp, and in this repo that
+# failure mode is silent by construction - web/i18n/nav-regen.py's
+# picker arm reported every picker current for months while matching
+# nothing. A clean run here looks identical whether it compiled the tree
+# for the target named or quietly did something else, and the specific
+# way these jobs could lie is the one that matters: with `--target`
+# dropped or misspelled they would become host builds, still pass, and
+# duplicate two jobs that already exist.
+#
+# Two proofs per leg, answering different questions. The ARTEFACT proof
+# is free - cargo writes under `target/<triple>/` only when `--target`
+# took, and on the Android leg that same file is then read for its ELF
+# header and its interpreter, which is what would notice a linker
+# falling back to the host toolchain. The COMPILE proof plants a
+# `#[cfg(target_os = "...")]` `compile_error!` that only the intended
+# target can see, and requires the run to refuse it; a plain type error
+# would prove the compiler ran, not that it ran for a phone. It costs an
+# incremental re-check of one crate, not a second cold run, and it
+# removes its own file on every path.
+#
+# Verified in BOTH directions before this landed, the method macapp.yml
+# used: probe branch `probe/mobile-targets-ci`, deleted after.
+#
+#   33062247305  first cut          both legs RED at the canary, which
+#                                   was the canary's own `bash -e` bug -
+#                                   see the note at that step
+#   33062563528  the fix            ios-check + android-check SUCCESS,
+#                                   both canaries green
+#   33062803034  planted defect     BOTH legs RED at the compile step
+#                                   (the smart.rs cfg widening above),
+#                                   canaries never reached
+#   33063017135  defect reverted,   all three SUCCESS; the link produced
+#                the link forced    `ELF 64-bit LSB pie executable, ARM
+#                on for one run     aarch64 ... interpreter
+#                                   /system/bin/linker64`
+#   33063562149  the link folded    ios-check + android-build SUCCESS.
+#                into android-      THIS is the shape that landed, and
+#                build, two jobs    the timings above are its own.
+name: mobile-targets
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'crates/**'
+      - 'vendor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'packaging/android/compose-app/app/build.gradle.kts'
+      - '.github/workflows/mobile-targets.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'vendor/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'packaging/android/compose-app/app/build.gradle.kts'
+      - '.github/workflows/mobile-targets.yml'
+  schedule:
+    # 04:40 UTC, off the hour and off nightly.yml's own slots. See "THE
+    # SCHEDULE IS NOT A DUPLICATE" in the header: this is the trigger
+    # that reports a RUNNER IMAGE bump, which no `paths:` filter can.
+    - cron: '40 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Agent sessions build with this set (see CLAUDE.md); incremental state
+  # is per-edit-loop state a one-shot runner never reads back, and it
+  # roughly doubles what a build writes.
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # -------------------------------------------------------------------
+  # iOS. The whole surface of the iOS engine is the ffi crate: the app
+  # links `libnzbfast_ffi.a`, so `-p nzbfast-ffi` is not a proxy for the
+  # thing that ships, it IS the thing that ships. It pulls nzbfast in
+  # with default-features off plus `ffi`, which is what compiles the
+  # module tree as the LIB target - the same dimension CLAUDE.md's host
+  # clippy gate needs `-p nzbfast-ffi` for.
+  #
+  # `aarch64-apple-ios`, the DEVICE triple, not `-sim`. The simulator
+  # target shares more with the host than the device does; the device
+  # triple is the one the App Store gets.
+  ios-check:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    concurrency:
+      group: mobile-ios-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a toolchain or
+      # image bump rather than against the diff - which is what the
+      # nightly schedule exists to surface.
+      - name: versions
+        run: |
+          rustc --version
+          cargo --version
+          xcodebuild -version || true
+          xcrun --sdk iphoneos --show-sdk-path
+
+      # NOT added to rust-toolchain.toml's `targets` list, and that is a
+      # decision rather than an omission. That list is installed by
+      # rustup on the FIRST cargo invocation in any checkout of this
+      # repo - so adding two phone targets there would download two more
+      # std sets on every dev box and in every Rust job in CI, to serve
+      # two jobs in this file. The armv7 entry that IS on that list is
+      # there for the opposite reason its own comment gives: a target
+      # nobody can build without a setup step is one nobody checks, and
+      # that target has no job. These two do.
+      - name: rust target
+        run: rustup target add aarch64-apple-ios
+
+      - name: cargo check (ios)
+        run: cargo check -p nzbfast-ffi --target aarch64-apple-ios --locked
+
+      # Proof one, and it is free. With `--target` dropped or misspelled
+      # cargo writes to target/debug/ instead, and everything above
+      # still passes while this file silently duplicates `slim-check`.
+      - name: the artefacts are under the ios target dir
+        run: |
+          set -eu
+          ls -d target/aarch64-apple-ios/debug >/dev/null || {
+            echo "::error::nothing under target/aarch64-apple-ios - the --target did not take"
+            ls target || true
+            exit 1; }
+          echo "checked into target/aarch64-apple-ios/debug"
+
+      # Proof two - see "THE CANARIES" in the header.
+      - name: prove the target is really ios
+        run: |
+          # GitHub runs every `run:` under `bash -e`, and `set -uo
+          # pipefail` does NOT turn that off - so a bare `cargo check`
+          # that is SUPPOSED to fail aborts the step before the next
+          # line is read. Measured: the first version of this step read
+          # `rc=$?` after the check and the whole job died at exit 101
+          # with the canary working perfectly (run 33062247305). An `if`
+          # condition is the one place `-e` does not fire, which is the
+          # shape macapp.yml's canary already uses.
+          set -uo pipefail
+          restore() {
+            cp "$RUNNER_TEMP/lib.rs.orig" crates/nzbfast-ffi/src/lib.rs
+            rm -f crates/nzbfast-ffi/src/target_canary.rs
+          }
+          cp crates/nzbfast-ffi/src/lib.rs "$RUNNER_TEMP/lib.rs.orig"
+          cat > crates/nzbfast-ffi/src/target_canary.rs <<'RS'
+          #[cfg(target_os = "ios")]
+          compile_error!("mobile-targets canary: compiled for iOS, as intended");
+          RS
+          echo 'mod target_canary;' >> crates/nzbfast-ffi/src/lib.rs
+          if cargo check -p nzbfast-ffi --target aarch64-apple-ios --locked \
+               > "$RUNNER_TEMP/ios-canary.log" 2>&1; then
+            restore
+            echo "::error::the ios check PASSED a target_os=ios compile error - not compiling for iOS"
+            exit 1
+          fi
+          restore
+          grep -m1 'mobile-targets canary' "$RUNNER_TEMP/ios-canary.log" || {
+            echo "::error::the ios check failed for some OTHER reason than the canary"
+            tail -30 "$RUNNER_TEMP/ios-canary.log"
+            exit 1; }
+          echo "canary refused as expected"
+          # The restore has to be provable, or the next thing to read
+          # this checkout inherits a tree the canary left dirty.
+          [ -z "$(git status --porcelain)" ] || {
+            echo "::error::the canary did not clean up after itself"
+            git status --porcelain
+            exit 1; }
+
+  # -------------------------------------------------------------------
+  # Android. The app execs the BIN, staged as `libnzbfast.so` by
+  # fetch-engine.sh, so `-p nzbfast --no-default-features` is what ships
+  # - the same command `slim-check` runs, with a `--target` on it and
+  # the link on the end. See "ANDROID BUILDS, iOS ONLY CHECKS" for why
+  # this leg is a build and that one is not.
+  android-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      # NOT ios-check's group. Job-level concurrency is contended between
+      # jobs of the SAME run, so a shared group would have the two jobs
+      # of one push queue behind each other - and with
+      # cancel-in-progress, cancel each other. macapp.yml records the
+      # same trap between its two jobs.
+      group: mobile-android-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # THE NDK IS RESOLVED, NEVER ASSUMED. android-lint.yml's header
+      # records the shape of this trap one level up: the stated blocker
+      # for that job was "no runner has the Android SDK", which was
+      # false - the image ships it at /usr/local/lib/android/sdk - and
+      # its FIRST run still died `sdkmanager: command not found`,
+      # because the SDK being present says nothing about what is on
+      # PATH. So this looks in every documented place, prints what it
+      # found, and only installs when it has to.
+      #
+      # IT HAS NEVER HAD TO, and that is the measurement worth keeping.
+      # The chip that commissioned this job budgeted for a ~2 GB NDK
+      # download plus a cache keyed the way android-lint.yml keys its
+      # gradle cache. The ubuntu image ALREADY SHIPS ONE - resolved at
+      # `/usr/local/lib/android/sdk/ndk/29.0.14206865` in 0 seconds on
+      # run 33062247305 - so there is no download, no cache, and no 2 GB
+      # taken out of a 10 GB per-repo cache budget that is already over
+      # its limit. Same shape as android-lint.yml's own "THE STATED
+      # BLOCKER WAS WRONG" note one directory over: the image has more
+      # on it than anybody assumes. The install arm stays as the belt,
+      # for the image that one day ships without one - and the nightly
+      # schedule is what would report that day.
+      #
+      # THE PINNED VERSION IN THAT FALLBACK IS NOT WHAT RUNS. The image
+      # gives 29.0.14206865; the hand recipe this reproduces was
+      # measured against 28.2.13676358. Both work, which is the point of
+      # resolving rather than pinning - and it means a green run here is
+      # not evidence about the NDK a person has locally.
+      #
+      # The prebuilt host directory is globbed rather than spelled:
+      # `linux-x86_64` on this runner, `darwin-x86_64` on the dev Mac
+      # (correct there even on Apple Silicon).
+      - name: resolve the NDK
+        run: |
+          set -eu
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          echo "ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT:-unset}"
+          echo "ANDROID_NDK_LATEST_HOME=${ANDROID_NDK_LATEST_HOME:-unset}"
+          NDK=""
+          for c in "${ANDROID_NDK_LATEST_HOME:-}" "${ANDROID_NDK_ROOT:-}" \
+                   "${ANDROID_NDK_HOME:-}"; do
+            [ -n "$c" ] && [ -d "$c/toolchains/llvm/prebuilt" ] && NDK="$c" && break
+          done
+          if [ -z "$NDK" ]; then
+            for c in "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/ndk/*; do
+              [ -d "$c/toolchains/llvm/prebuilt" ] && NDK="$c"
+            done
+          fi
+          if [ -z "$NDK" ]; then
+            echo "no NDK on the image - installing one"
+            SDKM=""
+            for c in "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/cmdline-tools/*/bin/sdkmanager \
+                     "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/tools/bin/sdkmanager; do
+              [ -x "$c" ] && SDKM="$c" && break
+            done
+            [ -n "$SDKM" ] || { echo "no sdkmanager under ${ANDROID_HOME:-}"; exit 1; }
+            yes | "$SDKM" "ndk;28.2.13676358" >/dev/null
+            NDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}/ndk/28.2.13676358"
+          fi
+          echo "NDK: $NDK"
+          BIN=""
+          for c in "$NDK"/toolchains/llvm/prebuilt/*/bin; do
+            [ -d "$c" ] && BIN="$c"
+          done
+          [ -n "$BIN" ] || { echo "no prebuilt toolchain under $NDK"; exit 1; }
+          echo "toolchain bin: $BIN"
+          # The API level comes from the app's own minSdk, so a bump
+          # moves the cross-build with it instead of leaving a second
+          # copy of the number here to drift. The clang wrapper is named
+          # for it, so a minSdk the NDK has no wrapper for is a refusal
+          # here rather than a silently different ABI.
+          GRADLE=packaging/android/compose-app/app/build.gradle.kts
+          API=$(sed -n 's/.*minSdk *= *\([0-9][0-9]*\).*/\1/p' "$GRADLE" | head -1)
+          [ -n "$API" ] || { echo "could not read minSdk from $GRADLE"; exit 1; }
+          echo "minSdk: $API"
+          CC="$BIN/aarch64-linux-android$API-clang"
+          [ -x "$CC" ] || { echo "no such clang wrapper: $CC"; ls "$BIN" | head -40; exit 1; }
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CC"
+            echo "CC_aarch64_linux_android=$CC"
+            echo "CXX_aarch64_linux_android=$CC++"
+            echo "AR_aarch64_linux_android=$BIN/llvm-ar"
+            echo "RANLIB_aarch64_linux_android=$BIN/llvm-ranlib"
+            echo "ANDROID_NDK_RESOLVED=$NDK"
+          } >> "$GITHUB_ENV"
+
+      - name: versions
+        run: |
+          rustc --version
+          cargo --version
+          cmake --version | head -1
+          "$CC_aarch64_linux_android" --version | head -1
+
+      # Same reasoning as the iOS leg for staying out of
+      # rust-toolchain.toml's `targets` list.
+      - name: rust target
+        run: rustup target add aarch64-linux-android
+
+      # `--profile dev` (the default): the link resolves against exactly
+      # the same sysroot and the same bionic at the same API level as
+      # the release build does, so the class this exists for is
+      # identical, while `[profile.release]` in Cargo.toml is
+      # `lto = "thin"` with `codegen-units = 1` and would spend the
+      # difference on optimisation this job has no use for.
+      - name: cargo build (android, links)
+        run: cargo build -p nzbfast --no-default-features --target aarch64-linux-android --locked
+
+      # Proof one, and on this leg it is stronger than the iOS
+      # equivalent because there is a real artefact to interrogate. A
+      # `cargo build` that produced nothing, or produced something for
+      # the wrong machine, exits zero just as happily.
+      - name: it is an aarch64 Android ELF
+        run: |
+          set -eu
+          BIN=target/aarch64-linux-android/debug/nzbfast
+          [ -f "$BIN" ] || {
+            echo "::error::no engine binary at $BIN - the --target did not take"
+            ls target || true
+            exit 1; }
+          file "$BIN"
+          readelf -h "$BIN" | grep -q 'AArch64' || {
+            echo "::error::$BIN is not an AArch64 ELF"; exit 1; }
+          # bionic's loader, not glibc's. This is the one line that would
+          # notice a linker silently falling back to the host toolchain.
+          readelf -l "$BIN" | grep -q '/system/bin/linker64' || {
+            echo "::error::$BIN does not ask for Android's linker64"
+            readelf -l "$BIN" | grep -i interpreter || true
+            exit 1; }
+          echo "engine: $(stat -c %s "$BIN") bytes, aarch64 Android ELF"
+
+      # Proof two - see "THE CANARIES" in the header. A `cargo check`
+      # rather than a build: it only has to establish which target_os
+      # the compiler is under, and the build above already left every
+      # dependency's metadata in place, so this is seconds.
+      - name: prove the target is really android
+        run: |
+          # `bash -e` and the `if` - see the iOS leg's note.
+          set -uo pipefail
+          restore() {
+            cp "$RUNNER_TEMP/main.rs.orig" crates/nzbfast/src/main.rs
+            rm -f crates/nzbfast/src/target_canary.rs
+          }
+          cp crates/nzbfast/src/main.rs "$RUNNER_TEMP/main.rs.orig"
+          cat > crates/nzbfast/src/target_canary.rs <<'RS'
+          #[cfg(target_os = "android")]
+          compile_error!("mobile-targets canary: compiled for Android, as intended");
+          RS
+          echo 'mod target_canary;' >> crates/nzbfast/src/main.rs
+          if cargo check -p nzbfast --no-default-features --target aarch64-linux-android \
+               --locked > "$RUNNER_TEMP/android-canary.log" 2>&1; then
+            restore
+            echo "::error::the android check PASSED a target_os=android compile error - not compiling for Android"
+            exit 1
+          fi
+          restore
+          grep -m1 'mobile-targets canary' "$RUNNER_TEMP/android-canary.log" || {
+            echo "::error::the android check failed for some OTHER reason than the canary"
+            tail -30 "$RUNNER_TEMP/android-canary.log"
+            exit 1; }
+          echo "canary refused as expected"
+          [ -z "$(git status --porcelain)" ] || {
+            echo "::error::the canary did not clean up after itself"
+            git status --porcelain
+            exit 1; }

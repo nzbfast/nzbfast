@@ -218,11 +218,35 @@ fn size_cap_settings_round_trip_validate_and_survive_a_restart() {
         live(d.port)["index_evict_kinds"],
         serde_json::json!(["movie", "other"])
     );
-    let bad = cfg(d.port, "index_evict_kinds", "movie,film");
+    // MALFORMED, not merely unknown - and the difference is the whole
+    // assertion. 60504955e widened `parse_evict_kinds` to take a custom
+    // category slug beside the six reserved kinds, so "film" is ACCEPTED
+    // now and this line asserted the opposite until 28 Aug 2026, which is
+    // what held nightly's long-suites and one-process-heavy red. The
+    // reject arm is `!EVICT_KINDS.contains(k) && !slug_shaped(k)`, and
+    // slug-shaped is `[a-z0-9-]+` after trim and lowercase - so the token
+    // has to carry a character outside that set. The unit tests next to
+    // the parser spell it with a space (`fil m`, tests_grabs.rs); `cfg`
+    // here pastes the value into a raw query string with no escaping, so
+    // this one uses `_` instead.
+    let bad = cfg(d.port, "index_evict_kinds", "movie,film_noir");
     assert_eq!(bad["status"], false);
     assert!(
-        bad["error"].as_str().unwrap_or_default().contains("film"),
+        bad["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("film_noir"),
         "{bad}"
+    );
+    // ... and the slug that IS well-formed is taken, which is the half a
+    // stale reject assertion hides.
+    assert_eq!(
+        cfg(d.port, "index_evict_kinds", "movie,formula-1")["status"],
+        true
+    );
+    assert_eq!(
+        live(d.port)["index_evict_kinds"],
+        serde_json::json!(["movie", "formula-1"])
     );
     assert_eq!(cfg(d.port, "index_evict_kinds", "")["status"], true);
     assert_eq!(live(d.port)["index_evict_kinds"], serde_json::json!([]));

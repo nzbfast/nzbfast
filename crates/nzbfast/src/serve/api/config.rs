@@ -60,6 +60,42 @@ fn m_backup_import(
                     "error": "not an nzbfast backup file",
                 }),
                 Some(b) => {
+                    // Per-file atomicity is not bundle atomicity (Codex
+                    // C18): a later member's refusal must not leave a
+                    // hybrid of old and imported startup state. Hold the
+                    // current bytes of all three members BEFORE the
+                    // first write; on any refusal every member is put
+                    // back, so the answer is all-old or all-imported. A
+                    // member that does not exist is held as None and
+                    // restored by removal.
+                    let settings_path = ctx.cfg_path.with_file_name("settings.json");
+                    let keyfile = ctx.cfg_path.with_file_name("apikey");
+                    let mut held: Vec<(std::path::PathBuf, Option<Vec<u8>>)> = Vec::new();
+                    for p in [
+                        ctx.cfg_path.to_path_buf(),
+                        settings_path.clone(),
+                        keyfile.clone(),
+                    ] {
+                        match std::fs::read(&p) {
+                            Ok(bytes) => held.push((p, Some(bytes))),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                held.push((p, None))
+                            }
+                            // A member this handler cannot even READ is
+                            // one it could not put back, so refuse the
+                            // whole import before anything is written.
+                            Err(e) => {
+                                return Some(json!({
+                                    "status": false,
+                                    "error": format!(
+                                        "could not read the current {} to hold for \
+                                         rollback: {e} - nothing was imported",
+                                        p.display()
+                                    ),
+                                }));
+                            }
+                        }
+                    }
                     let mut failed: Vec<String> = Vec::new();
                     let mut write_store = |path: &std::path::Path, v: &Value| {
                         let text = serde_json::to_string_pretty(v).unwrap_or_default();
@@ -71,7 +107,7 @@ fn m_backup_import(
                         write_store(ctx.cfg_path, cfg);
                     }
                     if let Some(s) = b.get("settings").filter(|v| v.is_object()) {
-                        write_store(&ctx.cfg_path.with_file_name("settings.json"), s);
+                        write_store(&settings_path, s);
                     }
                     // An explicit null is a fact, not a gap: the export
                     // writes `apikey_file: null` when the source install
@@ -85,17 +121,12 @@ fn m_backup_import(
                     // that one is left alone.
                     match b.get("apikey_file") {
                         Some(Value::String(k)) if !k.trim().is_empty() => {
-                            if crate::persist::write_atomic(
-                                &ctx.cfg_path.with_file_name("apikey"),
-                                k.trim().as_bytes(),
-                            )
-                            .is_err()
+                            if crate::persist::write_atomic(&keyfile, k.trim().as_bytes()).is_err()
                             {
                                 failed.push("apikey".into());
                             }
                         }
                         Some(_) => {
-                            let keyfile = ctx.cfg_path.with_file_name("apikey");
                             if let Err(e) = std::fs::remove_file(&keyfile)
                                 && e.kind() != std::io::ErrorKind::NotFound
                             {
@@ -108,9 +139,41 @@ fn m_backup_import(
                         info!(target: "config", "settings backup restored - restart to apply");
                         json!({"status": true, "restart_required": true})
                     } else {
+                        // Put every member back the way it was held -
+                        // rewriting an unwritten member with its own
+                        // bytes is a no-op, so no per-member bookkeeping
+                        // is owed. Best-effort: a rollback that also
+                        // fails is named beside the original refusal
+                        // rather than hidden under it.
+                        let mut stuck: Vec<String> = Vec::new();
+                        for (p, bytes) in &held {
+                            let ok = match bytes {
+                                Some(b) => crate::persist::write_atomic(p, b).is_ok(),
+                                None => match std::fs::remove_file(p) {
+                                    Ok(()) => true,
+                                    Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                                },
+                            };
+                            if !ok {
+                                stuck.push(p.display().to_string());
+                            }
+                        }
                         json!({
                             "status": false,
-                            "error": format!("could not write: {}", failed.join(", ")),
+                            "error": if stuck.is_empty() {
+                                format!(
+                                    "could not write: {} - the previous settings were \
+                                     put back and nothing was imported",
+                                    failed.join(", ")
+                                )
+                            } else {
+                                format!(
+                                    "could not write: {} - and could not restore: {}. \
+                                     Check those files before restarting",
+                                    failed.join(", "),
+                                    stuck.join(", ")
+                                )
+                            },
                         })
                     }
                 }
@@ -222,6 +285,9 @@ fn m_get_config(
                         // show the effective policy without
                         // duplicating the rule.
                         let rel = s.idle_release_policy();
+                        // One reading of this server's block, computed
+                        // once for the three fields below.
+                        let standing = d.block_standing(s);
                         json!({
                             "host": s.host,
                             "port": s.port,
@@ -247,7 +313,18 @@ fn m_get_config(
                             "retention_days": s.retention_days,
                             "block_bytes": s.block_bytes.unwrap_or(0),
                             "block_account": s.block_account,
-                            "block_used": d.block_spent(&s.host),
+                            "block_used": standing.spent,
+                            // What is LEFT, and which band that puts the
+                            // account in - both from our own accounting,
+                            // and both the DAEMON's answer, so the page
+                            // never re-derives the 85% threshold beside
+                            // it. Zero and "ok" on a server with no
+                            // block, which is what `block_bytes: 0`
+                            // means (an unlimited plan has nothing to
+                            // run out of) and is why the UI gates the
+                            // whole readout on `block_bytes > 0`.
+                            "block_left": standing.left,
+                            "block_band": standing.band_word(),
                             "enabled": s.enabled,
                             "warm_pool": s.warm_pool,
                             "idle_release_secs": s.idle_release_secs,
@@ -594,12 +671,11 @@ fn m_import_probe(
                 continue;
             }
             // #17: categories come over too, and the probe says so
-            // before anything is written. SAB only - NZBGet has no
-            // equivalent section.
+            // before anything is written.
             let cats = if kind == "sabnzbd" {
                 nzbkit::config::parse_sabnzbd_categories(&text)
             } else {
-                Default::default()
+                nzbkit::config::parse_nzbget_categories(&text)
             };
             cands.push(json!({
                 "kind": kind,
@@ -699,6 +775,38 @@ fn m_import_apply(
                             }
                         })
                 };
+                // NZBGet's DownloadRate is kilobytes/sec (NZBGet's own
+                // convention, 1024-byte kilobytes - the same as its
+                // FreeDiskSpaceMB field); SABnzbd has no config-file
+                // equivalent (its bandwidth cap lives in the browser
+                // session, not sabnzbd.ini), so this is NZBGet-only.
+                // "0" is NZBGet's own "no limit" default rather than a
+                // real setting somebody dialled in, and applying it
+                // would silently unlimit a speed cap the user already
+                // set here - so, same rule as password_file above, this
+                // only ever adopts INTO an unset ceiling.
+                let speedlimit_adopted = (kind == "nzbget")
+                    .then(|| crate::import_sab::nzbget_conf_value(&text, "DownloadRate"))
+                    .flatten()
+                    .and_then(|kb| kb.parse::<u64>().ok())
+                    .filter(|&kb| kb > 0)
+                    .filter(|_| d.speed_ceiling.load(Ordering::Relaxed) == 0)
+                    .and_then(|kb| {
+                        let bytes = nzbkit::config::nzbget_rate_kb_to_bps(kb).to_string();
+                        match apply_and_save(d, "speedlimit", &bytes) {
+                            Ok((_, saved)) => {
+                                info!(target: "import", "adopted speed limit {kb}KB/s from {path}");
+                                if !saved {
+                                    unsaved.push("speedlimit");
+                                }
+                                Some(kb)
+                            }
+                            Err(e) => {
+                                warn!(target: "import", "could not adopt speed limit: {e}");
+                                None
+                            }
+                        }
+                    });
                 // #17. Categories are not cosmetic on this side:
                 // `register_cat` exists because Sonarr and Radarr
                 // validate their configured category against our list
@@ -712,8 +820,12 @@ fn m_import_apply(
                 // Merged, never replaced, matching the contract this
                 // endpoint already states for servers. `merge_cat_list`
                 // is the same helper `register_cat` goes through.
-                let cat_report = if kind == "sabnzbd" || path.ends_with(".ini") {
-                    let found = nzbkit::config::parse_sabnzbd_categories(&text);
+                let cat_report = {
+                    let found = if kind == "sabnzbd" || path.ends_with(".ini") {
+                        nzbkit::config::parse_sabnzbd_categories(&text)
+                    } else {
+                        nzbkit::config::parse_nzbget_categories(&text)
+                    };
                     let names: Vec<&str> = found.cats.iter().map(|c| c.name.as_str()).collect();
                     let mut cats_added = 0;
                     if !names.is_empty() {
@@ -788,9 +900,6 @@ fn m_import_apply(
                     json!({"added": cats_added, "folders": dirs_added,
                                "folders_failed": dirs_failed,
                                "dropped": found.dropped})
-                } else {
-                    json!({"added": 0, "folders": 0, "folders_failed": Vec::<Value>::new(),
-                               "dropped": Vec::<String>::new()})
                 };
                 let (mut added, mut skipped) = (0, 0);
                 for s in incoming {
@@ -821,6 +930,7 @@ fn m_import_apply(
                 if added == 0 {
                     json!({"status": true, "added": 0, "skipped": skipped,
                                "password_file": pw_adopted,
+                               "speedlimit_kbps": speedlimit_adopted,
                                "categories": cat_report,
                                "warning": warning})
                 } else {
@@ -832,6 +942,7 @@ fn m_import_apply(
                             );
                             json!({"status": true, "added": added, "skipped": skipped,
                                        "password_file": pw_adopted,
+                                       "speedlimit_kbps": speedlimit_adopted,
                                        "categories": cat_report,
                                        "warning": warning})
                         }

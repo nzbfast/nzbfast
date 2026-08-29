@@ -101,6 +101,34 @@ Note either below.
   path. The recipe in `../README.md` used to copy all six, which is how
   a seeding step can look done and be two-thirds inert.
 
+- `yenc_decode/` - a SEED CORPUS, 11 files / 44 KB, added 27 Aug 2026
+  (post-v1.2.4 overnight campaign) to close the exact gap the 25 Jul
+  entry above describes in passing: `corpus/` is gitignored, so the
+  discovery that the target's corpus held ZERO `=y` inputs was a
+  finding about that one machine's accumulated state, not a property
+  the repo remembered - a fresh clone or a short CI smoke burst starts
+  from the same blind cold start every time, with only `yenc.dict`
+  (a flat string list, not a seed) standing between it and the control
+  line. Hand-built, one file per shape the 25 Jul note names as having
+  taken the corpus that long to reach on its own: `seed_all256_{crlf,lf}.bin`
+  (a full 0-255 payload, once each line ending), `seed_dotstuff.bin`
+  (an encoded line starting with `.`, the leading-dot unstuffing path),
+  `seed_multipart_p{1,2}.bin` (`=ypart`/`total=2` framing),
+  `seed_junkheader.bin` (a duplicate `name=` plus an unknown key),
+  `seed_namefield.bin` (a filename containing a space, unquoted),
+  `seed_glued.bin` (header keys separated by runs of spaces rather than
+  one), `seed_noend.bin` (body with no `=yend` at all) and
+  `seed_orphanpart.bin` (a bare `=ypart` with no preceding `=ybegin`).
+  Not a repro for any specific bug - the six silent-truncation shapes
+  the 25 Jul first seeding found are long since fixed - but the same
+  category of thing: `=ybegin`/`=yend`/`=ypart` is a magic no mutator
+  finds cold in a 60s CI burst, and every one of these shapes is a
+  distinct control-line edge the target's own doc comment says it
+  differentially checks (SIMD path vs scalar path). Verified rather
+  than assumed: all 11 were part of the corpus that ran 44.5M
+  executions over 4h in the campaign that added them, mutated
+  continuously, zero crashes or decoder divergences.
+
 - `tar_parse/` - a SEED CORPUS, and there was no in-tree tar fixture of
   any kind to copy (`nzbkit::tar` is a new parser, TODO 163 item 6). 15
   files, 112 KB: `plain_ustar.tar`, `gnu_longname.tar`, `pax_longname.tar`

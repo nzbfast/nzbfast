@@ -74,8 +74,13 @@ pub(in crate::serve) fn post_job_duties(
 /// the report, the FailureLink re-grab and the M14f duplicate promotion.
 /// That is correct for a post this old: nothing is coming, and a held
 /// alternative is the only thing that can still deliver the release.
-fn retry_may_still_help(msg: &str) -> bool {
-    if fail_kind(msg) != FailKind::MissingArticles {
+///
+/// Takes the KIND as a value rather than re-deriving it (TODO 307 item
+/// 1): the caller has already asked the job for its classification, and
+/// asking twice is how one predicate ends up answering about a code and
+/// the other about the sentence.
+fn retry_may_still_help(kind: FailKind, msg: &str) -> bool {
+    if kind != FailKind::MissingArticles {
         return true;
     }
     !crate::diag::missing_articles_proven_stale(msg)
@@ -94,8 +99,8 @@ pub(in crate::serve) fn auto_retry_eligible(j: &Job, secs: u64) -> bool {
         // A watchdog demotion goes back to the queue instead of history;
         // park returns before the retry block for it.
         && !j.demote
-        && fail_kind(&j.fail_message).transient()
-        && retry_may_still_help(&j.fail_message)
+        && j.fail_kind().transient()
+        && retry_may_still_help(j.fail_kind(), &j.fail_message)
         // ONE automatic retry. The retry itself bumps `retries` and
         // clears the stamp, so a second failure lands here ineligible -
         // and that is the failure that reports, re-grabs and promotes.

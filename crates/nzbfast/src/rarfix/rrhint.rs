@@ -29,7 +29,7 @@
 //! to read every intact shard of a damaged volume anyway, so a range
 //! cannot shrink that read - it can only say which volumes to open.
 
-use super::{collect_rar_volumes, rr_repair_volume, try_unrar_spent_why};
+use super::{RrRepair, collect_rar_volumes, rr_repair_volume, try_unrar_spent_why};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -129,6 +129,9 @@ impl DamageHint {
 pub(crate) struct RrPassStats {
     /// Volumes the RR pass opened and rewrote from their record.
     pub rewritten: usize,
+    /// Volumes opened whose record proved the protected prefix already
+    /// intact - the original file was kept, nothing was rewritten.
+    pub intact: usize,
     /// Volumes opened that carried no record (clean skip).
     pub no_record: usize,
     /// Volumes with a record whose repair failed.
@@ -197,11 +200,17 @@ pub(crate) fn rr_repair_volumes(
             }
             stats.bytes_scanned += len;
             match rr_repair_volume(path, pw) {
-                Ok(true) => {
+                Ok(RrRepair::Rebuilt) => {
                     info!(target: "repair", "✔ {name} - rewritten from recovery record");
                     stats.rewritten += 1;
                 }
-                Ok(false) => {
+                Ok(RrRepair::PrefixIntact) => {
+                    // Not counted as rewritten: the record proved the
+                    // prefix intact, the original was kept untouched.
+                    info!(target: "repair", "{name} - recovery record shows the protected prefix intact");
+                    stats.intact += 1;
+                }
+                Ok(RrRepair::NoRecord) => {
                     info!(target: "repair", "{name} - no recovery record");
                     stats.no_record += 1;
                 }
@@ -299,7 +308,12 @@ pub(crate) fn try_rar_rr_repair_hinted_why(
     // must not turn that into an extraction attempt over the damage
     // (pinned by e2e `a_missing_external_par2_still_reaches_the_native_escalation`,
     // whose fixture volumes carry neither a record nor a CRC).
-    let nothing_done = stats.rewritten == 0 && (stats.skipped.is_empty() || stats.no_record > 0);
+    // `intact` counts with `rewritten` here: a record that PROVED the
+    // prefix intact is a record that answered, and the old accounting
+    // (which called those rewritten) went on to extract.
+    let nothing_done = stats.rewritten == 0
+        && stats.intact == 0
+        && (stats.skipped.is_empty() || stats.no_record > 0);
     if nothing_done || stats.hard_failures > 0 {
         warn!(target: "repair", "recovery-record repair could not save the set");
         return Err(None);
@@ -348,7 +362,7 @@ pub(crate) fn try_rar_rr_repair_hinted_why(
         stats.skipped.len()
     );
     let second = rr_repair_volumes(dir, &stats.skipped, password, None);
-    if second.rewritten == 0 || second.hard_failures > 0 {
+    if (second.rewritten == 0 && second.intact == 0) || second.hard_failures > 0 {
         warn!(target: "repair", "recovery-record repair could not save the set");
         return Err(None);
     }

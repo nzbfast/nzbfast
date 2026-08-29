@@ -560,6 +560,68 @@ pub(super) fn set_index_evict_kinds(
     })
 }
 
+#[cfg(feature = "indexer")]
+pub(super) fn set_index_keep_kinds(
+    d: &Arc<Daemon>,
+    _name: &str,
+    v: &str,
+) -> std::result::Result<(bool, Value), String> {
+    Ok({
+        // Exclusion list, the protective complement of index_evict_kinds:
+        // a kind named here is NEVER evicted, and a kind in both lists is
+        // kept. Same vocabulary, same typo refusal - a misspelt kind here
+        // would silently protect nothing.
+        let kinds = parse_evict_kinds(v).map_err(|e| format!("index_keep_kinds: {e}"))?;
+        *d.index_keep_kinds.lock_ok() = kinds.clone();
+        (true, json!(kinds))
+    })
+}
+
+#[cfg(feature = "indexer")]
+pub(super) fn set_index_evict_scope(
+    d: &Arc<Daemon>,
+    _name: &str,
+    v: &str,
+) -> std::result::Result<(bool, Value), String> {
+    Ok({
+        let s = v.trim().to_ascii_lowercase();
+        if parse_evict_scope(&s).is_none() {
+            return Err(format!(
+                "index_evict_scope: expected one of {}",
+                EVICT_SCOPES.join(", ")
+            ));
+        }
+        // "" parses as All for a hand-edited file; store the canonical
+        // spelling so the UI's select always finds its option.
+        let s = if s.is_empty() { "all".to_string() } else { s };
+        *d.index_evict_scope.lock_ok() = s.clone();
+        (true, json!(s))
+    })
+}
+
+#[cfg(feature = "indexer")]
+pub(super) fn set_index_evict_headroom(
+    d: &Arc<Daemon>,
+    _name: &str,
+    v: &str,
+) -> std::result::Result<(bool, Value), String> {
+    Ok({
+        // Percent below the cap an eviction empties to, 0..=50. Out of
+        // range is refused rather than clamped silently: 60 is more
+        // likely a misread of the control than a wish to halve the
+        // database.
+        let n: u64 = v
+            .trim()
+            .parse()
+            .map_err(|_| "index_evict_headroom: expected a percent, 0 to 50".to_string())?;
+        if n > 50 {
+            return Err("index_evict_headroom: at most 50 percent".to_string());
+        }
+        d.index_evict_headroom.store(n, Ordering::Relaxed);
+        (true, json!(n))
+    })
+}
+
 pub(super) fn set_index_evict(
     d: &Arc<Daemon>,
     _name: &str,

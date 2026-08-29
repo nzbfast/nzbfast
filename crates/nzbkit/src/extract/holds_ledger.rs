@@ -76,6 +76,25 @@ impl HoldsLedger {
             .fold(0usize, |a, n| a.saturating_add(n))
     }
 
+    /// Held bytes of EVERY live seat, senior or not.
+    ///
+    /// What a budget joining right now would have taken off its own cap:
+    /// a new seat is junior to all of them, so `senior_bytes` for it is
+    /// exactly this. TODO 309(a), 27 Aug 2026 - `plan.rs
+    /// resume_map_admits` decides before any extractor exists, so it has
+    /// no seat to ask and reads this instead. Dynamic and therefore only
+    /// ever an estimate: a predecessor's holds drain while the resumed
+    /// job sets up, so this reads high, which is the safe direction for
+    /// a gate that spends the remainder.
+    pub fn live_bytes(&self) -> usize {
+        self.seats
+            .lock_ok()
+            .iter()
+            .filter_map(|(_, w)| w.upgrade())
+            .map(|b| b.bytes.load(Ordering::Relaxed))
+            .fold(0usize, |a, n| a.saturating_add(n))
+    }
+
     /// Seats still alive (diagnostic / test hook).
     pub fn live_seats(&self) -> usize {
         self.seats
@@ -112,6 +131,45 @@ mod tests {
         ex.set_holds_cap(cap);
         ex.join_holds_ledger(ledger);
         ex
+    }
+
+    /// TODO 309(a): `live_bytes` is what a budget joining NEXT would have
+    /// taken off its own cap - every live seat, not the ones senior to
+    /// some existing id. `plan.rs resume_map_admits` reads it before any
+    /// extractor exists, so there is no seat to ask `senior_bytes` about.
+    #[test]
+    fn live_bytes_is_what_the_next_seat_would_lose() {
+        let dir = tmpdir("holds-ledger-live-bytes");
+        let ledger = Arc::new(HoldsLedger::new());
+        let cap = 64 << 20;
+        assert_eq!(
+            ledger.live_bytes(),
+            0,
+            "an empty ledger costs a joiner nothing"
+        );
+
+        let first = rig(&dir, &ledger, cap);
+        let b1 = first.holds_budget_for_tests();
+        b1.add(10 << 20);
+        assert_eq!(ledger.live_bytes(), 10 << 20);
+
+        let second = rig(&dir, &ledger, cap);
+        let b2 = second.holds_budget_for_tests();
+        b2.add(5 << 20);
+        // Both seats count, and it agrees with what a third seat's own
+        // `senior_bytes` says - which is the property that makes this a
+        // sound estimate of the cap a joiner would get.
+        assert_eq!(ledger.live_bytes(), 15 << 20);
+        let third = rig(&dir, &ledger, cap);
+        let b3 = third.holds_budget_for_tests();
+        assert_eq!(b3.cap(), cap - (15 << 20));
+
+        // A finished pipeline stops costing the next joiner anything.
+        b1.sub(10 << 20);
+        drop(b1);
+        drop(first);
+        assert_eq!(ledger.live_bytes(), 5 << 20);
+        b2.sub(5 << 20);
     }
 
     /// Two pipelines on one ledger share ONE cap: the eldest keeps the

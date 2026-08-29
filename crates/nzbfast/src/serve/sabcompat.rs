@@ -63,11 +63,53 @@ pub(super) fn sab_warnings(
     // one most likely to be met by someone who has just wired up Sonarr.
     // An unreadable config counts the same as an empty one here: either
     // way there is nothing to download from.
-    let servers = nzbkit::config::Config::load(cfg_path)
-        .map(|c| c.servers.len())
-        .unwrap_or(0);
+    let cfg = nzbkit::config::Config::load(cfg_path).ok();
+    let servers = cfg.as_ref().map(|c| c.servers.len()).unwrap_or(0);
     if servers == 0 {
         out.push("No Usenet server is configured - add one in Settings before downloading".into());
+    }
+
+    // A prepaid block that has run out. This meets the pane's rule on
+    // every clause: it is true now, it degrades work now, and it does
+    // not resolve itself - the user has to go and buy more data.
+    //
+    // Until 27 Aug 2026 the ONLY place an exhausted block was visible
+    // was a colour on the Settings server list, which is a page you
+    // have to already suspect something to open. The runner drops the
+    // host out of the pool at job start (`reset_hub_for_job`) and logs
+    // one line under target "block"; nothing reached the user. So "why
+    // was only one of my three providers used" and "why did this fail
+    // on a post my fill server has" both had the same invisible answer.
+    // Design: research/BLOCK-ACCOUNT-ECONOMICS-2026-08-27.md.
+    //
+    // Exhausted ONLY, deliberately, and not the 85% mark the Settings
+    // list already colours: an almost-spent block is not stopping or
+    // degrading anything yet, and a pane that lists what MIGHT bite is
+    // the noise this one is documented to refuse. The early warning
+    // wants a different surface (see the design's stage 2).
+    //
+    // Named hosts: `hide_job_names` fences RELEASE names, which is what
+    // its own comment says and what the password warnings below count
+    // rather than name. A server hostname the caller configured is not
+    // that class, and a warning that will not say which account ran out
+    // cannot be acted on.
+    for s in cfg.as_ref().map(|c| c.servers.as_slice()).unwrap_or(&[]) {
+        if !s.enabled {
+            continue;
+        }
+        let Some(total) = s.block_bytes.filter(|b| *b > 0) else {
+            continue;
+        };
+        if d.block_spent(&s.host) < total {
+            continue;
+        }
+        out.push(format!(
+            "{} has used all {:.0} GB of the block you bought, so it is \
+             not being used for downloads. Top the account up, then press \
+             Block refilled on that server in Settings.",
+            s.host,
+            total as f64 / 1e9,
+        ));
     }
 
     // The queue is held by the low-disk guard: it re-checks every five
@@ -746,6 +788,9 @@ struct SlotCtx {
     /// not reach back into the daemon under the queue lock to find out.
     cat_scripts: std::collections::HashMap<String, String>,
     global_script: Vec<PathBuf>,
+    /// TODO 309(b): what pausing each job on the wire would cost, and
+    /// which row each answer is. See `PreLock::pause_cost`.
+    pause_cost: Vec<(String, crate::serve::requeue::RequeueCost)>,
 }
 
 /// One SABnzbd queue slot, built from the row's own state and the payload
@@ -783,6 +828,7 @@ fn slot_json(
         outages,
         cat_scripts,
         global_script,
+        pause_cost,
     } = ctx;
     let mbleft = left as f64 / API_MB;
     // Only a job actually on the wire has a rate to divide by.
@@ -1051,6 +1097,20 @@ fn slot_json(
         "password_needed": pw_wanted.as_deref() == Some(j.nzo_id.as_str()),
         "deferred": j.deferred,
         "defer_reason": j.defer_reason,
+        // TODO 309(b): what pausing THIS row would cost its next run,
+        // published so the dashboard can warn before the click rather
+        // than after it. Null on every row but the ones on the wire -
+        // the active job and, during a hand-over, the predecessor still
+        // draining behind it - and on those too until each has moved
+        // enough bytes for either arm to be able to fire
+        // (`Daemon::pause_cost`). `deferred` and
+        // `defer_reason` above are the same fact after the machine chose
+        // it; this is the same fact before the PERSON does.
+        "pause_cost": pause_cost
+            .iter()
+            .find(|(id, _)| *id == j.nzo_id)
+            .map(|(_, c)| c.wire_json())
+            .unwrap_or(Value::Null),
         // When the watchdog last benched it, and how many times. Both
         // additive and ours, like `deferred` above - SAB has no such
         // field and the *arrs ignore what they don't know.
@@ -1126,6 +1186,13 @@ fn slot_json(
         // name claims that those bytes deny. Null until the
         // prober has an answer.
         "media": j.media,
+        // TODO 304 stage 2, ours like `deferred` and `alt_offer` above:
+        // banked / fetching / retired, or null on every ordinary row.
+        // Until this key existed a banked row was a paused row at 100%
+        // and a background fetch was "Downloading", so no client - ours
+        // or anyone's - could tell the four states apart. See
+        // `serve::insurance::slot_payload`.
+        "insurance": crate::serve::insurance::slot_payload(j),
         "prefetching": sc.as_ref().is_some_and(|(id, _)| *id == j.nzo_id),
         "prefetched_mb": sc
             .as_ref()
@@ -1171,6 +1238,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         stall,
         pool_view,
         outages,
+        pause_cost,
     } = prelock_reads(d);
     let q = d.queue.lock_ok();
     // Live speed over a ~5 s rolling window (see current_speed_bps): a
@@ -1249,6 +1317,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
             .map(|(name, m)| (name.clone(), m.script.clone()))
             .collect(),
         global_script: d.scripts.lock_ok().clone(),
+        pause_cost,
     };
     let walk = queue_walk(
         d,
@@ -1426,6 +1495,14 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         // the queue (a/b are free/floor or spent/cap, in GB). Null when
         // downloads can start. The *arrs ignore unknown keys.
         "hold": hold, "storage_pause": crate::serve::slowstore::payload(d),
+        // TODO 304 stage 2, and here for the same reason as
+        // `password_prompt` / `preview` / `unpack_eat_volumes` above: the
+        // row drawer decides whether to OFFER the per-row insure control,
+        // and it is drawn off the queue poll rather than off get_config,
+        // which is only fetched when the settings view opens. 0 = the
+        // feature is off, and the control then says so rather than
+        // offering a switch that spends a budget of nothing.
+        "insurance_cap_gb": d.insurance_cap_gb.load(Ordering::Relaxed),
         // A STRING, as SAB sends it and as our own mode=status already
         // did - the two disagreed on type for the same field name.
         "speedlimit_abs": d.hub.rate.get().to_string(),
@@ -2218,6 +2295,7 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                             .then(|| (j.clone(), g.name.clone(), g.category.clone()))
                     })
                     .collect();
+                let mut fences = Vec::new();
                 for (job, name, current) in targets {
                     if current == cat {
                         ok = true; // already there: don't re-derive
@@ -2227,7 +2305,22 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                     // that actually landed - matching the SAB
                     // precedent (unregistered ids must not grow the
                     // persisted category list).
-                    ok |= super::api::queue::requeue_category(d, &job, &name, &cat).is_ok();
+                    if let Ok(f) = super::api::queue::requeue_category(d, &job, &name, &cat) {
+                        fences.push(f);
+                        ok = true;
+                    }
+                }
+                // Persisted HERE, with every fence still held, not left
+                // to the tail save below: a refused store has to roll
+                // the moved trees back under the fences, and by the
+                // tail they are gone (Codex C10).
+                if !fences.is_empty() && !super::api::queue::persist_relocations(d, fences) {
+                    ok = false;
+                    *rpc_error = Some(
+                        "the recategorize could not be written to the queue store - \
+                         it was undone"
+                            .into(),
+                    );
                 }
             }
             "GroupSetPriority" => {
@@ -2384,15 +2477,16 @@ fn jr_editqueue(d: &Arc<Daemon>, params: &[Value], rpc_error: &mut Option<String
                 *rpc_error = Some(format!("unsupported editqueue command {other:?}"));
             }
         }
-        // Load-bearing, and for more than the queue order: this is the
-        // ONLY store behind `GroupSetName` and `GroupApplyCategory`,
-        // whose shared `requeue_category` re-points `out_dir` and can
-        // already have MOVED the partial download to the new folder. A
-        // restructure that gives an arm its own early return takes the
-        // rename with it, and the record comes back after a restart
-        // naming a directory the bytes have left. One save, not one per
-        // arm, so renaming N jobs is one rewrite of a queue.json that
-        // reaches 14,500 rows. Pinned by `remote_compat.rs`.
+        // Load-bearing for every arm that mutates without a store of
+        // its own (priority, pause, parameters). `GroupSetName` and
+        // `GroupApplyCategory` no longer ride it alone: their shared
+        // `requeue_category` re-points `out_dir` and can have MOVED the
+        // partial download, so each persists inside its own arm with
+        // the relocation fences still held and rolls back on a refused
+        // store (Codex C10) - this tail save is their belt. One save,
+        // not one per arm, so editing N jobs is one rewrite of a
+        // queue.json that reaches 14,500 rows. Pinned by
+        // `remote_compat.rs`.
         if rpc_error.is_none() {
             d.save_queue();
         }
@@ -2637,6 +2731,11 @@ pub(super) fn handle_jsonrpc(
         "scheduleresume" => {
             let secs = params.first().and_then(Value::as_u64).unwrap_or(0);
             arm_pause_timer(d, std::time::Duration::from_secs(secs));
+            // The deadline has to reach the store too: `pausedownload`
+            // above persisted `paused: true` with no `pause_until_unix`,
+            // so a restart before N seconds would restore an INDEFINITE
+            // pause that never auto-resumes (Codex C14).
+            persist_pause(d);
             json!(true)
         }
         "rate" => {
@@ -2724,3 +2823,8 @@ mod history_custody_tests;
 // directory, which Windows mode bits do not express.
 #[cfg(all(test, unix))]
 mod save_warning_tests;
+
+// NOT unix-gated, unlike the two modules above: nothing in it needs a
+// mode bit, so gating it would only hide it from windows-clippy.
+#[cfg(test)]
+mod block_warning_tests;

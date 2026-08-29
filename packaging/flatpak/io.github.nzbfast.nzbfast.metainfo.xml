@@ -91,6 +91,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="1.2.4" date="2026-08-26">
+      <description>
+        <p>Jobs that used to fail on a damaged recovery set now finish, files arrive while the rest is still downloading, and the poster wall opens instantly on a large index.</p>
+      </description>
+    </release>
     <release version="1.2.3" date="2026-08-25">
       <url type="details">https://github.com/nzbfast/nzbfast/releases/tag/v1.2.3</url>
     </release>

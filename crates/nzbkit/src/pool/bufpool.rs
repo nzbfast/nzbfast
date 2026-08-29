@@ -165,7 +165,10 @@ impl<'a> PooledBuf<'a> {
 
     /// Hand the bytes on to an owner the borrow cannot reach, and stop
     /// guarding them. The outstanding gauge charge travels WITH the
-    /// buffer: whoever ends up dropping or `give`-ing it releases it.
+    /// buffer, and the far end owes it a `give` (directly, or through
+    /// [`BufPool::adopt`]'s drop) - a bare `Vec` drop releases NOTHING,
+    /// and `BufPool::Drop` reconciles only the free list, so bytes
+    /// dropped disarmed stay on the gauge for the rest of the run.
     pub fn into_vec(mut self) -> Vec<u8> {
         self.pool = None;
         std::mem::take(&mut self.buf)

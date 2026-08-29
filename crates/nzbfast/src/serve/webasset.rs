@@ -398,11 +398,13 @@ mod tests {
     /// rather than by serving one visitor another visitor's daemon.
     #[test]
     fn every_shell_substitution_is_a_key_field() {
-        // The tokens placeholder is substituted from a compiled-in file,
-        // so it is constant for the life of the binary and needs no key
-        // field; the other four are `ShellKey`'s state fields.
-        const KEYED: [&str; 5] = [
+        // The tokens and sound placeholders are substituted from
+        // compiled-in files, so they are constant for the life of the
+        // binary and need no key field; the other four are `ShellKey`'s
+        // state fields.
+        const KEYED: [&str; 6] = [
             "__NZBFAST_UI_TOKENS__",
+            "__NZBFAST_UI_SOUND__",
             "__NZBFAST_INDEX__",
             "__NZBFAST_SPOTS__",
             "__NZBFAST_INDEXERS__",

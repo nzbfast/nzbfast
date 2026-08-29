@@ -304,6 +304,18 @@ struct PlaybackSnapshot: Codable {
     let queue: [PlaybackJob]
     let history: [PlaybackJob]
     let stream: StreamTelemetry?
+    /// The daemon's own drain latch (`Daemon::note_queue_idle`), a
+    /// 2026-08-26 contract addition.
+    ///
+    /// NOT the same fact as an empty `queue` list, which is the reason
+    /// it exists: a job that has finished downloading is out of the
+    /// queue and not yet in history for the whole of its repair,
+    /// extract and move. ABSENT MUST READ FALSE - "I cannot tell" and
+    /// "there is nothing left to do" cannot be the same answer when a
+    /// caller acts on the second by standing the engine down. Decoded
+    /// here for the surfaces that ask whether the phone is really
+    /// finished; the engine stand-down itself is TODO 281 IO2.
+    let queueIdle: Bool?
 
     enum CodingKeys: String, CodingKey {
         case contract, version, nzbfast, paused, warnings, queue, history, stream
@@ -313,5 +325,57 @@ struct PlaybackSnapshot: Codable {
         case diskspaceGb = "diskspace_gb"
         case queueTotal = "queue_total"
         case historyTotal = "history_total"
+        case queueIdle = "queue_idle"
     }
+}
+
+// MARK: - On-device engine setup (TODO 281 IO1)
+
+/// The one news server a phone downloads through.
+///
+/// Bring-your-own-server is the posture the whole plan rests on: there
+/// is no indexer, no search and no content in this app, and the user
+/// supplies the provider. See
+/// research/PLAN-MOBILE-DOWNLOADER-2026-08-24.md section 1.
+struct NewsServer: Equatable {
+    var host = ""
+    var port = 563
+    var tls = true
+    var username = ""
+    var password = ""
+    var connections = 8
+
+    /// The `mode=server_save` / `mode=server_test` body.
+    ///
+    /// `index: -1` appends a new row rather than editing one. Built by
+    /// hand rather than through Codable because the daemon wants the
+    /// server nested under a key beside the index, which is a wrapper
+    /// shape and not a property of the server.
+    func payload(index: Int) -> Data {
+        let body: [String: Any] = [
+            "index": index,
+            "server": [
+                "host": host,
+                "port": port,
+                "tls": tls,
+                "username": username,
+                "password": password,
+                "connections": connections,
+            ],
+        ]
+        // The dictionary is built here out of Swift scalars, so there is
+        // nothing in it JSONSerialization can refuse; an empty body
+        // would be refused by the daemon rather than silently accepted.
+        return (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+    }
+
+    var looksComplete: Bool {
+        !host.trimmingCharacters(in: .whitespaces).isEmpty && (1...65535).contains(port)
+    }
+}
+
+struct ServerTestResponse: Codable {
+    let status: Bool?
+    let greeting: String?
+    let error: String?
 }

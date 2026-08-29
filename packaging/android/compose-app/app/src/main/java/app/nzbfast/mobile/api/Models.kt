@@ -34,6 +34,16 @@ data class HistorySlot(
     val size: String,
     val failMessage: String,
     val completedAt: Long,
+    /**
+     * Where the finished payload actually is on the daemon's disk.
+     *
+     * The playback contract (row 16) deliberately does not carry a path -
+     * it is a readiness call, and a phone has no use for a server's
+     * filesystem. The ONE thing that does need it is the on-device
+     * export (TODO 281 AN3), where the daemon's disk is this phone's, and
+     * that is why this row is fetched at all.
+     */
+    val storage: String,
     /** The daemon judged this row to hold media: the latched `media`
      * chip when present, else the stored path's own extension (rows
      * recorded before the chip existed). Gates the Play action -
@@ -113,6 +123,23 @@ data class PlaybackSnapshot(
     val linkPeakSrc: String,
     val diskFreeGb: Double,
     val warnings: Int,
+    /**
+     * The daemon's own drain latch (contract addition, TODO 281 AN2).
+     *
+     * NOT the same fact as an empty `queue` list. A job that has finished
+     * downloading is stamped Completed and retained out of the queue well
+     * before its record is filed into history, so for the whole length of
+     * its repair, extract and move it is in NEITHER list - and the latch
+     * accounts for that backlog where the lists cannot. The foreground
+     * service stops the engine on this and would tear down a job mid-tail
+     * on the other reading.
+     *
+     * A daemon that predates the addition answers without the key, and
+     * absent reads FALSE here: "I cannot tell" and "there is nothing left
+     * to do" must not be the same answer when the consequence of the
+     * second is killing the engine.
+     */
+    val queueIdle: Boolean,
     val queue: List<PlaybackJob>,
     val history: List<PlaybackJob>,
     val stream: StreamTelemetry,
@@ -172,6 +199,7 @@ object Parse {
                     size = s.optString("size"),
                     failMessage = s.optString("fail_message"),
                     completedAt = s.optLong("completed", 0),
+                    storage = s.optString("storage", ""),
                     playable = looksPlayable(s),
                 )
             )
@@ -247,6 +275,7 @@ object Parse {
             linkPeakSrc = j.optString("link_peak_src", ""),
             diskFreeGb = j.optDouble("diskspace_gb", 0.0),
             warnings = j.optInt("warnings", 0),
+            queueIdle = j.optBoolean("queue_idle", false),
             queue = playbackJobs(j.optJSONArray("queue")),
             history = playbackJobs(j.optJSONArray("history")),
             stream = StreamTelemetry(

@@ -416,7 +416,7 @@ jobs:
       - name: toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
       - name: fmt
-        run: cargo fmt -p nzbkit -p nzbfast -p nzbtray --check
+        run: cargo fmt -p nzbkit -p nzbfast -p nzbtray -p nzbfast-ffi --check
   site-version-gate:
     if: github.repository != 'nzbfast/nzbfast'
     runs-on: ubuntu-latest
@@ -1541,6 +1541,15 @@ jobs:
       - name: stall mark identity gate
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         run: tools/stall-mark-gate.py --selftest && tools/stall-mark-gate.py
+      # A driver that pins a fleet and stamps per-leg records must record
+      # the fleet the WIRE held - the 28 Aug 2026 knee incident is three
+      # ladder rungs running one fleet under three labels, and the exposed
+      # population was the drivers that never source the rig library at
+      # all. Same wrapper-under-tools arrangement and same
+      # private-vocabulary reason as the two gates above.
+      - name: fleet census gate
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: tools/fleet-census-gate.py --selftest && tools/fleet-census-gate.py
       # `libc::getrusage` and friends do not exist on Windows, and between
       # 21 and 23 Aug 2026 that one trio held windows-build AND
       # windows-clippy red on main for two days across four fix commits in
@@ -2867,34 +2876,92 @@ jobs:
   # coverage. This moves slim-check's interval by about 30 seconds and
   # its blame window by well under a commit at the measured cadence.
   #
-  # `cargo check`, not clippy, and no `-D warnings` - but NOT any longer
-  # for the reason this comment used to give. That reason was that the
-  # slim config is not warning-clean: about a dozen items are dead
-  # without `indexer` (the search-log constants, the scoreboard
-  # accessors, several Daemon fields) and silencing them would mean a
-  # dozen more cfgs on code the default build compiles. Re-measured 22
-  # Aug 2026 with `--all-targets` in hand and that is NO LONGER TRUE:
-  # the slim build emits zero warnings from `nzbfast`, in the plain
-  # command and this one alike, and `cargo clippy -p nzbfast
-  # --no-default-features --locked --all-targets --no-deps -- -D
-  # warnings` PASSES on this tree. (The three warnings you will still
-  # see are rustc's, from the vendored `rars` lib, which `--no-deps`
-  # does not silence because they are not clippy lints; they are
-  # identical under the plain command and are nobody's change.) So the
-  # standing follow-up - make the slim build warning-clean so this step
-  # can be tightened - has no work left in it, and the three
-  # `unused_mut` the gated-push idiom emits under `--all-targets` are
-  # silenced at the `let` rather than left for it.
+  # `cargo check`, not clippy, and no `-D warnings`. The history of that
+  # is worth more than the choice, because the REASON has been rewritten
+  # twice and the second rewrite was wrong in a way that cost a session.
   #
-  # The tightening was still declined, on the same measurement that
-  # bought `--all-targets`, run the other way: cold on the same quiet
-  # box, `cargo check --all-targets` is 29.8s and the clippy line above
-  # is 82.7s. THAT is the doubling-and-more the `--all-targets` guess
-  # wrongly feared, and it buys little here - `check` already lints the
-  # default config with `-D warnings`, so the increment is slim-only
-  # lints, against a compile check that is the entire reason this job
-  # exists. Revisit if the cadence ever slackens; the precondition is
-  # met and it is one line.
+  # It was first declined because the slim config is not warning-clean:
+  # about a dozen items are dead without `indexer` (the search-log
+  # constants, the scoreboard accessors, several Daemon fields) and
+  # silencing them would mean a dozen more cfgs on code the default build
+  # compiles. Re-measured 22 Aug 2026 with `--all-targets` in hand, that
+  # was no longer true - and this comment then drew a FORWARD-LOOKING
+  # conclusion out of a point-in-time measurement, saying the standing
+  # follow-up "has no work left in it" and that the precondition was met
+  # and the tightening one line.
+  #
+  # THE MEASUREMENT WAS RIGHT. THE CONCLUSION WENT STALE IN THREE DAYS.
+  # Measured 28 Aug 2026, that same clippy line exits 101 on three
+  # items, every one of them a rustc `unused`/`dead_code` rather than a
+  # clippy lint:
+  #
+  #   serve/daemon_tests/spare_tests.rs  unused import flat_rate_config
+  #   serve/dupe.rs                      method `dupe_collision` unused
+  #   serve/storecut.rs                  fn `on_promote_gap` unused
+  #
+  # Read the dates before reading anything else into that. The 22 Aug
+  # run (dae7325bd) was HONEST: at that commit `enqueue` still called
+  # `dupe_collision` unconditionally, and neither of the other two items
+  # existed yet. All three arrived on 25 Aug, from three lanes that could
+  # not have known - 84e1a0215 moved `enqueue` onto
+  # `dupe_collision_except` (TODO 290 / Codex F-09) and so took away that
+  # method's last unconditional caller, 6d92319f9 added `on_promote_gap`,
+  # and 18d3f06af added the `flat_rate_config` import. So nobody
+  # mis-measured and nobody was careless: a true statement about one
+  # commit was written down as a standing fact, and three ordinary
+  # commits three days later made it false with nothing anywhere to say
+  # so. That is the defect this paragraph exists to stop repeating.
+  #
+  # Each of the three is an item whose only remaining caller is
+  # `indexer`-gated, and NONE is a regression from the TODO 281 IO3b
+  # dashboard cutout: all three reproduce under `--no-default-features
+  # --features dashboard` too, which is the configuration this job built
+  # before `dashboard` was a feature at all. All three were cfg'd to the
+  # configuration that uses them the same day, 28 Aug 2026 -
+  # `#[cfg(any(feature = "indexer", test))]` on
+  # `dupe_collision`, because it is dead in the slim BIN build and LIVE
+  # in the slim TEST build, which a bare `indexer` cfg would have broken.
+  # `#[expect(dead_code)]` is the wrong tool for all three and CLAUDE.md's
+  # FIFTEENTH gate entry says why: `dead_code` is a rustc lint judged in
+  # every configuration, so an expectation fulfilled slim goes UNFULFILLED
+  # in the default build. (The three warnings you will still see are
+  # rustc's, from the vendored `rars` lib, which `--no-deps` does not
+  # silence because they are not clippy lints; they are identical under
+  # the plain command and are nobody's change.)
+  #
+  # The three `unused_mut` the gated-push idiom emits under
+  # `--all-targets` stay silenced at the `let`, and they are the SHAPE
+  # the paragraph above says `#[expect]` is wrong for, done right:
+  # `#[cfg_attr(not(feature = "indexer"), expect(unused_mut))]` in
+  # `serve/tests_grabs.rs`, `serve/webasset.rs` and `serve/assets.rs`.
+  # The cfg predicate names the one configuration where the lint fires,
+  # so the expectation is fulfilled exactly there and unfulfilled
+  # nowhere - which is what a bare `#[expect]` on a rustc lint cannot
+  # do, and why the three items above got a `cfg` on the ITEM instead.
+  #
+  # SO READ THE PRECONDITION AS A DATED MEASUREMENT AND NEVER AS A
+  # STANDING FACT. It passes as this is written, on 28 Aug 2026, and that
+  # is the whole of what is known. NOTHING holds it there: this step is
+  # `cargo check` with no `-D warnings`, which is exactly how three items
+  # accumulated in three days with every gate in the repo green. Re-run
+  # the line before quoting it: ~83s cold, far less warm, against the
+  # session that quoting it instead has already cost.
+  #
+  # The tightening is still declined, and NOT on the precondition. It is
+  # declined on the same measurement that bought `--all-targets`, run the
+  # other way: cold on the same quiet box, `cargo check --all-targets` is
+  # 29.8s and the clippy line is 82.7s. THAT is the doubling-and-more the
+  # `--all-targets` guess wrongly feared, and it buys little here -
+  # `check` already lints the default config with `-D warnings`, so the
+  # increment is slim-only lints, against a compile check that is the
+  # entire reason this job exists. What 28 Aug adds to that trade sits on
+  # the BENEFIT side and is real: slim-only dead code accumulates in
+  # silence, three items in three days, and tightening this step is the
+  # only thing that would make that impossible rather than merely
+  # written down. It is still ~53s per push on an unchanged cadence, and
+  # it moves `tools/claude-clippy-gate.py` with it - that gate pins this
+  # pair's SUBCOMMAND, so its roster and its selftest fixtures change in
+  # the same commit. Take it deliberately, not in passing.
   #
   # Cheap enough not to need any of the machinery above it. Cold on an
   # M-series Mac: 274 MB of check-mode artifacts for the plain command
@@ -2923,6 +2990,151 @@ jobs:
         run: rustup toolchain install stable --profile minimal && rustup default stable
       - name: check --no-default-features --all-targets (indexer off)
         run: cargo check -p nzbfast --no-default-features --locked --all-targets
+
+  # ===================================================================
+  # THE OTHER CONFIGURATION NOBODY BUILDS, added 29 Aug 2026, and it is
+  # slim-check's argument with the polarity flipped: that job exists
+  # because every OTHER lane builds with `indexer` ON, so a feature-gated
+  # mistake is invisible until it runs. `ktls` is the mirror image - an
+  # OPTIONAL feature, off by default, additionally `target_os = "linux"`,
+  # so NO lane and NO job anywhere had ever compiled it, on any box or
+  # any runner.
+  #
+  # WHAT THAT COST, measured rather than feared. The TODO 106 size-gate
+  # split (0bcb35ce9) moved the kernel offload out of nntp.rs into its
+  # own child and left SIX compile errors behind it, live on main for a
+  # day: four E0433s where the call sites still named the inline module
+  # `ktls_offload` that the split had flattened away, and two E0405s
+  # where `KtlsWire`'s `AsyncRead`/`AsyncWrite` impls lost the `use` line
+  # they had been leaning on in nntp.rs. That commit's own message says
+  # ktls.rs "cannot be compiled on this fleet" and was diffed by hand,
+  # line by line - and a hand diff is exactly what cannot see a name that
+  # has stopped resolving. Every gate in CLAUDE.md's list was green
+  # throughout, including tools/cfg-symbol-gate.py, whose subject is the
+  # neighbouring class (a reference to a cfg-EXCLUSIVE definition) and
+  # which by construction cannot see a module that does not exist.
+  #
+  # THE HOST CANNOT STAND IN FOR THIS ONE, and that is why it is a job
+  # rather than a documented line. `cargo check -p nzbkit --features
+  # ktls --target x86_64-unknown-linux-gnu` from the dev Mac dies in
+  # libsqlite3-sys' build script for want of `x86_64-linux-gnu-gcc`,
+  # exactly as CLAUDE.md's FORTY-SIXTH gate entry records for that
+  # target, and there is no brew formula that fixes it. An ubuntu runner
+  # IS linux, so it needs no cross toolchain at all - which makes the
+  # cheapest possible job the only one that can see the class.
+  #
+  # `-p nzbkit` and not the workspace: the feature and the module both
+  # live there, `nzbfast` does not name them, and widening would build a
+  # second full artifact tree for nothing. `--all-targets` is slim-check's
+  # lesson taken rather than relearned - without it only the library
+  # compiles, and that job spent an unknown length of time with two
+  # E0425s sitting in test targets nobody had ever built (c013e1878).
+  # `--locked`, as at every other cargo gate in this file.
+  #
+  # MEASURED BEFORE WIRING IT IN, on the only linux box this fleet can
+  # reach (an x86_64 slice, kernel 6.8, stable rustc): 22s warm and about
+  # a minute cold for the `--locked --all-targets` form, over a
+  # dependency graph that is mostly the rustls/aws-lc-rs stack nzbkit
+  # already pulls in for NNTP TLS - the `ktls` crate itself is one small
+  # addition. No cache is restored, for slim-check's reason one paragraph
+  # up: a different feature set is a different artifact tree.
+  #
+  # IT COMPILES THE FEATURE AND NEVER RUNS IT, deliberately. kTLS was
+  # measured on 2 Aug as a 40% CPU REGRESSION on kernel 6.8 and ships off
+  # behind feature AND `NZBFAST_KTLS=1`; the re-test conditions (x86
+  # kernel >= 6.11, or arm64 linux) exist on no box here. So this job is
+  # not a claim that the feature is worth having - it is the guard that
+  # keeps it COMPILING while that question is open, which is the whole of
+  # what was missing.
+  ktls-check:
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ci-ktls-check-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: check --features ktls --all-targets (linux kernel TLS offload)
+        run: cargo check -p nzbkit --features ktls --locked --all-targets
+
+  # ===================================================================
+  # THE FUZZ CRATE'S OWN GATE, added 27 Aug 2026 to close the third
+  # instance of the gap CLAUDE.md's clippy and fmt entries above each
+  # tell a story about: `crates/nzbkit/fuzz` cannot join either `-p`
+  # list, because cargo-fuzz detaches it into its OWN workspace (see the
+  # `[workspace]` table with nothing under it in its Cargo.toml, and the
+  # cfg-safety-gate waiver next to it explaining why the crate carries no
+  # `[lints]` table either). So it rode `.githooks/pre-commit` alone -
+  # that hook is deliberately WIDER than the CI package lists for
+  # exactly this reason - and nothing in CI ever checked it. Confirmed
+  # before landing this job: seven fuzz targets were unformatted on
+  # origin/main (import order in three, a doc-comment list item
+  # mis-indented in one, two `assert!` calls rustfmt would have
+  # wrapped), and clippy separately named three more real lints
+  # (`std::io::Error::new(ErrorKind::Other, ..)` where `Error::other` is
+  # shorter, a `.clone()` where `std::slice::from_ref` borrows, a doc
+  # comment rustdoc reads as an unindented list continuation) - every one
+  # sitting there for an unmeasured length of time with every other gate
+  # green.
+  #
+  # NEITHER COMMAND NEEDS `cargo fuzz` OR A NIGHTLY SANITIZER BUILD, and
+  # that was the open question this job answers: libfuzzer-sys links on
+  # stable, so `cargo clippy --manifest-path .../Cargo.toml` compiles the
+  # crate the same way any other crate does. Measured before wiring it
+  # in: clean from a `cargo clean` of the crate's OWN target dir (a
+  # separate workspace, separate target dir), 14s wall on an idle
+  # multi-core box - most of it the same rustls/aws-lc-rs stack `nzbkit`
+  # itself already pulls in for NNTP TLS, not anything fuzzing-specific.
+  # It is its own job rather than a step folded into `fmt` above because
+  # it needs the `clippy` component too, plus a full build of a SEPARATE
+  # workspace's dependency graph - a cost `fmt`'s own budget (~2.5 min
+  # for the whole tight four-job group) was never sized for. It is NOT
+  # covered by the dependency cache either: `tools/dep-cache-key.py`
+  # hashes the WORKSPACE ROOT's `Cargo.lock` only, and the fuzz crate
+  # keeps its own - so this job builds from scratch on every push that
+  # touches the compiler's view of the tree, the same trade
+  # `mobile-targets.yml`'s two legs already accept and for the same
+  # reason (this repo sits at 11.85 GB against GitHub's 10 GB per-repo
+  # cache limit with LRU eviction ACTIVE, so a target-dir cache here
+  # would evict what `check` and the four Windows jobs restore from).
+  # Gated the same way as `slim-check` beside it, on `changes.outputs.
+  # build`, so a docs-only push does not pay for it.
+  #
+  # The TWENTY-SEVENTH gate holds both commands and this job's two steps
+  # as PAIRS now, the same as the fmt line above.
+  fuzz-gate:
+    needs: changes
+    if: ${{ github.repository != 'nzbfast/nzbfast' && needs.changes.outputs.build == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: ci-fuzz-gate-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      - name: fmt (fuzz crate)
+        run: cargo fmt --manifest-path crates/nzbkit/fuzz/Cargo.toml --check
+      # NO `--locked`, and it is not an omission. cargo-fuzz generates
+      # this crate's own `.gitignore` and that file EXCLUDES Cargo.lock
+      # (crates/nzbkit/fuzz/.gitignore line 4), so there is no lockfile
+      # in the checkout for `--locked` to honour - cargo refuses to
+      # create one and the step dies before it lints a line. That is
+      # what took this job red the moment it landed (6b28197bd), on
+      # every push, and it is a property of the crate rather than of
+      # any commit: it could never have passed. The other gates in this
+      # file pass `--locked` because their packages are in the root
+      # workspace, whose Cargo.lock IS tracked. Do not add it back here
+      # unless the lockfile is committed first, which is a decision
+      # about the fuzz crate's reproducibility, not about this line.
+      - name: clippy (fuzz crate)
+        if: ${{ !cancelled() }}
+        run: cargo clippy --manifest-path crates/nzbkit/fuzz/Cargo.toml --all-targets --no-deps -- -D warnings
 
   # ===================================================================
   # DID THE TEST SHARDS ACTUALLY RUN? One row that answers it.

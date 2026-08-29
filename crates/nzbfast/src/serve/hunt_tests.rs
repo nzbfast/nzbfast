@@ -68,6 +68,13 @@ fn req(
         name: name.to_string(),
         origin: origin.to_string(),
         fail_message: fail.to_string(),
+        // Deliberately None across this module: every row here exists to
+        // pin what the GATES do with a given failure, and the gates read
+        // the string classifier whenever no producer stated a code - so
+        // leaving it unset is what keeps these rows testing the arm that
+        // every version-less record on every disk still lands on. TODO
+        // 307 item 1's own rows live in `failkind::tests`.
+        fail_code: None,
         nzb_path: nzb,
         category: String::new(),
     }

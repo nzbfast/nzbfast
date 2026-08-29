@@ -915,7 +915,11 @@ fn the_incremental_header_walk_does_not_wait_for_the_volume_tail() {
 #[test]
 fn a_chase_whose_volumes_exceed_the_cap_trims_from_inside_the_volume() {
     let f = noisy(16 << 20, 220);
-    let vols = rars_compressed_volumes("F.bin", &f, 9 << 20);
+    // Level 1 for the same reason as the test below it, and safe for the
+    // same reason: this one asserts on `vols[0]`, which is a FULL volume
+    // at `per_vol` whatever the packed total comes to, so it carries none
+    // of that test's remainder fragility. 7.35 s -> 2.03 s in a sweep.
+    let vols = rars_compressed_volumes_at_level("F.bin", &f, 9 << 20, Some(1));
     volumes_over_the_cap_trim_and_carry_one_pass("chase-volume-over-cap", &f, vols);
 }
 
@@ -1116,15 +1120,48 @@ fn volumes_over_the_cap_trim_and_carry_one_pass(tag: &str, f: &[u8], vols: Vec<V
 /// and paced on the watermark exactly as above. The finish volume now
 /// trims before its walk is finished, and the walk has to resume where
 /// it stopped rather than behind the trim point.
+///
+/// THE FIXTURE IS THE WHOLE COST OF THIS TEST and its shape is tuned
+/// (28 Aug 2026). It was 18.2 s in a full `--profile ci` sweep, the
+/// most expensive test in the workspace bar the soak, and 17.2 s of
+/// that was the one `rars_compressed_volumes` call - the chase it
+/// actually tests is half a second. Two things came out of measuring
+/// it, and both are in the numbers below rather than in a comment
+/// somewhere else.
+///
+/// The SEARCH EFFORT is now named: see
+/// [`rars_compressed_volumes_at_level`] for why level 1 builds the same
+/// archive 4.9x quicker, and for the level that is not available.
+///
+/// The SPLIT MARGIN was the reason a cheaper encoder could not simply
+/// be dropped in. `max_payload_per_volume` fills volumes to `PER_VOL`
+/// and leaves the remainder in the last one, so the last volume is
+/// `packed - 2 * PER_VOL` and the run fails the moment that falls under
+/// the 8 MiB floor OR the packed total crosses `3 * PER_VOL` and buys a
+/// tiny fourth volume. At the old 9 MiB / 37 MiB shape the packed total
+/// sat 397 KB under the upper edge and 651 KB over the lower one - a
+/// window of +1.4% / -2.3%, which the ~1% ratio difference between two
+/// encoder settings was enough to cross, and which any re-sync of the
+/// vendored writer could cross just as easily. 12 MiB volumes over
+/// 44 MiB of input put the last volume at 10.6 MB with 1.94 MB of room
+/// above and 2.25 MB below: +5.4% / -6.3%, four times the old margin,
+/// and the assertions below name both edges so a drift says which way
+/// it went. Do NOT tighten this back to buy the ~1 s the smaller input
+/// would save.
 #[test]
 fn a_chase_survives_trimming_the_volume_its_deferred_walk_resumes_in() {
+    const PER_VOL: usize = 12 << 20;
     let dir = tmpdir("chase-volume-over-cap-finish");
-    let f = noisy(37 << 20, 250);
-    let vols = rars_compressed_volumes("F.bin", &f, 9 << 20);
-    assert!(
-        vols.len() >= 3,
-        "want a member spanning three volumes, got {}",
-        vols.len()
+    let f = noisy(44 << 20, 250);
+    let vols = rars_compressed_volumes_at_level("F.bin", &f, PER_VOL, Some(1));
+    assert_eq!(
+        vols.len(),
+        3,
+        "want a member spanning exactly three volumes, got {} of {:?} - the packed \
+         total has drifted across a PER_VOL boundary, so re-size the payload rather \
+         than relaxing this",
+        vols.len(),
+        vols.iter().map(Vec::len).collect::<Vec<_>>()
     );
     for (i, v) in vols.iter().enumerate() {
         assert!(

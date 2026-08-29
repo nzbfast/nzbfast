@@ -554,7 +554,26 @@ impl Daemon {
             dest: Some(dest.to_path_buf()),
         });
         drop(g);
-        self.save_queue();
+        if !self.save_queue() {
+            // The record did not reach disk. A restart from here would
+            // restore a job that has never heard of the destination
+            // copy - the whole-job move then collides with it, or a
+            // failed job's take-back misses it. Undo both halves while
+            // the fence is still held so the file and the record stay
+            // one transaction; the whole-job move still carries the
+            // file, so the cost is only latency.
+            let mut g = job.lock_ok();
+            g.early_published.pop();
+            drop(g);
+            let _ = std::fs::remove_file(&dst);
+            warn!(
+                target: "move",
+                "early: queue store refused after publishing {} - took the \
+                 copy back; the whole-job move will carry it",
+                c.name
+            );
+            return Publish::Skipped;
+        }
         Publish::Landed(wrote)
     }
 

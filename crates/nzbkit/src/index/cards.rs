@@ -224,6 +224,17 @@ fn wall_window_eligible(
     no_title_predicate: bool,
 ) -> bool {
     sort == CardSort::Latest
+        // Descending only. The exact query ranks a key by
+        // MAX(first_posted) in BOTH directions (`latest {dir}`), and a
+        // newest-first walk hands that aggregate out for free - the
+        // first appearance of a key IS its MAX. An oldest-first walk
+        // hands out MIN, which is a different ranking: a key with one
+        // ancient and one fresh release sorts first by MIN and last by
+        // MAX, so an asc page picked by the walk is not the page the
+        // exact query returns, and no early-terminating oldest-first
+        // walk can know a key's MAX without reading to the end.
+        // `dir=asc` therefore keeps the exact query.
+        && q.desc
         && !group_by_kind
         && no_title_predicate
         && q.title_keys.is_empty()
@@ -254,9 +265,46 @@ fn card_page_sql(
                 -- the enrichment seed, and seeding those from a
                 -- random stem when we hold the real title would
                 -- throw the answer away at the last step.
+                --
+                -- COMPLETE-FIRST, and it is the ONLY one of this
+                -- query's two representative picks that leads with
+                -- completeness. The card badges `MAX(r.complete)`
+                -- beside a name taken from the NEWEST release, so a
+                -- title whose complete copy is older than one
+                -- obfuscated dupe read as complete while every
+                -- identity-derived field came off the dupe: the
+                -- enrichment seed parsed a hex string and asked TMDB
+                -- for it (so the card stays permanently unmatched -
+                -- the seed is WRITTEN to `titles`), and the wall's
+                -- have-badge ran `dupe_key` over the same string,
+                -- which needs a title plus a year or an SxxEyy and
+                -- answers None, so a copy you already own showed as
+                -- one you do not. Leading with `complete` makes the
+                -- badge and the name describe the same release, and
+                -- it moves NOTHING on a card with no complete
+                -- release at all (every row ties at 0 and the
+                -- newest-first tiebreak below decides, exactly as
+                -- before) - so the change is scoped to precisely the
+                -- cards whose badge and name disagree today.
                 (SELECT COALESCE(NULLIF(s.pre_title,''), s.stem) FROM releases s
                   WHERE s.title_key = r.title_key AND {rep_where}
-                  ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
+                  ORDER BY s.complete DESC, s.first_posted DESC, s.id DESC LIMIT 1),
+                -- The group stays NEWEST-first, and that asymmetry is
+                -- the decision rather than an oversight. These two
+                -- picks answer different questions and no consumer
+                -- pairs them: the name answers what this IS, and the
+                -- group answers whether it can still be FETCHED, which
+                -- `serve::bootstrap::oracle_verdict_json` resolves by
+                -- pairing this group's FAMILY with `latest` - the
+                -- MAX(first_posted) this same SELECT projects - to
+                -- read a retention verdict at that age. Those two have to
+                -- come off ONE release or the verdict describes
+                -- neither, and `latest` is an aggregate that cannot
+                -- follow a complete-first pick. Leading this one with
+                -- `complete` too would hand the oracle an older
+                -- release's group with the newest release's age, so
+                -- the answer would be optimistic by exactly the gap
+                -- between them.
                 (SELECT s.grp FROM releases s
                   WHERE s.title_key = r.title_key AND {rep_where}
                   ORDER BY s.first_posted DESC, s.id DESC LIMIT 1),
@@ -465,18 +513,16 @@ impl Index {
         &self,
         rel_where: &str,
         params: &[Box<dyn rusqlite::ToSql>],
-        desc: bool,
         limit: u32,
         offset: u32,
     ) -> rusqlite::Result<Option<Vec<String>>> {
-        // Newest-first takes the MAX of each key and cuts at the MIN of
-        // the window; oldest-first is the mirror image, and the wall
-        // offers that direction too (`dir=asc`).
-        let (grp, cut_agg, cmp, ord) = if desc {
-            ("MAX", "MIN", ">", "DESC")
-        } else {
-            ("MIN", "MAX", "<", "ASC")
-        };
+        // Newest-first ONLY: take the MAX of each key and cut at the MIN
+        // of the window. This used to carry a mirrored `dir=asc` arm
+        // that ranked keys by MIN(first_posted) - internally consistent,
+        // and not the exact query's ranking, which is MAX(first_posted)
+        // in both directions. `wall_window_eligible` refuses asc for
+        // that reason; see the comment there.
+        let (grp, cut_agg, cmp, ord) = ("MAX", "MIN", ">", "DESC");
         let want = i64::from(offset) + i64::from(limit);
         let mut cap = (want * WALL_WINDOW_PER_KEY + WALL_WINDOW_FLOOR).min(WALL_WINDOW_MAX);
         let n = params.len();
@@ -955,7 +1001,7 @@ impl Index {
         // cards", exactly like the C3 summary probe above.
         let page_keys = (self.wall_window
             && wall_window_eligible(q, sort, group_by_kind, title_wheres.is_empty()))
-        .then(|| self.wall_page_keys(&rel_where, &params, q.desc, q.limit.min(500), q.offset))
+        .then(|| self.wall_page_keys(&rel_where, &params, q.limit.min(500), q.offset))
         .transpose()?
         .flatten();
         let sql = match &page_keys {
@@ -1177,6 +1223,25 @@ mod tests {
         // 6,000 rows over 400 keys: well past WALL_WINDOW_FLOOR + a
         // page's worth, so the first window is a strict prefix.
         seed_wall(&ix, 6_000, 400);
+        // One key whose MIN(first_posted) and MAX(first_posted) sit at
+        // opposite ends of the population. `seed_wall` alone gives every
+        // key one posted second, so MIN == MAX and a ranking taken off
+        // the wrong aggregate is invisible - which is exactly how the
+        // asc arm shipped ranking by MIN while the exact query ranks by
+        // MAX (v1.2.4 tranche sweep, 27 Aug 2026). With this key the
+        // two aggregates disagree by the whole population, so both
+        // directions below fail loudly if either path's ranking basis
+        // moves.
+        for posted in [1_i64, 899_999] {
+            ix.db
+                .execute(
+                    "INSERT INTO releases(stem, poster, grp, total_bytes, files, complete,
+                                          first_posted, first_seen, kind, res, title_key, junk, adult)
+                     VALUES(?1, 'p@p', 'alt.test', 1, 1, 0, ?2, ?2, 'other', '', 'o:spread', 60, 0)",
+                    rusqlite::params![format!("stem-spread-{posted}"), posted],
+                )
+                .unwrap();
+        }
         for (desc, offset) in [
             (true, 0),
             (true, 60),
@@ -1324,6 +1389,12 @@ mod tests {
                 "{sort:?} does not walk its own sort key"
             );
         }
+        assert!(
+            !wall_window_eligible(&show_all(0, false), CardSort::Latest, false, true),
+            "asc ranks by MAX(first_posted) too, which an oldest-first \
+             walk cannot compute - a key's first appearance there is its \
+             MIN, a different ranking (v1.2.4 tranche sweep, 27 Aug 2026)"
+        );
         assert!(
             !wall_window_eligible(&q, CardSort::Latest, true, true),
             "catgroup ranks kind ahead of the sort key"

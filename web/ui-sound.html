@@ -1,0 +1,293 @@
+<!--
+  ONE press/warning/error sound engine for every page nzbfast serves that
+  has controls on it: the dashboard and the wall.
+
+  Before this file the wall carried a cut-down HAND COPY of the
+  dashboard's engine as it stood before the per-action vocabulary
+  landed - about twenty lines, one 1750->650 Hz blip for all 105 of its
+  controls, no master gain node (so the Settings volume slider had no
+  effect on it at all), no read of the per-event preferences (so
+  unchecking "Button press" did not silence it), and still carrying the
+  frozen-clock bug the dashboard's copy had already been fixed for. A
+  copy that agrees until it does not is exactly the copy-paste-sibling
+  drift CLAUDE.md's build section keeps growing gates to refuse, so the
+  engine is a partial both pages receive rather than two files somebody
+  has to remember to move together.
+
+  assets.rs (ui_themed) substitutes this whole snippet for the sound
+  placeholder in each page's <head>, beside the design tokens and by the
+  same mechanism. Do not write the placeholder's literal name in here: a
+  single `.replace` does not recurse, so it would be re-emitted into
+  every served page (the trap ui-tokens.html's own header records).
+
+  WHAT IS HERE and what is not. Here: the master switch, the preferences,
+  the audio context and its one enveloped note, the sixteen press
+  recipes, the classifier that decides which recipe a control gets, and
+  the four global hooks (press, first-gesture unlock, value-settled,
+  confirm/prompt). NOT here: the dashboard's `SND` event registry
+  (download complete, queue finished, connection lost), its voice
+  announcements, its audible-speed mode and the Settings UI that drives
+  all of them - those are one page's, and the wall has no Settings panel
+  to put them in. The split is "what a PRESS sounds like" against "what
+  the DAEMON sounds like"; the second is the dashboard's alone today.
+-->
+<script>
+// Click acknowledgment: a short blip + accent pulse the instant any
+// control is PRESSED (pointerdown, not click - no waiting for release),
+// so a press always visibly/audibly lands even while its round-trip
+// runs. Sound is a per-browser preference (Settings -> Interface);
+// the flash animation is auto-disabled under prefers-reduced-motion.
+// ---- Sounds: a tiny WebAudio synth behind a master switch, a volume
+// and per-event toggles. Every sound is synthesized at trigger time
+// from oscillator notes - no audio files. All preferences live in this
+// browser (localStorage), never on the server.
+//
+// The whole `sndPrefs` object is normalised HERE, including the two
+// fields only the dashboard's audible-speed mode reads: one file
+// defines the shape of the preference blob both pages share, which is
+// the point of sharing it. Two initialisers that can disagree about a
+// default is the thing this file exists to stop.
+let sndOn=localStorage.nzbfastSounds!=='off', AC=null, sndMaster=null;
+let sndPrefs=(()=>{ try{ return JSON.parse(localStorage.nzbfastSnd)||{}; }catch(e){ return {}; } })();
+sndPrefs.ev=sndPrefs.ev||{};
+if(!(sndPrefs.vol>=0)) sndPrefs.vol=0.5;
+if(!sndPrefs.speedMode) sndPrefs.speedMode='off';
+if(!(sndPrefs.toneSecs>0)) sndPrefs.toneSecs=2;
+function saveSndPrefs(){ localStorage.nzbfastSnd=JSON.stringify(sndPrefs); }
+function actx(){
+  AC=AC||new (window.AudioContext||window.webkitAudioContext)();
+  if(AC.state==='suspended') AC.resume();
+  if(!sndMaster){ sndMaster=AC.createGain(); sndMaster.connect(AC.destination); }
+  // Perceptual volume: square the slider so 50% sounds like half.
+  sndMaster.gain.value=sndPrefs.vol*sndPrefs.vol;
+  return AC;
+}
+// THE ONE CLICK THAT WOULD STILL HAVE BEEN SILENT, and why this is a
+// queue rather than the obvious listener reorder. `resume()` is ASYNC:
+// on the first press after a background event has left the context
+// suspended, the unlock is in flight while the press's own notes are
+// being scheduled, so the state is still 'suspended' when they ask - and
+// moving the unlock listener ahead of the blip handler does NOT change
+// that, because both run in the same tick and the promise settles after
+// it. Measured: reordering alone leaves the first press silent. So the
+// notes WAIT for the resume and are replayed on the far side of it.
+//
+// TWO BOUNDS, because a queue that just grows turns a quiet minute into
+// a burst the moment somebody clicks. A press is one to three notes
+// inside a few milliseconds, so eight is more than one press and less
+// than a backlog; and anything older than the stale window is dropped
+// rather than played late, since a sound that arrives a second after the
+// press it answers is worse than no sound at all. Both are deliberately
+// small: this queue exists to carry ONE press across a resume, never to
+// remember a page's history.
+const SND_Q_MAX=8, SND_Q_STALE_MS=400;
+let sndQ=[], sndQArmed=false;
+function queueNote(ac,freq,opts){
+  if(sndQ.length>=SND_Q_MAX) return;
+  sndQ.push({freq,opts,at:Date.now()});
+  if(sndQArmed) return;
+  sndQArmed=true;
+  const flush=()=>{
+    sndQArmed=false;
+    const q=sndQ; sndQ=[];
+    // Still not running means the browser refused the resume - this was
+    // not a user gesture after all. Drop the queue rather than holding
+    // it against a click that may never come.
+    if(ac.state!=='running') return;
+    const now=Date.now();
+    for(const n of q) if(now-n.at<=SND_Q_STALE_MS) note(n.freq,n.opts);
+  };
+  // `.then(flush, flush)` and not `.finally`: a REJECTED resume must
+  // also clear the armed flag and the queue, or the next press queues
+  // behind a promise that already failed and nothing ever plays again.
+  try{ ac.resume().then(flush, flush); }catch(e){ sndQArmed=false; sndQ=[]; }
+}
+// One enveloped oscillator note - every recipe below is built from these.
+function note(freq,{at=0,dur=.3,type='sine',gain=.09,to=null}={}){
+  const ac=actx();
+  // A SUSPENDED context has a FROZEN clock, so everything scheduled at
+  // `currentTime + at` lands in the past the instant it resumes: the
+  // oscillator starts and stops in the same tick and you hear nothing.
+  // That is the shape of "I clicked and there was no sound" - one
+  // background event (a completion, an update check) builds the context
+  // outside a user gesture, the browser refuses to resume it, and every
+  // press after that schedules into the freeze. `unlockAudio` below
+  // opens it on the first gesture; this refuses to pretend in the window
+  // before that, rather than silently dropping notes into a dead clock.
+  if(ac.state!=='running'){ queueNote(ac,freq,{at,dur,type,gain,to}); return; }
+  const t=ac.currentTime+at+.005, o=ac.createOscillator(), g=ac.createGain();
+  o.type=type; o.frequency.setValueAtTime(freq,t);
+  if(to) o.frequency.exponentialRampToValueAtTime(to,t+dur);
+  g.gain.setValueAtTime(0.001,t);
+  g.gain.exponentialRampToValueAtTime(gain,t+.015);
+  g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+  o.connect(g); g.connect(sndMaster);
+  o.start(t); o.stop(t+dur+.02);
+}
+
+// ---- Per-action acknowledgments. The generic blip said a control had
+// been pressed and nothing about WHICH, so a delete, a nudge up and a
+// nudge down were one sound. Each recipe here is a shape you can name
+// with your eyes shut: direction is pitch direction, a removal falls and
+// lands, a refusal buzzes, a toggle answers itself an octave away.
+//
+// They all ride the ONE `click` preference rather than adding ten more
+// checkboxes to Settings - one press is one preference, and the thing
+// being chosen is whether presses talk back at all, not which of them do.
+const ACT={
+  click:  ()=>note(1750,{dur:.07,gain:.14,to:650}),
+  up:     ()=>{note(587.33,{dur:.06,gain:.12}); note(880,{at:.05,dur:.1,gain:.12});},
+  down:   ()=>{note(880,{dur:.06,gain:.12}); note(587.33,{at:.05,dur:.1,gain:.12});},
+  top:    ()=>[659.26,987.77,1318.5].forEach((f,i)=>note(f,{at:i*.045,dur:.1,gain:.1})),
+  remove: ()=>{note(392,{dur:.07,gain:.13,type:'triangle',to:196});
+               note(147,{at:.06,dur:.15,gain:.11,type:'triangle'});},
+  drop:   ()=>{note(330,{dur:.05,gain:.1,type:'triangle'});
+               note(220,{at:.04,dur:.13,gain:.12,type:'triangle'});},
+  on:     ()=>{note(523.25,{dur:.05,gain:.11,type:'square'});
+               note(1046.5,{at:.045,dur:.09,gain:.06,type:'square'});},
+  off:    ()=>{note(1046.5,{dur:.05,gain:.06,type:'square'});
+               note(523.25,{at:.045,dur:.09,gain:.11,type:'square'});},
+  bottom: ()=>[1318.5,987.77,659.26].forEach((f,i)=>note(f,{at:i*.045,dur:.1,gain:.1})),
+  open:   ()=>note(740,{dur:.07,gain:.08,to:1245}),
+  close:  ()=>note(1245,{dur:.07,gain:.08,to:740}),
+  // Switching between views is a lateral move, so it does not rise or
+  // fall: one flat tick, quieter than a press, because it happens a lot.
+  tab:    ()=>note(1046.5,{dur:.05,gain:.07,type:'square'}),
+  // A value SETTLED - a select closed on a choice, a slider let go, a
+  // text field committed. Softer again: it confirms, it does not announce.
+  select: ()=>note(1568,{dur:.045,gain:.055}),
+  // A link that leaves this page. Two notes going away from you.
+  nav:    ()=>{note(880,{dur:.06,gain:.09}); note(1174.7,{at:.055,dur:.11,gain:.07});},
+  // WARNING: the page is about to ask you something you cannot take
+  // back. Two mid knocks - it asks, it does not deny.
+  warn:   ()=>{note(466.16,{dur:.1,gain:.12,type:'triangle'});
+               note(466.16,{at:.16,dur:.14,gain:.12,type:'triangle'});},
+  // ERROR: refused, failed, rejected. Low and rough, and the one sound
+  // here nobody could mistake for an acknowledgment.
+  refuse: ()=>{note(196,{dur:.11,gain:.11,type:'sawtooth'});
+               note(174.61,{at:.1,dur:.18,gain:.11,type:'sawtooth'});},
+};
+// One door for all of them, so the master switch and the `click` toggle
+// are asked exactly once. An unknown kind is the plain blip, which is
+// what a `data-snd` typo should sound like: still an acknowledgment.
+function actSnd(kind){
+  if(!sndOn) return;
+  // Three preferences, not one: the press family, warnings, errors. An
+  // unknown kind is the plain blip, which is what a `data-snd` typo
+  // should sound like - still an acknowledgment, never silence.
+  const pref = kind==='warn' ? 'warn' : kind==='refuse' ? 'refuse' : 'click';
+  if(sndPrefs.ev[pref]===false) return;
+  try{ (ACT[kind]||ACT.click)(); }catch(e){}
+}
+function clickBlip(kind){ actSnd(kind); }
+// Which sound a control gets, in priority order. An explicit `data-snd`
+// wins; after that the answer is derived from what the control IS and
+// from the state the press is about to move it INTO - so the 600-odd
+// controls on this page, and the next one somebody adds, are covered
+// without a list anybody has to remember to extend.
+//
+// TWO RULES ARE WORTH READING TWICE. A control carrying `aria-pressed`
+// beside SIBLINGS that carry it too is a segmented control, not a
+// switch: picking a view is a lateral move and gets the flat `tab`
+// tick, while a lone `aria-pressed` really is on/off. And the glyph
+// rule is not a guess at language - ✕ ↑ ↓ ⏫ ⏬ 🗑 are the same
+// characters in all 27 catalogues, which is what lets one rule cover
+// every list row on the page (queue, history, servers, watchlist,
+// categories, smart folders). A WORD is never matched, because a word
+// rule would be right in English and wrong in twenty-six other places.
+function sndKindFor(el){
+  const explicit=el.getAttribute('data-snd');
+  if(explicit) return explicit;
+  const tag=el.tagName.toLowerCase();
+  // Everything below reads the OLD state: this runs on pointerDOWN, so
+  // the sound names where the press is about to land, not where it is.
+  if(el.type==='checkbox') return el.checked?'off':'on';
+  const pressed=el.getAttribute('aria-pressed');
+  if(pressed==='true'||pressed==='false'){
+    const par=el.parentElement;
+    const siblings=par?par.querySelectorAll(':scope > [aria-pressed]').length:1;
+    return siblings>1 ? 'tab' : (pressed==='true'?'off':'on');
+  }
+  const expanded=el.getAttribute('aria-expanded');
+  if(expanded==='true'||expanded==='false') return expanded==='true'?'close':'open';
+  if(tag==='summary') return el.parentElement&&el.parentElement.open?'close':'open';
+  if(tag==='select') return 'open';
+  if(el.classList.contains('danger')) return 'remove';
+  if(tag==='a'){
+    const h=el.getAttribute('href')||'';
+    return (h&&h.charAt(0)!=='#'&&!/^javascript:/i.test(h))?'nav':'click';
+  }
+  // BY CODE POINT, not `charAt(0)`: 🗑 is U+1F5D1, outside the BMP, so
+  // charAt hands back half a surrogate pair and the lookup misses. The
+  // other five glyphs here are all BMP, which is exactly why that bug
+  // would have shipped looking like it worked - measured, the delete
+  // buttons that carry a bin rather than a cross were falling through to
+  // the plain blip.
+  const first=Array.from((el.textContent||'').trim())[0]||'';
+  return {'✕':'remove','✖':'remove','×':'remove','🗑':'remove',
+          '↑':'up','↓':'down','⏫':'top','⏬':'bottom'}[first]||'click';
+}
+// WHAT COUNTS AS A CONTROL. The base list is what both pages have in
+// common; a page appends its own shapes to it. The wall's release tile
+// is a `.card` with `role="button"` and a delegated handler, so it
+// carries none of the base selectors - and the dashboard's `.card` is a
+// LAYOUT PANEL, 55 of them, so folding the wall's shape into the base
+// would blip on every press anywhere inside a dashboard panel. The list
+// is read at EVENT time, so a page may extend it whenever it likes.
+const SND_PRESS_SEL=['button','select','a','[onclick]','summary','input[type=checkbox]'];
+addEventListener('pointerdown', e=>{
+  const el=e.target.closest(SND_PRESS_SEL.join(','));
+  if(!el||el.disabled) return;
+  // A control whose whole purpose is to play a sound must not also fire
+  // the generic button click - you'd hear two sounds at once and could
+  // not tell which one you were auditioning.
+  if(!el.hasAttribute('data-noblip')) clickBlip(sndKindFor(el));
+  el.classList.remove('clickflash'); void el.offsetWidth;
+  el.classList.add('clickflash');
+}, true);
+// The browser will only start an AudioContext from inside a user
+// gesture, and a page that has already run a background event has one
+// built and SUSPENDED by then (see note() above). So take the first
+// gesture of any kind and open the clock with it - once, then stop
+// listening. `capture` and `once` on all three, and it is deliberately
+// NOT folded into the blip handler above: a keyboard user who never
+// points at anything still has to be able to hear a completion.
+{
+  const unlockAudio=()=>{ try{ actx(); }catch(e){} };
+  for(const ev of ['pointerdown','keydown','touchstart'])
+    addEventListener(ev, unlockAudio, {capture:true, once:true});
+}
+addEventListener('change', e=>{
+  const el=e.target; if(!el||!el.tagName) return;
+  const tag=el.tagName.toLowerCase(), type=(el.type||'').toLowerCase();
+  // A checkbox already answered on pointerdown with the state it was
+  // moving into, and a file picker has the upload's own toast.
+  if(type==='checkbox'||type==='radio'||type==='file') return;
+  if(tag==='select'||tag==='textarea'||(tag==='input'&&
+      ['text','number','password','email','search','url','tel','range','color','date'].indexOf(type)>=0))
+    actSnd('select');
+}, true);
+// Every "are you sure?" knocks first and every request for a value
+// opens - one hook each, rather than the 28 and 12 call sites they have
+// between them, so the next one somebody writes is covered too. A
+// synchronous modal blocks this thread and not the audio one, so the
+// sound really does land before the dialog paints.
+{
+  const nativeConfirm=window.confirm.bind(window), nativePrompt=window.prompt.bind(window);
+  window.confirm=(m)=>{ actSnd('warn'); return nativeConfirm(m); };
+  window.prompt=(m,d)=>{ actSnd('open'); return nativePrompt(m,d); };
+}
+// "Pop up errors" (Settings -> Sounds). An error you cannot see is an
+// error you act on ten minutes late, and a toast lives in THIS tab, on
+// THIS screen, for six seconds. A desktop notification is the one
+// channel that reaches someone whose dashboard is behind something
+// else. Deliberately errors only: a notification for every ordinary
+// acknowledgment is a notification people switch off within a day.
+function popupErr(msg){
+  if(!sndPrefs.popupErr || typeof Notification==='undefined') return;
+  if(Notification.permission!=='granted') return;
+  // The product name is the title - it is a brand, so it needs no
+  // catalogue entry, and the daemon's own sentence is the body.
+  try{ new Notification('nzbfast', {body:String(msg||'').slice(0,240)}); }catch(e){}
+}
+</script>

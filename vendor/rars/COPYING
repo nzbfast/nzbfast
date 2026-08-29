@@ -1,5 +1,30 @@
-WTFPL licensed with 1 extra clause
+This fork of `rars` is licensed MIT OR Apache-2.0.
 
-1. don't blame me
+See LICENSE-MIT and LICENSE-APACHE beside this file for the two texts.
+Either may be chosen, at your option.
 
-It's all yours, including all the blame.
+## Why this file no longer says WTFPL
+
+Upstream https://github.com/bitplane/rars states its licence two ways,
+and they disagree with each other:
+
+  * its repo-root COPYING says "WTFPL licensed with 1 extra clause /
+    1. don't blame me / It's all yours, including all the blame";
+  * its workspace Cargo.toml declares `license = "MIT OR Apache-2.0"`,
+    and every version published to crates.io (0.9.0 through 0.9.3 as of
+    26 Aug 2026) carries that same MIT OR Apache-2.0 metadata.
+
+Upstream ships no MIT or Apache-2.0 text of its own - COPYING and
+README.md are the only such files in its root - so GitHub's own licence
+detector reports the repository as "Other / NOASSERTION".
+
+Earlier vendoring copied upstream's COPYING verbatim while our
+Cargo.toml carried upstream's OTHER answer, so this directory asserted
+both at once. That is now settled in one direction: WTFPL explicitly
+permits relicensing, and MIT OR Apache-2.0 is what the upstream author
+himself declares and publishes, so this fork states it, ships both
+texts, and is classifiable by SPDX tooling.
+
+The original work is bitplane's. The fork carries substantial
+modifications made for nzbfast; upstream is credited above and in
+COPYRIGHT.md, and the vendoring policy is in VENDORING.md.

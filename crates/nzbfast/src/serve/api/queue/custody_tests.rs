@@ -156,6 +156,64 @@ fn a_recategorize_with_no_sidecar_moves_the_partial_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Codex C10: the queue store refuses AFTER the recategorize moved the
+/// partial tree. The relocation fence prevents the live scheduling
+/// race, not a restart after refused persistence - so the refused save
+/// has to roll the whole transaction back, record and bytes together,
+/// or the durable row restores the old path while the partial bytes sit
+/// orphaned at the new one.
+#[test]
+fn a_refused_save_rolls_the_recategorize_back_whole() {
+    use crate::serve::storecut::{Store, arm_store_cut, disarm};
+    let dir = tmp("recatcut");
+    let d = test_daemon(&dir);
+    let old = d.out_dir().join("Rolled.Release");
+    std::fs::create_dir_all(&old).expect("old dir");
+    std::fs::write(old.join(".nzbfast.journal"), b"journal").expect("journal");
+    std::fs::write(old.join("part01.rar"), b"landed bytes").expect("part file");
+
+    let job = Arc::new(Mutex::new(
+        job_from_json(&serde_json::json!({
+            "nzo_id": "nzo-recat-2",
+            "name": "Rolled.Release",
+            "nzb_path": "/tmp/x.nzb",
+            "out_dir": old.to_string_lossy(),
+            "state": "Queued",
+        }))
+        .expect("job"),
+    ));
+    let old_cat = job.lock_ok().category.clone();
+    d.queue.lock_ok().push_back(job.clone());
+
+    arm_store_cut(&[Store::Queue]);
+    let fence = requeue_category(&d, &job, "Rolled.Release", "movies").expect("recategorize");
+    let newdir = job.lock_ok().out_dir.clone();
+    assert_ne!(newdir, old, "the transaction re-pointed the record");
+    assert!(
+        !persist_relocations(&d, vec![fence]),
+        "the armed cut must refuse the save"
+    );
+    disarm();
+
+    let (cat, out, relocating) = {
+        let g = job.lock_ok();
+        (g.category.clone(), g.out_dir.clone(), g.relocating)
+    };
+    assert_eq!(cat, old_cat, "the label went back with the refusal");
+    assert_eq!(out, old, "the record names the old path again");
+    assert_eq!(relocating, 0, "the fence lifted after the rollback");
+    assert!(
+        old.join("part01.rar").exists() && old.join(".nzbfast.journal").exists(),
+        "the partial tree came back to the path the durable row still names"
+    );
+    assert!(
+        !newdir.exists(),
+        "no orphaned bytes may stay at the path no record names"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A history-less delete of a LIVE job drops the queue row durably at
 /// once and unlinks the spooled `.nzb` only when the download drains
 /// (`spend_deferred_delete`). A kill in that window left an adoptable

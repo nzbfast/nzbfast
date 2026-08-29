@@ -13,6 +13,7 @@
 //! lines of table-driven cases were most of the parent, same pattern
 //! as cleanup_mode_tests.rs beside it.
 
+use super::movetree::*;
 use super::testkit::*;
 use super::*;
 
@@ -99,18 +100,6 @@ fn mover_errors_name_the_operation_and_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Poll until `f()` holds or ~10 s pass: the deferred-trash worker is
-/// asynchronous on purpose, so its outcomes need a bounded wait.
-fn eventually(f: impl Fn() -> bool) -> bool {
-    for _ in 0..200 {
-        if f() {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    f()
-}
-
 #[test]
 fn staged_delete_leaves_the_tree_synchronously() {
     let _steady = trash_globals_steady();
@@ -129,8 +118,9 @@ fn staged_delete_leaves_the_tree_synchronously() {
     let r = deferred_trash::stage(&f, &staging);
     assert!(r.is_ok(), "stage: {r:?}");
     assert!(!f.exists(), "the rename must be synchronous");
+    deferred_trash::drained();
     assert!(
-        eventually(|| !staging.exists()),
+        !staging.exists(),
         "the worker must dispose of the parked file and prune the empty staging dir"
     );
     let _ = std::fs::remove_dir_all(&parent);
@@ -152,8 +142,9 @@ fn first_stage_drains_a_predecessors_leftovers() {
     let f = job.join("junk.nfo");
     std::fs::write(&f, b"x").unwrap();
     deferred_trash::stage(&f, &staging).unwrap();
+    deferred_trash::drained();
     assert!(
-        eventually(|| !leftover.exists() && !staging.exists()),
+        !leftover.exists() && !staging.exists(),
         "the leftover must go with the freshly staged file"
     );
     let _ = std::fs::remove_dir_all(&parent);
@@ -197,10 +188,13 @@ fn the_drain_takes_only_what_this_module_staged() {
     std::fs::write(&f, b"x").unwrap();
     deferred_trash::stage(&f, &staging).unwrap();
 
-    assert!(
-        eventually(|| !ours.exists()),
-        "our own leftover is still drained"
-    );
+    // The fence, and not a poll on `ours`: a poll returns as soon as our
+    // own leftover goes, which is BEFORE the worker has had the chance
+    // to adopt anything else - so the two sentinel asserts below were
+    // passing on a worker that had not got to them yet, whether it would
+    // have taken them or not.
+    deferred_trash::drained();
+    assert!(!ours.exists(), "our own leftover is still drained");
     assert!(sentinel.exists(), "an unrelated FILE must survive");
     assert!(sentinel_dir.exists(), "an unrelated FOLDER must survive");
     let _ = std::fs::remove_dir_all(&parent);
@@ -275,14 +269,19 @@ fn a_refused_disposal_is_retried_by_the_next_stage() {
     let first = job.join("one.par2");
     std::fs::write(&first, b"x").unwrap();
     deferred_trash::stage(&first, &staging).unwrap();
+    // The fence, and not a poll: the worker prunes an emptied staging
+    // root at the END of the same iteration that disposed of the file,
+    // and a poll on the folder cannot see that step pending. Clearing
+    // `stuck` below empties the root, so a poll that returned early
+    // handed the pending prune the staging folder - and the write after
+    // it failed `NotFound`. See `deferred_trash::drained`.
+    deferred_trash::drained();
     assert!(
-        eventually(|| {
-            std::fs::read_dir(&staging)
-                .map(Iterator::count)
-                .unwrap_or(0)
-                == 1
-                && stuck.exists()
-        }),
+        std::fs::read_dir(&staging)
+            .map(Iterator::count)
+            .unwrap_or(0)
+            == 1
+            && stuck.exists(),
         "the refused leftover is all that should be left in the staging folder"
     );
 
@@ -295,8 +294,9 @@ fn a_refused_disposal_is_retried_by_the_next_stage() {
     let second = job.join("two.par2");
     std::fs::write(&second, b"x").unwrap();
     deferred_trash::stage(&second, &staging).unwrap();
+    deferred_trash::drained();
     assert!(
-        eventually(|| !staging.exists()),
+        !staging.exists(),
         "the second stage must re-drain the root it was refused in, \
          so the leftover goes and the empty folder is pruned"
     );

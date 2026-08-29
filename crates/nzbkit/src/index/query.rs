@@ -144,6 +144,37 @@ pub(super) fn stem_fold_arm(pfx: &str, p: &str) -> String {
 impl Index {
     /// Search by substring over the stem (case-insensitive), newest first.
     pub(super) fn search_once(&self, query: &str, limit: u32) -> rusqlite::Result<Vec<Release>> {
+        self.search_filtered(query, limit, false)
+    }
+
+    /// [`Self::search_once`] restricted to complete releases, with the
+    /// predicate INSIDE the SQL. The hunt and watchlist callers only
+    /// ever want complete rows, and filtering after the newest-first
+    /// LIMIT cannot recover what the cut dropped: a title with hundreds
+    /// of newer incompletes pushed its older complete copy past the
+    /// limit, so the local copy was invisible and indexer quota was
+    /// spent instead.
+    pub(super) fn search_complete_once(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<Release>> {
+        self.search_filtered(query, limit, true)
+    }
+
+    fn search_filtered(
+        &self,
+        query: &str,
+        limit: u32,
+        complete_only: bool,
+    ) -> rusqlite::Result<Vec<Release>> {
+        // ANDed onto the whole match clause (which is an OR of two
+        // legs), so it has to sit outside the parentheses.
+        let extra = if complete_only {
+            " AND complete = 1"
+        } else {
+            ""
+        };
         // Separator-insensitive, multi-term AND search: stems are stored
         // dotted ("Show.Name.S01E02") but *arr clients query with spaces
         // ("show name s01e02"), so normalize both sides to spaces and
@@ -182,7 +213,7 @@ impl Index {
             };
             let mut stmt = self.db.prepare(&format!(
                 "SELECT {REL_COLS} FROM releases
-                 WHERE id IN (SELECT rowid FROM rel_fts WHERE rel_fts MATCH ?1) {leg}
+                 WHERE (id IN (SELECT rowid FROM rel_fts WHERE rel_fts MATCH ?1) {leg}){extra}
                  ORDER BY first_seen DESC LIMIT ?2"
             ))?;
             let rows = stmt.query_map(rusqlite::params![m, limit], release_from_row)?;
@@ -216,7 +247,7 @@ impl Index {
             format!("({stem_chain}) OR (pre_title <> '' AND ({}))", chain(PS))
         };
         let sql = format!(
-            "SELECT {REL_COLS} FROM releases WHERE {where_clause}
+            "SELECT {REL_COLS} FROM releases WHERE ({where_clause}){extra}
              ORDER BY first_seen DESC LIMIT ?{}",
             terms.len() + 1
         );
@@ -287,10 +318,20 @@ impl Index {
         // and a caller that ranks complete-first cannot rank what the cut
         // threw away. A STABLE sort on the same key, so rows the two
         // rungs already ordered keep their relative order among equals.
+        //
+        // THE SAME KEY RUNG 1 ORDERS BY, part-ratio included, and it
+        // lacked that middle term until 28 Aug 2026. Ranking two
+        // incompletes by SIZE alone answers a question nobody asked: a
+        // 40 GB set holding 5% of its parts sorted ahead of a 12 GB one
+        // holding 99%, and the caller (`serve::indexers`, which queues
+        // the winner as a PARTIAL NZB) then fetched the one with almost
+        // nothing in it. Three keys, in the order rung 1 spells them.
+        let ratio = |r: &Release| r.have_parts as f64 / r.need_parts.max(1) as f64;
         let best_first = |out: &mut Vec<Release>| {
             out.sort_by(|a, b| {
                 b.complete
                     .cmp(&a.complete)
+                    .then_with(|| ratio(b).total_cmp(&ratio(a)))
                     .then_with(|| b.total_bytes.cmp(&a.total_bytes))
             });
         };
@@ -359,28 +400,74 @@ impl Index {
 
         // 2. FTS (or the LIKE fallback on a database without it), then
         //    verify: only a stem that really contains the header counts.
+        //
+        // TWO WINDOWS, AND THE SECOND ONLY WHEN THE FIRST CAME BACK
+        // FULL. The window is `ORDER BY first_seen DESC LIMIT
+        // FIND_SCAN_CAP` and `best_first` ranks complete-first AFTER it,
+        // which cannot rank a row the cut dropped - so a complete copy
+        // sitting behind 500 newer incomplete ones was invisible, and
+        // the NZBLNK ladder's last resort queued a PARTIAL NZB for a
+        // post this index holds whole. The same defect rung 1's ORDER BY
+        // closes, one rung down.
+        //
+        // WHY NOT SIMPLY ORDER THIS WINDOW COMPLETE-FIRST, which is the
+        // obvious move and was measured before it was rejected. On the
+        // FTS arm it is nearly free (29.7 -> 31.1 ms over a synthetic
+        // 200k-release index: the plan is a temp b-tree over the whole
+        // match set either way, so a richer sort key changes nothing).
+        // On the LIKE arm it is a CLIFF: today's `first_seen DESC` walks
+        // `idx_rel_seen` in order and stops at the cap, and a
+        // complete-leading key has no index to supply it, so the planner
+        // falls back to a full scan plus a sort. Measured on the same
+        // fixture, for a header common enough to hit the cap early:
+        // 0.77 ms -> 250 ms, a 320x regression - and scaled to the
+        // 16.5M-release index the rung-1 note above is measured on, that
+        // is tens of seconds holding the shared read connection. Worse,
+        // reordering is not even SOUND: the FTS match is broader than
+        // the fold verification that follows, so a complete-first window
+        // can fill with 500 rows that all fail verification and lose a
+        // row today's newest-first window would have found.
+        //
+        // The second window has neither problem. It is the SAME query
+        // with `complete = 1` added - same plan, same index walk, same
+        // bound - so what it returns is a strict ADDITION to what this
+        // rung already found, and it runs only when the cap was actually
+        // reached, which is the only case in which the cut can have
+        // dropped anything. A sub-cap window dropped nothing and pays
+        // nothing.
         let m = if self.fts {
             fts_match(header)
         } else {
             String::new()
         };
-        let cands: Vec<Release> = if !m.is_empty() {
-            let mut stmt = self.db.prepare(&format!(
-                "SELECT {REL_COLS} FROM releases
-                  WHERE id IN (SELECT rowid FROM rel_fts WHERE rel_fts MATCH ?1)
-                  ORDER BY first_seen DESC LIMIT ?2"
-            ))?;
-            stmt.query_map(rusqlite::params![m, FIND_SCAN_CAP], release_from_row)?
-                .collect::<Result<_, _>>()?
-        } else {
-            let arm = stem_fold_arm("", "?1");
-            let mut stmt = self.db.prepare(&format!(
-                "SELECT {REL_COLS} FROM releases WHERE {arm}
-                  ORDER BY first_seen DESC LIMIT ?2"
-            ))?;
-            stmt.query_map(rusqlite::params![want, FIND_SCAN_CAP], release_from_row)?
-                .collect::<Result<_, _>>()?
+        let scan = |only_complete: bool| -> rusqlite::Result<Vec<Release>> {
+            let extra = if only_complete {
+                " AND complete = 1"
+            } else {
+                ""
+            };
+            if !m.is_empty() {
+                let mut stmt = self.db.prepare(&format!(
+                    "SELECT {REL_COLS} FROM releases
+                      WHERE id IN (SELECT rowid FROM rel_fts WHERE rel_fts MATCH ?1){extra}
+                      ORDER BY first_seen DESC LIMIT ?2"
+                ))?;
+                stmt.query_map(rusqlite::params![m, FIND_SCAN_CAP], release_from_row)?
+                    .collect()
+            } else {
+                let arm = stem_fold_arm("", "?1");
+                let mut stmt = self.db.prepare(&format!(
+                    "SELECT {REL_COLS} FROM releases WHERE {arm}{extra}
+                      ORDER BY first_seen DESC LIMIT ?2"
+                ))?;
+                stmt.query_map(rusqlite::params![want, FIND_SCAN_CAP], release_from_row)?
+                    .collect()
+            }
         };
+        let mut cands = scan(false)?;
+        if cands.len() as u32 >= FIND_SCAN_CAP {
+            cands.extend(scan(true)?);
+        }
         push(
             cands
                 .into_iter()
@@ -404,18 +491,49 @@ impl Index {
             .replace('\\', "\\\\")
             .replace('%', "\\%")
             .replace('_', "\\_");
+        // `DISTINCT`, so `FIND_SCAN_CAP` counts RELEASES and not FILE
+        // PARTS. Without it the cap is spent on the parts of a handful
+        // of releases - a 400-part set eats four fifths of it on its own
+        // - and everything behind them is dropped before the ranking
+        // below ever sees it. Measured on a synthetic index whose first
+        // forty releases each carry 400 matching parts: 2 releases
+        // reached without it and all 40 with, at the same cost (107 vs
+        // 100 us on a hit, 997 vs 990 us on a miss - the scan is the
+        // same covering walk of `sqlite_autoindex_files_1` either way).
+        //
+        // Then the same two-window shape rung 2 uses, and for the same
+        // reason: when the cap is reached the cut can have dropped a
+        // complete release, and `best_first` below cannot rank what it
+        // never received. The twin puts `complete = 1` INSIDE the
+        // bounded subquery - joining `releases` on the rowid it already
+        // has - because adding it to the OUTER query would filter the
+        // same truncated 500 and recover nothing.
         let mut stmt = self.db.prepare(&format!(
             "SELECT {REL_COLS} FROM releases WHERE id IN (
-                 SELECT release_id FROM files
+                 SELECT DISTINCT release_id FROM files
                   WHERE filename LIKE ?1 || '%' ESCAPE '\\' LIMIT ?2)
               ORDER BY first_seen DESC"
         ))?;
         // Instrument-first: this scan is the one an index would replace -
         // time it and record how it went. See `note_filename_fallback`.
         let t0 = std::time::Instant::now();
-        let rows: Vec<Release> = stmt
+        let mut rows: Vec<Release> = stmt
             .query_map(rusqlite::params![esc, FIND_SCAN_CAP], release_from_row)?
             .collect::<Result<_, _>>()?;
+        if rows.len() as u32 >= FIND_SCAN_CAP {
+            let mut stmt = self.db.prepare(&format!(
+                "SELECT {REL_COLS} FROM releases WHERE id IN (
+                     SELECT DISTINCT f.release_id FROM files f
+                       JOIN releases r ON r.id = f.release_id
+                      WHERE f.filename LIKE ?1 || '%' ESCAPE '\\'
+                        AND r.complete = 1 LIMIT ?2)
+                  ORDER BY first_seen DESC"
+            ))?;
+            let more: Vec<Release> = stmt
+                .query_map(rusqlite::params![esc, FIND_SCAN_CAP], release_from_row)?
+                .collect::<Result<_, _>>()?;
+            rows.extend(more);
+        }
         note_filename_fallback(header, !rows.is_empty(), t0.elapsed());
         push(rows, &mut out);
         best_first(&mut out);
@@ -1377,6 +1495,52 @@ mod tests {
         teardown(&dir, ix);
     }
 
+    /// `search_complete` pushes the predicate INSIDE the SQL, before the
+    /// newest-first LIMIT. The hunt/watchlist idiom it replaces -
+    /// `search(...).filter(|r| r.complete)` - cannot recover a complete
+    /// copy OLDER than a limit's worth of incompletes, because the cut
+    /// has already dropped it.
+    #[test]
+    fn search_complete_finds_a_complete_copy_older_than_the_cut() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-searchcomp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        // The complete row is the OLDEST (first_seen 1000); eleven newer
+        // incompletes follow, so a limit of 8 cuts it before any caller
+        // filter can see it.
+        for i in 0..12 {
+            let complete = i32::from(i == 0);
+            ix.db
+                .execute(
+                    "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                          first_seen, total_bytes, have_parts, need_parts)
+                     VALUES(?1, ?2, 'alt.binaries.misc', 1, ?3, 50, ?4, 10, 10, 10)",
+                    rusqlite::params![
+                        format!("Some.Show.S03E0{i}.1080p"),
+                        format!("p{i}@x"),
+                        complete,
+                        1000 + i64::from(i)
+                    ],
+                )
+                .unwrap();
+        }
+        // The old idiom: newest-first cut first, complete filter after -
+        // nothing survives. This is the defect, pinned.
+        let plain = ix.search("some show", 8).unwrap();
+        assert_eq!(plain.len(), 8);
+        assert!(plain.iter().all(|r| !r.complete));
+        // FTS arm (a real query) and LIKE arm (empty query) both carry
+        // the predicate before the LIMIT.
+        let hits = ix.search_complete("some show", 8).unwrap();
+        assert_eq!(hits.len(), 1, "only the complete row comes back");
+        assert!(hits[0].complete);
+        let hits = ix.search_complete("", 8).unwrap();
+        assert_eq!(hits.len(), 1, "the LIKE arm filters too");
+        assert!(hits[0].complete);
+        teardown(&dir, ix);
+    }
+
     /// The instrument-first census records the rung it brackets: a
     /// filename-only header pays for the scan and is counted a HIT, a
     /// header nothing holds is counted a MISS with its wall time, and a
@@ -1469,6 +1633,249 @@ mod tests {
             after_miss.hit_nanos, after_hit.hit_nanos,
             "a miss charged its wall time to the hit path"
         );
+        teardown(&dir, ix);
+    }
+    /// Rung 2 finds a complete copy sitting behind a full window of
+    /// newer incomplete ones.
+    ///
+    /// The window is `ORDER BY first_seen DESC LIMIT FIND_SCAN_CAP` and
+    /// the complete-first ranking runs AFTER it, so a cut that fills
+    /// with 500 newer incompletes made the complete row invisible - and
+    /// `serve::indexers`, which ranks complete-first among the eight it
+    /// is handed and queues the winner, then fetched a PARTIAL NZB for a
+    /// post this index holds whole. The fix is a second, identically
+    /// bounded `complete = 1` window, run only when the first came back
+    /// full; this pins the case where it must fire.
+    #[test]
+    fn rung_two_finds_a_complete_copy_behind_a_full_scan_window() {
+        let _census = census_lock();
+        let dir = std::env::temp_dir().join(format!("nzbfast-rung2cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        assert!(ix.fts, "this test is about the FTS arm of rung 2");
+
+        // The header is a PREFIX of every stem and equal to none, so
+        // rung 1 (exact stem, both collations) misses and the ladder
+        // reaches rung 2. FIND_SCAN_CAP + 1 incomplete generations, all
+        // newer than the one complete copy - so the newest-first window
+        // is full before it ever reaches it.
+        let header = "floodhdr.2026.1080p";
+        ix.db.execute_batch("BEGIN").unwrap();
+        {
+            let mut st = ix
+                .db
+                .prepare(
+                    "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                          first_seen, total_bytes, have_parts, need_parts)
+                     VALUES(?1, 'bot@x', 'alt.binaries.misc', 1, ?2, ?3, ?3, ?4, ?5, 100)",
+                )
+                .unwrap();
+            // The complete one FIRST in rowid order and OLDEST by
+            // first_seen, so no walk order can stumble onto it.
+            st.execute(rusqlite::params![
+                format!("{header}.gen0.web.x264-grp"),
+                1,
+                1i64,
+                5_000_000_000i64,
+                100i64
+            ])
+            .unwrap();
+            for i in 1..=(FIND_SCAN_CAP + 1) {
+                st.execute(rusqlite::params![
+                    format!("{header}.gen{i}.web.x264-grp"),
+                    0,
+                    1000i64 + i64::from(i),
+                    9_000_000_000i64,
+                    5i64
+                ])
+                .unwrap();
+            }
+        }
+        ix.db.execute_batch("COMMIT").unwrap();
+
+        let hits = ix.find_by_header(header, 8).unwrap();
+        assert_eq!(hits.len(), 8, "the caller's cap still holds");
+        assert!(
+            hits[0].complete,
+            "the complete copy must survive a full window of newer incompletes"
+        );
+        assert_eq!(
+            hits[0].stem,
+            format!("{header}.gen0.web.x264-grp"),
+            "and it is the one generation that is actually complete"
+        );
+        teardown(&dir, ix);
+    }
+
+    /// Rung 3's `FIND_SCAN_CAP` counts RELEASES, not file PARTS.
+    ///
+    /// The bounded subquery reads `files`, and a multi-part set carries
+    /// hundreds of rows there, so an undeduplicated `LIMIT 500` spent
+    /// the whole cap on the parts of one or two releases and dropped
+    /// everything behind them - before the complete-first ranking below
+    /// could see any of it. `SELECT DISTINCT` makes the bound count what
+    /// the caller is actually choosing between.
+    #[test]
+    fn the_filename_rung_bounds_releases_and_not_their_parts() {
+        let _census = census_lock();
+        let dir = std::env::temp_dir().join(format!("nzbfast-rung3parts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+
+        // Three releases, each with 400 matching parts. The stems share
+        // nothing with the header, so rungs 1 and 2 both miss and the
+        // ladder reaches the filename scan. Undeduplicated, 500 file
+        // rows reach releases 1 and 2 only - and the COMPLETE one is
+        // release 3.
+        let parts = 400;
+        ix.db.execute_batch("BEGIN").unwrap();
+        {
+            let mut rel = ix
+                .db
+                .prepare(
+                    "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                          first_seen, total_bytes, have_parts, need_parts)
+                     VALUES(?1, 'p@x', 'alt.binaries.misc', ?2, ?3, 1, 1, 1000, ?4, 100)",
+                )
+                .unwrap();
+            let mut f = ix
+                .db
+                .prepare(
+                    "INSERT INTO files(release_id, filename, total_parts, bytes)
+                     VALUES(?1, ?2, ?3, 1)",
+                )
+                .unwrap();
+            for r in 1..=3i64 {
+                let complete = i32::from(r == 3);
+                rel.execute(rusqlite::params![
+                    format!("opaque.set.{r}"),
+                    parts,
+                    complete,
+                    if complete == 1 { 100i64 } else { 5 }
+                ])
+                .unwrap();
+                for p in 0..parts {
+                    f.execute(rusqlite::params![
+                        r,
+                        format!("9c2f70ab41.part{p:04}.rar"),
+                        parts
+                    ])
+                    .unwrap();
+                }
+            }
+        }
+        ix.db.execute_batch("COMMIT").unwrap();
+
+        let hits = ix.find_by_header("9c2f70ab41", 8).unwrap();
+        assert_eq!(hits.len(), 3, "all three releases are reachable: {hits:?}");
+        assert!(
+            hits[0].complete,
+            "and the complete one - which 500 undeduplicated file rows never reached - ranks first"
+        );
+        teardown(&dir, ix);
+    }
+
+    /// `best_first` ranks two incomplete copies by how much of each we
+    /// actually hold, not by how big each claims to be.
+    ///
+    /// Rung 1 has ordered on `have_parts/need_parts` since it gained an
+    /// ORDER BY; the Rust ranking rungs 2 and 3 share went straight from
+    /// `complete` to `total_bytes`, so a 40 GB set holding 5% of its
+    /// parts beat a 12 GB one holding 99% - and the caller queues the
+    /// winner as a partial NZB.
+    #[test]
+    fn the_ranking_prefers_the_fuller_copy_over_the_bigger_one() {
+        let _census = census_lock();
+        let dir = std::env::temp_dir().join(format!("nzbfast-rankratio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+
+        // Rung 1 orders in SQL, so this has to reach rung 2: the header
+        // is a prefix of both stems and equal to neither.
+        let header = "halfhdr.2026.1080p";
+        let put = |stem: &str, bytes: i64, have: i64| {
+            ix.db
+                .execute(
+                    "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                          first_seen, total_bytes, have_parts, need_parts)
+                     VALUES(?1, 'p@x', 'alt.binaries.misc', 1, 0, 1, ?2, ?3, ?4, 100)",
+                    rusqlite::params![stem, have, bytes, have],
+                )
+                .unwrap();
+        };
+        put(&format!("{header}.big.web.x264-grp"), 40_000_000_000, 5);
+        put(&format!("{header}.full.web.x264-grp"), 12_000_000_000, 99);
+
+        let hits = ix.find_by_header(header, 8).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(
+            hits[0].stem,
+            format!("{header}.full.web.x264-grp"),
+            "99% of a 12 GB set beats 5% of a 40 GB one"
+        );
+        teardown(&dir, ix);
+    }
+
+    /// Rung 3 finds a complete release behind a FULL window of matching
+    /// releases - the same two-window fix rung 2 gets, on the filename
+    /// scan. `DISTINCT` makes the bound count releases; it does not make
+    /// the bound infinite, so a header shared by more than
+    /// `FIND_SCAN_CAP` releases can still cut the complete one, and the
+    /// ranking below cannot rank what it never received.
+    #[test]
+    fn the_filename_rung_finds_a_complete_release_behind_a_full_window() {
+        let _census = census_lock();
+        let dir = std::env::temp_dir().join(format!("nzbfast-rung3cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+
+        // FIND_SCAN_CAP + 1 releases sharing one filename prefix, the
+        // COMPLETE one last by release id - so the bounded subquery,
+        // which walks `files` by (release_id, filename), fills on the
+        // incomplete ones and never reaches it.
+        let n = FIND_SCAN_CAP + 1;
+        ix.db.execute_batch("BEGIN").unwrap();
+        {
+            let mut rel = ix
+                .db
+                .prepare(
+                    "INSERT INTO releases(stem, poster, grp, files, complete, first_posted,
+                                          first_seen, total_bytes, have_parts, need_parts)
+                     VALUES(?1, 'p@x', 'alt.binaries.misc', 1, ?2, 1, 1, 1000, ?3, 100)",
+                )
+                .unwrap();
+            let mut f = ix
+                .db
+                .prepare(
+                    "INSERT INTO files(release_id, filename, total_parts, bytes)
+                     VALUES(?1, ?2, 1, 1)",
+                )
+                .unwrap();
+            for r in 1..=n {
+                let complete = i32::from(r == n);
+                rel.execute(rusqlite::params![
+                    format!("opaque.wide.{r}"),
+                    complete,
+                    if complete == 1 { 100i64 } else { 5 }
+                ])
+                .unwrap();
+                f.execute(rusqlite::params![r, format!("4b8e1d0c72.{r}.rar")])
+                    .unwrap();
+            }
+        }
+        ix.db.execute_batch("COMMIT").unwrap();
+
+        let hits = ix.find_by_header("4b8e1d0c72", 8).unwrap();
+        assert_eq!(hits.len(), 8, "the caller's cap still holds");
+        assert!(
+            hits[0].complete,
+            "the complete release must survive a full window of incomplete ones"
+        );
+        assert_eq!(hits[0].stem, format!("opaque.wide.{n}"));
         teardown(&dir, ix);
     }
 }

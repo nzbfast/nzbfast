@@ -56,6 +56,30 @@ pub struct Job {
     pub total_bytes: u64,
     pub out_dir: PathBuf,
     pub fail_message: String,
+    /// The classification of [`Self::fail_message`], as the PRODUCER
+    /// stated it - TODO 307 item 1's job-level carry.
+    ///
+    /// `None` means nobody stated one and the sentence is the only
+    /// evidence there is, which is the honest answer for a record
+    /// persisted before this field existed and for a failure whose
+    /// producer caught an error it cannot classify. Read it through
+    /// [`Self::fail_kind`], never directly: that is the one place the
+    /// fallback to the string classifier lives.
+    ///
+    /// Cleared with the message it explains - see [`Self::clear_failure`].
+    /// A code left behind by a cleared message is the one defect this
+    /// field introduces, and it is why the two are cleared by one method
+    /// rather than by two statements a reader has to remember.
+    ///
+    /// `pub(crate)` and not `pub` like its neighbours, because
+    /// [`FailKind`] is: a `pub` field naming a crate-private type is
+    /// what `private_interfaces` refuses, and that lint is only
+    /// reachable when `-p nzbfast-ffi` compiles this module as a LIB
+    /// (see CLAUDE.md's clippy gate). Narrowing the FIELD is the fix
+    /// d8bc07096 and bb8c6d633 both settled on for the same class;
+    /// widening the type would publish an application classification
+    /// nothing outside this crate has any use for.
+    pub(crate) fail_code: Option<FailKind>,
     /// The console block behind `fail_message`, captured when the job
     /// failed. Empty for everything that did not fail (and on platforms
     /// where the log tee does not run). See `fail_detail_snapshot`.
@@ -211,6 +235,18 @@ pub struct Job {
     /// persisted, so a restart gets a fresh ladder - deliberate, matching
     /// the auto-retry philosophy of "a restart is a new day".
     pub insurance_attempts: u32,
+    /// Why the last background insurance fetch stopped, in the daemon's
+    /// own words - the sentence the queue row shows once the ladder above
+    /// retires the post. `defer_reason` is the model: a bare count says
+    /// "three tries failed" where the sentence says whether the articles
+    /// are GONE (which is the news this whole feature exists to deliver
+    /// early) or the provider was simply down.
+    ///
+    /// NOT persisted, for the same reason `insurance_attempts` is not:
+    /// the ladder resets on a restart, and a reason kept beside a
+    /// zeroed count would be an undated claim about a fetch that is now
+    /// going to be retried anyway.
+    pub insurance_note: String,
     /// A real download of this job has completed (bytes are on disk).
     pub fetched: bool,
     /// User deleted this job while it was DOWNLOADING: the pipeline is
@@ -572,6 +608,20 @@ pub struct Job {
     /// restart does not have to re-derive it, and so a job whose lookup
     /// failed offline can be asked about later.
     pub inner_crc: u32,
+    /// TODO 309: which route this job's last run took through §94 A's
+    /// resume gate, and what that gate weighed - see
+    /// [`crate::streamhub::ResumeRoute`]. `None` on a run that replayed
+    /// nothing, which is every job that was not a resume.
+    ///
+    /// Persisted for the reason [`Self::whyslow`] is: the report is
+    /// asked for after the fact, often for a job that is already in
+    /// history and often after a restart, and by then the log lines the
+    /// engine wrote about the decision are long gone.
+    ///
+    /// OVERWRITTEN by every run, `None` included, unlike
+    /// [`Self::archive_shape`] and [`Self::inner_crc`] beside it - the
+    /// reasoning is at the write in `postproc.rs`.
+    pub resume_route: Option<crate::streamhub::ResumeRoute>,
     /// What an identity oracle said this release actually is: the
     /// canonical name, and the IMDb id that came with it. Empty when
     /// nothing was asked or nothing answered.
@@ -736,6 +786,35 @@ impl Job {
         self.finished_at = None;
         self.finished_unix = None;
         self.postproc_secs = 0.0;
+    }
+
+    /// This job's failure kind: the code its producer STATED, or - only
+    /// where nobody stated one - the string classifier over the sentence.
+    ///
+    /// TODO 307 item 1. Every job-terminal caller reads the
+    /// classification through here, so there is exactly one place the
+    /// fallback lives and exactly one place to look when asking which
+    /// evidence an answer rests on. See [`crate::failkind::job_kind`]
+    /// for what `None` still means and why the string path is not dead
+    /// code.
+    pub(in crate::serve) fn fail_kind(&self) -> FailKind {
+        crate::failkind::job_kind(self.fail_code, &self.fail_message)
+    }
+
+    /// Drop a terminal failure whole - the sentence AND the code that
+    /// classified it.
+    ///
+    /// One method rather than two statements because the pair is the
+    /// invariant: a `fail_code` outliving the `fail_message` it explains
+    /// would classify the job's NEXT failure by its previous one, and
+    /// that is a silent wrong answer on the auto-retry gate and the
+    /// dead-post report both. Four production paths clear a failure (the
+    /// manual retry, the demote requeue, and the two unlock arms that
+    /// turn an unpack failure back into a success) and a fifth is a
+    /// question of time; this is what the fifth will find.
+    pub(in crate::serve) fn clear_failure(&mut self) {
+        self.fail_message.clear();
+        self.fail_code = None;
     }
 }
 
@@ -944,7 +1023,7 @@ async fn settle_locked_failure(
                 j.password = Some(pw);
                 j.password_required = false;
                 if was_unpack_failure {
-                    j.fail_message.clear();
+                    j.clear_failure();
                     j.state = JobState::Completed;
                 }
             }
@@ -999,6 +1078,75 @@ pub(super) async fn finalize_completed(d: &Arc<Daemon>, job: &Arc<Mutex<Job>>) {
     finalize_completed_gen(d, job, None).await
 }
 
+/// Is the `.par2` sweep held back out of the finalize cleanup list, for
+/// the settle manifest to be written first?
+///
+/// ISSUE #18. `par_cleanup` is ON by default and deleted the recovery
+/// files inside [`finalize_completed_gen`]; `write_manifest` is OFF by
+/// default and the manifest is written in
+/// `postproc::settle_manifest_and_deferred_par2_sweep`, which
+/// `postproc::run_tail` calls only after awaiting that function. A
+/// crash, a kill or a power cut in that window therefore left the
+/// payload with no PAR2 on disk and no manifest either - the exact state
+/// the manifest exists to prevent. So when the manifest is owed the
+/// deletion is deferred past the write, and this predicate is the single
+/// place both ends agree on: that function asks it too, and asking twice
+/// with two hand-copied conditions is how the two halves drift into
+/// either double-deleting or never deleting.
+///
+/// The OTHER correction offered for #18 - write a provisional manifest
+/// BEFORE cleanup - is actively wrong and must not be reached for: at
+/// that point the tail has not renamed or TV-filed, so the recorded
+/// names would be pre-finalize names in a directory that may not be the
+/// final one, and `Manifest::write_reconciled`'s carry-forward would
+/// merge that bogus manifest into a shared season folder.
+///
+/// Both flags are read, not just `par_cleanup`: a user who listed
+/// `par2` in `cleanup_exts` by hand sits in the identical window, and a
+/// predicate that only knew about the default would leave them in it.
+/// A pattern entry that happens to select recovery files (`*.par2`) is
+/// NOT recognised - the count of shapes a glob can take is unbounded,
+/// and the bare extension is the documented spelling for this.
+pub(super) fn par2_sweep_deferred(d: &Daemon) -> bool {
+    d.write_manifest.load(Ordering::Relaxed)
+        && (d.par_cleanup.load(Ordering::Relaxed)
+            || d.cleanup_exts.lock_ok().iter().any(|x| x == "par2"))
+}
+
+/// The extension list [`finalize_completed_gen`]'s sweep runs with: the
+/// user's `cleanup_exts`, plus the `par_cleanup` default, minus whatever
+/// [`par2_sweep_deferred`] is holding back.
+///
+/// A named function rather than the inline block it was, so both halves
+/// of the issue #18 deferral can be pinned against one daemon in one
+/// test - the half that drops `par2` here and the half that sweeps it in
+/// `postproc::settle_manifest_and_deferred_par2_sweep`. Nothing enforces
+/// that pairing but a test, and a deferral whose second half never fires
+/// is a `.par2` set that is never swept at all.
+pub(super) fn finalize_cleanup_exts(d: &Daemon) -> Vec<String> {
+    let mut e = d.cleanup_exts.lock_ok().clone();
+    // Spent recovery files go with the sidecar junk by default. Added
+    // here rather than swept separately so it inherits the sweep's
+    // ordering guarantees - in particular that the identity rungs
+    // read the .par2 sidecars BEFORE anything deletes them.
+    if d.par_cleanup.load(Ordering::Relaxed) && !e.iter().any(|x| x == "par2") {
+        e.push("par2".to_string());
+    }
+    // ...unless the settle manifest is owed, in which case the .par2
+    // files are the only proof of the payload that will exist until it
+    // is written, and the write happens AFTER `finalize_completed_gen`
+    // returns (issue #18). Taken off the list here and swept in
+    // `postproc::settle_manifest_and_deferred_par2_sweep` instead, once
+    // the manifest is on disk. A
+    // `retain` rather than a guard on the `push` above: the entry can
+    // also arrive from the user's own `cleanup_exts`, and the crash
+    // window is exactly the same either way.
+    if par2_sweep_deferred(d) {
+        e.retain(|x| x != "par2");
+    }
+    e
+}
+
 /// [`finalize_completed`], fenced to the round of the record's life the
 /// caller started on (`Daemon::record_generation`).
 ///
@@ -1037,6 +1185,12 @@ pub(super) async fn finalize_completed_gen(
                 j.state == JobState::Completed && !j.tombstone,
                 j.state == JobState::Failed && !j.tombstone,
                 j.fail_message.clone(),
+                // TODO 307 item 1: the job's own classification, taken
+                // here beside the sentence rather than re-derived from
+                // it three fences later. `locked_probe` below is what
+                // reads it, and a probe fired on the wrong kind spends a
+                // password ladder on a full disk.
+                j.fail_kind(),
                 j.out_dir.clone(),
                 j.name.clone(),
                 j.category.clone(),
@@ -1051,22 +1205,25 @@ pub(super) async fn finalize_completed_gen(
             ))
         }
     };
-    let Some((done_ok, failed, fail2, out2, name2, cat2, tv2, pw2, repl2, crc2, nzb2, site2)) =
-        snapshot
+    let Some((
+        done_ok,
+        failed,
+        fail2,
+        kind2,
+        out2,
+        name2,
+        cat2,
+        tv2,
+        pw2,
+        repl2,
+        crc2,
+        nzb2,
+        site2,
+    )) = snapshot
     else {
         return;
     };
-    let exts = {
-        let mut e = d.cleanup_exts.lock_ok().clone();
-        // Spent recovery files go with the sidecar junk by default. Added
-        // here rather than swept separately so it inherits the sweep's
-        // ordering guarantees - in particular that the identity rungs
-        // read the .par2 sidecars BEFORE anything deletes them.
-        if d.par_cleanup.load(Ordering::Relaxed) && !e.iter().any(|x| x == "par2") {
-            e.push("par2".to_string());
-        }
-        e
-    };
+    let exts = finalize_cleanup_exts(d);
     // A job can FAIL because something in its output is locked, and the
     // tail below runs for completions only - so the one question a
     // locked failure turns on was never asked. An encrypted RAR set
@@ -1092,7 +1249,7 @@ pub(super) async fn finalize_completed_gen(
     // The disk-full and damaged-article failures are `Local` too and
     // already carry their own remedy; a password answers neither.
     let locked_probe = failed
-        && fail_kind(&fail2) == FailKind::Local
+        && kind2 == FailKind::Local
         && fail_hint(&fail2).is_empty()
         && !disk_full_failure(&fail2);
     if locked_probe
@@ -1242,6 +1399,8 @@ pub(super) async fn finalize_completed_gen(
                 && j.fail_message.is_empty()
             {
                 j.fail_message = why;
+                // A bomb verdict is this disk's, not the post's.
+                j.fail_code = Some(FailKind::Local);
             }
             // In "never ask" mode the locked outcome is not presented
             // as a failure: the still-packed note (blocked_by above)
@@ -1253,6 +1412,7 @@ pub(super) async fn finalize_completed_gen(
                 && d.password_prompt.lock_ok().as_str() != "never"
             {
                 j.fail_message = "password required to unpack".into();
+                j.fail_code = Some(FailKind::Local);
             }
             j.unpack_blocked_by = blocked_by;
             // C: the relocation now happens on the mover worker, off
@@ -1906,7 +2066,7 @@ pub(crate) fn nzbget_status(j: &Job) -> (&'static str, &'static str, &'static st
     if disk_full_failure(&msg) {
         return ("FAILURE/UNPACK", "SUCCESS", "SPACE");
     }
-    match fail_kind(&j.fail_message) {
+    match j.fail_kind() {
         // The one case that really is a failed repair.
         FailKind::Unrepairable => ("FAILURE/PAR", "FAILURE", "NONE"),
         // The post could not be fetched whole. NZBGet calls that health,
@@ -2376,6 +2536,11 @@ pub(super) fn restore_records(queue_arr: &[Value], hist_arr: &[Value]) -> (Vec<J
                          itself completed and its files are under {}",
                         job.out_dir.display()
                     );
+                    // A restart is ours. Stated rather than left to the
+                    // string classifier's catch-all, which is where a
+                    // sentence naming an output path lands only because
+                    // it matches none of the five openings above it.
+                    job.fail_code = Some(FailKind::Local);
                 }
             } else {
                 info!(
@@ -2509,8 +2674,17 @@ pub(super) use job_wire::{job_from_json, job_json};
 mod job_fail;
 pub(crate) use crate::failkind::{
     FailKind, RETRY_WHY_PROPAGATION, RETRY_WHY_TRANSPORT, another_copy_can_help, disk_full_failure,
-    disk_full_mid_download, fail_action, fail_hint, fail_kind, fail_kind_token,
+    disk_full_mid_download, fail_action, fail_hint, fail_kind_token,
 };
+// `fail_kind` has no production caller inside `serve` since TODO 307 item
+// 1: every job-terminal reader now goes through `Job::fail_kind`, which
+// consults the code the producer stated and falls back to this only where
+// nobody stated one. The ~90 test callers that pin the string classifier's
+// own arms still reach it through this module's glob, and pinning those
+// arms is the point - the fallback is not a legacy arm, it is the arm
+// every version-less record on every disk still lands on.
+#[cfg(test)]
+pub(crate) use crate::failkind::fail_kind;
 pub(super) use job_fail::{auto_retry_eligible, merge_notify_tokens, post_job_plan};
 // `post_job_duties` has no production caller outside `job_fail` itself - it is
 // the inner half of `post_job_plan` - but `serve::tests_grabs` pins its

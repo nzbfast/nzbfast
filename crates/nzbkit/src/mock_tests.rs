@@ -119,3 +119,41 @@ async fn a_chaos_hook_reaches_both_commands() {
         );
     }
 }
+
+/// A real file on disk round-trips byte-exact through
+/// `make_file_articles_from_path` - decoding every article back in
+/// order must reproduce the original bytes, and the posted name must
+/// be the file's own basename rather than something the caller chose.
+#[test]
+fn a_real_file_round_trips_byte_exact() {
+    let data: Vec<u8> = (0..250_000u32).map(|i| (i % 251) as u8).collect();
+    let path = std::env::temp_dir().join(format!(
+        "nzbkit-mock-real-file-fixture-{}.bin",
+        std::process::id()
+    ));
+    std::fs::write(&path, &data).unwrap();
+
+    let want_name = path.file_name().unwrap().to_string_lossy().into_owned();
+
+    let mut articles = HashMap::new();
+    let segs = make_file_articles_from_path(&path, 90_000, "realfile", &mut articles).unwrap();
+    std::fs::remove_file(&path).ok();
+
+    assert!(segs.len() > 1, "fixture must split into multiple articles");
+
+    let mut rebuilt = vec![0u8; data.len()];
+    for (id, _bytes, _part) in &segs {
+        let article = &articles[&format!("<{id}>")];
+        let decoded = crate::yenc::decode(article).unwrap();
+        assert_eq!(
+            decoded.name, want_name,
+            "posted name should be the file's own basename"
+        );
+        let start = decoded.begin as usize - 1;
+        rebuilt[start..start + decoded.data.len()].copy_from_slice(&decoded.data);
+    }
+    assert_eq!(
+        rebuilt, data,
+        "decoding every article back in order must reproduce the original file bytes"
+    );
+}

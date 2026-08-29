@@ -131,6 +131,43 @@ fn pointer_authority_from(
     }
 }
 
+/// The message for [`warn_docker_pointer_once`], split out so its wording
+/// is checkable without the container check or the once-per-run latch
+/// around it.
+fn docker_pointer_warning(authority: &str) -> String {
+    format!(
+        "library pointer names {authority}, this container's own view of \
+         the network - it may not be reachable from a media server outside \
+         the container"
+    )
+}
+
+/// Warns once per daemon run when a library pointer is minted inside a
+/// container, since `/.dockerenv` cannot tell apart the one shape where the
+/// bind-derived authority above is already right (`--network host`) from
+/// the shape where it names an address nothing outside the container can
+/// reach (a bridge network, where `authority` is the container's own
+/// bridge IP). TODO 298 rejected guessing which of the two this is - a
+/// custom network defeats any sniff for Docker's default bridge pools - in
+/// favour of just saying so; this is that interim.
+///
+/// Once there is a `public_host` setting to check, this wants to fire only
+/// when that setting is unset - TODO 298's own decision, still open. Until
+/// then every container hits it, host-network included, which is the
+/// honest state of what this daemon can tell about its own reachability.
+pub(super) fn warn_docker_pointer_once(authority: &str) {
+    if !std::path::Path::new("/.dockerenv").exists() {
+        return;
+    }
+    // Once per daemon run, not per settled job: a library queue can
+    // finish many jobs in a row and the same line every time would bury
+    // the one that matters.
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        warn!(target: "library", "{}", docker_pointer_warning(authority));
+    }
+}
+
 /// Largest media-extension writer in the extractor owned by `want` (the
 /// M11 active stream when `want` is None), if any. Resolving ownership and
 /// reading the writers off the same cloned extractor keeps the pick tied to
@@ -156,6 +193,25 @@ pub(super) fn pick_media(
     ws.into_iter().next()
 }
 
+/// Sample/extras tokens that disqualify an otherwise-biggest media file -
+/// checked as a whole NAME SEGMENT, split on any non-alphanumeric run, so
+/// `Movie.Sample.mkv` and `Movie-Sample-x264.mkv` are caught while
+/// `ResampleTest.mkv` (the token buried inside a bigger word) is not.
+/// Bare substring matching was considered and rejected for exactly that
+/// reason - Cursor sweep finding 19.
+const SAMPLE_EXTRA_TOKENS: [&str; 3] = ["sample", "screens", "proof"];
+
+/// Is this file's stem entirely, or in part, one of [`SAMPLE_EXTRA_TOKENS`]?
+/// Segment-based, not substring: see that constant's doc for why.
+fn is_sample_or_extra_name(name: &str) -> bool {
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    stem.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|seg| SAMPLE_EXTRA_TOKENS.contains(&seg))
+}
+
 /// The biggest media file inside a finished job's output folder - the
 /// feature, not the sample or the extra. Season packs unpack into
 /// subfolders, so the walk descends, but only a little: a bounded walk
@@ -164,10 +220,23 @@ pub(super) fn pick_media(
 /// Symlinks are never followed and never served. A RAR can carry one,
 /// and "biggest .mkv in the folder" would otherwise happily resolve a
 /// planted link to any file the daemon can read.
+///
+/// A file whose name reads as a sample/screens/proof clip
+/// ([`is_sample_or_extra_name`]) is skipped in favour of anything else
+/// media-shaped in the folder - Cursor sweep finding 19: with no
+/// exclusion at all, a finished-but-unfiled job whose only real media
+/// file is `Movie.Sample.mkv` served the sample as the feature. The
+/// exclusion is a preference, not a refusal: a folder that genuinely
+/// holds nothing but a sample still plays it, via `best_any` below.
+/// (`pick_media`, the LIVE path's biggest-writer pick, is untouched -
+/// there the writer for the sample never outgrows the feature's own
+/// writer while both are still downloading, so nothing there was ever
+/// filed as a bug.)
 pub(super) fn find_completed_media(dir: &std::path::Path) -> Option<PathBuf> {
     const MAX_DEPTH: u32 = 4;
     const MAX_ENTRIES: usize = 5_000;
     let mut best: Option<(u64, PathBuf)> = None;
+    let mut best_any: Option<(u64, PathBuf)> = None;
     let mut seen = 0usize;
     let mut stack = vec![(dir.to_path_buf(), 0u32)];
     while let Some((d, depth)) = stack.pop() {
@@ -189,15 +258,23 @@ pub(super) fn find_completed_media(dir: &std::path::Path) -> Option<PathBuf> {
                 if depth < MAX_DEPTH {
                     stack.push((p, depth + 1));
                 }
-            } else if md.is_file()
-                && is_media_name(&e.file_name().to_string_lossy())
+                continue;
+            }
+            let name = e.file_name();
+            if !(md.is_file() && is_media_name(&name.to_string_lossy())) {
+                continue;
+            }
+            if best_any.as_ref().is_none_or(|(sz, _)| md.len() > *sz) {
+                best_any = Some((md.len(), p.clone()));
+            }
+            if !is_sample_or_extra_name(&name.to_string_lossy())
                 && best.as_ref().is_none_or(|(sz, _)| md.len() > *sz)
             {
                 best = Some((md.len(), p));
             }
         }
     }
-    best.map(|(_, p)| p)
+    best.or(best_any).map(|(_, p)| p)
 }
 
 /// Serve a file from disk with Range support, for players. The live
@@ -1906,25 +1983,30 @@ pub(super) fn serve_range(
     // tiny_http chunks any body over ~1 MB even with a known length -
     // players want identity + exact Content-Length for seeking.
     //
-    // Clamped once, for the header and data_length together: see the
-    // note in `serve_file_range`. A no-op on 64-bit.
-    let span_len = (end - start).min(usize::MAX as u64);
-    let mut resp = tiny_http::Response::new(
-        tiny_http::StatusCode(status),
-        vec![
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype).unwrap(),
-            tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+    // The reader's span is the full u64; only tiny_http's
+    // `data_length` (an `Option<usize>`) cannot carry a >4 GiB span on
+    // a 32-bit target. Same split as `serve_file_range`: a span that
+    // fits keeps the identity framing, one that does not is served
+    // CHUNKED with no Content-Length, and Content-Range names the true
+    // span either way. Both arms are a no-op on 64-bit.
+    let span_len = end - start;
+    let fits = usize::try_from(span_len).ok();
+    let mut headers = vec![
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype).unwrap(),
+        tiny_http::Header::from_bytes(&b"Accept-Ranges"[..], &b"bytes"[..]).unwrap(),
+    ];
+    if fits.is_some() {
+        headers.push(
             tiny_http::Header::from_bytes(
                 &b"Content-Length"[..],
                 span_len.to_string().into_bytes(),
             )
             .unwrap(),
-        ],
-        reader,
-        Some(span_len as usize),
-        None,
-    )
-    .with_chunked_threshold(usize::MAX);
+        );
+    }
+    let mut resp =
+        tiny_http::Response::new(tiny_http::StatusCode(status), headers, reader, fits, None)
+            .with_chunked_threshold(usize::MAX);
     if status == 206 {
         resp.add_header(
             tiny_http::Header::from_bytes(
@@ -2353,6 +2435,20 @@ mod strm_tests {
             _ => assert_eq!(auth, "127.0.0.1:6789"),
         }
     }
+
+    /// TODO 298's warn-not-guess interim: the message names the actual
+    /// authority the pointer got, and stays inside house copy rules (no
+    /// em/en dash punctuation, no "streaming").
+    #[test]
+    fn the_docker_warning_names_the_authority_and_follows_copy_rules() {
+        let msg = super::docker_pointer_warning("172.17.0.3:6789");
+        assert!(msg.contains("172.17.0.3:6789"), "{msg}");
+        assert!(
+            !msg.chars().any(|c| c == '\u{2014}' || c == '\u{2013}'),
+            "{msg}"
+        );
+        assert!(!msg.to_ascii_lowercase().contains("streaming"), "{msg}");
+    }
 }
 
 #[cfg(test)]
@@ -2629,6 +2725,49 @@ mod stream_move_window_tests {
         let r = playback_readiness(&d, ID);
         assert_eq!(r["reason"], "no_media", "{r}");
         assert_eq!(r["ready"], false, "{r}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cursor sweep finding 19: a finished-but-unfiled job whose folder
+    /// holds both the feature and a sample must play the feature, never
+    /// the sample - but a folder holding NOTHING but a sample must still
+    /// play that, rather than refusing outright.
+    #[test]
+    fn completed_media_prefers_the_feature_over_the_sample() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-sample-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // The sample is written LARGER than the feature on disk, so a
+        // fix that merely re-ordered the walk without excluding the
+        // name would still get this right by accident - the sweep's
+        // defect was the sample outright winning on size, but the
+        // regression this guards is "no exclusion at all", not "wrong
+        // tie-break".
+        std::fs::write(dir.join("Movie.Sample.mkv"), vec![b's'; 8192]).unwrap();
+        std::fs::write(dir.join("Movie.mkv"), vec![b'f'; 4096]).unwrap();
+        let picked = find_completed_media(&dir).expect("a feature is present");
+        assert_eq!(picked.file_name().unwrap().to_str().unwrap(), "Movie.mkv");
+
+        // Nothing but a sample: the exclusion must not turn into a
+        // refusal to play anything at all.
+        std::fs::remove_file(dir.join("Movie.mkv")).unwrap();
+        let picked = find_completed_media(&dir).expect("the sample is all there is");
+        assert_eq!(
+            picked.file_name().unwrap().to_str().unwrap(),
+            "Movie.Sample.mkv"
+        );
+
+        // A word-boundary check: "resample" is not "sample" as a name
+        // segment, and must never be excluded by the substring alone.
+        std::fs::write(dir.join("Resample.Test.mkv"), vec![b'r'; 2048]).unwrap();
+        let picked = find_completed_media(&dir).expect("a media file is present");
+        assert_eq!(
+            picked.file_name().unwrap().to_str().unwrap(),
+            "Resample.Test.mkv",
+            "resample is bigger than the lone sample and is not itself a sample name"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

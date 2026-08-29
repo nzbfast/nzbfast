@@ -145,11 +145,29 @@ impl HostLease {
             // forever and every later run shed its idle connections
             // down to one per server with no successor waiting.
             let _w = WaiterGuard::new(&self.waiters);
-            // `notified()` is armed before the state is re-read on the
-            // next turn, and a release that lands between the check
-            // above and this await is kept by Notify's one-permit
-            // memory, so a wake is never lost.
-            self.woken.notified().await;
+            // Register with the Notify BEFORE re-reading `held`/`cap`,
+            // and only await after a failed re-check. Notify's memory
+            // for UNREGISTERED waiters is ONE stored permit, so with
+            // two waiters past the check above and neither polled yet,
+            // two `notify_one` calls collapse into one wake - a slot
+            // sits free while a waiter sleeps forever (27 Aug sweep
+            // finding 24). An enabled waiter is woken directly instead
+            // of through that single-permit memory, and a release that
+            // lands between the check above and `enable` is caught by
+            // the re-check.
+            let notified = self.woken.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut st = self.state.lock_ok();
+                if st.held < st.cap {
+                    st.held += 1;
+                    return Permit {
+                        lease: self.clone(),
+                    };
+                }
+            }
+            notified.as_mut().await;
         }
     }
 
@@ -295,8 +313,18 @@ impl super::Shared {
     /// Is there room for ONE more worker to leave this server - i.e.
     /// would someone still be here afterwards? A peek; [`Self::claim_handoff`]
     /// is the version that may be acted on.
+    ///
+    /// Bounded on SOCKET-CAPABLE bodies (`workers_dialling_on`: alive
+    /// minus admission-parked), not on `alive` (27 Aug sweep finding
+    /// 7). A worker parked in `wait_for_slot` holds no `Permit` and no
+    /// socket - the admission the leaver releases wakes it, but it
+    /// still races the successor job's workers for the host lease, so
+    /// a "leftover" that is a parked body can sit in `acquire` holding
+    /// nothing while `live_mask` still counts the server and requeues
+    /// only this host can serve wait for the watchdog.
     fn handoff_room(&self, idx: usize) -> bool {
-        self.alive[idx].load(Ordering::Acquire) > self.handoff_out[idx].load(Ordering::Acquire) + 1
+        self.workers_dialling_on(idx)
+            .is_some_and(|d| d > self.handoff_out[idx].load(Ordering::Acquire) + 1)
     }
 
     /// [`Self::want_handoff`], CLAIMED: true only for a worker that may
@@ -312,25 +340,55 @@ impl super::Shared {
     /// idle loop re-asks every 25 ms, so a fleet draining past queue-dry
     /// walks itself down to exactly two and then loses both.
     ///
-    /// `alive` counts the calling worker, and the caller's decrement
-    /// lands later (it unwinds to `life.retire()`), so `handoff_out`
-    /// holds the claims that have not shown up in `alive` yet. Counting
-    /// both is what makes this safe: at the last successful claim
-    /// `alive > handoff_out + 1`, and `handoff_out` bounds the workers
-    /// still to leave through this door, so at least one is left over.
-    /// It is also why the count is never given back - the same
-    /// conservative trade [`ServerState::claim_yield`] documents at
-    /// length, and the same shape of `fetch_update`. The cost is that a
-    /// large idle fleet hands over about half of itself per round rather
-    /// than all but one; the alternative is a window in which a server
-    /// goes dark mid-run, which is unrecoverable.
+    /// The room is judged against `workers_dialling_on`, not `alive`,
+    /// for [`Self::handoff_room`]'s reason: a parked body is not "kept
+    /// for requeues". `handoff_out` still serializes concurrent claims
+    /// in the window between the two steps below, and the cost of it
+    /// staying charged is that a large idle fleet hands over about half
+    /// of itself per round rather than all but one; the alternative is
+    /// a window in which a server goes dark mid-run, which is
+    /// unrecoverable.
+    ///
+    /// A granted claim also takes the leaver OUT OF `alive` on the
+    /// spot, through a CAS that refuses to take the last socket-capable
+    /// body (27 Aug sweep finding 25). The claim alone pinned no
+    /// specific leftover: between the claim and the worker's own
+    /// `life.retire()` a sibling could leave through another door
+    /// (connect/auth exhaustion, a budget bow-out), and the claimed
+    /// hand-over then took the server dark anyway. Reserving the
+    /// decrement here makes the check and the departure one atomic
+    /// step; `WorkerLife` consumes the pre-paid decrement via
+    /// `handoff_retired` instead of counting the exit twice. When the
+    /// reservation fails, the claim is given back - safe, because it
+    /// was never acted on - and the worker keeps its socket.
     pub(super) fn claim_handoff(&self, idx: usize) -> bool {
-        self.handoff_wanted(idx)
-            && self.handoff_out[idx]
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| {
-                    (self.alive[idx].load(Ordering::SeqCst) > h + 1).then_some(h + 1)
-                })
-                .is_ok()
+        if !self.handoff_wanted(idx) {
+            return false;
+        }
+        if self.handoff_out[idx]
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |h| {
+                self.workers_dialling_on(idx)
+                    .is_some_and(|d| d > h + 1)
+                    .then_some(h + 1)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        // The reservation: leave at least one socket-capable body
+        // behind, judged at the same instant the departure lands.
+        let reserved = self.alive[idx]
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |a| {
+                let parked = self.parked[idx].load(Ordering::SeqCst);
+                (a > parked + 1).then(|| a - 1)
+            })
+            .is_ok();
+        if !reserved {
+            self.handoff_out[idx].fetch_sub(1, Ordering::SeqCst);
+            return false;
+        }
+        self.handoff_retired[idx].fetch_add(1, Ordering::SeqCst);
+        true
     }
 
     /// A primary worker found itself idle after queue-dry: latch the
@@ -481,6 +539,63 @@ mod tests {
         shared.alive[0].store(3, Ordering::Relaxed);
         assert!(shared.claim_handoff(0));
         assert!(!shared.claim_handoff(0));
+
+        drop(held);
+        drop(waiter.await.unwrap());
+    }
+
+    /// 27 Aug sweep findings 7 and 25: the leftover must be a body
+    /// that can hold a socket, and the claim must PIN it. A worker
+    /// parked in `wait_for_slot` has no permit and no connection, so a
+    /// server whose only other body is parked may not hand its socket
+    /// away; and a granted claim takes the leaver out of `alive` at the
+    /// claim, so a sibling leaving through another door between claim
+    /// and retire cannot make the hand-over the last body out.
+    #[tokio::test]
+    async fn a_parked_body_is_not_a_leftover_and_a_claim_pins_one() {
+        let budget = ConnBudget::new();
+        let lease = budget.lease("s", 1);
+        let mut servers = one_server();
+        servers[0].1.lease = Some(lease.clone());
+        let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
+        let (shared, _) = Shared::new(reqs, &servers);
+
+        let held = lease.acquire().await;
+        let l2 = lease.clone();
+        let waiter = tokio::spawn(async move { l2.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(lease.waiters(), 1);
+        *shared.tail_started.lock_ok() = Some(Instant::now());
+
+        // Two alive, but one of them is admission-parked: no socket to
+        // take a requeue on, so the door stays shut.
+        shared.alive[0].store(2, Ordering::Relaxed);
+        shared.parked[0].store(1, Ordering::Relaxed);
+        assert!(!shared.want_handoff(0), "a parked body is not a leftover");
+        assert!(!shared.claim_handoff(0));
+        assert_eq!(
+            shared.handoff_out[0].load(Ordering::Relaxed),
+            0,
+            "a refused claim leaves nothing charged"
+        );
+
+        // The parked body dialled: two socket-capable bodies, one may go.
+        shared.parked[0].store(0, Ordering::Relaxed);
+        assert!(shared.claim_handoff(0));
+        assert_eq!(
+            shared.alive[0].load(Ordering::Relaxed),
+            1,
+            "the claim takes the leaver out of `alive` on the spot"
+        );
+        assert_eq!(
+            shared.handoff_retired[0].load(Ordering::Relaxed),
+            1,
+            "and pre-pays the decrement WorkerLife would otherwise repeat"
+        );
+        assert!(
+            !shared.claim_handoff(0),
+            "the pinned leftover is the last socket-capable body"
+        );
 
         drop(held);
         drop(waiter.await.unwrap());

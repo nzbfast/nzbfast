@@ -20,7 +20,7 @@ workspace = true
 # `log` compatibility are both unused here.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 memchr = "2"
-quick-xml = "0.41"
+quick-xml = "0.42"
 thiserror = "2"
 crc32fast = "1"
 libc = "0.2"
@@ -61,7 +61,7 @@ bzip2 = "0.6"
 # dependency. `encoder` is for `zip::fixtures` (lib-visible for the
 # fuzz corpus, like bzip2's and flate2's always-present encoder
 # halves); nothing in the shipping call graph reaches it.
-lzma-rust2 = { version = "0.19", default-features = false, features = ["std", "encoder"] }
+lzma-rust2 = { version = "0.20", default-features = false, features = ["std", "encoder"] }
 # RAR5 encrypted store-mode sets: AES-256-CBC + PBKDF2-HMAC-SHA256
 # (RustCrypto - pure Rust, no new C in the tree).
 aes = "0.9"
@@ -77,7 +77,7 @@ rars = { path = "../../vendor/rars" }
 # decoder is linked either way and a deflate-in-7z archive stops
 # declining. zstd/brotli/lz4 are the remaining codecs 7z permits; each
 # would add a real dependency, so they stay off until one is seen.
-sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd"] }
 
 # PAR2 hashes every downloaded byte through MD5; the asm backend is
 # ~25% faster than the portable soft path - a slow-x86 win (docker
@@ -176,7 +176,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 rcgen = { version = "0.14.9", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 # 7z test fixtures are written in-process (the writer needs the encoder
 # half of the crate; release builds keep it off).
-sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "compress"] }
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "deflate", "ppmd", "compress"] }
 # test-util: paused-clock tests (the connect-timeout regression test
 # auto-advances past CONNECT_TIMEOUT instead of sleeping 20 s for real).
 tokio = { version = "1", features = ["test-util"] }

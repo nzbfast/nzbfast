@@ -1445,6 +1445,148 @@ fn importing_a_sabnzbd_ini_merges_its_categories_and_says_what_it_could_not_take
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// PLAN M32 / nzbget#359: the other half of the switcher funnel.
+/// Importing an nzbget.conf brings servers (with their backup tiers),
+/// categories, and NZBGet's `DownloadRate` speed limit over - the same
+/// three the SAB counterpart test above pins, adapted to NZBGet's flat
+/// `Key=Value` shape and its `${MainDir}`/`${DestDir}` substitution.
+#[test]
+fn importing_an_nzbget_conf_brings_servers_categories_and_the_speed_limit() {
+    let dir = scratch("nzbgetimport");
+    let main = dir.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    let conf = dir.join("nzbget.conf");
+    std::fs::write(
+        &conf,
+        format!(
+            "MainDir={}\nDestDir=${{MainDir}}/dst\nDownloadRate=1500\n\
+             Server1.Active=yes\nServer1.Host=news.tier0.example.com\n\
+             Server1.Port=563\nServer1.Username=u1\nServer1.Password=p1\n\
+             Server1.Encryption=yes\nServer1.Connections=20\nServer1.Level=0\n\
+             Server2.Active=yes\nServer2.Host=news.tier1.example.com\n\
+             Server2.Encryption=no\nServer2.Level=1\n\
+             Category1.Name=movies\nCategory1.DestDir=${{DestDir}}/Films\n\
+             Category1.Unpack=yes\n\
+             Category2.Name=tv\nCategory2.Aliases=television*, tv-*\n",
+            main.display()
+        ),
+    )
+    .unwrap();
+
+    let d = serve(&dir);
+    let r = api(
+        d.port,
+        &format!(
+            "mode=import_apply&value={}&value2=nzbget",
+            urlenc(&conf.to_string_lossy())
+        ),
+    );
+    assert_eq!(r["status"].as_bool(), Some(true), "import failed: {r}");
+    assert_eq!(r["added"].as_u64(), Some(2), "{r}");
+
+    // Both servers landed, with their backup tier intact - Level 0 is
+    // the primary, Level 1 the backup tier that only fills in.
+    let servers = settings_block(d.port)["servers"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let by_host = |h: &str| {
+        servers
+            .iter()
+            .find(|s| s["host"].as_str() == Some(h))
+            .unwrap_or_else(|| panic!("{h} missing: {servers:?}"))
+            .clone()
+    };
+    assert_eq!(by_host("news.tier0.example.com")["level"].as_i64(), Some(0));
+    assert_eq!(by_host("news.tier1.example.com")["level"].as_i64(), Some(1));
+    // enabled is explicit, never absent - a redeploy onto an older
+    // config must not silently pause a server it never heard of.
+    assert_eq!(by_host("news.tier0.example.com")["enabled"], true);
+
+    // Categories merged...
+    let after = settings_block(d.port)["categories"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    for want in ["movies", "tv"] {
+        assert!(after.contains(want), "{want} missing after import: {after}");
+    }
+    // ...and the resolvable folder override landed, absolute and built
+    // out of NZBGet's own ${DestDir} substitution.
+    let dests = settings_block(d.port)["move_completed_cats"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        dests.contains("movies=") && dests.contains("/dst/Films"),
+        "{dests}"
+    );
+
+    // Fields with nowhere to go (Unpack, Aliases) are named, not
+    // silently dropped.
+    let dropped = r["categories"]["dropped"]
+        .as_array()
+        .expect("dropped")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(dropped.contains("unpack override"), "{dropped:?}");
+    assert!(dropped.contains("external category names"), "{dropped:?}");
+
+    // The speed limit came over, converted from NZBGet's 1024-byte
+    // kilobytes/sec to nzbfast's own raw bytes/sec.
+    assert_eq!(r["speedlimit_kbps"].as_u64(), Some(1500), "{r}");
+    assert_eq!(
+        settings_block(d.port)["speedlimit"].as_u64(),
+        Some(1500 * 1024),
+        "{r}"
+    );
+
+    drop(d);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A malformed or unreadable nzbget.conf refuses cleanly, with a
+/// reason, rather than importing whatever it could half-parse.
+#[test]
+fn a_malformed_nzbget_conf_is_refused_not_partially_imported() {
+    let dir = scratch("nzbgetbad");
+    let d = serve(&dir);
+
+    let apply = |path: &std::path::Path| {
+        api(
+            d.port,
+            &format!(
+                "mode=import_apply&value={}&value2=nzbget",
+                urlenc(&path.to_string_lossy())
+            ),
+        )
+    };
+
+    // No readable file at all.
+    let r = apply(&dir.join("does-not-exist.conf"));
+    assert_eq!(r["status"].as_bool(), Some(false), "{r}");
+    assert!(!r["error"].as_str().unwrap_or_default().is_empty(), "{r}");
+
+    // A real file with no servers in it must not add anything, and must
+    // not report success as if it had.
+    let empty = dir.join("noservers.conf");
+    std::fs::write(&empty, "MainDir=/tmp\nDownloadRate=500\n").unwrap();
+    let r = apply(&empty);
+    assert_eq!(r["added"].as_u64(), Some(0), "{r}");
+    assert!(
+        settings_block(d.port)["servers"]
+            .as_array()
+            .map(Vec::is_empty)
+            .unwrap_or(true),
+        "a server-less file must not have added one: {r}"
+    );
+
+    drop(d);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #46: probing a user-typed path says WHY it came up empty. There is
 /// exactly one candidate in that mode, and the two empty answers have
 /// opposite remedies - fix the path vs accept the file has no servers -

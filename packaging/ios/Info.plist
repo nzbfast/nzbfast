@@ -74,6 +74,60 @@
 	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- TODO 281 IO1: finished downloads land in Documents and the
+	     Files app shows them there, so there is no export step and no
+	     second permission to ask for. This is the iOS answer and it is
+	     the opposite of the Android one: a SAF document tree has no
+	     pwrite and no preallocation, so that platform writes to
+	     app-private storage and copies out afterwards, while here the
+	     one-pass writer aims straight at the directory the user can
+	     reach. Engine state (config, settings, the runtime record, the
+	     spool) stays in Application Support, which is why
+	     nzbfast_start takes the two directories separately.
+	     LSSupportsOpeningDocumentsInPlace lets the Files app hand a
+	     .nzb back to this app without copying it first. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<!-- TODO 281 IO2/IO2b. `audio` is the entitlement the
+	     watch-while-downloading feature rests on, and it is legitimate
+	     here for exactly one reason: real media is really playing.
+	     Download and playback are ONE process (the engine is linked in
+	     and serves 127.0.0.1 from a thread of this app), so an app iOS
+	     keeps scheduled for playing sound is an app whose NNTP sockets
+	     stay open - which is the only case on this platform where a
+	     backgrounded download runs at full speed rather than not at
+	     all. `PlaybackSession` activates the session on the player's
+	     PLAYING transition and releases it on every path out of
+	     playback, so its lifetime is the audio's and never the queue's.
+	     A silent session held open to keep a download alive is the one
+	     move that gets an app removed, and there is deliberately no
+	     entry point in this app that a caller with no audio could use.
+	     NO location background mode, ever, for the same reason.
+	     `processing` is the opportunistic overnight catch-up window
+	     (BGProcessingTask) and is never promised in the UI. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>processing</string>
+	</array>
+	<!-- Must LIST every identifier the app registers: BGTaskScheduler
+	     raises an uncatchable exception for one that is not here, so a
+	     drift between this and Lifecycle.processingTaskID is a crash on
+	     launch rather than a feature that quietly does nothing. -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.nzbfast.mobile.catchup</string>
+	</array>
+	<!-- Lock-screen and Dynamic Island progress. Display only, and it
+	     FREEZES while the app is suspended, which is the truthful
+	     behaviour rather than a limitation worked around: a bar that
+	     kept moving over a suspended engine would be a lie, and the one
+	     it tells is the exact thing the honest copy in Settings exists
+	     to prevent. -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

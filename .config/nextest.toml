@@ -381,6 +381,97 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 retries = 0
 
 # ---------------------------------------------------------------------
+# AND THE SAME BLOCK UNDER QEMU, WHERE THE 300 s IS 1.4x BELOW THE
+# ORDINARY WALL (28 Aug 2026). The override above is the right ceiling
+# for every box this fleet owns and the wrong one for the single job
+# that does not run on one. Its measurement table is three rows of an
+# 18-core mac dev box; nightly.yml's `armv7-cross` runs the workspace
+# under qemu on a GitHub runner, and nothing re-took the number there.
+# What that cost: `extract::chase::chase_shape_tests::
+# a_chase_survives_trimming_the_volume_its_deferred_walk_resumes_in`
+# is a 236-416 s test on that job, so the ceiling landed UNDER it and
+# armv7-cross went red on 27 and 28 Aug with one TIMEOUT out of 7,557.
+#
+# IT IS NOT A WEDGE, AND THE COHORT IS HOW YOU KNOW. Read across four
+# nightlies (the ceiling landed 25 Aug 22:19Z, after that night's run):
+#
+#   test                              25 Aug  26 Aug  27 Aug  28 Aug
+#   ..._exceed_the_cap_...             179.2   102.5   196.4   182.3
+#   a_v4_chase_decodes_a_volume_...    113.2    66.1   115.7   118.8
+#   chase_encrypted_compressed_...      51.4    30.2    53.0    52.9
+#   chase_header_encrypted_...          28.2    16.7    29.3    29.0
+#   top_level_chase_budget_breach_...   25.0    14.1    27.3    25.1
+#   a_chase_survives_trimming_...      416.3   236.8   TIMEOUT TIMEOUT
+#
+# Every test moves as ONE BLOCK: 1.69-1.77x its 26 Aug figure on 25 Aug
+# and 1.73-1.93x on 27 and 28. The 26 Aug runner was simply ~1.75x
+# faster than the other three (that job finished in 49 min against 75),
+# which is the whole of why one night out of four went green under a
+# ceiling that was already too low. The subject test's own scale factor
+# is 1.76, dead in the middle of its cohort, and its ratio to the
+# sibling above it is 2.32 and 2.31 on the two nights it completed - so
+# on 27 and 28 it was heading for ~454 s and ~421 s when it was killed
+# at 300.
+#
+# A DEADLOCK DOES NOT DO THAT, which is the point of writing the table
+# out. It completed twice, at 416.271 s and 236.771 s, and a run that
+# completes is not the class the block above exists for; a wedged
+# reader parks for the life of the process. Nor is it the OTHER thing a
+# 32-bit target invites - a `(remaining as usize).min(..)` narrowing a
+# 4 GiB span to ZERO (tools/chunk-narrow-gate.py, and `usize` is 32
+# bits here) makes no progress FOR EVER, so it cannot finish at all,
+# let alone finish in a time proportional to how fast the runner is.
+# Both were live hypotheses and both are refused by the same two
+# numbers. Do not re-derive this from the two reds alone: armv7-cross
+# was also red on 23 and 24 Aug and that was a DIFFERENT, fixed defect
+# (`nntp::unit_tests::status_line_tests::status_stays_small_enough_to_move`,
+# a struct-size assertion, which is what a 32-bit target does to one).
+#
+# WHY THE JOB'S OWN CEILING AND NOT A NEW NUMBER. `[profile.qemu]`
+# above already decided what "wedged, not slow" means for this job, and
+# said why: 15 minutes, far above anything legitimate. So the ONLY
+# thing this override changes against the profile it sits in is
+# `retries = 0` - the half the block above proves is load-bearing, and
+# the half `[profile.qemu]`'s own `retries = 1` would otherwise undo,
+# turning a wedge into "1 passed (1 flaky)" at exit 0. Inventing a
+# fourth number would also have let extract:: - the one module where
+# this defect has actually been seen - run LONGER than every other test
+# in the same job, which is backwards. 900 s is 2.16x the worst wall
+# ever observed here (416.3 s) and 1.98x the worst predicted (454 s),
+# and it is far inside the job's own `timeout-minutes: 150`, which is
+# the other side of the number: a ceiling above the job cap buys
+# nothing, because GitHub renders a job timeout as `cancelled` with no
+# test named.
+#
+# THIS IS THE REMEDY THE BLOCK ABOVE PRESCRIBES, not a loosening of it.
+# Its own words: "If a future extract test legitimately needs more than
+# 300 s, the answer is to make that test cheaper or give it its own
+# override, NEVER to raise this number for all 349." The 300 s stands
+# unchanged for every other profile, so a laptop and all four
+# `linux-tests` shards are exactly as tight as they were. Scope is the
+# MODULE and not the one test, deliberately: the sibling at 196.4 s is
+# already 65% of the way to the old ceiling on an ordinary runner, so a
+# per-test waiver would leave it one slow runner from the identical
+# red.
+#
+# `retries = 0` IS SPELLED OUT THOUGH IT NEED NOT BE. Measured on a
+# throwaway crate, 28 Aug 2026, nextest 0.9.143: settings resolve PER
+# KEY, so a qemu override naming only `slow-timeout` still picks up
+# `retries = 0` from the default override below it rather than
+# `retries = 1` from `[profile.qemu]` - a flaky-on-second-attempt test
+# reported FAIL, not "1 passed (1 flaky)". That is a good property and
+# a terrible thing to depend on: it makes the wedge instrument here a
+# side effect of a DIFFERENT block, which the next person to touch
+# either one cannot see. Same measurement confirmed the precedence this
+# whole override rests on - a `[[profile.qemu.overrides]]` beats a
+# `[[profile.default.overrides]]`, verified rather than read off the
+# ladder in tools/wedge-gate.py's header.
+[[profile.qemu.overrides]]
+filter = 'package(nzbkit) and binary(nzbkit) and test(/^extract::/)'
+slow-timeout = { period = "60s", terminate-after = 15 }
+retries = 0
+
+# ---------------------------------------------------------------------
 # The nightly heavy suites, migrated off bare `cargo test` on 17 Aug
 # 2026. Until then nightly.yml and its Windows twin were the LAST places
 # in CI running libtest directly - and they run the flakiest suites in

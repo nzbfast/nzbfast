@@ -59,7 +59,7 @@ pub(super) async fn userspace_tls(
     tcp: tokio::net::TcpStream,
     pin_fast_suite: bool,
 ) -> std::io::Result<Wire> {
-    let connector = tokio_rustls::TlsConnector::from(super::tls_client_config(pin_fast_suite));
+    let connector = tokio_rustls::TlsConnector::from(super::tls::tls_client_config(pin_fast_suite));
     let socket = BufReader::with_capacity(tls_read_buf(), tcp);
     Ok(Wire::Tls(Box::new(connector.connect(name, socket).await?)))
 }

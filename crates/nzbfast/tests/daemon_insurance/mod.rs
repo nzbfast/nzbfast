@@ -241,6 +241,18 @@ async fn banked_row_survives_the_takedown_the_deferred_row_does_not() {
         }
         let q = http(port, "/api?mode=queue&output=json", None);
         assert!(ok, "arm B was never banked: {q}");
+        // TODO 304 stage 2: and the row SAYS which of the two it is.
+        // These two rows are one setting apart and mean opposite things
+        // - arm B's payload is on disk, arm A's is still only on Usenet
+        // - and until this key existed both read "Paused" at the same
+        // percentage, with nothing anywhere to tell them apart.
+        let b_slot = queue_slot(&q, &id_b);
+        assert_eq!(b_slot["insurance"]["banked"], true, "{q}");
+        assert_eq!(b_slot["insurance"]["retired"], false, "{q}");
+        assert!(
+            queue_slot(&q, &id_a)["insurance"].is_null(),
+            "arm A was stamped before the feature came on: {q}"
+        );
         assert!(
             history_status(port, &id_b).is_none(),
             "banking must not file the row"

@@ -90,6 +90,12 @@ pub(in crate::serve) fn wind_down(d: &Arc<Daemon>, rt: &tokio::runtime::Handle, 
     // nothing lazily reopens the index database behind the close
     // started below. Never cleared - every caller of this either exits
     // or execs (`restart_in_place` exits if its exec fails).
+    // BEFORE that store, because `index_db_wanted` reads it and the
+    // ledger's last unwritten record is worth one bounded attempt while
+    // the database is still open. Best-effort and never blocking - see
+    // `flush_index_ledger_for_exit`.
+    #[cfg(feature = "indexer")]
+    d.flush_index_ledger_for_exit();
     d.exiting.store(true, Ordering::Relaxed);
     // Order matters. Pause first so nothing new is admitted while we are
     // tearing down, THEN wind the transfer down GRACEFULLY.

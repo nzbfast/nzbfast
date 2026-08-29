@@ -446,7 +446,7 @@ pub(super) fn parked_replaceable(j: &Job) -> bool {
         // every clock this runs on.
         && !j.auto_retry_at.is_some_and(|t| t > unix_now().unsigned_abs())
         && another_copy_can_help(
-            fail_kind(&j.fail_message),
+            j.fail_kind(),
             fail_hint(&j.fail_message),
             &j.fail_message,
             j.password_required,
@@ -870,11 +870,23 @@ impl Daemon {
                 )
             });
         } else {
-            // `_if_present` and not `history_upsert`, the same call
-            // `promote_held_alternative` makes for the same reason: a
+            // `history_publish`, whose present-check is the same guard
+            // `promote_held_alternative` takes for the same reason: a
             // delete landing between the read above and this write must
-            // not resurrect the record.
-            let _ = self.history_upsert_if_present(&orig);
+            // not resurrect the record. The rescuing publish and not the
+            // raw upsert because the stamp above DISARMED a PAST-DUE
+            // auto-retry (clause 3 admits one), so a refused append the
+            // rewrite could still rescue would reload the stamp at the
+            // next start and queue the parked row again beside the
+            // alternative that replaced it (Codex C11).
+            self.history_publish(&orig, || {
+                format!(
+                    "{}: the replaced row's disarmed retry did not reach the \
+                     store - after a restart its overdue auto-retry queues it \
+                     again beside the alternative",
+                    orig.lock_ok().name
+                )
+            });
         }
         self.save_queue();
         // Both events, and in this order. `job.failed` is what the

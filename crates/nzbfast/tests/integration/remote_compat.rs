@@ -531,6 +531,31 @@ fn sab_remote_arms_cover_lunaseas_calls() {
     }
     let v = api(p, "mode=history&name=delete&value=SABnzbd_nzo_nosuch");
     assert_eq!(v["status"], serde_json::Value::Bool(false), "{v}");
+    // And carries a reason. The dashboard's two history bulk controls
+    // report in red off this key alone; with it absent they fell through
+    // to their success branch and toasted "Cleared 0 from the list." in
+    // green over a write that was refused. The exact wire text is the
+    // i18n key (`err.<the whole sentence>` in web/i18n), so it is pinned
+    // here rather than merely tested for presence - reword it and 27
+    // locales quietly fall back to English with every gate green.
+    assert_eq!(
+        v["error"].as_str(),
+        Some(
+            "nothing in your history matched that - it may have been \
+             removed already"
+        ),
+        "a per-id miss must say why, in the words web/i18n keys on: {v}"
+    );
+    // The class sweeps above are SUCCESS, so they must not carry one -
+    // an `error` beside `"status": true` is what LunaSea's clear-history
+    // dialog would read as a failure.
+    for class in ["completed", "failed", "all"] {
+        let v = api(p, &format!("mode=history&name=delete&value={class}"));
+        assert!(
+            v.get("error").is_none(),
+            "an idempotent {class} sweep succeeded and must say nothing: {v}"
+        );
+    }
 
     // fullstatus: the four keys LunaSea's statistics page reads, all
     // strings (its parser hands them to tryParse, which takes String).

@@ -275,8 +275,10 @@ impl Shared {
         } else {
             self.sat.note_bytes(now, n, tail);
         }
-        // TODO 208 item 1: the line-aware shed rides the same fold.
-        self.line_cap_tick(now);
+        // TODO 208 item 1: the line-aware shed rides the same fold. The
+        // tail bit rides along so the supply arm can sit out a queue-dry
+        // tail (F6, 27 Aug sweep).
+        self.line_cap_tick(now, tail);
         // TODO 208.2: the mean delivered body, for the share-aware
         // stall bound. Same 1/8 fold as `art_ms`; a load/store race
         // drops one sample, which moves nothing.
@@ -1047,8 +1049,18 @@ mod tests {
         sh.note_srv_bytes(0, 8_000_000);
         let whole = sh.srv_rate(0).unwrap();
         let per = sh.srv_rate_per_worker(0).unwrap();
+        // RELATIVE, and it has to be. Both readers re-decay the EWMA
+        // against `start.elapsed()` at the instant they are called, so
+        // the two reads above are of two different moments and the gap
+        // between them is whatever the scheduler gave. An absolute
+        // 1.0 B/s tolerance on a ~554 kB/s rate is therefore a bound on
+        // the SCHEDULER, and the nightly armv7-cross run of 28 Aug 2026
+        // lost it: 554517.74 / 4 against 138619.82, out by 9.6 B/s -
+        // TRY 1 FAIL, TRY 2 PASS, reported as a flake. 1% still refuses
+        // every wrong divisor (dividing by 1, 2 or 8 is off by 100% or
+        // more), which is the whole of what this case claims.
         assert!(
-            (whole / 4.0 - per).abs() < 1.0,
+            (whole / 4.0 - per).abs() < whole * 0.01,
             "per-worker should be rate/alive: {whole} / 4 vs {per}"
         );
     }
@@ -1523,6 +1535,7 @@ mod tests {
             dup: false,
             prebyte_expiries: 0,
             soft_430: 0,
+            recheck_430: 0,
             fenced: false,
             rearms: 0,
             ladder: false,

@@ -961,6 +961,20 @@ ANON = {'benchmarks', 'explained', 'explained-onepass', 'explained-damaged',
 # a waiver list, so an entry is a claim somebody made on purpose, and the
 # reason is what a later reader needs to overturn it.
 ENGLISH_ONLY = {
+    'arr': 'Sonarr/Radarr/Prowlarr setup guide, added 28 Aug 2026 in English only, the same way and under the same open question as the synology and unraid guides below. It is a settings walkthrough whose load-bearing content is field names the *arrs themselves render in English regardless of the reader locale (Settings, Download Clients, SABnzbd, Test, Category) plus code spans that must stay byte-identical anyway, so a translated twin would carry a handful of connecting sentences around an English UI. Linked from the Sonarr / Radarr card on all 16 index pages as a bare English href, which is exactly what the two guides below already do from the localized download pages. Whether it should become a translated family is the same content decision, still open.',
+    'benchmark-nested-archives': 'Data appendix for the nested-archive '
+                'section of the benchmarks page: ten archive shapes against '
+                'seven downloaders, eight tables of figures and three '
+                'charts. English only DELIBERATELY, and not by the same '
+                'open question as the two below - it is almost entirely '
+                'numbers, unit labels and client names, so a translated '
+                'twin would be fifteen copies of the same tables held to '
+                'byte-identical <code> and figure parity for the sake of a '
+                'few hundred words of caption. The prose that a reader has '
+                'to understand to read the figures lives in the benchmarks '
+                'page section that links here, and THAT page is a '
+                'translated family. Revisit if the appendix grows prose '
+                'rather than tables.',
     'synology': 'Container Manager install guide, added 22 Jul 2026 '
                 '(df5ab151a) in English only. That commit localized the 15 '
                 'download pages to LINK to it and never translated the page '
@@ -992,7 +1006,7 @@ ENGLISH_ONLY = {
 # green. The per-entry loop in the selftest cannot see it either, because a
 # deleted entry deletes its own case. Raise this when a page family is added;
 # lowering it is a claim that a family has been withdrawn from the site.
-ROSTER_EXPECTED = 13
+ROSTER_EXPECTED = 15
 
 
 def page_bases(names):

@@ -1,5 +1,8 @@
 //! End-to-end component benchmark for a light mapped PAR2 repair.
 //! Fixture construction and recovery generation are outside the clock.
+//!
+//! Set NZBFAST_REPAIR_TIMING=1 for the per-phase breakdown (feed reads /
+//! fold+solve / patch+verify), which is the split TODO M2c.2 was about.
 
 use md5::{Digest, Md5};
 use nzbkit::extract::Extractor;
@@ -30,6 +33,27 @@ fn envn(name: &str, default: usize) -> usize {
 }
 
 fn main() {
+    // nzbkit emits its timing lines as tracing events; an example binary
+    // has to install a sink or NZBFAST_REPAIR_TIMING prints nothing. Same
+    // sink as examples/par2_repair_dir.rs, and for the same reason: the
+    // `repair-timing` target is the key these lines are grepped by.
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .init();
+    // Both calls below mirror examples/par2_repair_dir.rs, which carries the
+    // long-form rationale. In short: without the throttling opt-out a
+    // sustained bench gets demoted onto E-cores on Windows (16.6 s to 58 s on
+    // the laptop rig, no effect elsewhere), and without fast par mode this
+    // driver runs the streaming fold and reports a configuration nobody
+    // ships - serve/startup.rs turns it ON via FAST_PAR_DEFAULT, and the
+    // library flag defaults to OFF because it is the daemon's setting to own.
+    // MUST TRACK `nzbfast::serve::FAST_PAR_DEFAULT`. `NZBFAST_NTT=0` still
+    // forces the fold, which is how the fold column is measured.
+    nzbkit::mem::opt_out_of_power_throttling();
+    nzbkit::par2repair::set_fast_par_enabled(true);
     let payload_len = envn("NZBFAST_MAPPED_BYTES", 256 << 20);
     let block = envn("NZBFAST_MAPPED_BLOCK", 64 << 10);
     let missing_count = envn("NZBFAST_MAPPED_MISSING", 3);

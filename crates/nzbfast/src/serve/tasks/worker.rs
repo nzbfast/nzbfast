@@ -325,6 +325,32 @@ fn emit_started(d: &Daemon, j: &Job) {
 /// figures are detached off the hub right before the new job claims
 /// it, and not a moment earlier - a start that finds nothing leaves
 /// the carried run owning the hub for its whole drain.
+/// The pick-to-start re-checks, run inside the one lock hold that is
+/// atomic with the flip to Downloading - `pick_job` and
+/// `pick_insurance_job` both drop the job lock before returning, so
+/// everything they checked can move in the gap.
+///
+/// `relocating` is Codex F-06: a recategorize fits entirely inside the
+/// gap, and starting into the destination races `move_tree`. `tombstone`
+/// is the same gap class - a delete landing there has already begun
+/// unlinking the payload and the spooled .nzb, so starting spends
+/// bandwidth on a row the user just dismissed. An insurance pick is
+/// re-judged in full: the insure toggle can turn off in the gap (nothing
+/// could ever wind the fetch down afterwards, since
+/// `insurance_yields_to_arrivals` finds the active fetch by
+/// `g.insurance`), the row can be promoted or unpaused (it is
+/// `pick_job`'s business now), or already banked. The caller answers
+/// Ended, not Nothing, so another row can run.
+fn start_gap_refusal(j: &Job, insurance: bool) -> bool {
+    j.relocating > 0
+        || j.tombstone
+        || (insurance
+            && (!j.insurance
+                || j.fetched
+                || j.state != JobState::Queued
+                || crate::serve::insurance::insure_refusal(j).is_some()))
+}
+
 async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>) -> Start {
     let d = st.d.clone();
     let config = st.config.clone();
@@ -379,14 +405,10 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
     }
     let (nzb_path, out_dir, total, library, nzo_id, name, prio, job_password, eat_ok, failure_host) = {
         let mut j = job.lock_ok();
-        // Codex F-06: [`Job::relocating`], re-read here because this is
-        // the only critical section that can be atomic with the publish
-        // that raises it - `pick_job` drops the job lock before
-        // returning, so a recategorize fits entirely inside the gap
-        // between its check and this flip. Ended, not Nothing: another
-        // job may well be runnable, and `pick_job` skips this one until
-        // the move finishes.
-        if j.relocating > 0 {
+        // Re-read the pick's own preconditions here because this is the
+        // only critical section that can be atomic with a publish that
+        // invalidates them - see `start_gap_refusal` for the list.
+        if start_gap_refusal(&j, insurance) {
             return Start::Ended;
         }
         j.state = JobState::Downloading;
@@ -461,19 +483,24 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
                 }) => {
                     j.state = JobState::Failed;
                     // The counts make the verdict checkable;
-                    // append-only, the prefix is classified on.
+                    // append-only, the prefix is classified on. TODO 307
+                    // item 1: the kind is stated beside the sentence, so
+                    // the prefix is no longer the only thing carrying it.
                     j.fail_message = crate::with_build(format!(
                         "pre-flight: articles missing beyond repair - {}",
                         crate::check::impossible_reason(est_missing, recovery, &measured)
                     ));
+                    j.fail_code = Some(FailKind::PreflightImpossible);
                 }
                 Ok(_) => {
                     j.state = JobState::Completed;
+                    let authority = pointer_authority(&d.bind, d.port);
+                    warn_docker_pointer_once(&authority);
                     if let Err(e) = write_strm(
                         &out_dir,
                         &name,
                         d.scheme(),
-                        &pointer_authority(&d.bind, d.port),
+                        &authority,
                         &nzo_id,
                         &d.stream_token(&nzo_id),
                     ) {
@@ -483,6 +510,10 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
                 Err(e) => {
                     j.state = JobState::Failed;
                     j.fail_message = e.to_string();
+                    // A sweep that errored, not a verdict: the sampler
+                    // says nothing about the post, so nothing is stated
+                    // and the sentence is all the evidence there is.
+                    j.fail_code = crate::failkind::code_of_error(&e);
                 }
             }
             j.finished_at = Some(Instant::now());
@@ -572,6 +603,11 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
             let mut j = job.lock_ok();
             j.state = JobState::Failed;
             j.fail_message = crate::with_build(reason);
+            // `giveup_reason` opens `post is gone` and the block comment
+            // above says why; TODO 307 item 1 states it as well, so the
+            // opening is a courtesy to the reader rather than the only
+            // carrier of the verdict.
+            j.fail_code = Some(FailKind::Gone);
             j.finished_at = Some(Instant::now());
             j.finished_unix = Some(unix_now());
             info!(target: "health", "{nzo_id}: {}", j.fail_message);
@@ -626,6 +662,7 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
                         "pre-flight: articles missing beyond repair - {}",
                         crate::check::impossible_reason(est_missing, recovery, &measured)
                     ));
+                    j.fail_code = Some(FailKind::PreflightImpossible);
                     j.fail_detail = crate::fail_detail_snapshot(log_mark);
                     j.finished_at = Some(Instant::now());
                     j.finished_unix = Some(unix_now());
@@ -695,6 +732,15 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
         // which asserts nothing.
         d.hub.post_unix.store(0, Ordering::Relaxed);
         *owner = Some(nzo_id.clone());
+        // TODO 309(b): and where this job's journal lives, for the
+        // queue payload's pause-cost answer. In here with the owner
+        // publish because it IS the same fact - which job is on the
+        // wire - and the payload path may not reach into the queue for
+        // the out_dir (see `PauseCostState::owners`). It pushes the
+        // predecessor into the second slot rather than over it: the
+        // drain installed three lines up is still fetching, and until
+        // 28 Aug 2026 this call is what silenced its row.
+        d.note_wire_owner(&nzo_id, &out_dir);
         progress
     };
     let t_start = Instant::now();
@@ -745,6 +791,9 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
             p.display()
         );
     }
+    // PLAN M31: the same question one medium over - see
+    // `predecessor_posting` below and `get::dupefill`.
+    let donor_nzbs = predecessor_posting(&d, &job, &nzo_id);
     let fetch = {
         let config = config.clone();
         let nzb_path = nzb_path.clone();
@@ -780,6 +829,7 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
                 job_password,
                 eat_ok,
                 donor_dirs,
+                donor_nzbs,
                 Some(progress),
                 Some(hub),
                 &stream_owner,
@@ -803,6 +853,68 @@ async fn start_next(st: &mut Runner, quick: bool, carried: Option<&mut Running>)
         detached: None,
         insurance,
     })
+}
+
+/// PLAN M31: the NZBs of duplicate POSTINGS of this job's release whose
+/// live articles may fill a bad block - `get::dupefill`.
+///
+/// The sibling of `donor_dirs` in [`start_next`] and deliberately not
+/// the same thing. That one is a failed predecessor's BYTES ON DISK,
+/// which §293's block adoption already reads; this is a duplicate
+/// posting's ARTICLES, so a block the wire refused US can be asked for
+/// from a posting whose copy of it is still alive.
+///
+/// **STAGE 1 IS THE FAILED PREDECESSOR AND NOTHING ELSE, and that is a
+/// deliberate narrowing rather than the obvious first cut.** The
+/// spares §282 parks against a RUNNING row are equally reachable here
+/// and were wired first; what that measured is written up in
+/// `research/M31-DUPE-DONOR-LADDER-2026-08-28.md` and it is a product
+/// question rather than a bug. In short: a job with a byte-identical
+/// spare held against it now COMPLETES by borrowing a few of that
+/// spare's articles, so §282's promotion rung never fires - which is
+/// cheaper and better, and is also a decision to retire a shipped
+/// escalation path on this lane's own authority. Two `daemon_ladder`
+/// tests pin the old behaviour and both go red on it. So the source
+/// that needs that decision is held back, and the one that needs no
+/// decision at all ships. The write-up names the exact lines that turn
+/// the other source back on, including the `held_against` re-widening
+/// this narrowing reverted so the tree carries no reach nothing uses.
+///
+/// A promoted successor already IS the switch §282 chose, so borrowing
+/// from the post it replaced spends nothing anyone was holding: that
+/// job has failed, its NZB is in history, and its articles may well
+/// still serve the segments THIS post lost - a job fails for many
+/// reasons that are not "every article is gone".
+///
+/// Says so on the log itself rather than leaving that to the caller:
+/// `start_next` sits under the size gate's function ceiling and this
+/// sentence is about what THIS function found.
+fn predecessor_posting(
+    d: &Arc<Daemon>,
+    job: &Arc<Mutex<Job>>,
+    nzo_id: &str,
+) -> Vec<std::path::PathBuf> {
+    let alt_from = job.lock_ok().alt_from.clone();
+    if alt_from.is_empty() {
+        return Vec::new();
+    }
+    let pred = d.history.lock_ok().iter().find_map(|j| {
+        let g = j.lock_ok();
+        (g.nzo_id == alt_from).then(|| g.nzb_path.clone())
+    });
+    // A spool file that has been swept is not a donor. The existence
+    // check runs OUTSIDE the history lock, for the reason
+    // `start_next`'s donor_dirs stat does: the spool can be a network
+    // share, and a stat under that lock stalls the API behind it.
+    let out: Vec<std::path::PathBuf> = pred.into_iter().filter(|p| p.is_file()).collect();
+    if !out.is_empty() {
+        info!(
+            target: "repair",
+            "{nzo_id}: the post this replaces is available as an article donor - a block \
+             no server serves for us may still be alive in its copy",
+        );
+    }
+    out
 }
 
 /// The three arms that end a job before a pipeline starts share this
@@ -902,8 +1014,11 @@ async fn finish(st: &mut Runner, run: Running) {
         on_disk_bytes,
         verifier,
         shaper,
+        resume_route,
         #[cfg(feature = "indexer")]
         oracle_samples,
+        prov_facts,
+        prov_post_unix,
     } = settle_job_tail(d, &nzo_id, &mut st.ledger, &progress, detached);
     st.lane
         .submit(PostprocTicket {
@@ -911,6 +1026,7 @@ async fn finish(st: &mut Runner, run: Running) {
             fetch,
             verifier,
             shaper,
+            resume_route,
             log_mark,
             dl_bytes,
             dl_secs,
@@ -919,6 +1035,8 @@ async fn finish(st: &mut Runner, run: Running) {
             insurance,
             #[cfg(feature = "indexer")]
             oracle_samples,
+            prov_facts,
+            prov_post_unix,
         })
         .await;
 }

@@ -31,6 +31,8 @@ fn frozen_table() -> crate::streamhub::TailTable {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     let slot = std::sync::Arc::new(crate::unpack::FileSlot {
         hint: "pack.part01.rar".into(),
+        hint_is_posted_name: nzbkit::release::stem_is_a_name("pack.part01.rar"),
+        name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
         is_par2_main: false,
         sample_skipped: false,
         par2_sniffed: AtomicBool::new(false),

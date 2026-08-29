@@ -308,10 +308,20 @@ pub(crate) async fn fetch_volumes(
         cancel,
     )
     .await
-    .map(|(failures, _paths)| VolumeYield {
-        asked,
-        failed: failures.total().saturating_add(omitted),
-        ours: failures.ours().saturating_add(omitted),
+    .map(|(failures, _paths)| {
+        // Instrument only: how the wire losses were SPELLED, so an
+        // incident log can tell an all-430 source from one that closes
+        // connections on removed content - the distinction the blame
+        // axis deliberately folds away. See [`LossSpelling`].
+        let sp = failures.spelling();
+        if sp.any() {
+            info!(target: "repair", "recovery losses by wire spelling: {}", sp.describe());
+        }
+        VolumeYield {
+            asked,
+            failed: failures.total().saturating_add(omitted),
+            ours: failures.ours().saturating_add(omitted),
+        }
     })
 }
 
@@ -646,6 +656,9 @@ pub(crate) struct VolumeFailures {
     per_file: std::collections::HashMap<usize, u32>,
     unattributed: u32,
     ours: u32,
+    /// See [`LossSpelling`] - instrument only, fed by the two terminal
+    /// arms beside the blame charge and read by nothing but a log line.
+    spelling: LossSpelling,
 }
 
 /// Whether one failed recovery article is evidence about the SOURCE or
@@ -727,6 +740,87 @@ impl VolumeFailures {
             .copied()
             .unwrap_or(0)
             .saturating_add(self.unattributed)
+    }
+
+    /// How this fetch's wire losses were SPELLED. Read by the log line
+    /// in [`fetch_volumes`] and by nothing else - see [`LossSpelling`].
+    pub(crate) fn spelling(&self) -> LossSpelling {
+        self.spelling
+    }
+}
+
+/// Instrument only (v1.2.4 tranche sweep R2 follow-up, 27 Aug 2026):
+/// how each of a recovery fetch's terminal wire losses was SPELLED, so
+/// the next slow-escalation incident log can answer a question the
+/// blame axis deliberately does not ask.
+///
+/// The blame mapping above reads every `FetchOutcome::Failed` as OURS,
+/// on the stated ground that a link failure says nothing about whether
+/// the article is there - the fail-safe direction, kept. What that
+/// direction cannot see is a provider that answers removed content by
+/// closing the connection rather than by 430: every such loss lands in
+/// `Transport`, `source_asked` shrinks toward zero, and
+/// [`VolumeYield::source_will_not_serve`] can never fire - the §282
+/// 46-minute escalation shape, for that refusal style. Whether any
+/// provider on this fleet actually behaves that way is UNMEASURED, and
+/// this tally is the measurement: a round whose losses are ~all
+/// connection-failed while other sources serve the same set is the
+/// evidence a narrower rule could act on. Until such a round shows up
+/// in a log, nothing here reads these numbers to change anything.
+///
+/// STATED LIMIT: per ROUND, not per server. `FetchOutcome::Failed`
+/// carries no server index, so a mixed side fleet cannot be split here
+/// without a pool wire change - which is the day-the-data-warrants-it
+/// step, not this one. Omitted duplicates never reach the wire and are
+/// deliberately absent from every bucket.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LossSpelling {
+    /// Every live server answered 430/423 (or retention ruled it out).
+    pub(crate) missing: u32,
+    /// The session carrying it died or refused it - the bucket a
+    /// reset-on-takedown provider would fill.
+    pub(crate) transport: u32,
+    /// OUR read deadline ended it; the peer never said anything.
+    pub(crate) read_stall: u32,
+    /// Nobody ever asked: the fleet wound down or a worker panicked.
+    pub(crate) fleet_down: u32,
+}
+
+impl LossSpelling {
+    fn note_missing(&mut self) {
+        self.missing = self.missing.saturating_add(1);
+    }
+
+    fn note_failed(&mut self, code: nzbkit::fail::FailCode) {
+        use nzbkit::fail::FailCode;
+        let n = match code {
+            FailCode::Transport => &mut self.transport,
+            FailCode::ReadStall => &mut self.read_stall,
+            FailCode::FleetExhausted | FailCode::WorkerPanic => &mut self.fleet_down,
+        };
+        *n = n.saturating_add(1);
+    }
+
+    /// Anything at all to say.
+    pub(crate) fn any(&self) -> bool {
+        self != &Self::default()
+    }
+
+    /// The log clause: only the nonzero buckets, so the common
+    /// all-430 round reads as one term rather than four.
+    pub(crate) fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        for (n, what) in [
+            (self.missing, "answered 430/423"),
+            (self.transport, "connection-failed"),
+            (self.read_stall, "read-stalled"),
+            (self.fleet_down, "never asked (fleet down)"),
+        ] {
+            if n > 0 {
+                parts.push(format!("{n} {what}"));
+            }
+        }
+        parts.join(", ")
     }
 }
 
@@ -852,6 +946,7 @@ pub(crate) async fn consume_volume_articles(
                 // the gate exists to refuse, and either way an
                 // alternate source is the remedy the clause names.
                 failures.charge_id(&id_to_file, &id, Blame::Source);
+                failures.spelling.note_missing();
             }
             FetchOutcome::Failed { id, code, .. } => {
                 // NOT ONE of these is the source refusing, and the
@@ -876,6 +971,7 @@ pub(crate) async fn consume_volume_articles(
                     }
                 };
                 failures.charge_id(&id_to_file, &id, blame);
+                failures.spelling.note_failed(code);
             }
         }
     }
@@ -1397,6 +1493,58 @@ mod recovery_volume_tests {
             code,
             error: code.reason().to_string(),
         }
+    }
+
+    /// Sweep R2's instrument (27 Aug 2026): the spelling tally counts
+    /// each terminal outcome into exactly one bucket, independently of
+    /// the blame axis, and its clause names only the nonzero buckets.
+    /// This is the measurement that would show a provider answering
+    /// removed content by connection close rather than 430 - the shape
+    /// the blame mapping deliberately cannot see.
+    #[tokio::test]
+    async fn the_loss_spelling_tally_counts_each_outcome_once() {
+        use nzbkit::fail::FailCode;
+        let dir = temp_dir("spelling");
+        let mut outs: Vec<(usize, FetchOutcome)> = Vec::new();
+        for i in 0..3 {
+            outs.push((0, refused(i)));
+        }
+        for (i, code) in [
+            FailCode::Transport,
+            FailCode::Transport,
+            FailCode::ReadStall,
+            FailCode::FleetExhausted,
+            FailCode::WorkerPanic,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            outs.push((0, gave_up(i, code)));
+        }
+        let (failures, _) = consume_outcomes(&dir, outs).await;
+        let sp = failures.spelling();
+        assert_eq!(
+            sp,
+            LossSpelling {
+                missing: 3,
+                transport: 2,
+                read_stall: 1,
+                fleet_down: 2,
+            }
+        );
+        assert!(sp.any());
+        assert_eq!(
+            sp.describe(),
+            "3 answered 430/423, 2 connection-failed, 1 read-stalled, 2 never asked (fleet down)"
+        );
+        // The all-430 round - the common case - reads as one term.
+        let only = LossSpelling {
+            missing: 4,
+            ..Default::default()
+        };
+        assert_eq!(only.describe(), "4 answered 430/423");
+        assert!(!LossSpelling::default().any(), "a clean fetch says nothing");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// TODO 307 item 1's residue, at the wire: the consumer's two axes

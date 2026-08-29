@@ -247,7 +247,8 @@ fn adopt_reparented_directory(job: &Mutex<Job>, gen0: &(u32, u64, std::path::Pat
 ///
 /// `fleet` is the host set the sidecar may download on:
 /// - `borrow == false`: the idle hosts. The exclusion list is every host
-///   that IS serving the active job plus exhausted block accounts and
+///   that IS serving the active job, plus every host on which each
+///   enabled account is an exhausted prepaid block, plus the
 ///   auth-refused hosts - the sidecar may only touch idle capacity.
 /// - `borrow == true`: healthy BUSY hosts, used when no healthy idle
 ///   server exists (the 31 Jul soak state: the only idle server
@@ -282,19 +283,21 @@ pub(super) fn spawn_sidecar(
     };
     let total: u64 = deltas.iter().map(|(_, b)| b).sum();
     let cfg_loaded = nzbkit::config::Config::load(config).ok();
-    let block: std::collections::HashSet<String> = cfg_loaded
-        .as_ref()
-        .map(|c| {
-            c.servers
-                .iter()
-                .filter(|s| {
-                    s.block_bytes
-                        .is_some_and(|b| b > 0 && d.block_spent(&s.host) >= b)
-                })
-                .map(|s| s.host.clone())
-                .collect()
-        })
-        .unwrap_or_default();
+    // §96.5: the same block-account arithmetic the main job's start
+    // does, from the SAME place - `Daemon::block_pool_rules`, which owns
+    // the rule and every reason behind it. This was written out a second
+    // time here until 28 Aug 2026 and carried all three of that helper's
+    // defects: it read DISABLED rows, one exhausted row excluded the
+    // whole host (funded or flat-rate siblings with it), and the budget
+    // map was last-write-wins so the config's order decided the cap.
+    // Keep the two on one helper; a third copy is how they drift.
+    let (block_excluded, block_budgets) = d.block_pool_rules(
+        cfg_loaded
+            .as_ref()
+            .map(|c| c.servers.as_slice())
+            .unwrap_or(&[]),
+    );
+    let block: std::collections::HashSet<String> = block_excluded.into_iter().collect();
     // Servers the active job's pool has recorded a refusal for (bad
     // credential or connection/IP cap) moved no bytes, so the busy-host
     // test below never catches them - but they are dead weight, not idle
@@ -376,23 +379,12 @@ pub(super) fn spawn_sidecar(
     // §96.5: a block host with bytes left may serve the sidecar, but
     // its remaining budget rides along, so a block that runs out
     // mid-prefetch releases the server there and then, same as on the
-    // main job. (The ledger is read at spawn: a main job spending the
-    // same host concurrently is not re-subtracted mid-run, so the
-    // bound is per-fleet, not global - the exclusion lists above keep
-    // that overlap to the borrow path.)
-    *hub.host_byte_budgets.lock_ok() = cfg_loaded
-        .as_ref()
-        .map(|c| {
-            c.servers
-                .iter()
-                .filter_map(|s| {
-                    let b = s.block_bytes.filter(|b| *b > 0)?;
-                    let left = b.saturating_sub(d.block_spent(&s.host));
-                    (left > 0).then(|| (s.host.clone(), left))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // main job. Computed above with the exclusion, in one pass, so the
+    // two cannot disagree about the same host. (The ledger is read at
+    // spawn: a main job spending the same host concurrently is not
+    // re-subtracted mid-run, so the bound is per-fleet, not global -
+    // the exclusion lists above keep that overlap to the borrow path.)
+    *hub.host_byte_budgets.lock_ok() = block_budgets;
     // M29 3d: the idle-server prefetch is real availability signal too.
     // The primary job's OracleSink lives on the daemon hub; this sidecar
     // runs on a FRESH hub, so without its own sink every 222/430 it sees
@@ -473,6 +465,9 @@ pub(super) fn spawn_sidecar(
                     // §293: and its donor question travels the same way -
                     // the primary runner resolves donors when the job
                     // actually runs; the prefetch never repairs.
+                    Vec::new(),
+                    // PLAN M31, same reason one line up: the prefetch
+                    // never settles, so it never has a bad block to fill.
                     Vec::new(),
                     Some(progress.clone()),
                     Some(hub.clone()),

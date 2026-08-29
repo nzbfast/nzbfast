@@ -195,6 +195,62 @@ fn parse_decimal_size(v: &str) -> Option<usize> {
     usize::try_from(n.checked_mul(mult)?).ok()
 }
 
+/// How many CPU-bound workers this machine should run at once.
+///
+/// The one place `available_parallelism` is read for a WORKER POOL, so
+/// that the answer can be capped from outside the process. Sites that
+/// want the machine's real core count for something else - a benchmark
+/// measuring the box, a diagnostic reporting it - go on asking the
+/// standard library directly and say so.
+///
+/// `NZBFAST_CPU_WORKERS` overrides it, and the caller that exists is a
+/// PHONE (TODO 281 AN4). On a big.LITTLE SoC `available_parallelism`
+/// counts the little cores as if they were big, and every one of these
+/// pools is a work-stealing queue sharing one thermal envelope: past the
+/// big cluster the extra threads are paid for twice, once in power and
+/// again in the frequency the throttle takes off every other thread. The
+/// Android launcher reads the topology out of `cpuinfo_max_freq` and
+/// passes the count - see `DeviceProfile.cpuWorkers` in
+/// packaging/android/compose-app.
+///
+/// This is a CEILING on the pool width and nothing else. Every call site
+/// still applies its own clamps (`.min(work.len())`, the physical-core
+/// rule on hybrid x86, `NZBFAST_NTT_THREADS`), so a smaller answer here
+/// can only ever narrow a pool, never widen one.
+///
+/// Read once. The value cannot change while the process runs, and these
+/// sites sit inside repair and decode loops where a `getenv` per call
+/// would be a syscall in a hot path.
+pub fn cpu_workers() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        let machine = std::thread::available_parallelism().map_or(4, |n| n.get());
+        match std::env::var("NZBFAST_CPU_WORKERS") {
+            Ok(v) => cpu_workers_override(&v).unwrap_or(machine),
+            Err(_) => machine,
+        }
+    })
+}
+
+/// What `NZBFAST_CPU_WORKERS` is allowed to mean, split out so it can be
+/// tested: the reading of the variable itself cannot be, because
+/// [`cpu_workers`] latches its answer in a `OnceLock` and the whole
+/// process shares one.
+///
+/// `None` for anything that is not a positive number, so a typo falls
+/// back to the machine rather than to zero workers, which is a hang. The
+/// ceiling is not a guess about hardware: this value arrives from a
+/// launcher, and a pool a thousand threads wide is a way to take the
+/// process down that no caller asked for. 1024 is far past any real
+/// machine and far short of thread exhaustion.
+pub(crate) fn cpu_workers_override(raw: &str) -> Option<usize> {
+    raw.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0)
+        .map(|n| n.min(1024))
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MemBudget {
     pub total: u64,
@@ -722,7 +778,7 @@ pub fn peak_rss() -> Option<u64> {
 // symbol, which the language rules call undefined behaviour even when
 // both are pointer-sized. Declared once with the real Mach signature
 // (`task_info_t` is `integer_t*`); callers cast their struct pointer.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 // SAFETY: declared once, with the real Mach signature (`task_info_t` is
 // `integer_t*`) per the comment above, so there are no conflicting extern
 // declarations for the symbol; callers cast their #[repr(C)] info-struct
@@ -746,7 +802,7 @@ pub fn current_rss() -> Option<u64> {
             return Some(cur);
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     // SAFETY: TaskBasicInfo is #[repr(C)] matching the documented
     // mach_task_basic_info layout (comment below), every field is a plain
     // integer so zeroed() is a valid value, `count` is initialized to the
@@ -807,7 +863,7 @@ pub fn current_rss() -> Option<u64> {
 /// after an idle trim where naive RSS stays pinned. Elsewhere it equals
 /// current_rss.
 pub fn dashboard_rss() -> Option<u64> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     // SAFETY: TaskVmInfo is #[repr(C)] matching the documented task_vm_info
     // layout (comment below), every field is a plain integer so Default's
     // zero value is valid, `count` is initialized to the struct size in
@@ -869,7 +925,7 @@ pub fn dashboard_rss() -> Option<u64> {
 // unfulfilled.
 #[allow(unreachable_code)]
 pub fn trim() -> u64 {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         // SAFETY: signature matches the documented declaration in
         // malloc/malloc.h (comment below).
@@ -1091,6 +1147,34 @@ mod tests {
         // which is what keeps `holds_cap + partials_cap < total`.
         let b = MemBudget::with_total(1 << 30);
         assert_eq!(b.holds_cap(), (1u64 << 30) as usize / 100 * 45);
+    }
+
+    /// TODO 281 AN4: what a launcher is allowed to say with
+    /// `NZBFAST_CPU_WORKERS`.
+    ///
+    /// The reading of the variable is not tested here and cannot be:
+    /// [`cpu_workers`] latches its answer in a process-wide `OnceLock`,
+    /// so a test that set the variable would be testing whichever test
+    /// ran first. What IS testable is the rule the value is judged by,
+    /// which is where every way of getting this wrong lives.
+    #[test]
+    fn cpu_workers_override_is_bounded_and_refuses_nonsense() {
+        assert_eq!(cpu_workers_override("6"), Some(6));
+        assert_eq!(cpu_workers_override("  6\n"), Some(6));
+        // Zero workers is a hang, not a setting, and neither is a typo:
+        // both fall back to the machine rather than to nothing.
+        assert_eq!(cpu_workers_override("0"), None);
+        assert_eq!(cpu_workers_override(""), None);
+        assert_eq!(cpu_workers_override("many"), None);
+        assert_eq!(cpu_workers_override("-4"), None);
+        assert_eq!(cpu_workers_override("4.5"), None);
+        // Clamped rather than trusted: this arrives from a launcher.
+        assert_eq!(cpu_workers_override("100000"), Some(1024));
+        assert_eq!(cpu_workers_override("1024"), Some(1024));
+        // And with nothing set at all the answer is still a usable pool
+        // width - never zero, never past the ceiling.
+        let n = cpu_workers();
+        assert!((1..=1024).contains(&n), "cpu_workers() = {n}");
     }
 
     #[test]

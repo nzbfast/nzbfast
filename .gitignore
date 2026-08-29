@@ -107,3 +107,8 @@ __pycache__/
 # The generators and the ground-truth manifests are what get committed.
 research/torture-soak-2026-08-11/adversarial*/
 research/torture-soak-2026-08-11/fixtures*/
+
+# tools/checkjs-gate.py's pinned typescript, installed by `npm ci` from the
+# committed package.json + package-lock.json. Dev-only and nothing here
+# ships - see the gate's header for why the pin is exact.
+/node_modules/

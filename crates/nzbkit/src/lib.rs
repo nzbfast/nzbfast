@@ -24,6 +24,9 @@ pub mod config;
 #[cfg(all(test, feature = "indexer"))]
 mod corr_calibration;
 pub mod disk;
+/// PLAN M31 stage 1: borrow a lost segment's bytes from a duplicate
+/// posting, proved block by block against the target's own PAR2 set.
+pub mod dupedonor;
 pub mod extract;
 /// Role-aware fault selection for the chaos mock (TODO 283): resolve a
 /// FILE ROLE - payload, recovery index, volume N - to the ids the

@@ -55,6 +55,9 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         hub: Arc::new(crate::StreamHub::default()),
         paused: std::sync::atomic::AtomicBool::new(false),
         early_file_publish: std::sync::atomic::AtomicBool::new(false),
+        write_manifest: std::sync::atomic::AtomicBool::new(false),
+        boot_at: Instant::now(),
+        metrics_open: std::sync::atomic::AtomicBool::new(false),
         offline: std::sync::atomic::AtomicBool::new(false),
         paused_by_offline: std::sync::atomic::AtomicBool::new(false),
         exiting: std::sync::atomic::AtomicBool::new(false),
@@ -189,6 +192,7 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         par_cleanup: AtomicBool::new(true),
         postproc_jobs: AtomicU64::new(2),
         slow_storage: Default::default(),
+        pause_cost: Default::default(),
         out_umask: std::sync::atomic::AtomicU32::new(u32::MAX),
         fast_par: AtomicBool::new(FAST_PAR_DEFAULT),
         prefer_external_unrar: AtomicBool::new(false),
@@ -276,22 +280,33 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         #[cfg(feature = "indexer")]
         index_evict_kinds: seed_index_evict_kinds(&settings_path),
         #[cfg(feature = "indexer")]
+        index_keep_kinds: seed_index_keep_kinds(&settings_path),
+        #[cfg(feature = "indexer")]
+        index_evict_scope: seed_index_evict_scope(&settings_path),
+        #[cfg(feature = "indexer")]
+        index_evict_headroom: seed_index_evict_headroom(&settings_path),
+        #[cfg(feature = "indexer")]
         compact_pending: std::sync::atomic::AtomicBool::new(false),
         #[cfg(feature = "indexer")]
         last_auto_trim: std::sync::Mutex::new(None),
+        #[cfg(feature = "indexer")]
+        index_ledger: std::sync::Mutex::new(Default::default()),
         #[cfg(feature = "indexer")]
         index_opened: Mutex::new(OpenedLog::default()),
         #[cfg(feature = "indexer")]
         index_gates: seed_index_gates(&settings_path, None),
         line_speed: seed_line_speed(&settings_path),
         link_peak: super::linkpeak::LinkPeak::load(spool.join("linkpeak.json")),
+        line_carry: super::linecarry::LineCarry::load(spool.join("linecarry.json")),
         whyslow: super::whyslow::WhySlow::default(),
         tune_hint: Mutex::new(String::new()),
         local_link: Mutex::new(None),
         cpu_sample: Mutex::new(None),
         speed_win: Mutex::new(VecDeque::new()),
         usage: Mutex::new(Default::default()),
+        provquality: super::provquality::ProvQuality::load(spool.join("provquality.json")),
         run_usage_flushed: Mutex::new(Default::default()),
+        block_band: Mutex::new(Default::default()),
         pause_until: Mutex::new(None),
         pause_wake: std::sync::Condvar::new(),
         pause_timer_live: std::sync::atomic::AtomicBool::new(false),

@@ -27,6 +27,23 @@ impl Daemon {
     /// PROPERs are never duplicates, and a stem with no derivable key is
     /// never one either. Same rules the hold itself applies, because it
     /// is the same code.
+    ///
+    /// `cfg(any(feature = "indexer", test))` because the only PRODUCTION
+    /// caller is `m_index_dupe`, and `serve/api/index.rs` is gated on
+    /// `indexer` whole - so with the indexer off this wrapper is dead in
+    /// the bin build. Both arms are load-bearing and the second is the
+    /// one that is easy to get wrong: it is NOT dead in the slim TEST
+    /// build, because `a_deleted_release_is_not_a_duplicate_until_the_mark_is_spent`
+    /// calls it and is not itself gated, so a bare `indexer` cfg here
+    /// stops the slim test build compiling. `enqueue` reaches the same
+    /// scans through `dupe_collision_except` and is unconditional; what
+    /// is conditional is only this ASK-before-you-add door.
+    ///
+    /// Not `#[expect(dead_code)]`: `dead_code` is a rustc lint judged in
+    /// every configuration, so an expectation that is fulfilled slim
+    /// goes UNFULFILLED in the default build - see CLAUDE.md's
+    /// FIFTEENTH gate entry.
+    #[cfg(any(feature = "indexer", test))]
     pub(crate) fn dupe_collision(&self, stem: &str) -> Option<DupeCollision> {
         self.dupe_collision_except(stem, None)
     }

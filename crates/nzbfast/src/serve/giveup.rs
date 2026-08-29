@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 // For the Daemon impl moved in from daemon.rs (§129 4a paydown).
-use super::{Daemon, Job, JobState, fail_kind, is_arr_origin, is_watchlist_origin};
+use super::{Daemon, Job, JobState, is_arr_origin, is_watchlist_origin};
 use crate::MutexExt;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -742,14 +742,18 @@ impl Daemon {
         if threshold == 0 {
             return;
         }
-        let (name, nzo_id, origin, state, fail_message) = {
+        let (name, nzo_id, origin, state, fail_kind) = {
             let g = job.lock_ok();
             (
                 g.name.clone(),
                 g.nzo_id.clone(),
                 g.origin.clone(),
                 g.state,
-                g.fail_message.clone(),
+                // TODO 307 item 1: the classification, not the sentence.
+                // Nothing below this point wants the words, and taking
+                // the kind here is what puts the breaker on the
+                // producer's verdict rather than on its prose.
+                g.fail_kind(),
             )
         };
         let from_arr = is_arr_origin(&origin);
@@ -769,7 +773,7 @@ impl Daemon {
         // machine and then unmonitors + blocklists content that is
         // perfectly obtainable. Skip, don't clear: a local fault is not
         // a success either, and the target's real failure count stands.
-        if state == JobState::Failed && !fail_kind(&fail_message).post_unavailable() {
+        if state == JobState::Failed && !fail_kind.post_unavailable() {
             return;
         }
         let p = crate::wall::parse_release(&name);

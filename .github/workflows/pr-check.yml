@@ -369,27 +369,68 @@ jobs:
       # USED to have: the daemon suite is single-threaded by invariant
       # (CLAUDE.md invariant 4) and flakes under a parallel workspace
       # pass, and cargo cannot exclude one test target from --workspace.
+      # `.config/nextest.toml` answers it narrowly, with per-binary
+      # `max-threads = 1` groups, exactly as the Linux leg's own comment
+      # above explains.
       #
-      # STILL `cargo test`, deliberately, and this is the one asymmetry
-      # in this file worth explaining. The Linux leg moved to nextest on
-      # 26 Aug 2026 for a MEASURED 3.03x; that measurement is a Linux
-      # measurement on a developer box, and nothing has measured this
-      # runner. Converting both legs in one commit would also make the
-      # next red public run ambiguous between them, on a gate whose
-      # verification cycle costs ~45 minutes and which is the gate
-      # external contributors hit. The conversion here is mechanical
-      # once the Linux one has a green run behind it - the same install
-      # step in its pwsh spelling (ci-private.yml has one), the same two
-      # `-E` filters, and `--skip ladder_finds_the_knee_and_soaks_the_line`
-      # below becomes `and not test(ladder_finds_the_knee_and_soaks_the_line)`
-      # inside the first pass's filter.
+      # CONVERTED TO NEXTEST 27 Aug 2026, per the recipe this comment
+      # used to carry: the same pwsh install step ci-private.yml's
+      # windows-build job uses (prebuilt, pinned by version, checked by
+      # SHA256, an explicit retry loop rather than -MaximumRetryCount -
+      # see that job's own comment for why the loop exists), the same two
+      # `-E` filters the Linux leg uses, and
+      # `--skip ladder_finds_the_knee_and_soaks_the_line` folded into the
+      # first filter as `and not test(ladder_finds_the_knee_and_soaks_the_line)`.
+      # Both passes build the SAME thing - identical flags, identical
+      # features - and select what to RUN with `-E`, so the second pass
+      # compiles nothing, same as the Linux leg.
+      #
+      # NOT verified on this runner: nothing here has run on the public
+      # repo yet (pr-check is gated to it), so the on-runner timing stays
+      # an open question until the next public PR - see TODO 285's tail.
+      # `timeout-minutes` above is left at 75 for exactly that reason.
+      - name: install cargo-nextest
+        shell: pwsh
+        env:
+          NT_VERSION: "0.9.140"
+          NT_SHA_WINDOWS: "ec39698dfe5bcfffb7d5da037f226bc1670584ba247123f4e684a0f224fe828d"
+        run: |
+          $url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$env:NT_VERSION/cargo-nextest-$env:NT_VERSION-x86_64-pc-windows-msvc.zip"
+          $want = $env:NT_SHA_WINDOWS
+          # An EXPLICIT loop, not -MaximumRetryCount: that parameter only
+          # retries HTTP 304/4xx/5xx, and what this step actually dies of
+          # is `The response ended prematurely. (ResponseEnded)` - a
+          # transport-level truncation it does not cover (ci-private.yml's
+          # windows-build job lost three runs to it on 12 Aug 2026, at 2x
+          # private-repo billing, with the workspace suite skipped every
+          # time). The hash is checked INSIDE the loop so a short read
+          # retries rather than failing the job; it remains the only thing
+          # that decides correctness.
+          $ok = $false
+          foreach ($i in 1..5) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile cargo-nextest.zip
+              $got = (Get-FileHash cargo-nextest.zip -Algorithm SHA256).Hash.ToLower()
+              Write-Host "attempt ${i}: cargo-nextest zip sha256 = $got"
+              if ($got -eq $want) { $ok = $true; break }
+              Write-Host "attempt ${i}: sha256 mismatch (expected $want)"
+            } catch {
+              Write-Host "attempt ${i}: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds (5 * $i)
+          }
+          if (-not $ok) { throw "cargo-nextest download failed after 5 attempts (expected sha256 $want)" }
+          New-Item -ItemType Directory -Force -Path C:\nextest | Out-Null
+          Expand-Archive cargo-nextest.zip -DestinationPath C:\nextest -Force
+          Remove-Item cargo-nextest.zip
+          "C:\nextest" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: test (workspace minus nzbfast)
         env:
           NZBFAST_NO_ENRICH: "1"
           # As on the Linux leg: par2 is fetched above, so a skip here means
           # the install or the PATH broke and the run must say so.
           NZBFAST_REQUIRE_PAR2: "1"
-        # --skip ladder_finds_the_knee_and_soaks_the_line: that test
+        # not test(ladder_finds_the_knee_and_soaks_the_line): that test
         # measures wall-clock throughput of a simulated 8 MB/s line and
         # asserts the tuner's knee lands at ~8 connections. On hosted
         # windows-latest the 8-conn rung under-delivers (~78% of the
@@ -398,10 +439,11 @@ jobs:
         # passed every one of them. A check that always fails gates
         # nothing. The Linux leg keeps running it, and the private
         # repo's Windows lane never ran it (its per-push sweep excludes
-        # the time-measuring targets wholesale) - so this skip removes
-        # a red light, not coverage. The other conn_tuner tests stay.
-        run: cargo test --workspace --exclude nzbfast --locked --features nzbkit/heavy-tests --no-fail-fast -- --skip ladder_finds_the_knee_and_soaks_the_line
-      - name: test (nzbfast, single-threaded)
+        # the time-measuring targets wholesale) - so this exclusion
+        # removes a red light, not coverage. The other conn_tuner tests
+        # stay.
+        run: cargo nextest run --locked --features nzbkit/heavy-tests,nzbfast/heavy-tests --no-fail-fast -E 'not package(nzbfast) and not test(ladder_finds_the_knee_and_soaks_the_line)'
+      - name: test (nzbfast)
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
@@ -409,7 +451,9 @@ jobs:
           # the Linux runner: it opens an all-interfaces listener, which on
           # Windows is exactly what raises the Defender Firewall dialog,
           # and a hosted runner has nobody to click it.
-        run: cargo test -p nzbfast --locked --features heavy-tests --no-fail-fast -- --test-threads=1
+        # Same flags as the pass above on purpose - only the filter and
+        # the env differ - so this step compiles nothing.
+        run: cargo nextest run --locked --features nzbkit/heavy-tests,nzbfast/heavy-tests --no-fail-fast -E 'package(nzbfast)'
       # Parity with the Linux leg above, which has run clippy all along
       # while this job did not - and clippy only lints what compiles for
       # the host, so `#[cfg(windows)]` code was gated on no runner at all.

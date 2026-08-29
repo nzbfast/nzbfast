@@ -74,13 +74,11 @@ impl ArchiveSource {
                 let data = data.get(range).ok_or(Error::TooShort)?;
                 writer.write_all(data)?;
             }
-            Self::File(path) => {
-                let mut file = File::open(path.as_ref())?;
-                file.seek(SeekFrom::Start(range.start as u64))?;
-                let mut limited = file.take(range.len() as u64);
-                std::io::copy(&mut limited, writer)?;
-            }
-            Self::Stream { .. } => {
+            // File goes through `range_reader` so a truncated volume is an
+            // ERROR (`short_range()`), not a short copy that reads as done.
+            // (nzbfast-local change, 27 Aug 2026 - re-apply on the next rars
+            // re-sync, see vendor/rars/VENDORING.md.)
+            Self::File(_) | Self::Stream { .. } => {
                 let mut reader = self.range_reader(range)?;
                 std::io::copy(&mut reader, writer)?;
             }
@@ -95,9 +93,18 @@ impl ArchiveSource {
                 Ok(Box::new(Cursor::new(data)))
             }
             Self::File(path) => {
+                // `file.take(len)` answers `Ok(0)` with bytes still owed on a
+                // truncated volume, which the chained extract walks read as
+                // fragment EOF - the same defect the 26 Aug change closed on
+                // the owned readers. Reuse the guarded File reader instead.
+                // (nzbfast-local change, 27 Aug 2026 - re-apply on the next
+                // rars re-sync, see vendor/rars/VENDORING.md.)
                 let mut file = File::open(path.as_ref())?;
                 file.seek(SeekFrom::Start(range.start as u64))?;
-                Ok(Box::new(file.take(range.len() as u64)))
+                Ok(Box::new(OwnedRangeReader::File {
+                    file,
+                    remaining: range.len() as u64,
+                }))
             }
             Self::Stream { source, len } => {
                 if range.start > range.end || range.end > *len {
@@ -606,13 +613,22 @@ mod tests {
         let path = dir.join("short.rar");
         std::fs::write(&path, b"0123").unwrap();
         let file_source = ArchiveSource::File(path.clone().into());
-        let mut reader = file_source.owned_range_reader(0..8).unwrap();
-        let mut out = Vec::new();
-        let error = reader
-            .read_to_end(&mut out)
-            .expect_err("a truncated volume must not read as a clean end");
-        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
-        assert_eq!(out, b"0123");
+        for mut reader in [
+            Box::new(file_source.owned_range_reader(0..8).unwrap()) as Box<dyn Read>,
+            Box::new(file_source.range_reader(0..8).unwrap()) as Box<dyn Read>,
+        ] {
+            let mut out = Vec::new();
+            let error = reader
+                .read_to_end(&mut out)
+                .expect_err("a truncated volume must not read as a clean end");
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+            assert_eq!(out, b"0123");
+        }
+        // And the copy walk, which routes through the same guarded reader.
+        let mut sink = Vec::new();
+        file_source
+            .copy_range_to(0..8, &mut sink)
+            .expect_err("a truncated volume must not copy as complete");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

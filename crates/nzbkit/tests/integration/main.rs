@@ -100,7 +100,7 @@
 //! defect, not the suite's, and it was never only about tests - an
 //! embedder pointing the client at a new CA after its first connection
 //! had exactly the same silence. The cache is keyed by the CA path now
-//! (see `tls_client_config` in `crates/nzbkit/src/nntp.rs`), the two
+//! (see `tls_client_config` in `crates/nzbkit/src/nntp/tls.rs`), the two
 //! modules take a guard from `tls_env` so that only one CA is in force
 //! at a time, and neither uses `std::env::set_var` any more - the
 //! `unsafe` on that call was justified by "the only test in this

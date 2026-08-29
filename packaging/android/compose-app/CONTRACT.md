@@ -86,7 +86,7 @@ Full API key only (queue contents are never add-only). Optional
   "paused": false, "pause_int": "0",
   "speed_bps": 0.0, "diskspace_gb": 601.03, "warnings": 0,
   "link_peak": 0.0, "link_peak_src": "",
-  "queue_total": 1, "history_total": 0,
+  "queue_total": 1, "history_total": 0, "queue_idle": false,
   "queue":   [ <job>, ... ],
   "history": [ <job>, ... ],
   "stream": { "readers": 0, "blocked_reads": 0, "zero_filled_bytes": 0,
@@ -109,6 +109,26 @@ A `<job>`:
 Numbers are NUMBERS here (the SAB payloads quote theirs); `status`
 words and `activity` tokens are the same ones rows 2 and 3 carry.
 `queue_total` / `history_total` count before `limit` cuts the page.
+
+Contract ADDITION (2026-08-26, keys may be added, TODO 281 AN2):
+`queue_idle` (bool) - the daemon's own drain latch, `Daemon::note_queue_idle`.
+
+It is NOT the same fact as an empty `queue` list, and the difference is
+the reason it exists. A job that has finished downloading is stamped
+`Completed` and retained OUT of the queue a hundred lines before its
+record is filed into history, so for the whole length of its tail - the
+repair, the extract, the move - it is in NEITHER list. The latch accounts
+for that backlog (`postproc_backlog`) where the lists cannot, and it is
+re-armed by enqueue.
+
+The caller is the Android foreground service, which STOPS THE ENGINE on
+it: the alternative reading tears a job down mid-repair. A client that
+predates the addition sees no key, and absent must read FALSE - "I cannot
+tell" and "there is nothing left to do" cannot be the same answer when
+the consequence of the second is killing the process. The Compose app
+parses it that way and the four `playback_*.json` fixtures, all
+pre-addition recordings, are what test it
+(`playbackWithoutQueueIdleIsNotIdle`).
 
 Contract ADDITION (2026-08-06, keys may be added): `link_peak` (bps)
 and `link_peak_src` ("measured" | "line" | "") - the link's learned
@@ -217,6 +237,18 @@ Both shells, in step:
   it); pause-on-metered stays open - it is on-device-engine work
   (connectivity callbacks driving the local daemon), not a player
   change.
+
+## Row 3 (`mode=history`) is still read, for one field
+
+The Compose app polls row 16 and nothing else, with ONE exception since
+TODO 281 AN3: the on-device export needs `storage`, the finished
+payload's directory on disk, and row 16 deliberately does not carry a
+path. It is a readiness call, and a phone has no use for a server's
+filesystem - except in on-device mode, where that filesystem is the
+phone's own. So the export path, and only the export path, fetches
+`mode=history` when it has something to copy. Export is on-device only
+for the same reason: a remote daemon's `storage` names a directory on
+that machine.
 
 ## Not used yet (candidates for the next phase)
 

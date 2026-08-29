@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """classify.py - grade one client run of one nested-corpus leg.
 
-    classify.py <manifest.json> <outdir> <client-exit-code>
+    classify.py <manifest.json> <outdir> <client-exit-code> [--skip-dirs a,b]
 
 Prints one line:  class=<c> matched=<k>/<n> [missing=a,b] [leftover=x,y]
 
@@ -12,6 +12,17 @@ Classes (the "automatic vs manual intervention" framing):
                        payloads are not all there - an operator would have
                        to keep unpacking or repairing by hand
   fail                 nonzero exit / timeout, and no complete payload set
+
+--skip-dirs NAMES excludes directory names anywhere under <outdir> from the
+walk. It exists because a client may STAGE a payload inside its own delivery
+directory: Weaver writes `complete/.weaver-staging/<job>/` and moves the file
+out when the job finishes, so a full-size payload sitting there is work in
+progress and NOT a delivered result. Counting it graded three Weaver legs
+auto-complete whose job never finished and whose log recorded no completion,
+alongside an `inner.rar.partial` in the same directory. Every other client
+already keeps its intermediate area OUTSIDE the tree we grade (nzbget
+inter/, SAB incomplete/, rustnzb incomplete/), so this is what makes Weaver
+graded on the same footing rather than on a more generous one.
 """
 
 import hashlib
@@ -29,10 +40,16 @@ def sha256(path):
 
 
 def main():
-    if len(sys.argv) != 4:
+    argv = sys.argv[1:]
+    skip = set()
+    if "--skip-dirs" in argv:
+        i = argv.index("--skip-dirs")
+        skip = {d for d in argv[i + 1].split(",") if d}
+        del argv[i:i + 2]
+    if len(argv) != 3:
         sys.exit(__doc__)
-    manifest = json.load(open(sys.argv[1]))
-    outdir, rc = sys.argv[2], int(sys.argv[3])
+    manifest = json.load(open(argv[0]))
+    outdir, rc = argv[1], int(argv[2])
 
     # Index every file under outdir by basename and by size (clients
     # differ on layout, and some rename the extracted payload to the job
@@ -40,7 +57,8 @@ def main():
     # is "present" when its exact bytes exist anywhere in the tree, so we
     # match on content (size + sha256), not on the corpus-side basename.
     by_name, by_size = {}, {}
-    for root, _dirs, files in os.walk(outdir):
+    for root, dirs, files in os.walk(outdir):
+        dirs[:] = [d for d in dirs if d not in skip]
         for name in files:
             path = os.path.join(root, name)
             by_name.setdefault(name, []).append(path)

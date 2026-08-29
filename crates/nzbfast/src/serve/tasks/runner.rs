@@ -21,6 +21,8 @@ pub(super) struct JobTail {
     pub(super) on_disk_bytes: u64,
     pub(super) verifier: Option<Arc<nzbkit::live::LiveVerifier>>,
     pub(super) shaper: Option<Arc<nzbkit::extract::Extractor>>,
+    /// TODO 309: this run's resume route, on its way to the record.
+    pub(super) resume_route: Option<crate::streamhub::ResumeRoute>,
     /// M29 oracle samples, drained here and ingested on the lane. The
     /// DRAIN has to happen on the runner (the hub's sink belongs to
     /// this job, and the next job installs a fresh one); the INGEST
@@ -28,6 +30,19 @@ pub(super) struct JobTail {
     /// is the runner - see `settle_job_tail`.
     #[cfg(feature = "indexer")]
     pub(super) oracle_samples: Vec<nzbkit::oracle::Sample>,
+    /// This job's per-provider facts for the quality ledger, read off
+    /// the same `pool_live` snapshot as the reliability figures beside
+    /// them.
+    ///
+    /// Read here and RECORDED on the lane, the same split the oracle
+    /// samples above take and for a related reason: the ledger's row
+    /// carries the job's OUTCOME, and whether a job completed, needed
+    /// repair or failed is not decided until post-processing has run.
+    /// Reading it on the runner and recording it there would file every
+    /// job as whatever it looked like at network drain.
+    pub(super) prov_facts: Vec<crate::serve::provquality::HostFacts>,
+    /// ...and its post date, for the age bucket the facts land in.
+    pub(super) prov_post_unix: i64,
 }
 
 /// TODO §156 item 7: the no-servers guard's config read, kept off the
@@ -466,10 +481,13 @@ pub(super) async fn download_guards(
 /// Hand the shared hub over from the previous job to this one.
 ///
 /// Two halves. First the block-account economics for this job's pool:
-/// hosts whose block spend is used up are ruled out, and every host with
-/// bytes LEFT is handed its remaining budget so the pool releases it
-/// mid-run if this job spends the rest (§96.5 - the exclusion alone only
-/// helps the next job). Then every per-job hub slot is REPLACED rather
+/// a host every one of whose enabled accounts is an exhausted block is
+/// ruled out, and a host whose block accounts still have bytes LEFT (and
+/// no unlimited account beside them) is handed the largest of those
+/// remainders so the pool releases it mid-run if this job spends the
+/// rest (§96.5 - the exclusion alone only helps the next job). Both
+/// answers come from [`Daemon::block_pool_rules`], which owns the rule
+/// and the reasons for it. Then every per-job hub slot is REPLACED rather
 /// than merely left, because the tail of job N-1 and the queue payload
 /// both read these while job N runs: a slot still holding the previous
 /// job's value is a double-billed byte, a stale extractor served down
@@ -481,47 +499,64 @@ pub(super) fn reset_hub_for_job(
     nzo_id: &str,
     failure_host: String,
 ) {
-    // Block accounts: rule exhausted hosts out of this job's
-    // pool (block spend ≥ the configured block size), and hand
-    // every host with bytes LEFT its remaining budget, so the
-    // pool releases it mid-run if this job spends the rest
-    // (§96.5 - the exclusion alone only helps the next job).
+    // Block accounts: rule a host out of this job's pool when every
+    // enabled account on it is a block that is used up (spend ≥ the
+    // configured block size), and hand a host that still has block
+    // bytes LEFT its remaining budget, so the pool releases it mid-run
+    // if this job spends the rest (§96.5 - the exclusion alone only
+    // helps the next job).
     //
     // The snapshot comes from the bounded no-servers probe rather than
     // from a fresh `Config::load` here: this function runs ON the
     // runner with the job already marked Downloading and no fetch task
     // to cancel yet, so a config path that stopped answering wedged the
     // queue silently (Codex sweep H).
+    //
+    // The arithmetic itself is `Daemon::block_pool_rules`, shared with
+    // the prefetch sidecar rather than written out twice. This loop used
+    // to do it inline, per ROW, and got three things wrong that only
+    // show up when two config entries share one host (a supported
+    // shape - a block account beside the main account): a disabled row
+    // was read, one exhausted row excluded the whole host including a
+    // funded or flat-rate sibling, and the budget was last-write-wins so
+    // the config's ORDER decided the cap. That helper's doc comment
+    // carries the full account and the stated residue; do not re-inline
+    // this, and do not let the sidecar's copy drift from it.
     {
-        let mut excluded: Vec<String> = Vec::new();
-        let mut budgets: std::collections::HashMap<String, u64> = Default::default();
-        for s in cfg_now
-            .as_ref()
-            .map(|c| c.servers.as_slice())
-            .unwrap_or(&[])
-        {
-            let Some(b) = s.block_bytes.filter(|b| *b > 0) else {
-                continue;
-            };
-            let spent = d.block_spent(&s.host);
-            if spent >= b {
-                excluded.push(s.host.clone());
-            } else {
-                budgets.insert(s.host.clone(), b - spent);
-            }
-        }
+        let (excluded, budgets) = d.block_pool_rules(
+            cfg_now
+                .as_ref()
+                .map(|c| c.servers.as_slice())
+                .unwrap_or(&[]),
+        );
         *d.hub.excluded_hosts.lock_ok() = excluded;
         *d.hub.host_byte_budgets.lock_ok() = budgets;
     }
     // TODO 208 item 1: the link anchor the fleet build caps the seed
     // from. Read here, at job start, so the second job on a fresh
     // install already has the first job's measured peak.
-    d.hub.line_anchor_bps.store(
-        d.link_peak
-            .effective(d.line_speed.load(Ordering::Relaxed))
-            .0,
-        Ordering::Relaxed,
-    );
+    //
+    // TODO 275 item 1 part 1: and its PROVENANCE, which this line kept
+    // the `.0` of and threw away for as long as it has existed. The
+    // pool's supply arm sizes fleets off this number and could not tell
+    // a line it measured from one a user typed into Settings; the word
+    // is now carried down to `PoolConfig::line_anchor_measured`. See
+    // `pool::linecap::fleet_for_supply` for what rests on it and why
+    // nothing branches on it yet.
+    let (anchor_bps, anchor_src) = d.link_peak.effective(d.line_speed.load(Ordering::Relaxed));
+    d.hub.line_anchor_bps.store(anchor_bps, Ordering::Relaxed);
+    d.hub
+        .line_anchor_measured
+        .store(anchor_src == "measured", Ordering::Relaxed);
+    // TODO 275 item 1 part 2: what one socket carried on the LAST job,
+    // read here for the same reason and at the same moment as the
+    // anchor above. The in-run supply arm learns this every run and
+    // used to let it die with the pool, so every job re-walked the same
+    // climb from the curve's planned carry; `serve::linecarry` is the
+    // memory and this is where the next job collects it.
+    d.hub
+        .line_carry_bps
+        .store(d.line_carry.carry_bps(), Ordering::Relaxed);
     // M2c.5: allow the engine's speculative recovery prefetch
     // for the main job unless a period quota is configured -
     // same reasoning as the sidecar guard: opportunistic
@@ -557,6 +592,13 @@ pub(super) fn reset_hub_for_job(
     // network bytes, under-billing its quota and under-reporting
     // its speed.
     d.hub.resume_seeded.store(0, Ordering::Relaxed);
+    // TODO 309: and the previous job's resume route, for a reason the
+    // owner tag alone does not cover. A retry of the SAME job carries
+    // the same nzo_id, so a run that dies before it reaches §94 A's
+    // gate - a config error, no usable servers - would otherwise leave
+    // its predecessor's verdict matching, and the tail would stamp the
+    // earlier attempt's route onto this attempt's report.
+    *d.hub.resume_route.lock_ok() = None;
     // M29 oracle: fresh per-job sink - the pool records each
     // article's hit/430 into it; drained to the ledger below.
     *d.hub.oracle.lock_ok() = Some(Arc::new(nzbkit::oracle::OracleSink::default()));
@@ -667,8 +709,19 @@ pub(super) struct DetachedTail {
     pub(super) resume_seeded: u64,
     verifier: Option<Arc<nzbkit::live::LiveVerifier>>,
     shaper: Option<Arc<nzbkit::extract::Extractor>>,
+    /// TODO 309: which route this run's resume took. Snapshotted here
+    /// for the same reason the two above are - the lane reads it long
+    /// after the next job may own the hub slot.
+    resume_route: Option<crate::streamhub::ResumeRoute>,
     #[cfg(feature = "indexer")]
     oracle_samples: Vec<nzbkit::oracle::Sample>,
+    /// Unix seconds of the youngest article in THIS job's NZB, 0 for
+    /// unknown. Snapshotted here for the same reason the handles above
+    /// are: `Hub::post_unix` is zeroed and rewritten at the next job's
+    /// Downloading transition, and pairing one job's date with another
+    /// job's article counters is exactly the reading its own doc warns
+    /// against.
+    post_unix: i64,
 }
 
 /// Take [`DetachedTail`] for `nzo_id` off the hub, which must still be
@@ -739,8 +792,14 @@ pub(super) fn detach_job_tail(d: &Arc<Daemon>, nzo_id: &str) -> DetachedTail {
         // finish/verify flips a set to "partly on disk"), and by
         // then the next job may own the hub slot.
         shaper: d.hub.extractor_for(Some(nzo_id)),
+        // Same ownership rule, and it is doing real work here: the
+        // verdict is published early (at intake, before the first
+        // article) and read late, so a hand-over sits squarely between
+        // the two.
+        resume_route: d.hub.resume_route_for(nzo_id),
         #[cfg(feature = "indexer")]
         oracle_samples,
+        post_unix: d.hub.post_unix.load(Ordering::Relaxed),
     }
 }
 
@@ -776,18 +835,62 @@ pub(super) fn settle_job_tail(
     // tries/430s to the reliability ledger.
     let mut residual: Vec<(String, u64)> = Vec::new();
     let mut per_server_rel: Vec<(String, u64, u64)> = Vec::new();
+    let mut prov_facts: Vec<crate::serve::provquality::HostFacts> = Vec::new();
     if let Some(l) = &detached.pool_live {
-        for s in &l.servers {
-            let bytes = s.bytes.load(Ordering::Relaxed);
-            let billed = detached.usage_flushed.get(&s.host).copied().unwrap_or(0);
-            if bytes > billed {
-                residual.push((s.host.clone(), bytes - billed));
+        // FOLD BY HOST BEFORE COMPARING, and this half MUST move with
+        // `Daemon::flush_run_usage`'s - see `Daemon::fold_bytes_by_host`
+        // for why either alone is worse than neither. `usage_flushed` is
+        // keyed by HOST and holds the SUM of every row on that host,
+        // while `l.servers` is one row per configured ACCOUNT and two
+        // config rows may legitimately share a host. Comparing a single
+        // row's counter against the pair's total under-bills here
+        // exactly as it did there; comparing the pair's total against a
+        // map that had NOT been folded would bill the whole job twice.
+        let per = Daemon::fold_bytes_by_host(
+            &l.servers
+                .iter()
+                .map(|s| (s.host.clone(), s.bytes.load(Ordering::Relaxed)))
+                .collect::<Vec<_>>(),
+        );
+        for (host, bytes) in &per {
+            let billed = detached.usage_flushed.get(host).copied().unwrap_or(0);
+            if *bytes > billed {
+                residual.push((host.clone(), bytes - billed));
             }
-            per_server_rel.push((
-                s.host.clone(),
-                s.articles_tried.load(Ordering::Relaxed),
-                s.articles_missing.load(Ordering::Relaxed),
-            ));
+        }
+        // The reliability ledger and the provider-quality facts stay
+        // PER ROW, on the far side of the fold above. `add_reliability`
+        // accumulates into a host-keyed bucket itself, so two rows on
+        // one host already sum there and folding here would only move
+        // the same addition earlier; and `HostFacts` wants the ROW's
+        // own counters, which is what makes a single busy account
+        // legible beside a quiet sibling on the same hostname.
+        for s in &l.servers {
+            let tried = s.articles_tried.load(Ordering::Relaxed);
+            let missing = s.articles_missing.load(Ordering::Relaxed);
+            per_server_rel.push((s.host.clone(), tried, missing));
+            prov_facts.push(crate::serve::provquality::HostFacts {
+                host: s.host.clone(),
+                tried,
+                missing,
+                // The RUN's own total, not the residual above: the
+                // usage ledger bills deltas because it is billed at
+                // several moments, and this one is written once. It is
+                // this ROW's bytes rather than the folded per-host sum
+                // for the reason in the block comment above.
+                bytes: s.bytes.load(Ordering::Relaxed),
+                capped_since_ms: s.capped_since.load(Ordering::Relaxed),
+                // The PERMANENT refusal only. A capacity refusal is
+                // the connection cap, which `capped_since` above
+                // already records as what it is - counting it twice
+                // would have one provider's busy evening read as a
+                // dead account.
+                refused: s
+                    .refusal
+                    .lock_ok()
+                    .as_ref()
+                    .is_some_and(|r: &nzbkit::pool::Refusal| r.permanent),
+            });
         }
     }
     if !residual.is_empty() {
@@ -799,7 +902,21 @@ pub(super) fn settle_job_tail(
         on_disk_bytes,
         verifier: detached.verifier,
         shaper: detached.shaper,
+        resume_route: detached.resume_route,
         #[cfg(feature = "indexer")]
         oracle_samples: detached.oracle_samples,
+        prov_facts,
+        prov_post_unix: detached.post_unix,
     }
 }
+
+// §96.5 with two config rows sharing one hostname: the pool-build rules
+// `reset_hub_for_job` publishes, and the settle-side usage fold. Its own
+// file for the size gate, and the explicit #[path] because a bare `mod`
+// on a child of `runner.rs` resolves against serve/tasks/runner/
+// (ref-gate: that directory is what rustc would go looking for, and its
+// absence is the point of the attribute). Same shape as
+// `stall.rs`'s `stall_gone_tests`.
+#[cfg(test)]
+#[path = "runner_block_tests.rs"]
+mod runner_block_tests;

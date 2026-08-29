@@ -543,6 +543,16 @@ med seg hver eneste indekser bak seg.</p>
 tilbake, som beviser adressen og nøkkelen med ett klikk. En lagret nøkkel vises aldri
 igjen: feltet sier det, og lar du det stå tomt, beholdes nøkkelen som allerede er
 der.</p>
+<p><b>nzbindex, helt uten konto.</b> Innstillinger → Søk på indeksere →
+<b>+ Legg til indekser</b>, og sett radens første felt til <code>nzbindex</code> i
+stedet for å navngi en konto. Den søker på nzbindex.com direkte via sitt eget
+dokumenterte API, ingen nøkkel kreves, selv om nzbindex også tar imot en, for en
+høyere grense på sin side. Den indekserer det som faktisk er lagt ut i stedet for en
+utvalgt releaseliste, så den finner ting kontoene over ikke har, til prisen at mange av
+resultatene har forvrengte navn. Nedlastinger legges likevel i kø og pakkes ut som
+enhver annen jobb. <b>Bare komplette</b>, på som standard, holder unna innlegg som
+mangler deler og aldri kan bli ferdige; feltene for størrelse, alder og nyhetsgruppe
+ved siden av snevrer inn et søk ytterligere.</p>
 <p><b>Å søke.</b> Åpne <b>🎬 veggen</b> i toppfeltet og velg <b>Utgivelser</b>.
 Nedtrekkslista ved siden av søkefeltet avgjør hvor et søk ser: <b>Denne indeksen</b>,
 altså det denne maskinen selv har skannet, <b>Indeksere</b>, eller <b>Begge</b>. Valget
@@ -1088,7 +1098,8 @@ overvåkingsmappen), <code>nzb.refeed</code> (en ferdig nedlastings egen NZB-fil
 overvåkingslisten kom inn, og den erstattede kopien ble fjernet),
 <code>queue.idle</code>, <code>queue.paused</code> og <code>queue.resumed</code> (køen stoppet eller startet igjen, uansett hvem eller hva som gjorde det), <code>queue.finished_action</code>
 (handlingen ved køens slutt ble slått på, kjørte eller ble avbrutt), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> og <code>update.available</code> (en nyere nzbfast-versjon ble funnet). Hver bærer
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> og <code>server.block_spent</code> (en forhåndsbetalt blokkonto er nede på de siste 15 % av dataene du kjøpte, eller har brukt opp alt) og <code>update.available</code> (en nyere nzbfast-versjon ble funnet). Hver bærer
 <code>schema_version</code> (for øyeblikket 1; nye nøkler kan dukke opp uten et hopp -
 ignorer det du ikke kjenner), en monoton <code>seq</code> og et
 <code>at</code>-tidsstempel i millisekunder.</p>
@@ -1247,6 +1258,7 @@ annen klient gjør overlapp på tvers av jobber.</li>
 <li><b>Soak på tvers av jobber</b>: mens en ferdig jobbs hale (verifisering/utpakking) fullføres
 på disk, eier den neste jobbens nedlasting allerede linjen.</li>
 </ul>
+<p><b>Med bare én konfigurert leverandør</b> kan dette bare oppdage et innlegg som er helt dødt - det kommer absolutt ingenting inn fra det, enten fordi hver artikkel avvises eller fordi leverandøren rett og slett slutter å svare. En jobb som bare er treg, men fortsatt mottar noen bytes, blir latt i fred, fordi det ikke finnes noen andre leverandør å flytte den til. Konfigurer en andre leverandør, så kan nzbfast også legge merke til et innlegg som en server ikke lenger har, og rute eller utsette det i stedet for å vente jobben ut.</p>
 <h3 id="oracle">Tilgjengelighetsorakelet</h3>
 <p>Takedowns er den viktigste grunnen til at en Usenet-nedlasting mislykkes, og de lar
 seg forutsi: den samme utgivelsen forsvinner hos én backbone mens en annen fortsatt har
@@ -1430,6 +1442,7 @@ SABnzbd-kompatibelt, så eksisterende SAB-integrasjoner fungerer uendret. To nø
 <tr><td>Diagnostikk</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic-autentisering: hvilken som helst bruker, API-nøkkel som passord)</td></tr>
 <tr><td>Forhåndsvisning / avspilling</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP-ranges; å starte en parkert biblioteksjobb krever <code>?t=</code>-token eller nøkkel), <code>/m3u/&lt;id&gt;</code> (krever nøkkel eller jobbens eget token; lager tokenet), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Overvåking</td><td><code>/metrics</code> svarer i Prometheus-tekstformatet 0.0.4: nedlastingshastighet, kødybde og byte, forbindelser per leverandør, avbrudd og artikkeltellinger, minne per delsystem og oppetid. Basisenheter hele veien (byte, sekunder), så panelet regner om, og ingenting kommer forhåndsavrundet. Bare GET, og som standard kreves den fulle API-nøkkelen. Sett <code>metrics_open</code> for å servere det uten nøkkel, som er det vanlige Prometheus-oppsettet: det inneholder ingen jobbnavn og ingen stier, men det publiserer vertsnavnet til hver oppsatt leverandør til alle som når porten.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Filer og plasseringer</h2>

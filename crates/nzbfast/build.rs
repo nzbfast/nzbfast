@@ -42,8 +42,18 @@ fn main() {
 
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    // Every target, before the Windows-only half below returns.
-    precompress_pages(&root, &out);
+    // Every target, before the Windows-only half below returns - but
+    // only when the browser-facing pages are being compiled IN. Without
+    // the `dashboard` feature (TODO 281 IO3b: the store build, and both
+    // phones) nothing includes these members, so gzipping 11.5 MB of
+    // catalogues and manuals into OUT_DIR is work whose whole output is
+    // discarded. `CARGO_FEATURE_DASHBOARD` is cargo's own spelling of the
+    // feature for a build script, and the `include_bytes!` sites that
+    // read these keys carry the SAME cfg - so a build that skips this
+    // cannot reach a missing file.
+    if std::env::var_os("CARGO_FEATURE_DASHBOARD").is_some() {
+        precompress_pages(&root, &out);
+    }
 
     if std::env::var("CARGO_CFG_WINDOWS").is_err() {
         return;

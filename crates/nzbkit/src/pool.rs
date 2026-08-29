@@ -98,357 +98,12 @@ impl ConnTarget {
     }
 }
 
-#[derive(Clone)]
-pub struct PoolConfig {
-    /// Memory-floor gauge for bodies queued in this pool's outcome
-    /// channel (memgauge, instrument-first). None (the default) charges
-    /// nothing: only a consumer that RELEASES the charge on receive may
-    /// set this - a fire-and-forget consumer (sidefetch, post checks,
-    /// nettools probes) would leak the gauge upward monotonically. The
-    /// get pipeline sets `Sub::Channel` and releases in its drain.
-    pub channel_gauge: Option<crate::memgauge::Sub>,
-    pub connections: usize,
-    /// Pipelined BODY commands in flight per connection.
-    pub window: usize,
-    /// Stagger between connection spawns (connect-burst avoidance).
-    pub ramp_delay: Duration,
-    /// Transport-failure attempts per article before reporting Failed.
-    pub article_retries: u8,
-    /// Per-response read timeout (stall detection).
-    pub read_timeout: Duration,
-    /// TODO 96.1, graduated to the "Adaptive connection timeouts"
-    /// setting (adaptive_timeouts, ON by default; env
-    /// NZBFAST_ADAPTIVE_TIMEOUT overrides in either direction):
-    /// replace the flat whole-response `read_timeout` with a two-phase
-    /// bound - an adaptive pre-byte budget from the server's TTFB EWMA
-    /// (dead connections detected in 2-10 s instead of 30) plus a
-    /// progress-rolling stall deadline on the body (a slow-but-alive
-    /// transfer is never killed for exceeding a flat cap).
-    pub adaptive_timeout: bool,
-    /// Backoff after a failed connect, doubled per consecutive failure.
-    pub connect_backoff: Duration,
-    /// Consecutive connect failures before a worker gives up.
-    pub max_connect_attempts: u32,
-    /// Paced dials the elected prober rides before declaring a parked
-    /// server dead (see [`CAP_PROBE_BOUNCES`], the shipped default).
-    /// Configurable for tests only: the ladder is paced off
-    /// `connect_backoff`, so a test that shrinks the backoff to keep
-    /// the suite quick is left paying 75 REAL connect attempts, and
-    /// what one of those costs is the platform's business, not ours -
-    /// a refused loopback connect is microseconds on macOS and ~2 s on
-    /// Windows, where its SYN is retried. 75 x 2 s outlasted the seal
-    /// test's whole budget and read as a pool hang on Windows alone.
-    /// Production never notices: at the default 8 s backoff the ladder
-    /// is backoff-dominated and a slow refusal is noise.
-    pub cap_probe_bounces: u32,
-    /// Total time a server may spend granting NO sessions during one run
-    /// before it is retired for the rest of that run; `None` = never
-    /// give up on it.
-    ///
-    /// The ceiling `cap_probe_bounces` cannot be. That ladder counts
-    /// CONSECUTIVE bounces and any granted session resets it, so a
-    /// provider at its account cap that frees one slot every few minutes
-    /// renews the ~10 minute horizon indefinitely and the run never
-    /// reaches a terminal - the job simply sits at zero bytes. This
-    /// budget accumulates across episodes and cannot be rewound, so the
-    /// pathological case is bounded while an ordinary reconnect costs
-    /// its own seconds and nothing more.
-    ///
-    /// Retiring is not a verdict about the POST: the articles that only
-    /// that server carried end up transport-failed, which the daemon
-    /// classifies `FailKind::Transport` - auto-retried from the journal,
-    /// and never reported to an indexer as a dead post.
-    ///
-    /// `None` is a real configuration, not a disabled feature: a user
-    /// who would rather a job wait all night than come back as failed
-    /// sets it, and the queue row now says which provider it is waiting
-    /// on for the whole wait.
-    ///
-    /// It stands `cap_probe_bounces` down as well, because otherwise it
-    /// would not deliver what it promises: a wholly unreachable server
-    /// would still be retired on that ladder at ~10 minutes and the job
-    /// would still come back failed. With it `None` the pool waits, and
-    /// the run does not end on its own - by request. The auto-defer
-    /// watchdog is what keeps the rest of the queue moving.
-    pub outage_budget: Option<Duration>,
-    /// Shared body-buffer pool; None = allocate per article.
-    pub buf_pool: Option<Arc<BufPool>>,
-    /// Live per-server gauges for dashboards (M14h); None = don't track.
-    pub live: Option<Arc<LiveStats>>,
-    /// TODO 112: live connection target for THIS server; None = every
-    /// spawned worker runs, the old behaviour. See [`ConnTarget`].
-    pub live_target: Option<Arc<ConnTarget>>,
-    /// TODO 208 item 1: the whole fleet's connection budget the in-run
-    /// shed walks `live_target` down to its share of (see
-    /// `pool::linecap`); 0 = off. MAX-folded across the fleet, like the
-    /// gauge's `pct`. A flat constant between 23 and 24 Aug 2026; since
-    /// TODO 277 it is the SEED of a curve on the line rate, which the
-    /// governor may grow during the run when `line_cap_auto`.
-    pub line_cap_fleet: usize,
-    /// TODO 277: is `line_cap_fleet` the curve's own number (true) or
-    /// one somebody typed (false)? Only the first may be grown in-run -
-    /// a leg that typed `NZBFAST_LINE_CAP=40` is asking for 40 sockets,
-    /// not for a floor of 40. ALL-folded across the fleet, unlike
-    /// everything else here, because one typed number pins the arm.
-    pub line_cap_auto: bool,
-    /// TODO 208 item 1: the line rate in bytes/s the daemon has seen
-    /// this link sustain (its persisted link anchor), 0 = none. The cap
-    /// no longer divides it, but the in-run shed still stands down
-    /// without it, and the stall bound sizes an article's share from
-    /// it. MAX-folded across the fleet.
-    pub line_anchor_bps: u64,
-    /// Shared pool-level speed limiter; None = unlimited.
-    pub rate: Option<Arc<RateLimit>>,
-    /// M29 availability oracle: per-article hit/430 outcomes accumulate
-    /// here (in memory - the daemon flushes to the ledger per job).
-    /// None = don't record.
-    pub oracle: Option<Arc<crate::oracle::OracleSink>>,
-    /// B3 wire-cap: global in-flight body byte ceiling across the whole
-    /// pool (see MemBudget::inflight_cap). Over it, workers stop topping
-    /// up their pipeline beyond one request in flight. 0 = uncapped.
-    pub inflight_cap: u64,
-    /// Connections that outlive this run (see [`crate::warmpool`]).
-    /// None = the old behaviour, connect per run and QUIT at the end,
-    /// which is still right for a one-shot CLI `get`.
-    pub warm: Option<Arc<crate::warmpool::WarmPool>>,
-    /// Cross-job hand-over (see [`handoff`]): this server's connection
-    /// cap as a lease shared with the NEXT job's run. A worker takes a
-    /// permit before it claims or dials and holds it while it has a
-    /// socket; an idle worker after queue-dry hands its socket back when
-    /// a successor is waiting on the lease. None = no successor can ever
-    /// be waiting, which is the CLI and every test that does not opt in.
-    pub lease: Option<Arc<handoff::HostLease>>,
-    /// Per-run latch the caller awaits to start the next job: latched
-    /// the first time a primary worker finds itself idle after queue-dry.
-    pub handoff: Option<Arc<handoff::HandoffSignal>>,
-    /// Tail fan-out prototype (off by default, env NZBFAST_TAIL_FANOUT=1):
-    /// in the endgame, an IDLE primary connection races a healthy
-    /// in-flight article too - same server included - instead of only
-    /// the 430-laddering ones. First completion wins, the loser's read
-    /// is abandoned, so the waste is bounded to bytes-in-flight at win
-    /// time. See `pick_dup` for the exact gates.
-    pub tail_fanout: bool,
-    /// TODO 208 item 3 endgame depth taper (dark, env NZBFAST_TAIL_TAPER=1):
-    /// as the work left in the run falls toward one article per
-    /// connection, cap the TOP-UP depth so the fleet arrives at
-    /// queue-dry holding roughly one article each instead of `window`
-    /// each. The drain that follows queue-dry is exactly the in-flight
-    /// set emptying - `conns x window` articles, measured at 1.13-1.62
-    /// GB on every banked 1 GbE bench leg regardless of fixture, line
-    /// speed or the §202 gate. That stretch is not line-idle - it is
-    /// payload arriving - so this is a ROBUSTNESS bound, not a
-    /// throughput one: a connection that grabbed four of the last
-    /// articles cannot hand them back when a faster one goes idle, and
-    /// the tail is where one wedged session is the wall. Tapering
-    /// leaves that work in the QUEUE, where it can still be
-    /// rebalanced, and costs only the round trip between a completion
-    /// and the next BODY at depth 1. See [`Shared::tail_window`].
-    pub tail_taper: bool,
-    /// M7b.2 depth steering (dark, env NZBFAST_STEER_DEPTH=1): a server
-    /// whose windowed per-conn rate falls below 1/4 of the best other
-    /// live server's tops its pipelines up to depth 1 instead of
-    /// `window`, restoring above 1/2 (hysteresis; thresholds env-tunable
-    /// while open question 9.3 of the steering design collects measured
-    /// values). Full participation at bounded commitment - never a
-    /// demotion (§129 3d): the server keeps every connection fetching,
-    /// it just stops parking `window` articles behind each slow session.
-    /// The clamp gates TOP-UP only; an already-deep pipeline drains
-    /// naturally (no shed - that would be a different, gated feature).
-    pub steer_depth: bool,
-    /// M7b.2 envelope racing (dark, env NZBFAST_RACE_ENVELOPE=1):
-    /// per-owner hedge bounds, the idle-picker envelope-race arm, and
-    /// the fleet-wide dup-spend hygiene cap; the whole-run 2x
-    /// slow-owner rule retires while armed. See `steer::speculative_arm`.
-    pub race_envelope: bool,
-    /// TODO 202: speculative racing stands down while the fleet's
-    /// now-rate is within this percent of the run's observed line peak
-    /// - on a saturated line a duplicate can only displace payload.
-    /// 0 = gate off. See `pool/saturation.rs`. Env NZBFAST_RACE_SAT_PCT.
-    /// 70 since 22 Aug 2026 (TODO 208 item 4 ladder: 90 is a cliff,
-    /// 70 ties 80 on wall and spends less; the why is in `get/fleet.rs`).
-    pub race_sat_pct: u8,
-    /// TODO 202 §17: the per-ARTICLE escape from the gate above, ON by
-    /// default - an article whose owner has moved NO bytes is raced
-    /// even while the fleet reads saturated, because it is not
-    /// competing for the line. Rationale and the arithmetic that forces
-    /// it: `Shared::not_using_the_line`. Env NZBFAST_RACE_ESCAPE (0 =
-    /// off), which is the arm that prices the escape on ONE binary -
-    /// `race_sat_pct` 0-vs-80 prices the GATE and cannot price this,
-    /// since at 0 there is no gate to escape from.
-    pub race_escape: bool,
-    /// TODO 208.2 warm-up: the stall bound is re-read DURING a silence
-    /// and fed before the peak trains (see `Shared::stall_bound`). ON
-    /// by default; env NZBFAST_STALL_LIVE (0 = off) is the A/B arm;
-    /// fleet-wide, `any`-folded like `race_escape`.
-    pub stall_live: bool,
-    /// TODO 208.2 over-read: gauge fed per arriving chunk (`pool/saturation.rs`); env NZBFAST_PEAK_ARRIVALS (0 = off).
-    pub peak_arrivals: bool,
-    /// Steering design §5.7: every byte on this server costs money -
-    /// spend none deliberately. Excludes it from all speculative dup
-    /// pickers; the endgame verdict ladder and the CRC-steer refetch
-    /// stay eligible (last-resort/only-source). Per-server, never
-    /// OR-folded; wired from the server's block_account setting.
-    pub block_account: bool,
-    /// §96.5 mid-run block cap: bytes this server may still spend on
-    /// THIS run (its prepaid block minus the lifetime already billed),
-    /// seeded by the daemon at fleet build. When the run's own
-    /// per-server byte counter crosses it, the server's workers drain
-    /// what is in flight and bow out for good - nothing is shed, and
-    /// the shared queue hands its remaining articles to the other
-    /// servers. None or Some(0) = unlimited, matching the config
-    /// convention that a zero block means "no block configured" (an
-    /// ALREADY-spent block never reaches here - the daemon's job-start
-    /// exclusion rules the host out of the fleet entirely).
-    pub budget_bytes: Option<u64>,
-    /// Hedged-request experiment (off by default, env NZBFAST_HEDGE=1):
-    /// replace the flat 8 s staleness bound in the dup race with an
-    /// adaptive one - 3x the trained dispatch-to-done article-time EWMA,
-    /// clamped to [500 ms, 8 s] - so a mid-run straggler is raced after
-    /// roughly three article-times instead of a flat 8 s. Hedge issue
-    /// rate is capped (see `pick_dup`) so jitter cannot turn into a
-    /// duplicate storm.
-    pub hedge: bool,
-    /// TTFB-suspicion hedge (TODO 115, off by default, env
-    /// NZBFAST_TTFB_HEDGE=1): when an adaptive-path read has sat in
-    /// PRE-BYTE silence past a suspicion bound (~1 s, or 2x the
-    /// server's TTFB EWMA if that is larger), the article is marked
-    /// suspect and any topping-up worker dup-races it IMMEDIATELY -
-    /// same server included - instead of waiting out the full adaptive
-    /// pre-byte budget (floor 4 s) plus a requeue round-trip. First
-    /// answer wins, the owner's read is never killed, and every
-    /// suspect dup counts against the hedge issue-rate cap so jitter
-    /// cannot turn suspicion into a duplicate storm. Only meaningful
-    /// with `adaptive_timeout` (the flat read has no pre-byte phase).
-    pub ttfb_hedge: bool,
-    /// Slow-connection recycle experiment (off by default, env
-    /// NZBFAST_RECYCLE_SLOW=1): a connection whose articles keep LOSING
-    /// dup races is a degraded TCP session - after
-    /// [`RECYCLE_RACE_LOSSES`] consecutive losses it sheds its pipeline
-    /// and redials instead of continuing to lose. Racing fixes the
-    /// symptom per article; this fixes the cause. Endgame losses never
-    /// count: the tail fan-out races every straggler, and losing a
-    /// speculative race is not degradation evidence (TODO 111).
-    pub recycle_slow: bool,
-    /// Slope-recycle experiment (off by default, env
-    /// NZBFAST_RECYCLE_SLOPE=1): a session whose own delivery rate sits
-    /// below a quarter of its server's per-worker average after 10 s is
-    /// a degraded TCP session - redial it proactively, before it loses
-    /// races or strands a tail article. The reactive `recycle_slow`
-    /// waits for the damage; this watches the slope.
-    pub recycle_slope: bool,
-    /// Hot-spare experiment (off by default, env NZBFAST_HOT_SPARE=1):
-    /// keep ONE authenticated spare connection parked per server during
-    /// the run; a worker whose session dies claims it instantly instead
-    /// of paying dial + TLS + auth in its critical path, and a filler
-    /// task re-dials the spare in the background. The spare is +1 over
-    /// the configured budget - a provider at its cap simply refuses it,
-    /// which costs nothing.
-    pub hot_spare: bool,
-    /// Early fan-out experiment (env NZBFAST_TAIL_FANOUT=2, which also
-    /// implies `tail_fanout`): arm the endgame dup rules from the
-    /// moment the queue runs dry (the pool's tail latch) instead of
-    /// waiting for pending <= ENDGAME_MAX. With a big fleet the queue
-    /// dries with far more than 64 articles in flight - 48 connections
-    /// at window 4 is ~190 - and that whole stretch has idle capacity
-    /// the endgame gate refuses to spend. Earlier than queue-dry is
-    /// meaningless by construction: no worker is idle before it.
-    pub tail_fanout_early: bool,
-    /// Flap breaker (ON by default): a server whose ESTABLISHED
-    /// sessions keep dying - an external party burning its IP cap, a
-    /// provider throttling the account - is clamped to ONE keeper
-    /// connection for the rest of the run, as long as another server is
-    /// live. The keeper retries (and serves, whenever the provider lets
-    /// it in); the rest of the fleet stops churning through
-    /// shed-pipeline/redial cycles and its capacity flows to healthy
-    /// servers through the shared queue. Without this, a
-    /// flapping-but-occasionally-working server never quiets down: the
-    /// occasional good session clears the failure counters that retire
-    /// a DEAD one.
-    pub flap_breaker: bool,
-    /// Cap-aware flap keepers (ON by default since the 5 Aug
-    /// graduation, env NZBFAST_FLAP_CAP_KEEPERS overrides either way,
-    /// TODO 115): when the flap breaker
-    /// clamps a server whose accept cap we have OBSERVED (dials bounced
-    /// off a capacity refusal while N sessions were established), hold
-    /// min(observed cap, configured connections) keepers instead of a
-    /// flat one. The eweka IP-cap shape allows two sessions; a single
-    /// keeper leaves the second slot - throughput the provider is
-    /// willing to give us - on the table (fault matrix 5 Aug: NZBGet
-    /// takes it, but with 217 dials of hammering; ours stays in the
-    /// tens because keepers redial only when their own session dies and
-    /// back off paced on any capacity bounce, never a tight loop).
-    /// Never exceeds the per-server connection budget, which is where
-    /// account limits (and max_source_ips-derived caps) already landed.
-    /// Graduation evidence (standalone chaos flap leg, one box, one
-    /// corpus): 43/43 s at 24 dials off, 40/40 s at 36 dials on - a
-    /// wall that ties the best competitor while dialling a refusing
-    /// provider 6x less than it does.
-    pub flap_cap_keepers: bool,
-    /// Consumer-triggered CRC retry-elsewhere (TODO 111/114): a body
-    /// that fails its own yEnc pcrc32 - or decodes to a different part
-    /// than the segment asked for (split-brain; its CRC passes) - is
-    /// requeued to a DIFFERENT server exactly once instead of riding
-    /// to PAR2 repair. Detection is the decode consumer's EXISTING
-    /// pass, reported back through [`QueueControl::note_decoded`]: a
-    /// Done outcome defers its `complete_one` and parks its Work in
-    /// `Shared::handed` until the verdict, and a bad body is requeued
-    /// after claim, the clean refetch re-claiming through the normal
-    /// arbitration. (The first cut validation-decoded in the pool -
-    /// ~25% CPU at the loopback ceiling; the consumer seam priced at
-    /// off-parity CPU, which is why the multi-server pricing gate
-    /// could go.) Requires a consumer that actually calls
-    /// `note_decoded` for every Done it receives; the download
-    /// pipeline's decode consumers do, the other pool users (repair,
-    /// nettools, post) leave this off.
-    pub crc_steer: bool,
-    /// §129 3g: follow every BODY to a provider that has answered a
-    /// refusal with no message-id with an alignment fence - a DATE,
-    /// pipelined behind it, whose answer cannot be mistaken for a
-    /// BODY's ([`Connection::send_fence`]). It is what makes positional
-    /// attribution CHECKABLE on a provider that gives us nothing to
-    /// check: without it a response dropped upstream is invisible, and
-    /// a present article silently collects the refusal meant for the
-    /// article behind it.
-    ///
-    /// On by default, off with `NZBFAST_DESYNC_FENCE=0`. It costs one
-    /// six-byte command and one short answer per article, only against
-    /// providers that refuse bare, and no round trips - the fence rides
-    /// the same pipeline. What it buys is in `provider_demote_rig`:
-    /// re-arming the confirming repeat alone still leaked a present
-    /// article once in 11 runs at 1-in-7 withheld responses, because
-    /// the proof of a desync can arrive AFTER the verdict it should
-    /// have stopped. The fence removes the misattribution instead of
-    /// undoing it.
-    pub desync_fence: bool,
-    /// TODO 121.4: the consumer acks every Done id (`note_settled`, or
-    /// `note_decoded` under `crc_steer`), so the pool keeps the
-    /// article's `done_ok` liveness entry until the body is DECODED
-    /// AND WRITTEN, not merely accepted by the outcome channel. That
-    /// closes the dead-span verdict's last blind window - a body
-    /// sitting in the channel buffer or a decode worker's in-hand
-    /// batch under disk backpressure - which could outlast the
-    /// grace-plus-votes threshold and let /stream zero-fill bytes it
-    /// already had. Same contract as `crc_steer`: only turn this on
-    /// for pools whose consumer really acks every Done (the download
-    /// pipeline's decode consumers); an ack-less consumer would leak
-    /// the set and pin every span "live" forever.
-    pub arrival_ack: bool,
-    /// TODO 96.4: issue the endgame ladder's FAN-OUT dispatches as STAT
-    /// rather than BODY. A fan-out dup exists to buy a verdict, and on
-    /// an article that is merely absent from one backbone every racer
-    /// that HAS it delivers a whole body for a claim only one of them
-    /// can win. STAT answers the same question - the refusal codes are
-    /// identical, so `handle_missing`'s unanimity is unchanged - and
-    /// the hit costs one line instead of an article.
-    ///
-    /// It buys that with a round trip: a 223 is not bytes, so an
-    /// article the fan-out would have DELIVERED now has to be fetched
-    /// after the probe. Off by default because the phase this runs in
-    /// is the one §146 measured to be round-trip-bound with the wire
-    /// idle - see the §96 item 4 write-up for the A/B that says so.
-    /// `NZBFAST_STAT_PROBE=1` turns it on.
-    pub stat_probe: bool,
-}
+// Every knob the pool has, its neutral default and the shipped profile
+// are a child module (TODO 106 size-gate split): 543 lines of pure
+// configuration with no behaviour in them. The re-export keeps
+// `pool::PoolConfig` spelled exactly as it always was.
+mod config;
+pub use config::PoolConfig;
 
 /// Decrements the connected gauge when a session ends, however it ends.
 struct ConnGauge {
@@ -470,6 +125,18 @@ impl ConnGauge {
             // on connections we actually GOT: an idle provider sitting
             // below its cap says nothing either way.
             l.servers[idx].retire_cap_if_exceeded(now);
+            // High-water mark of the same number, which is what the
+            // word GRANTED means to every caller that reads it (see
+            // `ServerLive::connected_peak`). Recorded HERE, at the one
+            // place the concurrency can rise, so the answer is exact:
+            // `sysbench` used to approximate it with a 100 ms sampler,
+            // which cannot see a fleet that does not outlive a tick.
+            // One `fetch_max` per SESSION ESTABLISHMENT - not per
+            // article - on the cache line the `fetch_add` above just
+            // touched.
+            l.servers[idx]
+                .connected_peak
+                .fetch_max(now, std::sync::atomic::Ordering::AcqRel);
         }
         ConnGauge {
             live: live.clone(),
@@ -508,130 +175,6 @@ impl<'a> SessionTally<'a> {
 impl Drop for SessionTally<'_> {
     fn drop(&mut self) {
         self.shared.sessions[self.idx].fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        PoolConfig {
-            channel_gauge: None,
-            connections: 6,
-            window: 3,
-            ramp_delay: Duration::from_millis(150),
-            article_retries: 3,
-            read_timeout: Duration::from_secs(30),
-            adaptive_timeout: false,
-            connect_backoff: Duration::from_secs(2),
-            max_connect_attempts: 5,
-            cap_probe_bounces: CAP_PROBE_BOUNCES,
-            outage_budget: Some(OUTAGE_BUDGET),
-            buf_pool: None,
-            live: None,
-            live_target: None,
-            lease: None,
-            handoff: None,
-            line_cap_fleet: 0,
-            line_cap_auto: false,
-            line_anchor_bps: 0,
-            rate: None,
-            oracle: None,
-            inflight_cap: 0,
-            warm: None,
-            tail_fanout: false,
-            tail_taper: false,
-            steer_depth: false,
-            race_envelope: false,
-            race_sat_pct: 70,
-            race_escape: true,
-            stall_live: true,
-            peak_arrivals: true,
-            block_account: false,
-            budget_bytes: None,
-            hedge: false,
-            ttfb_hedge: false,
-            recycle_slow: false,
-            recycle_slope: false,
-            hot_spare: false,
-            tail_fanout_early: false,
-            flap_breaker: true,
-            // The env override lives HERE, not only in build_fleet, so
-            // every pool - nettools probes, post_cmd, warm-pool rigs -
-            // honors NZBFAST_FLAP_CAP_KEEPERS=0 (TODO 121.3; before
-            // this, a default-built pool ignored the knob entirely).
-            flap_cap_keepers: std::env::var("NZBFAST_FLAP_CAP_KEEPERS")
-                .ok()
-                .is_none_or(|v| v == "1"),
-            crc_steer: false,
-            arrival_ack: false,
-            // §129 3g. Default ON, with the kill switch HERE rather than
-            // only in build_fleet for the same reason `flap_cap_keepers`
-            // has it here: every pool must honor it.
-            desync_fence: std::env::var("NZBFAST_DESYNC_FENCE")
-                .ok()
-                .is_none_or(|v| v == "1"),
-            // TODO 96.4. Default OFF; same "every pool honors the knob"
-            // placement as the two above.
-            stat_probe: std::env::var("NZBFAST_STAT_PROBE")
-                .ok()
-                .is_some_and(|v| v == "1"),
-        }
-    }
-}
-
-impl PoolConfig {
-    /// The pool AS THE DAEMON SHIPS IT - the posture a measurement rig
-    /// wants unless it is deliberately measuring something else.
-    ///
-    /// [`PoolConfig::default()`] is the library's neutral posture, with
-    /// every speculation knob off. It is not what runs: `nzbfast`'s
-    /// `get/fleet.rs` resolves two dashboard settings, both ON by
-    /// default, into five of these fields.
-    ///
-    /// * "Race slow articles" (`race_stragglers`) -> [`Self::tail_fanout`],
-    ///   [`Self::tail_fanout_early`], [`Self::hedge`],
-    ///   [`Self::recycle_slope`].
-    /// * "Adaptive connection timeouts" (`adaptive_timeouts`) ->
-    ///   [`Self::adaptive_timeout`], in place of the flat
-    ///   [`Self::read_timeout`].
-    ///
-    /// A fleet built from `default()` therefore has the whole endgame
-    /// speculation layer and the adaptive read budget switched off, and
-    /// a rig that tunes against it is tuning a fleet nobody runs. Build
-    /// from this instead wherever those knobs are load-bearing:
-    ///
-    /// ```ignore
-    /// PoolConfig { connections, ramp_delay: Duration::ZERO, ..PoolConfig::shipped() }
-    /// ```
-    ///
-    /// Opting out is fine when it is the POINT - `tls_chaos` pins the
-    /// flat 30 s read timeout it exists to test, and the demote rig's
-    /// non-hostage legs stay pessimistic on purpose - but say so at the
-    /// call site. The knobs that are still dark (`steer_depth`,
-    /// `race_envelope`, `ttfb_hedge`, `recycle_slow`, `hot_spare`) are
-    /// env-only in the daemon too, so they stay off here.
-    ///
-    /// Two fields the daemon also sets are deliberately NOT here,
-    /// because neither is a property of the fleet alone.
-    /// [`Self::crc_steer`] depends on fleet SHAPE (a same-level peer on
-    /// another host must exist for a refetch-elsewhere to mean
-    /// anything), and [`Self::arrival_ack`] is a contract with a
-    /// consumer that calls `note_settled` - switching it on under a
-    /// collector that never acks would leave every delivered article
-    /// looking live. Rigs that want either one ask for it by name.
-    ///
-    /// Kept honest by `nzbfast`'s
-    /// `get::fleet::tests::shipped_matches_the_daemons_own_defaults`,
-    /// which reads the same two defaults out of `build_fleet`'s
-    /// resolution path.
-    pub fn shipped() -> Self {
-        PoolConfig {
-            adaptive_timeout: true,
-            tail_fanout: true,
-            tail_fanout_early: true,
-            hedge: true,
-            recycle_slope: true,
-            ..PoolConfig::default()
-        }
     }
 }
 
@@ -703,7 +246,13 @@ pub fn retention_mask(retention_days: &[u32], age_days: u32) -> u32 {
 /// generic "missing segments" sent users hunting propagation ghosts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingCause {
-    /// Every server still live was asked and answered 430/423.
+    /// Every server that could have been asked WAS asked, and every one
+    /// of them answered 430/423 - unanimous over the servers that had a
+    /// working connection at some point in the run, not merely over
+    /// whoever still had a worker at the moment the verdict was taken.
+    /// `Shared::participation_mask` is the internal name of that set,
+    /// and `MissingCause::Unasked` is what a verdict short of it says.
+    ///
     /// `takedown`: at least one of those refusals said the article was
     /// REMOVED rather than not found ([`crate::nntp::takedown_flavoured`]
     /// - Giganews's 451, or refusal text naming a removal). A hint for
@@ -713,6 +262,21 @@ pub enum MissingCause {
     /// The article's age exceeds every configured server's
     /// `retention_days` - no server was ever asked.
     Retention,
+    /// Every server that still had a worker refused it - but `dark`
+    /// server(s) that had been serving this run went out before the
+    /// article reached them, so the refusals are NOT unanimous over the
+    /// servers that could have answered. It is terminal (nobody left can
+    /// fetch it, and waiting rotates it forever) because OUR FLEET SHRANK,
+    /// not because the post is gone. `FailCode::FleetExhausted` says that
+    /// of a run which lost EVERY server; this is the partial case, worded
+    /// alike on purpose.
+    ///
+    /// Read it the way [`crate::fail::FailCode`] asks its own readers to:
+    /// a consumer that treats this as evidence ABOUT THE POST repeats the
+    /// mistake. `takedown` carries the same hint `Gone` does and is still
+    /// worth having - a refusal naming a removal said something about the
+    /// post, whichever other server went dark.
+    Unasked { takedown: bool, dark: u32 },
 }
 
 /// The decode consumer's per-article verdict, reported back through
@@ -766,81 +330,12 @@ pub enum FetchOutcome {
     },
 }
 
-#[derive(Debug, Default)]
-pub struct PoolStats {
-    pub bytes: u64,
-    pub connects: u64,
-    pub reconnects: u64,
-    /// Did ANY worker ever hold a usable connection to this server (fresh
-    /// dial or warm-pool hand-me-down)? False means the server sat out
-    /// the entire run - unreachable, or it refused the login - so every
-    /// "unanimous 430" verdict was reached without its vote. The failure
-    /// summary names such servers; without that, one dead backup silently
-    /// turns a single 430 into "missing segments".
-    pub ever_connected: bool,
-    /// Did this server connect, serve, and then LEAVE while the run still
-    /// had work outstanding - a permanent refusal, a prepaid block or
-    /// quota spent, the cumulative outage budget blown, the
-    /// connect-attempt cap? All four end with the server's last worker
-    /// returning, and until this bit existed all four were SILENT.
-    ///
-    /// `ever_connected` cannot see it: that stays TRUE for a server that
-    /// worked for ten minutes and then walked out. So nothing said the
-    /// quorum had shrunk while `live_mask` (alive NOW) stopped counting
-    /// the leaver, and the survivors' 430s on the segments it alone
-    /// carried read as unanimous. What that cost - a healthy post
-    /// reported gone, the one automatic retry suppressed, and with it the
-    /// indexer dead-report, FailureLink re-grab and duplicate promotion -
-    /// is written up at `LossCauses::left_servers` (audit 20 Aug, A3).
-    ///
-    /// Never true for a server that never connected at all: that is
-    /// `ever_connected == false`, its own clause and its own sentence.
-    pub left_mid_run: bool,
-    /// WHY this server's sessions ended, counted where it happens.
-    ///
-    /// `reconnects` alone says a session died and was redialled; it does
-    /// not say who hung up. That gap cost a whole investigation on 6 Aug
-    /// 2026: a provider churning 148 sessions in one 190 GB job had six
-    /// hypotheses eliminated one at a time (fan-out, hedge, slope
-    /// recycle, connection count, provider idle timeout, the pre-byte
-    /// budget) purely by exclusion, because "session lost, redialled"
-    /// reads identically for a peer FIN, a peer reset, our own read
-    /// timeout, our own quit and a protocol desync. See
-    /// research/PROVIDER-CHURN-2026-08-06.md.
-    pub ends: SessionEnds,
-    /// Milliseconds this server's workers spent parked because the
-    /// fetch->decode channel was FULL - i.e. waiting on decode, verify
-    /// and the disk rather than on the network. The daemon has always
-    /// had this (`ServerLive::blocked_ms`); the CLI did not, so a
-    /// bench leg could not tell a NETWORK dip from a WRITE-SIDE dip -
-    /// which is exactly the question a periodic throughput sawtooth
-    /// asks (6 Aug: full rate for 8-9 s, then a drop to 8-21% of peak,
-    /// repeating, costing ~12-15% of an 87 GB job).
-    pub blocked_ms: u64,
-}
-
-/// Per-server tally of how sessions ENDED, by cause.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct SessionEnds {
-    /// The peer closed or reset the connection, or the socket failed
-    /// under us: an I/O-flavoured `NntpError`. THIS is "the provider
-    /// hung up on us".
-    pub peer: u64,
-    /// A well-formed but unusable answer - the response did not parse,
-    /// or the echoed message-id did not match what we asked for.
-    pub protocol: u64,
-    /// Our own pre-first-byte budget expired: the server had not
-    /// started answering in time. Distinguished from `stall` because
-    /// giving up pre-byte is our budget CHOICE, not evidence the peer
-    /// is dead (TODO 121.1).
-    pub prebyte: u64,
-    /// Our own mid-flow deadline expired: bytes were moving and
-    /// stopped. That is a genuine wedge.
-    pub stall: u64,
-    /// We hung up deliberately - shed for promoted work, over the live
-    /// connection target, or a pipeline deeper than a mid-window cap.
-    pub ours: u64,
-}
+// TODO 106 size-gate split (28 Aug 2026): PoolStats and SessionEnds -
+// the caller-visible per-server run statistics - live in
+// pool/stats.rs; the re-export keeps every `pool::PoolStats` /
+// `pool::SessionEnds` spelling unchanged.
+mod stats;
+pub use stats::{PoolStats, SessionEnds};
 
 // TODO 106 size-gate split: the live gauges, the event ring and the
 // refusal records - everything the pool REPORTS rather than does - came
@@ -937,6 +432,12 @@ struct Work {
     /// one voids the refusals it handed out ([`Shared::void_soft_430`]),
     /// which clears its bits here again.
     soft_430: u32,
+    /// TODO 315: server groups whose LAST-EVIDENCE refusal this article
+    /// has already spent its one late re-ask on - held at most once per
+    /// group, which is what makes the pass terminate. A field of its
+    /// own and NOT a second meaning for `soft_430`, which doubts a
+    /// different thing; see [`Shared::take_recheck`] for both.
+    recheck_430: u32,
     /// §129 3g: this dispatch carried an alignment fence, so its
     /// response is followed by the fence's own and the reader must
     /// consume that too. Set at dispatch from the server's
@@ -1323,6 +824,25 @@ struct Shared {
     /// session actually ends, so a redial that never wins cannot hide
     /// the cause (the same reasoning as `note_flap`).
     ends: Vec<[AtomicU64; 5]>,
+    /// Per-server tally of authoritative 430/423 wire answers, split by
+    /// whether the attribution was PROVEN (slot 0: the refusal echoed a
+    /// message-id, or arrived fenced) or POSITIONAL (slot 1: a bare
+    /// refusal, filed against the pipeline front by position alone).
+    /// The split is the one number that separates "the provider said
+    /// this article is gone" from "a desynced socket's refusal was
+    /// filed on the wrong article" after the fact: a run whose losses
+    /// are all bare, on a session population that also shows protocol
+    /// desyncs, is a misattribution suspect, while echoed refusals
+    /// cannot misfile (a mismatched echo kills the session before any
+    /// verdict is recorded). Counted where the answer lands
+    /// ([`session::handle_missing`]), dups included, exactly like the
+    /// M29 oracle's miss - this counts WIRE ANSWERS, not verdicts.
+    /// Motivated by the 28 Aug 2026 g25L leg: 952 segments went
+    /// terminally missing on a slow cold route whose sessions also
+    /// died 89 times on protocol desync, and nothing in the leg log
+    /// could say which kind of 430 the verdicts rested on
+    /// (research/SLOW-SOCKET-430-CAUSAL-READ-2026-08-28.md).
+    miss_answers: Vec<[AtomicU64; 2]>,
     /// Per-server write-side wait (see [`PoolStats::blocked_ms`]). Kept
     /// on Shared as well as LiveStats because the CLI runs without a
     /// live-stats sink and still needs to tell a network dip from a
@@ -1347,6 +867,10 @@ struct Shared {
     /// the counter beside it keeps the hot path off this lock.
     soft_rearm: std::sync::Mutex<HashMap<Arc<str>, u32>>,
     soft_rearm_n: AtomicUsize,
+    /// TODO 315: how many articles hold a late re-ask right now. A
+    /// COUNT, not a set, and a CONCURRENCY limit, not a quota - see
+    /// [`Shared::take_recheck`].
+    recheck_held: AtomicUsize,
     /// Takedown-flavoured refusal evidence by message-id: server-group
     /// bits whose CHARGED refusal said "removed" rather than "not
     /// found" (see [`crate::nntp::takedown_flavoured`]). A HINT and
@@ -1626,9 +1150,17 @@ struct Shared {
     alive: Vec<AtomicUsize>,
     /// Per-server count of workers that have CLAIMED a cross-job
     /// hand-over and are on their way out ([`Shared::claim_handoff`]).
-    /// Monotone for the run, and never released - the same conservative
-    /// trade `ServerState::claim_yield` makes, and for the same reason.
+    /// Monotone for the run except when a claim's leftover reservation
+    /// fails and the claim is handed straight back - otherwise never
+    /// released, the same conservative trade `ServerState::claim_yield`
+    /// makes, and for the same reason.
     handoff_out: Vec<AtomicUsize>,
+    /// Per-server count of `alive` decrements already taken by a
+    /// granted hand-over claim (the finding-25 reservation in
+    /// [`Shared::claim_handoff`]), still owed to `WorkerLife`'s exit
+    /// arithmetic - which consumes one instead of decrementing `alive`
+    /// a second time for the same departure.
+    handoff_retired: Vec<AtomicUsize>,
     /// Per-server count of workers holding a live-target admission
     /// (see [`Admitted`]); `admit_wake` is pinged whenever one is
     /// returned so a parked worker can take it.
@@ -1831,7 +1363,9 @@ pub use ratelimit::RateLimit;
 // its descendants exactly as the private ones were, and `pub(super)`
 // does the same for the methods.
 mod gates;
+mod recheck;
 use gates::*;
+use recheck::RECHECK_430_MAX;
 
 mod session;
 use session::*;
@@ -2081,20 +1615,6 @@ impl Shared {
         until != 0 && (self.start.elapsed().as_millis() as u64) < until
     }
 
-    /// Bits of every server that still has at least one worker running.
-    /// A server whose workers all bowed out (connect exhaustion) can never
-    /// answer for its untried articles - terminal decisions must be made
-    /// against this mask, not the full server set.
-    fn live_mask(&self) -> u32 {
-        let mut m = 0u32;
-        for (si, a) in self.alive.iter().enumerate() {
-            if a.load(Ordering::Relaxed) > 0 {
-                m |= server_bit(si);
-            }
-        }
-        m
-    }
-
     /// Build the queue, seeding each Work's `tried_430` with the servers
     /// whose retention can't cover it. Articles outside EVERY server's
     /// retention never enter the queue (no worker could pop them - they'd
@@ -2152,6 +1672,7 @@ impl Shared {
                     dup: false,
                     prebyte_expiries: 0,
                     soft_430: 0,
+                    recheck_430: 0,
                     fenced: false,
                     rearms: 0,
                     ladder: false,
@@ -2183,11 +1704,15 @@ impl Shared {
             ends: (0..n_servers)
                 .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
                 .collect(),
+            miss_answers: (0..n_servers)
+                .map(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                .collect(),
             blocked_ms: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             crc_retried: std::sync::Mutex::new(HashSet::new()),
             part_latch: queue::PartLatch::default(),
             soft_rearm: std::sync::Mutex::new(HashMap::new()),
             soft_rearm_n: AtomicUsize::new(0),
+            recheck_held: AtomicUsize::new(0),
             takedown: std::sync::Mutex::new(HashMap::new()),
             takedown_n: AtomicUsize::new(0),
             spent: std::sync::Mutex::new(HashMap::new()),
@@ -2248,6 +1773,7 @@ impl Shared {
             levels: servers.iter().map(|(s, _)| s.level).collect(),
             alive: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
             handoff_out: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
+            handoff_retired: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
             admitted: (0..n_servers).map(|_| AtomicUsize::new(0)).collect(),
             admit_wake: (0..n_servers).map(|_| tokio::sync::Notify::new()).collect(),
             connected: (0..n_servers).map(|_| AtomicBool::new(false)).collect(),
@@ -2399,6 +1925,16 @@ impl Shared {
             prebyte: g(2),
             stall: g(3),
             ours: g(4),
+        }
+    }
+
+    /// Count one authoritative 430/423 wire answer from a server -
+    /// proven attribution (echoed id, or fenced) in slot 0, bare
+    /// positional attribution in slot 1. See the `miss_answers` field
+    /// for why the split matters.
+    fn note_miss_answer(&self, server: usize, proven: bool) {
+        if let Some(row) = self.miss_answers.get(server) {
+            row[usize::from(!proven)].fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2809,22 +2345,7 @@ pub async fn fetch_all_multi_ctl(
     join_fleet(&shared, out, workers).await;
     shared.report_diagnostics();
 
-    counters
-        .into_iter()
-        .enumerate()
-        .map(|(si, (b, c, r))| PoolStats {
-            bytes: b.load(Ordering::Relaxed),
-            connects: c.load(Ordering::Relaxed),
-            reconnects: r.load(Ordering::Relaxed),
-            ever_connected: shared.connected[si].load(Ordering::Relaxed),
-            left_mid_run: shared.left_mid_run[si].load(Ordering::Relaxed),
-            ends: shared.session_ends(si),
-            blocked_ms: shared
-                .blocked_ms
-                .get(si)
-                .map_or(0, |c| c.load(Ordering::Relaxed)),
-        })
-        .collect()
+    stats::run_stats(&shared, &counters)
 }
 
 /// How long a worker may outlive the run's terminal state before its join
@@ -3020,8 +2541,15 @@ async fn next_work(
     // whose workers bowed out never saw it - a dead server can't answer,
     // and waiting for it deadlocks the whole run (the queue rotates the
     // item forever). Collected under the lock, reported after.
+    //
+    // Terminal, though, is not the same claim as GONE, and this site used to
+    // make both at once (27 Aug sweep finding 8). The refusal mask rides out
+    // of the scan with the id so `missing_cause` can tell "every server that
+    // could answer refused it" from "the fleet shrank out from under it" -
+    // see `Shared::participation_mask`. The test below is deliberately
+    // unchanged: a frozen mask there is what the warning above refuses.
     let live = shared.live_mask();
-    let mut unservable: Vec<(Arc<str>, u32)> = Vec::new();
+    let mut unservable: Vec<(Arc<str>, u32, u32)> = Vec::new();
     let mut picked: Option<Work> = None;
     // Promoted items this (slow) server steps PAST: they must go back to
     // the queue FRONT in order - a fast server picks from the front, and
@@ -3055,7 +2583,7 @@ async fn next_work(
         for _ in 0..q.len() {
             let Some(mut w) = q.pop_front() else { break };
             if w.tried_430 & live == live {
-                unservable.push((w.id, w.ord));
+                unservable.push((w.id, w.ord, w.tried_430));
                 continue;
             }
             // M5: the fill gate asks for refusals, and a lower-level
@@ -3123,15 +2651,11 @@ async fn next_work(
     if picked.is_none() {
         shared.scan_futile[ctx.idx].store(now_ms, Ordering::Relaxed);
     }
-    for (id, ord) in unservable {
+    for (id, ord, tried_430) in unservable {
         if shared.claim_done(&id, ord) {
             let takedown = shared.take_takedown(&id) != 0;
-            let _ = out
-                .send(FetchOutcome::Missing {
-                    id,
-                    cause: MissingCause::Gone { takedown },
-                })
-                .await;
+            let cause = shared.missing_cause(tried_430, takedown);
+            let _ = out.send(FetchOutcome::Missing { id, cause }).await;
             shared.complete_one();
         }
     }
@@ -3353,22 +2877,7 @@ pub fn fetch_all_sharded(
     drop(out);
     shared.report_diagnostics();
 
-    counters
-        .iter()
-        .enumerate()
-        .map(|(si, (b, c, r))| PoolStats {
-            bytes: b.load(Ordering::Relaxed),
-            connects: c.load(Ordering::Relaxed),
-            reconnects: r.load(Ordering::Relaxed),
-            ever_connected: shared.connected[si].load(Ordering::Relaxed),
-            left_mid_run: shared.left_mid_run[si].load(Ordering::Relaxed),
-            ends: shared.session_ends(si),
-            blocked_ms: shared
-                .blocked_ms
-                .get(si)
-                .map_or(0, |c| c.load(Ordering::Relaxed)),
-        })
-        .collect()
+    stats::run_stats(&shared, &counters)
 }
 
 #[cfg(test)]

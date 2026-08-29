@@ -196,6 +196,61 @@ final class ApiClient {
         }
     }
 
+    // MARK: server setup (on-device mode)
+
+    /// Save the one news server the on-device engine downloads through.
+    ///
+    /// THE CREDENTIAL GOES TO THE ENGINE AND IS NEVER WRITTEN FROM
+    /// SWIFT. `config.local.json` is seeded with an empty server list
+    /// (Engine.prepareDirectories) and everything after that goes
+    /// through the daemon's own `mode=server_save`, which is the path
+    /// the dashboard wizard and the Android setup screen both take.
+    /// Writing the file directly would mean this app owning the config
+    /// schema, the password handling and the atomic write, three things
+    /// the engine already does.
+    ///
+    /// `index: -1` appends; the phone posture is one provider, so
+    /// nothing here edits an existing row.
+    func serverSave(_ server: NewsServer) async throws {
+        let resp = try await postJSON(StatusResponse.self, mode: "server_save",
+                                      body: server.payload(index: -1),
+                                      what: "the server")
+        guard resp.status == true else {
+            throw ApiError.daemon(resp.error ?? "The engine would not save that server.")
+        }
+    }
+
+    /// Try the server without saving it. The greeting is the proof: a
+    /// server that answers one has accepted the credentials.
+    func serverTest(_ server: NewsServer) async throws -> String {
+        let resp = try await postJSON(ServerTestResponse.self, mode: "server_test",
+                                      body: server.payload(index: -1),
+                                      what: "the server test")
+        guard resp.status == true else {
+            throw ApiError.daemon(resp.error ?? "That server did not answer.")
+        }
+        return resp.greeting ?? "Connected."
+    }
+
+    private func postJSON<T: Decodable>(_ type: T.Type, mode: String, body: Data,
+                                        what: String) async throws -> T {
+        guard let url = apiURL(mode: mode) else { throw ApiError.badURL }
+        var req = request(url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw ApiError.http((resp as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            throw ApiError.decode(what)
+        }
+    }
+
     func probe(_ id: String) async throws -> ProbeResponse {
         let url = config.baseURL
             .appendingPathComponent("preview")

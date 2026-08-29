@@ -22,6 +22,19 @@ use crate::mock::{Chaos, MockServer, make_file_articles};
 #[cfg(test)]
 mod next_work_tests;
 
+// TODO 315's late-re-ask pair, out under the size gate (TODO 106) the
+// same way and for the same reason as the sibling above: the cold
+// backend rig is a whole leg with its own fixture builder, and this
+// file is a hundred lines from its ceiling.
+#[cfg(test)]
+mod recheck_tests;
+
+// The BufPool gauge tests, out under the same gate on 27 Aug 2026 - see
+// that file's own header for why this block was the seam. Same
+// `#[cfg(test)]` for the same resolver reason as the line above.
+#[cfg(test)]
+mod bufpool_gauge_tests;
+
 pub(super) fn server(host: &str) -> ServerConfig {
     ServerConfig {
         host: host.into(),
@@ -67,6 +80,7 @@ pub(super) fn work(id: &str) -> Work {
         dup: false,
         prebyte_expiries: 0,
         soft_430: 0,
+        recheck_430: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -1800,8 +1814,62 @@ async fn recycle_slope_redials_a_collapsed_session() {
 /// exactly one session greets every extra dial with the 502 capacity
 /// refusal. The bounced workers yield and park (issue #16), the one
 /// accepted session carries the whole job, and the run still finishes.
+///
+/// THE BARRIER BELOW IS THE TEST, not scaffolding around it. The closing
+/// assertion - that the server accepted more dials than it had room for -
+/// is what stops this becoming a rubber stamp: without it, a run in which
+/// the cap was never provoked passes exactly like one where it was, and
+/// the parking behaviour the test is named for goes unproven. But until
+/// 27 Aug 2026 the test only ASSERTED that precondition, never FORCED it,
+/// which is shape (c) in `unit-one-process`'s own taxonomy. Nothing holds
+/// the one admitted session back, so on a contended runner it can carry
+/// all eight articles and end the run before the other three workers'
+/// connections are ever pulled off the listen backlog - `accepted` stays
+/// 1 and the assertion fails on a pool that did nothing wrong. That is
+/// how it reddened `unit-one-process` on main on 27 Aug 2026 (run
+/// 33031972346, on 9ceb0d5d) and went green on its own two runs later.
+///
+/// So the winner is FROZEN - `MockServer::pause` holds every session at
+/// the top of its command loop, so the greeting lands and nothing after
+/// it does - until the mock has accepted `DIALS_WANTED` connections,
+/// which is the same constant the assertion reads. One number, so the
+/// gate and the claim cannot drift. What that buys does not depend on
+/// any model of how the runtime interleaves: while the barrier holds,
+/// the run CANNOT reach the state the assertion is about, so the extras
+/// get their dial by construction rather than by winning a race.
+///
+/// MEASURED, because this box cannot reproduce the CI interleaving and a
+/// fix argued only from the code would be a guess. 200 runs of this body
+/// in one process on the 18-core dev Mac at load 70, no barrier:
+/// `accepted` came out 4 or 8 every time and never 1 - the defect is
+/// simply not reachable here. So the interleaving was synthesised with
+/// the one knob that produces it, a per-slot `ramp_delay`, which puts
+/// the winner already carrying the job before the extras dial. At 50 ms
+/// and at 200 ms, WITHOUT the barrier: `accepted` was 1 in 60 runs out
+/// of 60, i.e. this assertion failed every single time. WITH it: 2 in
+/// 60 out of 60, and all eight articles were delivered either way. On
+/// the shipped shape (`ramp_delay: ZERO`) the barrier changes nothing -
+/// 4 or 8 as before, and the test still runs in 0.06 s.
+///
+/// Raising the article count instead was considered and rejected: it
+/// lengthens the window the winner needs to lose, which lowers the rate
+/// without removing the class. The barrier removes it.
+///
+/// The release is bounded rather than unbounded on purpose. A barrier
+/// that waited forever would turn "the fleet never provoked the cap" -
+/// the one thing this test exists to notice - into a 30 s hang reported
+/// as `run hung against a capacity-capped server`, which names the wrong
+/// defect. Past the bound the winner is released anyway and the closing
+/// assertion gets to say what actually happened.
 #[tokio::test]
 async fn capacity_bounce_parks_the_extras_and_the_run_finishes() {
+    // Extra dials the cap must have greeted and bounced. Read by the
+    // barrier that forces them and by the assertion that claims them.
+    const DIALS_WANTED: u64 = 2;
+    // Long enough that no scheduling delay can reach it, short enough to
+    // leave room inside the run's own 30 s budget for the honest verdict.
+    const BARRIER_BUDGET: Duration = Duration::from_secs(10);
+
     let mut articles = std::collections::HashMap::new();
     let payload: Vec<u8> = (0..64_000u32).map(|i| (i * 5) as u8).collect();
     make_file_articles("cap.bin", &payload, 8_000, "cap", &mut articles);
@@ -1814,6 +1882,19 @@ async fn capacity_bounce_parks_the_extras_and_the_run_finishes() {
         },
     )
     .await;
+    // Freeze the admitted session before a single worker dials.
+    srv.pause.store(true, Ordering::Release);
+    let barrier = {
+        let pause = srv.pause.clone();
+        let accepted = srv.accepted.clone();
+        tokio::spawn(async move {
+            let t0 = std::time::Instant::now();
+            while accepted.load(Ordering::Relaxed) < DIALS_WANTED && t0.elapsed() < BARRIER_BUDGET {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            pause.store(false, Ordering::Release);
+        })
+    };
     let cfg = PoolConfig {
         connections: 4,
         ramp_delay: Duration::ZERO,
@@ -1831,6 +1912,7 @@ async fn capacity_bounce_parks_the_extras_and_the_run_finishes() {
     )
     .await
     .expect("run hung against a capacity-capped server");
+    barrier.await.expect("the pause barrier panicked");
     let mut done = 0;
     while let Ok(o) = rx.try_recv() {
         if matches!(o, FetchOutcome::Done { .. }) {
@@ -1839,7 +1921,7 @@ async fn capacity_bounce_parks_the_extras_and_the_run_finishes() {
     }
     assert_eq!(done, n, "the one admitted session delivers everything");
     assert!(
-        srv.accepted.load(Ordering::Relaxed) >= 2,
+        srv.accepted.load(Ordering::Relaxed) >= DIALS_WANTED,
         "the fleet actually provoked the cap (extra dials were greeted and bounced)"
     );
 }
@@ -2782,173 +2864,87 @@ fn a_done_deregistration_never_holds_the_inflight_map_into_the_park() {
     assert!(sh.inflight.lock_ok().is_empty(), "the entry was retired");
 }
 
-// --- BufPool gauge accounting and the PooledBuf guard -----------------
-//
-// `BufPool::new_gauged` had no test of any kind before 26 Aug 2026, and
-// its charge/release pairing is the whole reason a missed give is worse
-// than a lost recycle: a lost recycle costs one allocation, a lost
-// release climbs the outstanding gauge for the rest of the run and the
-// memory floor reads it as resident bytes nobody can attribute. These
-// pin the accounting, and the last one pins what the guard buys.
-//
-// Every one of these takes `one_gauge_test_at_a_time()` as its FIRST
-// statement, so it drops LAST: `memgauge`'s `CUR`/`PEAK` are process-
-// global, so under `cargo test` (and the `unit-one-process` job) a
-// neighbour moving the same gauge would be read as this test's own
-// charge. It is the same lock `memgauge`'s own tests take - one of our
-// own would serialize us against nobody.
-
-use crate::memgauge::{Sub, cur, one_gauge_test_at_a_time, reset_for_tests};
-
-#[test]
-fn a_gauged_take_charges_outstanding_and_only_a_pooled_buffer_leaves_the_free_list() {
-    let _g = one_gauge_test_at_a_time();
-    reset_for_tests();
-    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
-
-    // A fresh buffer was never on the free list, so only outstanding moves.
-    let a = pool.take();
-    let cap = a.capacity() as u64;
-    assert_eq!(cur(Sub::RawOut), cap);
-    assert_eq!(cur(Sub::RawFree), 0);
-
-    // Back to the pool: the charge moves from outstanding to the free list.
-    drop(a);
-    assert_eq!(cur(Sub::RawOut), 0);
-    assert_eq!(cur(Sub::RawFree), cap);
-
-    // A POPPED buffer leaves the free list as it becomes outstanding.
-    let b = pool.take();
-    assert_eq!(cur(Sub::RawOut), cap);
-    assert_eq!(cur(Sub::RawFree), 0);
-    drop(b);
-}
-
-#[test]
-fn a_gauged_give_releases_outstanding_before_every_early_return() {
-    let _g = one_gauge_test_at_a_time();
-    reset_for_tests();
-    // max_held 1, so the second give has nowhere to park.
-    let pool = BufPool::new_gauged(1, Sub::OutFree, Sub::OutOut);
-
-    // Over the keep-cap: `give` returns early WITHOUT parking, and the
-    // outstanding release has to have happened before that return.
-    let mut big = pool.take();
-    big.reserve(5 * 1024 * 1024);
-    assert!(big.capacity() > 4 * 1024 * 1024);
-    drop(big);
-    assert_eq!(
-        cur(Sub::OutOut),
-        0,
-        "the oversized early return must not skip the outstanding release"
-    );
-    assert_eq!(
-        cur(Sub::OutFree),
-        0,
-        "an oversized buffer is freed, never parked, so the free list is untouched"
-    );
-
-    // Past max_held: released from outstanding, not added to the free list.
-    let x = pool.take();
-    let y = pool.take();
-    let xc = x.capacity() as u64;
-    drop(x);
-    assert_eq!(cur(Sub::OutFree), xc);
-    drop(y);
-    assert_eq!(
-        cur(Sub::OutOut),
-        0,
-        "a surplus give releases outstanding even though the buffer is dropped"
-    );
-    assert_eq!(
-        cur(Sub::OutFree),
-        xc,
-        "the surplus buffer was dropped, so the free list did not grow"
-    );
-}
-
-#[test]
-fn a_dying_gauged_pool_hands_back_its_whole_free_list() {
-    let _g = one_gauge_test_at_a_time();
-    reset_for_tests();
-    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
-    let a = pool.take();
-    let b = pool.take();
-    let held = a.capacity() as u64 + b.capacity() as u64;
-    drop(a);
-    drop(b);
-    assert_eq!(cur(Sub::RawFree), held);
-    drop(pool);
-    assert_eq!(
-        cur(Sub::RawFree),
-        0,
-        "a job's pool dies with its free list - without this the gauge \
-         carries the dead pool's bytes into the next job forever"
-    );
-}
-
-#[test]
-fn an_ungauged_pool_charges_nothing() {
-    let _g = one_gauge_test_at_a_time();
-    reset_for_tests();
-    let pool = BufPool::new(2);
-    drop(pool.take());
-    let snap = crate::memgauge::snapshot();
-    for s in [Sub::RawFree, Sub::RawOut, Sub::OutFree, Sub::OutOut] {
-        assert_eq!(snap.cur_of(s), 0, "{} moved on an ungauged pool", s.name());
-    }
-}
-
-#[test]
-fn a_guarded_buffer_comes_back_from_an_early_return_and_a_panic() {
-    let _g = one_gauge_test_at_a_time();
-    reset_for_tests();
-    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
-    let cap = {
-        let b = pool.take();
-        b.capacity() as u64
+/// The proven-vs-bare 430 tally: one count per wire answer, in the slot
+/// the refusal's own attribution earns. An ECHOED refusal is proven on
+/// arrival; a BARE one is positional-only evidence, so `soft_430`
+/// requeues it uncharged for one confirming repeat that travels FENCED
+/// and lands in the proven column. Both shapes are asserted here
+/// because the split is the measurement the counters exist for
+/// (research/SLOW-SOCKET-430-CAUSAL-READ-2026-08-28.md): a run whose
+/// losses are all bare, on sockets that also desync, is a
+/// misattribution suspect, and until these counters nothing in a leg
+/// log could say which kind of refusal a Missing verdict rested on.
+///
+/// THE PROVEN COUNT IS TWO PER ABSENT ARTICLE HERE, not one, and the
+/// second is TODO 315's late re-ask: the refusal that would make the
+/// article terminal is held and the last live backbone asked once
+/// more. The bare count is unchanged at one, because the first bare
+/// answer arms the fence and everything after it travels fenced. That
+/// is the whole reason these two assertions are worth having as a
+/// PAIR - the ratio is what a census line is read on, and it moves
+/// when either mechanism does.
+async fn miss_tally_run(echo: bool) -> PoolStats {
+    let mut articles = std::collections::HashMap::new();
+    let payload: Vec<u8> = (0..16_000u32).map(|i| (i * 7) as u8).collect();
+    let segs = make_file_articles("m.bin", &payload, 8_000, "mt", &mut articles);
+    let absent = format!("<{}>", segs[0].0);
+    articles.remove(segs[0].0.as_str());
+    let chaos = Chaos {
+        missing: std::iter::once(absent.clone()).collect(),
+        echo_missing_id: echo,
+        ..Default::default()
     };
-
-    // The shape the bare take/give pair could not defend: a consumer
-    // that leaves between the two halves. `?` on a fresh buffer.
-    fn early_return(pool: &BufPool) -> Result<(), ()> {
-        let _b = pool.take();
-        Err(())
+    let srv = MockServer::start(articles, chaos).await;
+    let reqs: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, _)| ArticleReq::fresh(format!("<{id}>")))
+        .collect();
+    let cfg = PoolConfig {
+        connections: 1,
+        ramp_delay: Duration::ZERO,
+        ..Default::default()
+    };
+    let (tx, mut rx) = mpsc::channel(64);
+    let stats = tokio::time::timeout(
+        Duration::from_secs(20),
+        fetch_all(&srv.server_config(), &cfg, reqs, tx),
+    )
+    .await
+    .expect("run hung");
+    let mut missing = 0;
+    while let Ok(o) = rx.try_recv() {
+        if let FetchOutcome::Missing { id, .. } = o {
+            assert_eq!(&*id, absent.as_str());
+            missing += 1;
+        }
     }
-    assert!(early_return(&pool).is_err());
-    assert_eq!(cur(Sub::RawOut), 0, "an early return returns the buffer");
-    assert_eq!(cur(Sub::RawFree), cap);
-
-    // And an unwind, which no amount of remembering can cover.
-    let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _b = pool.take();
-        panic!("consumer blew up mid-article");
-    }));
-    assert!(hit.is_err());
-    assert_eq!(cur(Sub::RawOut), 0, "an unwind returns the buffer");
-    assert_eq!(cur(Sub::RawFree), cap);
+    assert_eq!(missing, 1, "exactly the absent article resolves Missing");
+    stats
 }
 
-#[test]
-fn into_vec_disarms_the_guard_and_adopt_re_arms_it() {
-    let _g = one_gauge_test_at_a_time();
-    reset_for_tests();
-    let pool = BufPool::new_gauged(4, Sub::RawFree, Sub::RawOut);
-    let b = pool.take();
-    let cap = b.capacity() as u64;
+#[tokio::test]
+async fn an_echoed_430_counts_as_proven_every_time() {
+    let stats = miss_tally_run(true).await;
+    assert_eq!(
+        (stats.miss_proven, stats.miss_bare),
+        (2, 0),
+        "an echoed refusal is proven attribution on arrival, and a \
+         single-provider run spends two of them per absent article: the \
+         one that would have ended it, held by TODO 315's late re-ask, \
+         and the one that does"
+    );
+}
 
-    // Handing the bytes down the outcome channel: the guard stops
-    // guarding, and the outstanding charge travels WITH the buffer.
-    let raw = b.into_vec();
-    assert_eq!(cur(Sub::RawOut), cap, "the charge follows the bytes");
-    assert_eq!(cur(Sub::RawFree), 0);
-
-    // The far end re-guards it. `adopt` charges nothing - these bytes
-    // were charged by the `take` that minted them - and its drop is the
-    // one matching release.
-    let readopted = pool.adopt(raw);
-    assert_eq!(cur(Sub::RawOut), cap, "adopt must not double-charge");
-    drop(readopted);
-    assert_eq!(cur(Sub::RawOut), 0);
-    assert_eq!(cur(Sub::RawFree), cap);
+#[tokio::test]
+async fn a_bare_430_counts_bare_then_fence_proven() {
+    let stats = miss_tally_run(false).await;
+    assert_eq!(
+        (stats.miss_proven, stats.miss_bare),
+        (2, 1),
+        "a bare refusal is positional-only and tallies bare; the first \
+         one also arms the server's bare_refuser flag, so every answer \
+         after it travels FENCED and tallies as proven - ONE bare per \
+         absent article and never two, against two proven (soft_430's \
+         confirming repeat, then TODO 315's late re-ask)"
+    );
 }

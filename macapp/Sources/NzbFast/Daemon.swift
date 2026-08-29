@@ -733,10 +733,28 @@ final class Daemon {
         //
         // `runtime.json` FIRST, by how much each source knows about where
         // the listener IS: the port it BOUND, then the port we last
-        // attached to, then the port that was asked for. See
-        // `runtimePort()` for what the old two-source scan missed.
+        // attached to, then the port that was asked for, then the
+        // shipped default. See `runtimePort()` for what the old
+        // two-source scan missed.
+        //
+        // The trailing 6789 is what a true first run was missing: with no
+        // runtime.json, no persisted port and no saved setting, the first
+        // three all filter out to nothing, so the loop below never probed
+        // 6789 at all - it went straight to the free-port scan, which
+        // treats anything already bound there as a stranger (see the
+        // comment on that scan). An engine of ours that was still up from
+        // an earlier launch - crashed before it could persist a port,
+        // started by hand, or simply not yet reflected in this process's
+        // UserDefaults cache - was exactly that "anything", so first run
+        // scanned past it to 6790 and spawned a second engine over the
+        // same data directory. Probing 6789 here first, the same way the
+        // Windows tray's `handoff_candidates` always does, means an
+        // engine that proves itself as ours (see `isNzbfast`) is attached
+        // to before the scan ever runs; the scan's stranger rule then
+        // only fires for a listener that did NOT pass that proof, which
+        // is genuinely not ours to touch.
         var candidates: [Int] = []
-        for p in [runtimePort() ?? 0, port, saved ?? 0] where p > 0 && !candidates.contains(p) {
+        for p in [runtimePort() ?? 0, port, saved ?? 0, 6789] where p > 0 && !candidates.contains(p) {
             candidates.append(p)
         }
         for candidate in candidates {
@@ -762,6 +780,14 @@ final class Daemon {
                     "nzbfast: engine on :%d is v%@, bundle carries v%@ - upgrade restart",
                     port, running.description, mine.description)
                 if await upgradeRestart() {
+                    // The replacement engine binds the SAVED settings port,
+                    // not the one the old engine held: the dashboard's Port
+                    // setting is restart-only, and apply_saved_settings
+                    // overrides `--port` with it at startup. Re-point the
+                    // spawn argument and the health poll at it, or a port
+                    // change followed by an upgrade waits 15 s on the dead
+                    // old port and reaps the healthy child.
+                    if let s = savedPort() { persistPort(s) }
                     do {
                         try spawn()
                     } catch {
@@ -799,9 +825,13 @@ final class Daemon {
         // which is the honest outcome - the setting is the user's.
         //
         // Otherwise: free-port scan from 6789 (the shipped launchers'
-        // rule). A port with ANY listener - nzbfast or not - is skipped:
-        // on first run an existing daemon on 6789 is somebody else's
-        // (there is no persisted claim on it), and we must not touch it.
+        // rule). A port with ANY listener - nzbfast or not - is skipped.
+        // By the time we get here, 6789 has already been probed above (it
+        // is always in `candidates`, first run included) and did not
+        // prove itself as ours, so a listener the scan finds there is
+        // either a stranger's daemon or an nzbfast whose identity we
+        // could not confirm - either way, not ours to attach to or
+        // displace, so we skip past it rather than touch it.
         var chosen = saved ?? 0
         if chosen == 0 {
             for p in 6789..<6889 where !portTaken(p) {
@@ -927,6 +957,13 @@ final class Daemon {
                     return
                 }
                 self.child = nil
+                // The child this flag vouched for is gone, and
+                // `keyBearingAllowed` reads it: left true, a keyed URL
+                // built between this callback and the user's Restart
+                // would carry the master key toward a port nothing of
+                // ours holds any more. `engineIsOurs` in AppDelegate
+                // exists precisely because this clear happens here.
+                self.spawnedByUs = false
                 // The engine that proved itself is gone. A fresh listener
                 // on the same port is a different generation and has to
                 // prove itself again before this wrapper hands it the API

@@ -201,6 +201,34 @@ gen_x3() {
 
 # ---- apocalypse tier --------------------------------------------------
 
+gen_r4() {
+    leg_init realistic r4-inner-damaged
+    rand_file "$L/work/movie.bin" $SZ_REAL
+    add_payload "$L/work/movie.bin" 2
+    # THE FIELD SHAPE THIS LEG EXISTS FOR: the post arrives intact and the
+    # ARCHIVE INSIDE IT does not. One recovery pass is needed, and it is
+    # needed on content that only exists AFTER the outer archive has been
+    # opened - which is a different operation from repairing the posted set,
+    # and the one most clients stop at.
+    #
+    # Level 2 (inner): a plain store RAR of the payload. Its PAR2 is computed
+    # BEFORE the damage and travels with it, so the recovery set is complete
+    # and the repair is genuinely available to any client that looks for it.
+    ( cd "$L/work" && rar_a inner.rar -m0 -- movie.bin && rm movie.bin )
+    ( cd "$L/work" && par2 create -r10 -q -q inner.par2 inner.rar >/dev/null )
+    poison "$L/work/inner.rar"
+    # Level 1 (outer, posted): HEALTHY volumes and a HEALTHY posted PAR2.
+    # Nothing is wrong with the transfer, which is the whole point - a client
+    # cannot reach the payload by being good at the posted set alone, and a
+    # leg that damaged the outer too would let a client that repairs only
+    # what was posted look like it had solved this one.
+    ( cd "$L/work" && rar_a "$L/post/r4.rar" -m0 -v$VOL -- inner.rar inner*.par2 )
+    ( cd "$L/post" && par2 create -r10 -q -q r4.par2 r4.*rar >/dev/null )
+    finish_leg "rar(store,vols)+par2 healthy > rar(store,damaged)+par2-alongside > payload" 2 \
+        '{}' \
+        "Intact post, damaged inner archive, inner PAR2 packed alongside it. 64 bytes poisoned in inner.rar AFTER its PAR2 was computed, so the recovery set is complete and the repair is available to anyone who looks. Recovery chain: extract the outer, par2 repair inner.rar, extract the rebuilt archive. Realistic tier on purpose - this is a bad source or a partial re-post, not a torture shape, and unlike a1 it needs exactly ONE repair and no rar recovery record."
+}
+
 gen_a1() {
     leg_init apocalypse a1-damage-every-level
     rand_file "$L/work/payload.bin" $SZ_APOC
@@ -280,6 +308,7 @@ if tier_on realistic; then
     if want r2-depth2-store-store; then gen_r2; fi
     if want r2c-depth2-store-compressed; then gen_r2c; fi
     if want r3-rar-wrap-7z; then gen_r3; fi
+    if want r4-inner-damaged; then gen_r4; fi
 fi
 if tier_on extreme; then
     if want x1-depth5-ladder; then gen_x1; fi

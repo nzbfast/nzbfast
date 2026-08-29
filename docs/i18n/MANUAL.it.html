@@ -574,6 +574,17 @@ normale indirizzo web basta; una voce Prowlarr somiglia a
 <b>Applica indexer</b>. <b>Prova</b> chiede al sito che cosa supporta e mostra la
 risposta, il che convalida indirizzo e chiave con un clic. Una chiave salvata non viene
 più mostrata: il campo lo dice, e lasciarlo vuoto conserva quella già presente.</p>
+<p><b>nzbindex, senza bisogno di account.</b> Impostazioni → Cerca sugli indexer →
+<b>+ Aggiungi indexer</b>, poi imposta il primo campo della riga su
+<code>nzbindex</code> invece di nominare un account. Cerca su nzbindex.com direttamente
+tramite la sua API documentata, nessuna chiave richiesta, anche se nzbindex ne accetta
+una comunque, per un limite più alto dal suo lato. Indicizza ciò che è stato davvero
+pubblicato invece di un elenco di release curato, quindi trova cose che gli account
+sopra non hanno, al prezzo che molti dei suoi risultati hanno nomi mescolati. I download
+comunque si mettono in coda e si estraggono come qualsiasi altro job.
+<b>Solo completi</b>, attivo per impostazione predefinita, tiene fuori i post a cui
+mancano parti e che non potranno mai completarsi; i campi di dimensione, età e newsgroup
+accanto restringono ulteriormente una ricerca.</p>
 <p><b>Cercare.</b> Apri <b>🎬 la bacheca</b> nell'intestazione e scegli <b>Release</b>. Il menu a tendina accanto al campo di ricerca decide dove guarda una ricerca:
 <b>Questo indice</b>, cioè quello che questa macchina ha scansionato da sé,
 <b>Indexer</b>, oppure <b>Entrambi</b>. La tua scelta viene ricordata. Interrogare i
@@ -1152,7 +1163,8 @@ aggiornamento della watchlist è andato a buon fine e la copia superata è stata
 rimossa),
 <code>queue.idle</code>, <code>queue.paused</code> e <code>queue.resumed</code> (la coda si è fermata o è ripartita, chiunque o qualunque cosa l'abbia fatto), <code>queue.finished_action</code>
 (l'azione di fine coda è stata armata, eseguita o annullata), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> e <code>update.available</code> (è stata trovata una versione più recente di nzbfast). Ciascuno porta uno
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> e <code>server.block_spent</code> (un account a blocco prepagato è arrivato all'ultimo 15% dei dati acquistati, oppure li ha esauriti) e <code>update.available</code> (è stata trovata una versione più recente di nzbfast). Ciascuno porta uno
 <code>schema_version</code> (attualmente 1; nuove chiavi possono comparire senza incremento -
 ignora ciò che non conosci), un <code>seq</code> monotono e un
 timestamp <code>at</code> in millisecondi.</p>
@@ -1317,6 +1329,7 @@ attivo (le loro copie sono sparite) iniziano intanto a scaricare il job
 (verifica/estrazione) si completa su disco, il download del job successivo possiede
 già la linea.</li>
 </ul>
+<p><b>Con un solo provider configurato</b>, questo può rilevare solo un post completamente morto - non arriva assolutamente nulla da esso, sia perché ogni articolo viene rifiutato sia perché il provider smette semplicemente di rispondere. Un lavoro semplicemente lento ma che riceve ancora qualche byte viene lasciato stare, perché non c’è un secondo provider a cui spostarlo. Configura un secondo provider e nzbfast potrà anche accorgersi che un server non possiede più un post e instradarlo o rimandarlo invece di aspettare che il lavoro finisca.</p>
 <h3 id="oracle">L'oracolo di disponibilità</h3>
 <p>Le rimozioni sono il motivo principale per cui un download Usenet fallisce, e sono
 prevedibili: la stessa release sparisce da un backbone mentre un altro ce l'ha ancora.
@@ -1509,6 +1522,7 @@ NZB</b> (solo inserimento: <code>addfile</code>/<code>addurl</code>). <code>addn
 <tr><td>Diagnostica</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: utente qualsiasi, chiave API come password)</td></tr>
 <tr><td>Anteprima / riproduzione</td><td><code>/stream/&lt;nzo_id&gt;</code> (range HTTP; avviare un job di libreria parcheggiato richiede il token <code>?t=</code> o la chiave), <code>/m3u/&lt;id&gt;</code> (richiede la chiave o il token del lavoro stesso; conia il token), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Monitoraggio</td><td><code>/metrics</code> risponde nel formato di esposizione testuale Prometheus 0.0.4: velocità di download, profondità e byte della coda, connessioni per provider, interruzioni e conteggi degli articoli, memoria per sottosistema e tempo di attività. Unità di base ovunque (byte, secondi), così è il cruscotto a convertire e nulla arriva pre-arrotondato. Solo GET, e per impostazione predefinita serve la chiave API completa. Imposta <code>metrics_open</code> per servirlo senza chiave, che è la disposizione abituale con Prometheus: non contiene nomi di lavori né percorsi, ma pubblica il nome host di ogni provider configurato a chiunque possa raggiungere la porta.</td></tr>
 </table></div>
 
 <h2 id="files">17 · File e percorsi</h2>

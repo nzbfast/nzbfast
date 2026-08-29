@@ -40,6 +40,11 @@
      its own palette, so a user who chose Light got a light dashboard and
      a pitch-black wall. -->
 __NZBFAST_UI_TOKENS__
+<!-- The shared press/warning/error sound engine, substituted by
+     assets.rs from web/ui-sound.html. This page used to carry a stale
+     hand-made fork of it: one blip for all 105 controls, deaf to the
+     volume slider and to two of the three preferences. -->
+__NZBFAST_UI_SOUND__
 <style>
 *{box-sizing:border-box}
 html{scrollbar-color:color-mix(in srgb,var(--fg) 26%,transparent) var(--bg)}
@@ -543,6 +548,10 @@ button:active:not(:disabled){transform:scale(.94);filter:brightness(1.35)}
   border-radius:10px;font-size:13px;transition:transform .25s ease;z-index:30;
   box-shadow:0 8px 30px rgba(0,0,0,.55)}
 #toast.show{transform:translateX(-50%) translateY(0)}
+/* A failure looks like one, the same way it does on the dashboard - by
+   CLASS and never an inline style, so nothing outranks the rules
+   around it. Read the note at the dashboard's own #toast.toastbad. */
+#toast.toastbad{border-color:var(--bad)}
 /* Off-screen but still in the accessibility tree: the live region and
    any text that exists only to be spoken. Same rule as the dashboard. */
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
@@ -950,12 +959,16 @@ const DAEMON_LOCALE='__NZBFAST_LOCALE__';
 // is also where pull search lives: the poster wall goes, and what is
 // left is a search over your indexer accounts. An unreplaced token means
 // "on", the state that hides nothing.
-const IDX_ON='__NZBFAST_INDEX__'!=='0';
+// The casts are load-bearing for tools/checkjs-gate.py and say something
+// true: serve/webasset.rs rewrites these tokens before the page goes out,
+// so what is compared is a string whose value is not known here - without
+// them a checker reads every one of these comparisons as impossible.
+const IDX_ON=(/** @type {string} */('__NZBFAST_INDEX__'))!=='0';
 const IDX_COUNT=+'__NZBFAST_INDEXERS__'||0;
 // Spotnet: a third thing this page can search, switched on separately
 // from the built-in indexer. An unreplaced token means off - spots are
 // new, so there is no install anywhere that should assume otherwise.
-const SPOT_ON='__NZBFAST_SPOTS__'==='1';
+const SPOT_ON=(/** @type {string} */('__NZBFAST_SPOTS__'))==='1';
 // Spots are promoted into the release index as first-class named
 // cards, so while they are on there IS a wall to show even with the
 // header indexer off - which is the default install now.
@@ -1019,31 +1032,14 @@ function applyI18n(){
     const tr=I18N[el.dataset.i18nPlaceholder]; if(tr!=null) el.placeholder=tr;
   });
 }
-// Click acknowledgment: blip + accent pulse on press (matches the
-// dashboard; shares its localStorage sound preference).
-let sndOn=localStorage.nzbfastSounds!=='off', AC=null;
-function clickBlip(){
-  if(!sndOn) return;
-  try{
-    AC=AC||new (window.AudioContext||window.webkitAudioContext)();
-    if(AC.state==='suspended') AC.resume();
-    const t=AC.currentTime, o=AC.createOscillator(), g=AC.createGain();
-    o.type='sine';
-    o.frequency.setValueAtTime(1750,t);
-    o.frequency.exponentialRampToValueAtTime(650,t+.05);
-    g.gain.setValueAtTime(.1,t);
-    g.gain.exponentialRampToValueAtTime(.001,t+.07);
-    o.connect(g); g.connect(AC.destination);
-    o.start(t); o.stop(t+.08);
-  }catch(e){}
-}
-addEventListener('pointerdown', e=>{
-  const el=e.target.closest('button,select,a,[onclick],.card');
-  if(!el||el.disabled) return;
-  clickBlip();
-  el.classList.remove('clickflash'); void el.offsetWidth;
-  el.classList.add('clickflash');
-}, true);
+// Click acknowledgment lives in web/ui-sound.html now - the engine, its
+// classifier and its press/warn/error tiers are shared with the
+// dashboard rather than hand-copied here. What is left is the one shape
+// this page has and that one does not: a release TILE, a `.card` with
+// `role="button"` and a delegated handler, so it carries none of the
+// base selectors. The dashboard's `.card` is a layout panel and must
+// NOT blip, which is why this is appended here and not in the partial.
+SND_PRESS_SEL.push('.card');
 let key = localStorage.nzbfastKey || '';
 // Same contract as the dashboard's: every adoption bumps the epoch, and
 // api() only treats a refusal as news about the CURRENT key if the key
@@ -1324,7 +1320,7 @@ const fmtVotes = n => n>=1e6 ? (n/1e6).toFixed(1)+'M' : n>=1e3 ? Math.round(n/1e
 function fmtDate(iso){
   if(!/^\d{4}-\d{2}-\d{2}$/.test(iso||'')) return '';
   const d=new Date(iso+'T00:00:00Z');
-  if(isNaN(d)) return '';
+  if(isNaN(d.getTime())) return '';
   try{
     return new Intl.DateTimeFormat(LOCALE,{dateStyle:'medium',timeZone:'UTC'}).format(d);
   }catch(e){ return iso; }
@@ -1769,6 +1765,33 @@ function modalClose(box){
 let _sheetSaid='';
 function sheetOpen(){
   const sheet=document.getElementById('sheet');
+  // A sheet is modal, so the View menu must never be left up behind it.
+  // `#hidChip` - the ONLY entrance to the Hidden & filters sheet - lives
+  // INSIDE `#viewMenu`, and until 27 Aug 2026 nothing closed the menu on
+  // the way in. That left `#vpBack` (position:fixed; inset:0; z-index 29)
+  // covering the viewport while the sheet's own `#ovl` sits at z-index 20,
+  // NINE BELOW IT, so `elementFromPoint` at the centre of the sheet's
+  // Unhide button returned `vpBack` and every control in the sheet -
+  // Unhide, Remove filter, Add filter, the field select, the value box,
+  // and the sheet's own close - swallowed its first click. Measured by
+  // journeys/tests/wall.spec.ts at 1280x720.
+  //
+  // Closing the menu is the fix rather than lifting `#ovl` above 29,
+  // because the backdrop is only half of what is in the way: `#viewMenu`
+  // ITSELF is z-index 30 and was still drawn ON TOP of the open sheet.
+  // Raising `#ovl` would leave that, and leave two backdrops stacked.
+  // This runs BEFORE modalOpen(sheet) below on purpose: modalClose hands
+  // focus back to `#viewBtn`, which modalOpen then records as the sheet's
+  // own opener, so dismissing the sheet returns focus to the button the
+  // menu belongs to. Reversed, the menu's close would yank focus back out
+  // of the sheet that had just taken it.
+  //
+  // It is a no-op when the menu is already closed - which is every other
+  // caller (openCard, openPerson, openPreCand) and every REPAINT of an
+  // open sheet: `modalClose` returns early with no trap registered, and
+  // the three attribute writes are already in the state they set. Same
+  // unconditional call reflowBar() has always made.
+  toggleViewMenu(false);
   document.getElementById('ovl').classList.add('open');
   document.body.style.overflow='hidden';
   nameControls(sheet);
@@ -1839,9 +1862,16 @@ function press(el, on){
   el.setAttribute('aria-pressed', on?'true':'false');
 }
 
-function toast(msg){
+// The dashboard's contract, and now the same one here: a REFUSED click
+// sounds refused. `bad` is what routes a failure into the shared
+// engine's error tier (its own preference, its own recipe, and the
+// desktop popup for someone whose wall is behind something else) -
+// without it the wall's 28 failure sentences played the plain press
+// blip, which is the sound of a click that WORKED.
+function toast(msg, bad){
   const t=document.getElementById('toast');
-  t.textContent=msg; t.classList.add('show');
+  if(bad){ actSnd('refuse'); popupErr(msg); }
+  t.textContent=msg; t.classList.toggle('toastbad', !!bad); t.classList.add('show');
   clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'), 2600);
 }
 
@@ -1914,7 +1944,7 @@ async function grab(id, play){
   // Hand-picked grabs skip the queue: Play = Force (starts even while
   // something else downloads), Download = High.
   const j=await api('index_get',`&id=${id}&priority=${play?2:1}${dupeOk}`);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   const nzo=(j.nzo_ids||[])[0];
   toast(play?t('wall.queuedPlay','Queued: opening player…'):t('wall.queued','Queued for download'));
   if(play&&nzo) m3uHandoff(nzo);
@@ -1928,25 +1958,25 @@ async function grab(id, play){
 async function m3uHandoff(id){
   try{
     const r=await fetch('/m3u/'+encodeURIComponent(id), {headers:key?{'X-Api-Key':key}:{}});
-    if(!r.ok){ toast(tErr('failed')); return; }
+    if(!r.ok){ toast(tErr('failed'), true); return; }
     const a=document.createElement('a');
     a.href=URL.createObjectURL(await r.blob());
     a.download='nzbfast.m3u';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href),5000);
-  }catch(e){ toast(tErr('could not reach nzbfast')); }
+  }catch(e){ toast(tErr('could not reach nzbfast'), true); }
 }
 async function dlRelNzb(id){
   try{
     const r=await fetch('/getnzb/'+encodeURIComponent(id)+'.nzb', {headers:key?{'X-Api-Key':key}:{}});
-    if(!r.ok){ toast(tErr('failed')); return; }
+    if(!r.ok){ toast(tErr('failed'), true); return; }
     const m=(r.headers.get('Content-Disposition')||'').match(/filename="([^"]+)"/);
     const a=document.createElement('a');
     a.href=URL.createObjectURL(await r.blob());
     a.download=m?m[1]:id+'.nzb';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(a.href),5000);
-  }catch(e){ toast(tErr('could not reach nzbfast')); }
+  }catch(e){ toast(tErr('could not reach nzbfast'), true); }
 }
 
 // ---- 24C: two surfaces - wall (discover) and releases (the table) ----
@@ -2065,7 +2095,7 @@ function viewBadge(){
   const b=document.getElementById('viewBtn');
   b.classList.toggle('on', n>0);
   const old=b.querySelector('.vpn'); if(old) old.remove();
-  if(n){ const s=document.createElement('span'); s.className='vpn'; s.textContent=n; b.appendChild(s); }
+  if(n){ const s=document.createElement('span'); s.className='vpn'; s.textContent=String(n); b.appendChild(s); }
 }
 addEventListener('click', e=>{
   const m=document.getElementById('viewMenu');
@@ -2195,6 +2225,18 @@ function setView(v){
 }
 function syncTabs(){
   document.querySelectorAll('#tabs button').forEach(x=>press(x, x.dataset.k===tab));
+}
+// The same for the Wall/Releases switcher, and it is NOT redundant with
+// setView(): that one swaps the whole surface, so boot calls it only when
+// the stored view is the table (see the bottom of this file). In the
+// default view nothing had ever painted these two, so the switcher was
+// the one segmented control on the page carrying no `aria-pressed` -
+// invisible to a screen reader AND, since sndKindFor derives a lateral
+// move from exactly that attribute, the one control whose press sounded
+// like an ordinary action. Both are fixed by saying what the buttons are
+// rather than by tagging them.
+function syncViews(){
+  document.querySelectorAll('#views button').forEach(b=>press(b, b.dataset.v===view));
 }
 // M30: friendly display name for a ROT13-rescued row - the raw stem is
 // rotated gibberish; the parser's decoded title/marker facts read fine.
@@ -2483,7 +2525,7 @@ async function groupFetch(seq){
       `&sort=${sort}&dir=${curDesc()?'desc':'asc'}&complete=${complete}`+
       `&limit=${LPAGE}&offset=${lpage*LPAGE}&matched=0&all=0`);
     if(seq!==lseq) return;
-    if(j.error){ toast(tErr(j.error)); return; }
+    if(j.error){ toast(tErr(j.error), true); return; }
     updateCats(j.cats);
     ltotal=j.total||0;
     lgroups=j.cards||[];
@@ -2539,7 +2581,7 @@ async function browseFetch(){
     // A failed local page renders nothing, so it cannot render the
     // pinned rows either - spend the pin here rather than leave it for
     // an unrelated later search to inherit.
-    if(j.error){ dropExt(); toast(tErr(j.error)); return; }
+    if(j.error){ dropExt(); toast(tErr(j.error), true); return; }
     if(wantLocal) updateCats(j.cats);
     ltotal=j.total||0;
     lrows=j.results||[];
@@ -2774,7 +2816,7 @@ async function spotFetch(seq,q){
     `&q=${encodeURIComponent(q)}&adult=${adult}&cat=${encodeURIComponent(cat)}`+
     `&limit=${LPAGE}&offset=${lpage*LPAGE}`).catch(e=>({status:false,error:String(e)}));
   if(seq!==lseq) return;
-  if(!j.status){ toast(tErr(j.error)); return; }
+  if(!j.status){ toast(tErr(j.error), true); return; }
   ltotal=j.total||0;
   lrows=[]; extRows=[]; extNotes=[]; xexp.clear();
   spotRows=j.results||[];
@@ -2813,7 +2855,7 @@ async function grabSpot(msgid,btn){
   const j=await api('spot_grab',`&msgid=${encodeURIComponent(msgid)}&priority=1`);
   if(!j.status){
     if(btn) btn.disabled=false;
-    toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}));
+    toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true);
     return;
   }
   toast(t('wall.queued','Queued for download'));
@@ -2825,7 +2867,7 @@ async function grabExt(token,btn){
   const j=await api('indexer_grab',`&token=${encodeURIComponent(token)}&priority=1`);
   if(!j.status){
     if(btn) btn.disabled=false;
-    toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}));
+    toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true);
     return;
   }
   toast(t('wall.queued','Queued for download'));
@@ -2948,7 +2990,7 @@ document.getElementById('selAll').addEventListener('change',e=>{
   if(!boxes.length && grpOn()){
     e.target.checked=false;
     announce(t('wall.selall.grouped','Open a title first - selecting works on releases, and a closed title has none on the page.'));
-    toast(t('wall.selall.grouped','Open a title first - selecting works on releases, and a closed title has none on the page.'));
+    toast(t('wall.selall.grouped','Open a title first - selecting works on releases, and a closed title has none on the page.'), true);
     return;
   }
   boxes.forEach(c=>{
@@ -3062,7 +3104,7 @@ async function watchThis(season){
   if(ex){
     const covers=!ex.seasons||ex.seasons.toLowerCase()==='all'
       ||ex.seasons.split(',').some(x=>x.trim()==String(season));
-    if(season==null||covers){ toast(t('wall.already','Already watching {title}',{title:c.title})); return; }
+    if(season==null||covers){ toast(t('wall.already','Already watching {title}',{title:c.title}), true); return; }
     ex.seasons+=`,${season}`;
   } else {
     const w={id:Date.now(), kind, title:c.title, seasons:season!=null?String(season):'',
@@ -3087,7 +3129,7 @@ async function watchThis(season){
   const j=await apiPost('config',{name:'watchlist', value:JSON.stringify(list)});
   toast(j.status?'☆ '+t('wall.watching','Watching {title}{series}: grabs happen automatically',
       {title:c.title, series:season!=null?' '+t('wall.serieslc','series {n}',{n:season}):''})
-    :t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.rejected','rejected')}));
+    :t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.rejected','rejected')}), !j.status);
 }
 async function openCard(k){
   // v2 cards arrive without their release list - fetch it on open
@@ -3302,14 +3344,14 @@ async function preAssign(id,pid){
   // mutex (TODO 166) means nothing was stored and pressing again works,
   // which "the release may have been named meanwhile" would talk the
   // user out of.
-  if(!j.status){ toast(tErr(j.error)||t('wall.cand.fail','That did not stick - the release may have been named meanwhile.')); return; }
+  if(!j.status){ toast(tErr(j.error)||t('wall.cand.fail','That did not stick - the release may have been named meanwhile.'), true); return; }
   closeOvl(); browseFetch();
 }
 async function preReject(id){
   // Same rule as preAssign: a rejection that did not land must not close
   // the sheet as though it had - the row comes straight back otherwise.
   const j=await api('pre_reject',`&id=${id}`).catch(()=>({status:false}));
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   closeOvl(); browseFetch();
 }
 
@@ -3342,7 +3384,7 @@ async function rarName(id,btn){
   // post" there would blame the post for the daemon's problem, which is
   // the wrong answer to act on (verified against a daemon whose server
   // was refusing connections - it read as a dead archive).
-  if(j && !j.outcome && j.error){ toast(tErr(j.error)||j.error); return; }
+  if(j && !j.outcome && j.error){ toast(tErr(j.error)||j.error, true); return; }
   const enc = j && j.outcome==='encrypted';
   toast(enc?t('wall.rarname.enc','That archive is password-protected, so no file name can be read out of it.')
           :t('wall.rarname.no','Nothing readable in that post: no file name came back.'));
@@ -3629,7 +3671,7 @@ async function fixSearch(btn){
           <span class="dim">${esc(c.genres||c.provider)}${c.overview?` - ${esc(c.overview.slice(0,110))}${c.overview.length>110?'…':''}`:''}</span></div>
       </div>`).join('')
       :`<div class="dim" style="padding:6px 2px">${t('wall.fx.nomatch','No matches: try another spelling or kind, or use manual entry below.')}</div>`;
-  }catch(e){ toast(t('wall.searchfail','Search failed: {err}',{err:e.message})); }
+  }catch(e){ toast(t('wall.searchfail','Search failed: {err}',{err:e.message}), true); }
   finally{ btn.disabled=false; btn.textContent=old; }
 }
 async function applyCand(i){
@@ -3639,7 +3681,7 @@ async function applyCand(i){
     meta:{id:cand.id, provider:cand.provider||'', overview:cand.overview, rating:cand.rating,
           genres:cand.genres, poster_url:cand.poster_url, backdrop_url:cand.backdrop_url,
           imdb:cand.imdb||'', air_date:cand.air_date||''}});
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   toast(t('wall.matchupdated','Match updated.'));
   wsig=''; await refresh();
 }
@@ -3650,9 +3692,9 @@ async function manualSave(refetch){
     title:g('fx_title'), year:parseInt(g('fx_year'))||0};
   if(refetch) body.refetch=true;
   else{ body.overview=g('fx_overview'); body.genres=g('fx_genres'); }
-  if(!body.title){ toast(t('wall.titlereq','A title is required.')); return; }
+  if(!body.title){ toast(t('wall.titlereq','A title is required.'), true); return; }
   const j=await apiPost('wall_fix',body);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   toast(refetch?t('wall.savedfetch','Saved: fresh metadata arrives within ~30 s.'):t('wall.saved','Saved.'));
   wsig=''; await refresh();
   if(refetch) setTimeout(()=>{ wsig=''; refresh(); }, 25000);
@@ -3672,19 +3714,19 @@ async function mergeSearch(btn){
           <span class="dim">${esc(c.kind)} · ${tn('wall.lcount',c.n||0,'{n} release','{n} releases')}</span></div>
       </div>`).join('')
       :`<div class="dim" style="padding:6px 2px">${t('wall.nomatch','No matches.')}</div>`;
-  }catch(e){ toast(t('wall.searchfail','Search failed: {err}',{err:e.message})); }
+  }catch(e){ toast(t('wall.searchfail','Search failed: {err}',{err:e.message}), true); }
   finally{ btn.disabled=false; btn.textContent=old; }
 }
 async function applyMerge(i){
   const c=mergeCands[i]; if(!c||!openKey) return;
   const j=await api('wall_merge',`&value=${encodeURIComponent(openKey)}&value2=${encodeURIComponent(c.key)}`);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   toast(t('wall.merged','Merged: {n} releases moved.',{n:j.moved}));
   closeOvl(); wsig=''; await wallFetch(true); openCard(c.key);
 }
 // ---- custom artwork: paste a URL (daemon fetches it) or upload ----
 async function artDone(j){
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   toast(t('wall.posterupdated','Poster updated.'));
   wsig=''; await refresh();
   // Re-render the sheet so the new poster shows immediately (this
@@ -3696,7 +3738,7 @@ async function artFromUrl(btn){
   if(!url||!openKey) return;
   btn.disabled=true; const old=btn.textContent; btn.textContent=t('wall.busy.fetching','Fetching…');
   try{ await artDone(await apiPost('wall_art',{key:openKey,url})); }
-  catch(e){ toast(t('wall.failed','Failed: {err}',{err:e.message})); }
+  catch(e){ toast(t('wall.failed','Failed: {err}',{err:e.message}), true); }
   finally{ btn.disabled=false; btn.textContent=old; }
 }
 async function artFromFile(inp){
@@ -3708,7 +3750,7 @@ async function artFromFile(inp){
     const r=await fetch(`/api?mode=wall_art&key=${encodeURIComponent(openKey)}`,
       {method:'POST', body:fd, headers: key?{'X-Api-Key': key}:{}});
     await artDone(await r.json());
-  }catch(e){ toast(t('wall.failed','Failed: {err}',{err:e.message})); }
+  }catch(e){ toast(t('wall.failed','Failed: {err}',{err:e.message}), true); }
 }
 
 async function metaRefresh(btn){
@@ -3716,7 +3758,7 @@ async function metaRefresh(btn){
   btn.disabled=true;
   try{
     const j=await api('wall_refresh',`&value=${encodeURIComponent(openKey)}`);
-    if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+    if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
     toast(t('wall.metacleared','Metadata cleared: fresh fetch within ~30 s.'));
     wsig=''; await refresh();
     setTimeout(()=>{ wsig=''; refresh(); }, 25000);
@@ -3750,7 +3792,7 @@ async function wallFetch(reset){
       (decSel?`&year_min=${decSel.split('-')[0]}&year_max=${decSel.split('-')[1]}`:'');
     const j=await api('wall2', qs);
     if(seq!==wseq) return;
-    if(j.error){ toast(tErr(j.error)); return; }
+    if(j.error){ toast(tErr(j.error), true); return; }
     updateCats(j.cats);
     wtotal=j.total||0;
     if(j.groups!==undefined) idxGroups=j.groups;
@@ -3923,7 +3965,7 @@ let hidCount=0, curSug=null;
 const H4S='margin:18px 0 8px;font-size:11.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)';
 async function hideKey(k){
   const j=await api('wall_hide',`&value=${encodeURIComponent(k)}`);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   toast(t('wall.hidden.done','Hidden: find it under “Hidden”.'));
   if(openKey===k) closeOvl();
   hidCount++; updateHidChip();
@@ -3964,7 +4006,7 @@ async function askIndexers(btn){
     `&title_key=${encodeURIComponent(c.key)}`);
   if(btn) btn.disabled=false;
   if(!j.status){
-    toast(tErr(j.error)||t('wall.ask.none','No indexers configured - add one in Settings'));
+    toast(tErr(j.error)||t('wall.ask.none','No indexers configured - add one in Settings'), true);
     return;
   }
   extRows=j.results||[]; extNotes=j.notes||[]; xexp.clear();
@@ -3990,7 +4032,7 @@ async function askIndexers(btn){
 }
 async function unhideKey(k){
   const j=await api('wall_unhide',`&value=${encodeURIComponent(k)}`);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   wsig=''; wallFetch(true);
   openHidden();
 }
@@ -4040,7 +4082,7 @@ function renderSuggest(){
 async function acceptSug(){
   if(!curSug) return;
   const j=await api('wall_rule_add',`&name=${encodeURIComponent(curSug.field)}&value=${encodeURIComponent(curSug.value)}&value2=auto`);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   toast(t('wall.sug.added','Filter added: manage it under “Hidden”.'));
   curSug=null; renderSuggest();
   wsig=''; wallFetch(true); fetchSuggest();
@@ -4050,7 +4092,7 @@ async function dismissSug(){
   const j=await api('wall_suggest_no',`&name=${encodeURIComponent(curSug.field)}&value=${encodeURIComponent(curSug.value)}`);
   // Clearing the panel against a write that did not happen just brings
   // the same nudge back on the next poll (TODO 166) - say so instead.
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   curSug=null; renderSuggest(); fetchSuggest();
 }
 // The Hidden & filters panel - reuses the detail-sheet overlay.
@@ -4103,12 +4145,12 @@ async function addRule(){
   const f=document.getElementById('nr_field').value, v=document.getElementById('nr_val').value.trim();
   if(!v) return;
   const j=await api('wall_rule_add',`&name=${encodeURIComponent(f)}&value=${encodeURIComponent(v)}`);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   wsig=''; wallFetch(true); openHidden();
 }
 async function delRule(id){
   const j=await api('wall_rule_del',`&value=${id}`);
-  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')})); return; }
+  if(!j.status){ toast(t('wall.failed','Failed: {err}',{err:tErr(j.error)||t('wall.unknown','unknown')}), true); return; }
   wsig=''; wallFetch(true); openHidden();
 }
 document.getElementById('hidChip').addEventListener('click', ()=>openHidden());
@@ -4564,7 +4606,7 @@ document.getElementById('sort').value=sortBy;
 // wall2 answer lands, but that is a whole round trip later, and the
 // markup ships with All pre-lit - so without this the bar visibly
 // flicks from All to Movies after the grid has already painted.
-syncTabs();
+syncTabs(); syncViews();
 applyZoom();
 renderDir();
 renderChips();

@@ -1,5 +1,6 @@
-# `:app:lintDebug` for the Compose Android app, which until now ran on no
-# runner anywhere.
+# The Compose Android app's gate: `:app:testDebugUnitTest` and
+# `:app:lintDebug`, neither of which ran on any runner anywhere until this
+# workflow existed (lint on 25 Aug 2026, the tests on 27 Aug).
 #
 # WHY THIS EXISTS. Android lint is NOT part of `assembleDebug`, and no
 # workflow asked for it by name, so `grep -rn lintDebug .github/workflows/`
@@ -36,6 +37,71 @@
 # neither of which the engine binary participates in. So this job is a
 # JDK, a gradle distribution and the SDK, and never a cross-compiler.
 #
+# WHY THE JVM TESTS ARE HERE TOO, added 27 Aug 2026. `:app:testDebugUnitTest`
+# is 32 JUnit tests under `app/src/test/`, and until that date
+# `grep -c testDebugUnitTest .github/workflows/android-lint.yml` was 0, so
+# they executed on no runner anywhere - the same silence the lint half of
+# this file was written to end, one gradle task over. Lint does not reach
+# them: it analyses Kotlin and the manifest and never loads a test class.
+#   They are not ordinary unit tests. They are the ONLY thing holding the
+# app to the frozen mobile API contract in
+# `packaging/android/compose-app/CONTRACT.md` - each one parses a response
+# SNAPSHOT recorded from a real daemon, so a daemon-side shape change the
+# app's parsers cannot read becomes a red test here rather than a phone
+# that quietly shows nothing.
+#   The sharpest of them is `playbackWithoutQueueIdleIsNotIdle`. A daemon
+# predating the 26 Aug `queue_idle` contract addition answers WITHOUT that
+# key, and `EngineService` STOPS THE ENGINE when it reads true - so absent
+# has to read false, and the four pre-addition `playback_*.json` fixtures
+# are the only honest negative case that will ever exist. CONTRACT.md says
+# in as many words not to re-record them. Nothing ran the test that rests
+# on that.
+#   Like lint, this needs no engine binary and no NDK: they are plain JVM
+# JUnit 4 against the standalone `org.json` artifact (the
+# `testImplementation` block in app/build.gradle.kts), with no Robolectric
+# and no device.
+#
+# WHY A SECOND STEP, AND NOT A SECOND TASK OR A SECOND JOB. Three shapes
+# were available and the two rejected ones each lose something concrete.
+#   A SECOND TASK on the existing step - `./gradlew :app:testDebugUnitTest
+# :app:lintDebug` - is the cheapest of the three (one JVM start, one
+# configuration phase) and is wrong twice over. The run's step list would
+# name the failure "lint" whatever actually broke; and gradle stops at the
+# first failing task, so ONE red test hides every lint error behind it.
+# You would fix the test, push, and only then learn lint was red too -
+# the seventeen-day silence at the top of this file, in miniature, once
+# per round trip.
+#   A SECOND JOB is distinguishable at the top of the run and pays for it
+# three times: a second checkout, a second sdkmanager, and a second
+# restore of the ~130 MB gradle cache, plus compiling the debug variant
+# twice. It also puts two jobs on ONE cache key - on a cold key both miss,
+# both build, and both reach the save step, where the loser logs `Unable
+# to reserve cache with key ...`. Noise rather than breakage, but noise
+# bought with runner minutes.
+#   A SECOND STEP keeps one setup, one cache pair and one compilation of
+# the debug variant (`testDebugUnitTest` runs `compileDebugKotlin`, which
+# `lintDebug` then finds up to date), while the run's own step list names
+# which half went red. Measured on the dev Mac 27 Aug 2026 with warm
+# gradle caches and `app/build` deleted first: 26 s for the tests then
+# 19 s for lint, against 29 s for both tasks in one invocation. So this
+# shape costs about 16 s a run against a 20-minute budget, and buys a red
+# that says what it is.
+#   The masking problem is then closed explicitly rather than by ordering.
+# The lint step carries `if: ${{ !cancelled() && steps.tests.conclusion !=
+# 'skipped' }}`, so a failing test cannot suppress a lint error - while a
+# failure in SETUP, which leaves the test step skipped, correctly skips
+# lint too instead of running it into the same missing SDK. Tests go first
+# because they are the sharper signal and because their compilation is the
+# one lint then reuses.
+#
+# THE NAME STAYS `android-lint`, which is now narrower than what the job
+# does, and that is a decision rather than an oversight. `android-lint.yml`
+# is cited by path from the backlog, from three development handoff
+# documents and from the live work-claims ledger, nothing mechanical reads
+# either the workflow name or the job name, and renaming the file to match
+# would strand every one of those citations to buy a label. The STEP names
+# are what a person reading a red run actually sees, and those are exact.
+#
 # WHY ITS OWN WORKFLOW RATHER THAN A JOB IN size-gate.yml. That file's
 # every-branch placement is earned by being BUILD-FREE - checkout plus a
 # python script, seconds of runner time - and its `paths:` union already
@@ -52,16 +118,31 @@
 # of the `packaging-gates` job in size-gate.yml.
 #
 # WARNINGS ARE TOLERATED, ERRORS ARE NOT. `abortOnError` is AGP's default
-# and lint's error tier is what this gate is for. The tree carries 14
-# warnings today, deliberately left by the lane that fixed the errors, and
-# two of them are worth a session's attention rather than a `-Werror`
-# flag that would redden this job on day one: `PictureInPictureIssue`, in
-# the very method `df83cd5a0` repaired, and `OldTargetApi` for
-# `targetSdk = 34` against `compileSdk = 36`, which is a Play Store
-# shipping deadline rather than a style note. Both are item 2 of the
-# handoff named above. Same judgement macapp.yml made about its two
-# tolerated Swift warnings, and for the same reason: a gate that is red
-# the day it lands is a gate somebody switches off.
+# and lint's error tier is what this gate is for. No `-Werror` flag, on
+# the judgement macapp.yml made about its two tolerated Swift warnings:
+# a gate that is red the day it lands is a gate somebody switches off.
+#   The census below is read off the RUNNER's own
+# `lint-results-debug.xml` (run 33065896167, 27 Aug 2026), not off a
+# local run, and it is 0 errors and 17 warnings - `8x UseKtx`,
+# `4x GradleDependency`, `2x NewerVersionAvailable`,
+# `1x AndroidGradlePluginVersion`, `1x OldTargetApi`,
+# `1x MissingApplicationIcon`. This paragraph said 14 until 27 Aug and
+# named `PictureInPictureIssue` as one to look at; that one was FIXED on
+# 25 Aug in `9bf49d8b6` and the count had drifted since, which is what a
+# hand-maintained number in a comment does. If you move it, re-read it
+# from the uploaded artifact rather than from your own box.
+#   Two are decisions rather than backlog. `OldTargetApi`
+# (`targetSdk = 34` against `compileSdk = 36`) is a HOLD with a measured
+# reason, not an oversight: `9bf49d8b6` investigated it and left it,
+# because targeting 35 caps dataSync foreground services at ~6h/24h and
+# `EngineService` - a long-running exec'd native engine on exactly that
+# service type - would hit the cap with nobody on this fleet able to soak
+# it. It is still a Play Store shipping deadline, so it is a decision with
+# an expiry. And `MissingApplicationIcon` is real and product-facing
+# rather than a style note: the manifest sets no `android:icon` and the
+# app has no `res/` directory at all, so the launcher draws Android's
+# generic default. That belongs with the APK release train (TODO 281 AN5)
+# and its icon masters already exist under `packaging/icon/`.
 name: android-lint
 
 on:
@@ -144,8 +225,23 @@ jobs:
             ~/.gradle/wrapper
           key: android-gradle-v1-${{ runner.os }}-${{ hashFiles('packaging/android/compose-app/gradle/wrapper/gradle-wrapper.properties', 'packaging/android/compose-app/**/*.gradle.kts') }}
       # `--no-daemon`: a gradle daemon outlives the step and buys nothing
-      # on a runner that is destroyed after one build.
+      # on a runner that is destroyed after one build. `--console=plain`
+      # because the run log is not a terminal - the rich console rewrites
+      # lines in place and the log then reads as one smeared paragraph.
+      #
+      # Tests before lint: they are the sharper signal (a snapshot that no
+      # longer parses is a contract drift, not a style note), and their
+      # `compileDebugKotlin` is the one lint immediately reuses. See the
+      # step-not-task-not-job argument in the header.
+      - name: unit tests
+        id: tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --console=plain --stacktrace
+      # `!cancelled()` so a red test cannot hide a red lint; the `skipped`
+      # clause so a failure in SETUP (which leaves the test step skipped)
+      # does not run lint into the same broken toolchain. Both halves are
+      # argued in the header.
       - name: lint
+        if: ${{ !cancelled() && steps.tests.conclusion != 'skipped' }}
         run: ./gradlew :app:lintDebug --no-daemon --console=plain --stacktrace
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ always() && steps.cache.outputs.cache-hit != 'true' }}
@@ -154,6 +250,20 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: android-gradle-v1-${{ runner.os }}-${{ hashFiles('packaging/android/compose-app/gradle/wrapper/gradle-wrapper.properties', 'packaging/android/compose-app/**/*.gradle.kts') }}
+      # The HTML report plus the JUnit XML, so a red run is readable - and
+      # machine-readable - without reproducing the whole toolchain
+      # locally. `always()` because the interesting case is the failing
+      # one, and `if-no-files-found: ignore` because a job that died in
+      # setup has no report to offer and should not fail twice for it.
+      - name: test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-test-report
+          path: |
+            packaging/android/compose-app/app/build/reports/tests/testDebugUnitTest
+            packaging/android/compose-app/app/build/test-results/testDebugUnitTest
+          if-no-files-found: ignore
       # The HTML/XML report, so a red run is readable without reproducing
       # the whole toolchain locally. `always()` because the interesting
       # case is the failing one.

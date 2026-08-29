@@ -28,20 +28,33 @@ import androidx.compose.ui.unit.dp
 /**
  * On-device first run: the engine needs a Usenet provider before it
  * can download - the same three fields as the dashboard wizard.
+ *
+ * [suggestedConnections] is TODO 281 AN4 on the one screen where the
+ * number is decided. The daemon's own default for a saved server is 8,
+ * which is a figure for a machine on a line that does not move; a phone
+ * changes line every time it leaves the house, so the default offered
+ * here is derived from what the platform says the current network can do
+ * (DeviceProfile.connectionsForLine). It is a DEFAULT and not a lock: the
+ * field is editable, because a provider's account limit is a fact about
+ * the account that no amount of measuring this end can discover.
  */
 @Composable
 fun ServerSetupScreen(
     busy: Boolean,
     status: String?,
-    onTest: (host: String, port: Int, tls: Boolean, user: String, pass: String) -> Unit,
-    onSave: (host: String, port: Int, tls: Boolean, user: String, pass: String) -> Unit,
+    suggestedConnections: Int,
+    lineNote: String,
+    onTest: (host: String, port: Int, tls: Boolean, user: String, pass: String, conns: Int) -> Unit,
+    onSave: (host: String, port: Int, tls: Boolean, user: String, pass: String, conns: Int) -> Unit,
 ) {
     var host by rememberSaveable { mutableStateOf("") }
     var port by rememberSaveable { mutableStateOf("563") }
     var tls by rememberSaveable { mutableStateOf(true) }
     var user by rememberSaveable { mutableStateOf("") }
     var pass by rememberSaveable { mutableStateOf("") }
+    var conns by rememberSaveable { mutableStateOf(suggestedConnections.toString()) }
     val portNum = port.toIntOrNull() ?: 563
+    val connNum = (conns.toIntOrNull() ?: suggestedConnections).coerceIn(1, 60)
 
     Column(
         modifier = Modifier
@@ -92,13 +105,21 @@ fun ServerSetupScreen(
             visualTransformation = PasswordVisualTransformation(),
             modifier = Modifier.fillMaxWidth(),
         )
+        OutlinedTextField(
+            value = conns,
+            onValueChange = { conns = it.filter(Char::isDigit).take(2) },
+            label = { Text("Connections") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(lineNote, style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(
-                onClick = { onTest(host.trim(), portNum, tls, user.trim(), pass) },
+                onClick = { onTest(host.trim(), portNum, tls, user.trim(), pass, connNum) },
                 enabled = !busy && host.isNotBlank(),
             ) { Text("Test") }
             Button(
-                onClick = { onSave(host.trim(), portNum, tls, user.trim(), pass) },
+                onClick = { onSave(host.trim(), portNum, tls, user.trim(), pass, connNum) },
                 enabled = !busy && host.isNotBlank(),
             ) { Text("Save and continue") }
         }

@@ -10,12 +10,17 @@ use quick_xml::{Reader, XmlVersion};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NzbError {
+    // Carries the encoding failures too, since quick-xml 0.42. There was a
+    // separate `Encoding(#[from] quick_xml::encoding::EncodingError)` variant
+    // until then, fed by the decode step every content accessor used to
+    // perform; 0.42 validates UTF-8 when it BUILDS the event instead, so the
+    // failure now arrives as `quick_xml::Error::Encoding` and nothing in this
+    // crate could construct the old variant any more. Do NOT put it back
+    // without a call that can actually produce one.
     #[error("XML error: {0}")]
     Xml(#[from] quick_xml::Error),
     #[error("XML attribute error: {0}")]
     Attr(#[from] quick_xml::events::attributes::AttrError),
-    #[error("XML encoding error: {0}")]
-    Encoding(#[from] quick_xml::encoding::EncodingError),
     #[error("NZB contains no files")]
     Empty,
     #[error("NZB truncated: document ends inside an open element")]
@@ -255,7 +260,7 @@ impl Nzb {
                 Event::Start(e) => {
                     depth += 1;
                     match e.local_name().as_ref() {
-                        b"file" => {
+                        "file" => {
                             let mut f = NzbFile::default();
                             for attr in e.attributes() {
                                 let attr = attr?;
@@ -265,20 +270,20 @@ impl Nzb {
                                     html_latin1_entity,
                                 )?;
                                 match attr.key.local_name().as_ref() {
-                                    b"subject" => f.subject = val.into_owned(),
-                                    b"poster" => f.poster = val.into_owned(),
-                                    b"date" => f.date = val.trim().parse().unwrap_or(0),
+                                    "subject" => f.subject = val.into_owned(),
+                                    "poster" => f.poster = val.into_owned(),
+                                    "date" => f.date = val.trim().parse().unwrap_or(0),
                                     _ => {}
                                 }
                             }
                             cur_file = Some(f);
                         }
-                        b"group" => cur_group = Some(String::new()),
-                        b"meta" => {
+                        "group" => cur_group = Some(String::new()),
+                        "meta" => {
                             let mut ty = String::new();
                             for attr in e.attributes() {
                                 let attr = attr?;
-                                if attr.key.local_name().as_ref() == b"type" {
+                                if attr.key.local_name().as_ref() == "type" {
                                     ty = attr
                                         .normalized_value_with(
                                             XmlVersion::Implicit1_0,
@@ -291,7 +296,7 @@ impl Nzb {
                             }
                             cur_meta = Some((ty, String::new()));
                         }
-                        b"segment" => {
+                        "segment" => {
                             let mut seg = Segment {
                                 number: 0,
                                 bytes: 0,
@@ -305,8 +310,8 @@ impl Nzb {
                                     html_latin1_entity,
                                 )?;
                                 match attr.key.local_name().as_ref() {
-                                    b"bytes" => seg.bytes = val.trim().parse().unwrap_or(0),
-                                    b"number" => seg.number = val.trim().parse().unwrap_or(0),
+                                    "bytes" => seg.bytes = val.trim().parse().unwrap_or(0),
+                                    "number" => seg.number = val.trim().parse().unwrap_or(0),
                                     _ => {}
                                 }
                             }
@@ -316,7 +321,7 @@ impl Nzb {
                     }
                 }
                 Event::Text(t) => {
-                    let text = t.xml10_content()?;
+                    let text = t.xml10_content();
                     // Meta values keep their fragments UNTRIMMED and are
                     // trimmed once as a whole at </meta>: entities split
                     // the text into separate events, and per-fragment
@@ -354,7 +359,18 @@ impl Nzb {
                     // CDATA-wrapped message-id (or meta value / group name)
                     // is silently dropped and the article never fetched.
                     // CDATA content is literal - no entity unescaping.
-                    let raw = String::from_utf8_lossy(&c);
+                    // NOT `String::from_utf8_lossy` any more, and that is a
+                    // behaviour change rather than a spelling one: quick-xml
+                    // 0.42 validates UTF-8 when it BUILDS the event, so a
+                    // latin-1 byte inside a CDATA body now fails the whole
+                    // parse where it used to arrive as U+FFFD. Measured 28 Aug
+                    // 2026 across both versions - a subject or a text node
+                    // already hard-failed under 0.41, so CDATA was the one
+                    // place a bad byte was silently swallowed, and swallowing
+                    // it produced a WRONG meta password or a message-id that
+                    // was never posted. Pinned by
+                    // `cdata_with_a_latin1_byte_is_refused_not_corrupted`.
+                    let raw = c.into_inner();
                     // Same rule as Text above: meta fragments stay
                     // untrimmed until </meta>.
                     if cur_segment.is_none()
@@ -385,7 +401,7 @@ impl Nzb {
                     let resolved = if let Some(c) = r.resolve_char_ref()? {
                         c.to_string()
                     } else {
-                        let name = r.xml10_content()?;
+                        let name = r.xml10_content();
                         match name.as_ref() {
                             "amp" => "&".to_string(),
                             "lt" => "<".to_string(),
@@ -420,7 +436,7 @@ impl Nzb {
                 Event::End(e) => {
                     depth = depth.saturating_sub(1);
                     match e.local_name().as_ref() {
-                        b"file" => {
+                        "file" => {
                             if let Some(mut f) = cur_file.take() {
                                 // Segments arrive in document order which is not
                                 // guaranteed to be part order.
@@ -444,7 +460,7 @@ impl Nzb {
                                 files.push(f);
                             }
                         }
-                        b"group" => {
+                        "group" => {
                             if let Some(g) = cur_group.take()
                                 && let Some(f) = cur_file.as_mut()
                             {
@@ -454,7 +470,7 @@ impl Nzb {
                                 }
                             }
                         }
-                        b"meta" => {
+                        "meta" => {
                             if let Some((ty, val)) = cur_meta.take() {
                                 // One whole-value trim, replacing the old
                                 // per-fragment trims: element-formatting
@@ -465,7 +481,7 @@ impl Nzb {
                                 }
                             }
                         }
-                        b"segment" => {
+                        "segment" => {
                             if let (Some(f), Some(mut seg)) =
                                 (cur_file.as_mut(), cur_segment.take())
                             {
@@ -496,7 +512,7 @@ impl Nzb {
                 // count). It carries no message-id by construction, so
                 // there is nothing to fetch - only something to declare.
                 Event::Empty(e) => {
-                    if e.local_name().as_ref() == b"segment"
+                    if e.local_name().as_ref() == "segment"
                         && let Some(f) = cur_file.as_mut()
                     {
                         f.dropped_segments += 1;
@@ -893,6 +909,60 @@ mod tests {
             nzb.files.iter().all(|f| !f.subject.contains("&auml;")),
             "no subject may keep the raw entity"
         );
+    }
+
+    /// A latin-1 byte anywhere in the document is REFUSED, and CDATA is the
+    /// arm where that is a change rather than a restatement.
+    ///
+    /// Measured 28 Aug 2026 against quick-xml 0.41 and 0.42 side by side, in
+    /// the pass that took the bump. A bad byte in a `subject=` or in element
+    /// text already failed the parse under 0.41 - every content accessor
+    /// decoded strictly - so those two are unchanged. CDATA was the outlier:
+    /// this arm read it with `String::from_utf8_lossy`, so the byte arrived
+    /// as U+FFFD and the parse SUCCEEDED with a corrupted value. That is the
+    /// worst of the three outcomes for the two things CDATA actually carries
+    /// here - a meta password that is now silently wrong, and a message-id
+    /// that was never posted. 0.42 validates when it builds the event, so all
+    /// three shapes now agree: refuse the document.
+    ///
+    /// Do NOT "fix" a report of this by reintroducing a lossy read, and do
+    /// not reach for a lossy pre-transcode of the whole input either - that
+    /// would also start ACCEPTING the latin-1 subjects this parser has always
+    /// refused, which is a product decision and not a bump.
+    #[test]
+    fn cdata_with_a_latin1_byte_is_refused_not_corrupted() {
+        let mut xml = br#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head><meta type="password"><![CDATA[stra"#
+            .to_vec();
+        // 0xDF is `ß` in latin-1 and is not a valid UTF-8 sequence.
+        xml.push(0xDF);
+        xml.extend_from_slice(
+            br#"e]]></meta></head>
+  <file subject="s" poster="p" date="1700000000">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments><segment bytes="1" number="1">a@example.com</segment></segments>
+  </file>
+</nzb>"#,
+        );
+        let err = Nzb::parse(&xml).expect_err("a latin-1 byte in CDATA must refuse the document");
+        // It arrives as `Xml`, not as a separate encoding variant: see the
+        // note on `NzbError::Xml`.
+        assert!(
+            matches!(err, NzbError::Xml(_)),
+            "encoding failures surface as NzbError::Xml since quick-xml 0.42, got {err:?}"
+        );
+
+        // The same document with the byte spelled as UTF-8 still parses, so
+        // this test cannot pass by refusing CDATA in general.
+        let ok = String::from_utf8(
+            xml.iter()
+                .map(|&b| if b == 0xDF { b'x' } else { b })
+                .collect::<Vec<_>>(),
+        )
+        .expect("ascii-ised fixture is utf-8");
+        let nzb = Nzb::parse(ok.as_bytes()).expect("the well-formed twin parses");
+        assert_eq!(nzb.password(), Some("straxe"));
     }
 
     /// The same entities must resolve in element text (message-ids, meta

@@ -455,7 +455,100 @@ pub(crate) fn recovery_candidates(
     already_fetched: &[usize],
     sniffed_vols: &[usize],
 ) -> Vec<(usize, usize, u64)> {
+    // TODO 311: which volumes belong to THIS set, as far as a name can
+    // say. A post with one recovery set per file has one set's volumes
+    // interleaved with every other set's, and this list is what
+    // `pick_volumes` chooses the next batch from - so without an
+    // ordering the batch is bought for the wrong set, lands 0 usable
+    // slices (they carry another set id) and the repair declines with
+    // parity for the damage sitting undownloaded. Measured on
+    // `e2e_multiset`: 145 usable of 250 needed, and 0 for one set.
+    //
+    // It has to FILTER and not merely reorder, which was measured:
+    // `pick_volumes` is a byte-minimizing knapsack over the whole list
+    // and pays no attention to order at all, so a reordered list
+    // changed nothing. Filtering is sound on its own terms - a volume
+    // belonging to another set carries another set id, so not one of
+    // its slices can ever be usable here, and buying it is pure wire.
+    //
+    // The fallback is what keeps a name a HINT: when NOTHING is affine
+    // the full list comes back, so an obfuscated post - where no name
+    // identifies anything - behaves exactly as it did, escalation
+    // included. A post with one set is all-affine or none-affine, so it
+    // is untouched either way. The residual trade is stated rather than
+    // hidden: on a multi-set post whose volumes are named after some
+    // OTHER set's payload, this set's own volumes become unreachable
+    // where before they were merely improbable. That takes deliberately
+    // crossed naming, and the alternative - measured on
+    // `e2e_multiset` - is that a per-file-set post cannot repair at all.
     let mut vols: Vec<(usize, usize, u64)> = Vec::new();
+    let mut affine: Vec<bool> = Vec::new();
+    // `track01.bin` -> `track01`, and the full name too: par2cmdline
+    // writes `track01.bin.vol00+01.par2` by default and
+    // `track01.vol00+01.par2` when given an explicit base.
+    let stems: Vec<String> = set
+        .files
+        .iter()
+        .flat_map(|f| {
+            let full = f.name.to_ascii_lowercase();
+            let stem = full
+                .rsplit_once('.')
+                .map_or(full.clone(), |(a, _)| a.to_string());
+            [full, stem]
+        })
+        // Too short to distinguish one release from another.
+        .filter(|st| st.len() >= 3)
+        .collect();
+    // The affinity test is on the volume's BASE NAME and is an EQUALITY.
+    // It was a `starts_with` over the whole volume name until 28 Aug
+    // 2026, and a prefix cannot tell one member of a numbered series
+    // from another: with an eighteen-track post, stem `track1` (from
+    // `track1.bin`) prefix-matches `track18.bin.vol00+01.par2`, so
+    // track 1's set read seventeen siblings' volumes as its own. Once
+    // ANY volume is affine the list is filtered to the affine ones, so
+    // the knapsack then bought another set's volumes, got zero usable
+    // slices (they carry another set id) and declined the repair with
+    // this set's own parity still sitting on the server. Cost is a
+    // wasted round trip and roughly double the recovery bytes rather
+    // than an unrepaired job, because the escalation re-asks - which is
+    // why this fix is a tightening and not a rewrite.
+    //
+    // A DELIMITER rule (stem, then a `.` or `-`) was the obvious
+    // alternative and does not close the commonest case: a stem that
+    // ends in an extension is followed by a dot in a SIBLING's volume
+    // name too, so `track01` would still take `track01.cue`'s volumes
+    // when `track01.bin` is this set's file. Base equality takes
+    // neither - `track01.cue` is not `track01.bin` and not `track01`.
+    //
+    // `par2_vol_suffix` is the repo's one answer to "where does the
+    // volume suffix start", shared with classification and with
+    // `extract::release_stem`; the text before it is the base. It
+    // returns an offset into the LOWERCASED name, which `lower` below
+    // is, and ASCII lowercasing never changes a byte's length so the
+    // offset is good for either spelling.
+    //
+    // ONE CORNER, decided deliberately rather than left to be found.
+    // Base equality is strictly NARROWER than the old prefix test -
+    // every base-equal name was prefix-affine too - so this can never
+    // make a volume affine that was not, and therefore can never turn
+    // the none-affine FALLBACK off for a set that used to enjoy it.
+    // Where the tightening empties the affine list the fallback re-arms
+    // and hands back the whole list, which includes this set's own
+    // volumes: strictly better than today, where a prefix-colliding
+    // sibling's volumes could arm the filter and exclude them. What is
+    // left is the narrower shape: a set whose OWN volume's base is a
+    // delimiter-free extension of one of its own stems (`abcd` off
+    // `abc`) at the same time as some other volume's base equals that
+    // stem exactly. That volume is then filtered out where the prefix
+    // rule kept it. It is UNGUARDED on purpose: no par2 tool writes a
+    // volume base that is not either a payload name or that name minus
+    // its last extension - both of which are in `stems` - and the only
+    // guard available at this altitude is a second prefix tier, which
+    // would restore the very collision above.
+    let base_is_affine = |lower: &str| {
+        nzbkit::nzb::par2_vol_suffix(lower)
+            .is_some_and(|at| stems.iter().any(|st| st.as_str() == &lower[..at]))
+    };
     for (fi, f) in nzb.files.iter().enumerate() {
         if (f.kind() != FileKind::Par2Volume && !sniffed_vols.contains(&fi))
             || already_fetched.contains(&fi)
@@ -463,6 +556,13 @@ pub(crate) fn recovery_candidates(
             continue;
         }
         let name = f.filename_hint().unwrap_or(&f.subject);
+        // A SNIFFED volume is recovery data identified by packet magic,
+        // not by name - an obfuscated post's volume is a hash - so it
+        // can never be affine to anything and must never be filtered
+        // out by a decision made about names. It counts as affine to
+        // every set, which leaves it exactly as reachable as it was.
+        let lower = name.to_ascii_lowercase();
+        affine.push(sniffed_vols.contains(&fi) || base_is_affine(&lower));
         // Blocks are block_size + ~100 bytes of packet overhead each,
         // yEnc ~2% inflation. Shared with pre-flight, which needs the
         // identical arithmetic to size a `.vol-NN.par2` budget and must
@@ -470,6 +570,14 @@ pub(crate) fn recovery_candidates(
         let est = nzbkit::par2::est_recovery_blocks(f.bytes(), set.block_size);
         let count = vol_count_from_name(name).unwrap_or(est.max(1));
         vols.push((fi, count, f.bytes()));
+    }
+    if affine.iter().any(|&a| a) {
+        return vols
+            .into_iter()
+            .zip(affine)
+            .filter(|(_, a)| *a)
+            .map(|(v, _)| v)
+            .collect();
     }
     vols
 }
@@ -1338,6 +1446,44 @@ enum NativeVerdict {
 /// names inside can still be hostile, which joining under the
 /// absolute donor dir already defuses. Same skip rules as the native
 /// scan: no .par2, no .nzbfast bookkeeping, same 1000-file bound.
+/// The "and adoption already found some of it" half of an unrepairable
+/// verdict, shared by every surface that prints one.
+///
+/// `RepairReport::blocks_adopted` only reaches a caller through
+/// `RepairStatus::Repaired`, so until 29 Aug 2026 a donation that
+/// bridged SOME of the damage and still came up short left no trace on
+/// any surface: the shortfall lines named `needed` and `have` and
+/// nothing else. That is not a cosmetic gap. A bench round on 28 Aug
+/// 2026 read `grep -c "block(s) adopted from" == 0` over a whole daemon
+/// log and recorded "adoption bridged nothing" as an open question,
+/// when the arithmetic in that same log (290 blocks bad at verify, 268
+/// needed at the native verdict) says adoption had in fact found 22 of
+/// them. The count is what tells a partial donation from no donation,
+/// and it belongs wherever the shortfall is reported.
+///
+/// Empty when nothing was adopted, so the everyday line is unchanged.
+pub(crate) fn adopted_clause(adopted: usize) -> String {
+    if adopted == 0 {
+        String::new()
+    } else {
+        format!(" (adoption already found {adopted} of them in files outside the recovery set)")
+    }
+}
+
+/// Report the native pass's shortfall and turn it into a verdict.
+///
+/// Out of line only because [`fetch_and_repair`] is at its size-gate
+/// ceiling; the wording is the whole point of it, so keep the two
+/// together if that ever changes.
+fn native_shortfall(needed: usize, have: usize, adopted: usize) -> NativeVerdict {
+    warn!(
+        target: "repair",
+        "native repair: {needed} block(s) damaged, only {have} recovery block(s) on disk{}",
+        adopted_clause(adopted)
+    );
+    NativeVerdict::NoRecovery { needed, have }
+}
+
 fn donor_extra_args(donor_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for donor in donor_dirs {
@@ -1534,13 +1680,18 @@ pub(crate) async fn fetch_and_repair(
     // PLACE (no volume rewrite). Self-proving: success requires every
     // patched file to match its PAR2 whole-file MD5, so a native bug can
     // never ship bad bytes - it falls through to par2cmdline instead.
+    //
+    // SCOPED TO THIS SET BY ID, and load-bearing: this runs once PER
+    // declined set (`disk_repair_declined_sets`) and the directory-scoped
+    // entry repaired the first set every time, greening over the others'
+    // holes - see [`nzbkit::par2repair::repair_dir_set_with_donors`].
     let native_repair = || -> NativeVerdict {
         if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_some() {
             return NativeVerdict::Backstop;
         }
         let t0 = Instant::now();
-        use nzbkit::par2repair::{RepairStatus, repair_dir_with_donors};
-        match repair_dir_with_donors(out_dir, donor_dirs) {
+        use nzbkit::par2repair::{RepairStatus, repair_dir_set_with_donors};
+        match repair_dir_set_with_donors(out_dir, &set.recovery_set_id, donor_dirs) {
             Ok(RepairStatus::NoDamage) => {
                 info!(
                     target: "repair",
@@ -1612,13 +1763,11 @@ pub(crate) async fn fetch_and_repair(
                 );
                 NativeVerdict::Done
             }
-            Ok(RepairStatus::Unrepairable { needed, have }) => {
-                warn!(
-                    target: "repair",
-                    "native repair: {needed} block(s) damaged, only {have} recovery block(s) on disk"
-                );
-                NativeVerdict::NoRecovery { needed, have }
-            }
+            Ok(RepairStatus::Unrepairable {
+                needed,
+                have,
+                adopted,
+            }) => native_shortfall(needed, have, adopted),
             Err(e) => {
                 warn!(target: "repair", "native repair failed ({e}) - falling back to par2cmdline");
                 NativeVerdict::Backstop
@@ -1958,3 +2107,10 @@ mod side_fetch_tests;
 // 3,000 lines and this subject is its own.
 #[cfg(test)]
 mod unpackprog_tests;
+
+// TODO 311's volume-affinity rule - which of a multi-set post's
+// recovery volumes `recovery_candidates` lets the knapsack buy for one
+// set. Out here for the reason the four above are: `repair_tests` is
+// 2,939 of the size gate's 3,000 lines, and this subject is its own.
+#[cfg(test)]
+mod vol_affinity_tests;

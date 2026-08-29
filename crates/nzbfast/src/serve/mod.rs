@@ -47,6 +47,14 @@ use daemon::*;
 mod wire;
 use wire::*;
 
+// serve/requeue.rs: what a job's rerun will cost - the demotion
+// watchdog's `RequeueCost` and `requeue_cost`, lifted out of
+// `tasks/stall.rs` when the pause warning became a second caller
+// (TODO 309(b)), plus `Daemon::pause_cost` and the cache that keeps it
+// off the journal on the poll path.
+mod requeue;
+use requeue::*;
+
 // serve/altcand.rs: §282 alternate candidates - the settings, the queue
 // row's offer and the switch. Inherent methods on `Daemon` plus free
 // helpers, so no glob is needed.
@@ -266,8 +274,24 @@ use servers::*;
 mod startup;
 use startup::*;
 
+// The settings-restore half of startup, moved out under the size gate
+// (TODO 106). A sibling and not a child of `startup` on purpose - see
+// that file's header: as a child, `pub(super)` on its ~45 seeders would
+// have meant "visible in startup" rather than "visible in serve", and
+// every one would have needed respelling.
+mod settings_restore;
+use settings_restore::*;
+
 // §125: the throughput graph's learned 100% anchor.
 mod linkpeak;
+
+// TODO 275 item 1 part 2: the per-socket carry the last job measured,
+// which is what the next job's fleet seed starts from.
+mod linecarry;
+
+// Longitudinal per-provider quality: the rolling 30-day ledger of what
+// each news server delivered, and the advice that reads out of it.
+mod provquality;
 
 // §129 4b: "Why is this slow?" - live per-job attribution.
 mod whyslow;
@@ -766,6 +790,14 @@ use stream::*;
 mod preview;
 use preview::*;
 
+// `GET /metrics`: the daemon's own numbers in Prometheus text
+// exposition format. Its own file rather than an arm of the API
+// dispatcher because it is a different contract - a text body, no
+// `output=json`, no mode, and a hard rule that nothing in it may touch
+// the index (TODO 166; a scrape is a poll loop, so it is the worst
+// caller to put behind the index write mutex).
+mod metrics;
+
 mod httputil;
 
 // Not glob-imported: only the handoff redeem in `bootstrap` asks it, by
@@ -831,7 +863,15 @@ use sched::*;
 mod assets;
 use assets::*;
 
+// The browser-facing page machinery, TODO 281 IO3b: every item in it
+// serves a WEB page (the two shells, the precompressed catalogues and
+// manuals, the per-request stylesheet, and the content negotiation the
+// three share), so the module goes as one rather than item by item.
+// Without `dashboard` the daemon still answers its whole API - which is
+// the only thing either phone shell ever asks it.
+#[cfg(feature = "dashboard")]
 mod webasset;
+#[cfg(feature = "dashboard")]
 use webasset::*;
 
 /// Discover an article sample spanning a range of ages for the diversity

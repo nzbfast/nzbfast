@@ -23,6 +23,8 @@ fn slot(
 ) -> Arc<crate::unpack::FileSlot> {
     Arc::new(crate::unpack::FileSlot {
         hint: "f".into(),
+        hint_is_posted_name: nzbkit::release::stem_is_a_name("f"),
+        name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
         is_par2_main: par2,
         sample_skipped: false,
         par2_sniffed: AtomicBool::new(false),

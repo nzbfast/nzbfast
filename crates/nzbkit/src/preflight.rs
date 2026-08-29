@@ -536,8 +536,23 @@ pub async fn stat_sweep_with(
                         st.total = leg.elapsed();
                         return st;
                     }
-                    let read =
-                        tokio::time::timeout(Duration::from_secs(20), conn.read_stat()).await;
+                    // `read_stat_checked`, never `read_stat`: `pending` is
+                    // a POSITIONAL queue, so a leg that lost one reply
+                    // upstream would file every later reply against the
+                    // article behind it - a shifted 430 marks a present
+                    // article MISSING across the union and can drive a
+                    // false Impossible fast-abort on a healthy post. The
+                    // check runs BEFORE any store below, so a mismatch
+                    // takes the ReadFailed exit with this cell and every
+                    // remaining cell on the leg still Unknown, and
+                    // Unknown never condemns an article. A server that
+                    // echoes no id at all still passes - that is most of
+                    // them on a 430.
+                    let read = tokio::time::timeout(
+                        Duration::from_secs(20),
+                        conn.read_stat_checked(Some(ids[id].as_str())),
+                    )
+                    .await;
                     match read {
                         Ok(Ok(have)) => {
                             // SeqCst, not Relaxed: `charge_deficit` has
@@ -717,7 +732,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// What one probe could read out of the PAR2 bytes it actually fetched.
 ///
 /// The block size is the whole set's, so a single valid Main packet
-/// settles it. The file lengths are NOT: a probe fetches one or two
+/// settles it - and where the fetched bytes covered MORE than one
+/// recovery set it is the LARGEST set's, because this type states one
+/// figure and its consumer states one back (see `probe_recovery_set`
+/// for what makes that safe). The file lengths are NOT: a probe
+/// fetches one or two
 /// articles, so it sees whatever FileDesc packets happened to land in
 /// them, and [`crate::par2::Par2Set::parse`] silently drops every file
 /// whose FileDesc was not among them. A caller reading that list as
@@ -737,9 +756,10 @@ pub struct ProbedSet {
     /// verified. Always non-zero.
     pub block_size: u64,
     /// Lowercased member-file name -> its EXACT length, for the files
-    /// the fetched bytes described. `None` value = two files in the set
-    /// share this name up to case and their lengths disagree, so the
-    /// name does not identify one file.
+    /// the fetched bytes described, across EVERY recovery set they
+    /// covered. `None` value = two of those files share this name up to
+    /// case and their lengths disagree - whether they are members of
+    /// one set or of two - so the name does not identify one file.
     described: std::collections::HashMap<String, Option<u64>>,
 }
 
@@ -791,16 +811,47 @@ impl ProbedSet {
 /// digests EVERY packet it keeps - which is what lets a caller place a
 /// member file's block grid on a number it did not have to estimate.
 pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Option<ProbedSet> {
-    let set = probe_par2_set(servers, ids).await?;
+    let sets = probe_par2_sets(servers, ids).await?;
     // Keyed by lowercased name because the NZB subject and the
     // FileDesc packet are two records of one filename, written
     // by different tools. Two set members whose names collide
     // there are recorded as ambiguous rather than as either
     // one: a length attached to the wrong file would misplace
     // that file's block grid.
+    //
+    // TODO 311's last box: the UNION across every adopted set, and the
+    // choice is made by what this map is FOR rather than by copying the
+    // live path. `described` answers one question - how long is the
+    // member posted under this name - and that question has the same
+    // answer whichever recovery set describes it, so a post with one
+    // set per track (GH #63's shape) describes eighteen files here
+    // exactly as a single eighteen-file set would. Taking only the
+    // largest set instead would answer `None` for seventeen of them,
+    // which `check_sweep::escalate_repairable` reads as "no FileDesc
+    // seen" and falls back from - correct but blind, and blind for a
+    // reason that is not true.
+    //
+    // The collapse rule needs no widening to carry it: two sets that
+    // disagree about a name's length collapse to `None` by exactly the
+    // rule two members of ONE set already do, which is the answer that
+    // keeps a length off the wrong file's block grid. That is the whole
+    // of what a union has to get right here, and it is why a union is
+    // safe at THIS consumer where it would not be at the donation ones
+    // (see the call sites in `get::donor` and `get::dupefill`).
+    //
+    // A STRAY set - another release's `.par2` left in the NZB, the
+    // shape `db70451e4` and section G of the §311 handoff document -
+    // costs this map nothing, and the reason is that it is keyed by
+    // NAME. `escalate_repairable` looks a name up out of the NZB's own
+    // `filename_hint`, so a stray's members are simply never asked
+    // about; the only way one can be heard from at all is a name the
+    // post ALSO carries, at a length the stray disagrees about, and
+    // that is the collapse above - `None`, the caller keeps the byte
+    // figure, which is what it does for an undescribed file anyway.
+    // The union cannot make that file's answer worse, only unknown.
     let mut described: std::collections::HashMap<String, Option<u64>> =
         std::collections::HashMap::new();
-    for f in &set.files {
+    for f in sets.iter().flat_map(|s| &s.files) {
         described
             .entry(f.name.to_ascii_lowercase())
             .and_modify(|v| {
@@ -811,13 +862,29 @@ pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Opt
             .or_insert(Some(f.length));
     }
     Some(ProbedSet {
-        block_size: set.block_size,
+        // One representative figure, and there is no honest alternative:
+        // `ProbedSet` states a single block size because its consumer
+        // states a single one back. `pick_sets` orders largest first
+        // (ties by set id, so it does not depend on which `.par2`
+        // article came back first), so this is the same set the
+        // pre-union code adopted and the answer does not move on a
+        // single-set post. What makes it SAFE on a multi-set one is
+        // `check::multiple_par2_sets`, which drops the declared-count
+        // cap whenever the NZB carries more than one set - and that cap
+        // is the only rule a foreign block size could flip a verdict
+        // through, because `measured_verdict`'s own comparison divides
+        // by the block size on both sides and cancels it out. That
+        // covers the stray-set case too, and by construction rather
+        // than by luck: a stray declaring MORE files than the real
+        // release becomes `sets[0]` here, and the same `.par2` in the
+        // NZB is what makes `multiple_par2_sets` true.
+        block_size: sets[0].block_size,
         described,
     })
 }
 
 /// The probe underneath [`probe_recovery_set`], handing back the WHOLE
-/// parsed set rather than the two facts pre-flight wants from it.
+/// parsed sets rather than the two facts pre-flight wants from them.
 ///
 /// §293's plan-side arm is the second caller and the reason this is its
 /// own door: donating a predecessor's file to a successor turns on the
@@ -828,11 +895,64 @@ pub async fn probe_recovery_set(servers: &[ServerConfig], ids: &[String]) -> Opt
 /// that skips a download on what comes back is standing on the same
 /// digests the repair engine does.
 ///
+/// # Why this is plural, and what the caller now owes
+///
+/// It answered `Option<Par2Set>` until TODO 311's last box, through a
+/// bare `Par2Set::parse(&views).ok()?` - and `parse` refuses the whole
+/// input the moment two packets carry different recovery-set ids. So
+/// the instant the articles this probe accumulated covered two
+/// recovery sets, every consumer here was told "I know nothing about
+/// this post", when what had actually happened is that it knew about
+/// two sets instead of one. Nothing was WRONG on disk and no job
+/// failed for it - pre-flight degrades an optimisation, not a verdict,
+/// which is why the live path was fixed first and this was left - but
+/// the run then plans against a post it could have measured. Read the
+/// limit below before concluding anything about how a caller reaches
+/// that: on today's callers it is latent, and the paragraph says why.
+///
+/// [`crate::live::pick_sets`] is the same adoption the live path takes,
+/// and it is a no-op on the single-set input that very nearly every
+/// real post is: one set in, one set out, byte for byte the answer
+/// `parse` gave before. Largest first, ties by set id, so a caller that
+/// wants ONE representative reads a stable one that does not depend on
+/// which article came back first.
+///
+/// A caller that takes only `sets[0]` is choosing to, and must say so:
+/// the union is right for a name-to-length map (see
+/// [`probe_recovery_set`]) and is NOT automatically right for a caller
+/// whose own duplicate rail is scoped to one `Par2Set`.
+///
+/// # The limit, stated rather than left to be found
+///
+/// `pick_sets` groups at the granularity of one INPUT VIEW, keyed on
+/// [`crate::par2::Par2Set::set_id_of`], whose own doc records the
+/// assumption the whole scheme rests on: one posted file is one set. So
+/// a single view whose bytes cover two sets is still refused, exactly
+/// as `Par2Set::parse` refuses it, and no arm here splits packets to
+/// take it apart.
+///
+/// That is not a hole today and the reason is worth writing down,
+/// because it is also what says when it becomes one. A view here is one
+/// ARTICLE, and every caller passes ids belonging to exactly one posted
+/// `.par2` file - `check::block_size_probe` its first and last segment,
+/// `get::donor` and `get::dupefill` every segment of the NZB's Par2Main
+/// - so the views of any one call are byte ranges of one file, and one
+/// file is one set. What this fix reaches is therefore the case where
+/// the accumulated articles span TWO par2 files, which is what a caller
+/// probing more than one seed does. Widen a caller that way and this
+/// door already answers; hand it a genuinely concatenated multi-set
+/// upload and it will decline, and the fix then is packet-granular
+/// grouping inside `pick_sets`, which would want measuring first
+/// (it copies where the borrow path does not, and #63's real shape -
+/// many one-set files - takes the borrow path).
+///
 /// `None` for every failure, and the zero-block-size rejection lives
 /// here rather than in the caller: a set that divides every consumer by
-/// zero is not one anybody posted, and answering `None` lets the loop
-/// try the NEXT server instead of settling for it.
-pub async fn probe_par2_set(servers: &[ServerConfig], ids: &[String]) -> Option<Par2Set> {
+/// zero is not one anybody posted. It now drops THAT set and keeps the
+/// rest, which is the same judgement one rung finer - and if nothing
+/// survives it, `None` again, so the server loop still tries the NEXT
+/// server instead of settling for it.
+pub async fn probe_par2_sets(servers: &[ServerConfig], ids: &[String]) -> Option<Vec<Par2Set>> {
     let mut delivering = 0usize;
     for server in servers {
         if delivering >= MAX_PROBE_SERVERS {
@@ -889,13 +1009,23 @@ pub async fn probe_par2_set(servers: &[ServerConfig], ids: &[String]) -> Option<
             }
             conn.quit().await;
             let views: Vec<&[u8]> = parts.iter().map(|p| p.as_slice()).collect();
-            let set = crate::par2::Par2Set::parse(&views).ok()?;
+            let mut sets = crate::live::pick_sets(&views).ok()?;
             // A zero block size divides every consumer by zero and is
-            // not a set anyone posted; treat it as no answer.
-            if set.block_size == 0 {
+            // not a set anyone posted. A BELT, and measured to be one:
+            // `par2::parse_main` refuses a zero slice size outright, so
+            // no `Par2Set` reaching here can carry one and this retain
+            // has nothing to drop today - it is kept because this door
+            // is `pub` and the promise ("always non-zero", which
+            // `ProbedSet` states to its own callers) has to be held
+            // somewhere that a change to the parser cannot quietly
+            // undo. Per set rather than for the whole answer, so if it
+            // ever does fire, one bad Main packet riding along with
+            // good ones costs only itself.
+            sets.retain(|s| s.block_size != 0);
+            if sets.is_empty() {
                 return None;
             }
-            Some(set)
+            Some(sets)
         };
         if let Ok(Some(probed)) = tokio::time::timeout(PROBE_TIMEOUT, one).await {
             return Some(probed);
@@ -1593,6 +1723,211 @@ mod tests {
         );
     }
 
+    /// A minimal PAR2 blob: one Main packet and one FileDesc per member.
+    ///
+    /// Local to this module on purpose, and the duplication is stated
+    /// rather than hidden. `live/tests.rs` and `index/pesto.rs` each
+    /// carry their own builder, both of them inside a `mod tests` this
+    /// one cannot reach, and both build more than the two packet types
+    /// the probe reads (an IFSC list, real per-block checksums) for
+    /// questions that are not asked here. What this needs is exactly
+    /// the pair of facts `ProbedSet` is made of - a block size from the
+    /// Main packet, and a name and a length per FileDesc - with the SET
+    /// ID as a free parameter, which is the one thing no fixture on
+    /// disk gives: `tests/fixtures/par2/` holds two files of ONE set.
+    ///
+    /// Every packet carries a real MD5 over its own bytes, because
+    /// `Par2Set::parse` drops any packet whose digest does not check
+    /// out - a builder that skipped it would hand the probe an empty
+    /// set and this test would pass against a gate that had gone dead.
+    fn par2_blob(set_id: u8, block_size: u64, files: &[(&str, u64)]) -> Vec<u8> {
+        use md5::{Digest, Md5};
+        let sid = [set_id; 16];
+        let pkt = |ptype: &[u8; 16], body: &[u8]| -> Vec<u8> {
+            let mut p = Vec::new();
+            p.extend_from_slice(crate::par2::MAGIC);
+            p.extend_from_slice(&(64 + body.len() as u64).to_le_bytes());
+            p.extend_from_slice(&[0u8; 16]);
+            p.extend_from_slice(&sid);
+            p.extend_from_slice(ptype);
+            p.extend_from_slice(body);
+            let md5: [u8; 16] = Md5::digest(&p[32..]).into();
+            p[16..32].copy_from_slice(&md5);
+            p
+        };
+        // File ids must be unique WITHIN a set and are keyed on the set
+        // id too, so two sets describing one name stay two files.
+        let fid = |i: usize| -> [u8; 16] {
+            let mut f = [set_id; 16];
+            f[0] = i as u8 + 1;
+            f
+        };
+        let mut main = Vec::new();
+        main.extend_from_slice(&block_size.to_le_bytes());
+        main.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        for i in 0..files.len() {
+            main.extend_from_slice(&fid(i));
+        }
+        let mut out = pkt(crate::par2::TYPE_MAIN, &main);
+        for (i, (name, length)) in files.iter().enumerate() {
+            let mut desc = Vec::new();
+            desc.extend_from_slice(&fid(i));
+            desc.extend_from_slice(&[0u8; 16]); // whole-file md5
+            desc.extend_from_slice(&[0u8; 16]); // md5-16k
+            desc.extend_from_slice(&length.to_le_bytes());
+            let mut n = name.as_bytes().to_vec();
+            while !n.len().is_multiple_of(4) {
+                n.push(0);
+            }
+            desc.extend_from_slice(&n);
+            out.extend(pkt(crate::par2::TYPE_FILEDESC, &desc));
+        }
+        out
+    }
+
+    /// Serve one article per blob and probe them together.
+    ///
+    /// One article each, because that is how the door sees more than
+    /// one set: `parts` accumulates one decoded body per id and hands
+    /// them to the parser as separate VIEWS, which is the granularity
+    /// [`crate::live::pick_sets`] groups at.
+    async fn probe_blobs(blobs: &[&[u8]]) -> Option<ProbedSet> {
+        let mut articles = std::collections::HashMap::new();
+        let ids: Vec<String> = blobs
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let segs = make_file_articles(
+                    &format!("s{i}.par2"),
+                    b,
+                    200_000,
+                    &format!("p{i}"),
+                    &mut articles,
+                );
+                format!("<{}>", segs[0].0)
+            })
+            .collect();
+        let srv = MockServer::start(articles, Chaos::default()).await;
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            probe_recovery_set(&[srv.server_config()], &ids),
+        )
+        .await
+        .expect("probe hung")
+    }
+
+    /// TODO 311's last box: bytes covering more than one recovery set
+    /// are PLANNED against, not declined.
+    ///
+    /// `Par2Set::parse` refuses the whole input the moment two packets
+    /// carry different set ids, and this probe swallowed that with
+    /// `.ok()?` - so a `.par2` upload holding the indexes of a
+    /// per-file-set post (GH #63's shape, concatenated into one file)
+    /// made pre-flight answer "I know nothing about this post" when
+    /// what had really happened is that it knew about two sets.
+    ///
+    /// The union is what `described` wants and the assertion says why:
+    /// how long is the member posted under this name has ONE answer
+    /// whichever set describes it, so every member of every set is
+    /// described here exactly as a single set naming all of them would
+    /// be. The block size is the LARGEST set's, which is a
+    /// representative and not a union, so it is pinned in both
+    /// concatenation orders - it must not depend on which article of
+    /// the index came back first.
+    #[tokio::test]
+    async fn articles_covering_two_recovery_sets_are_planned_against() {
+        let a = par2_blob(0xA1, 4_096, &[("a-one.bin", 1_000), ("a-two.bin", 2_000)]);
+        let b = par2_blob(0xB2, 8_192, &[("b-one.bin", 3_000)]);
+
+        // The fixture is genuinely the refused shape, and this is what
+        // the door did with it: `.ok()?`, so `None`, so every caller
+        // was told the post carried no set to plan against.
+        assert!(
+            matches!(
+                crate::par2::Par2Set::parse(&[&a, &b]),
+                Err(crate::par2::Par2Error::MixedRecoverySets)
+            ),
+            "the fixture must be the input the old door declined"
+        );
+
+        let probed = probe_blobs(&[&a, &b]).await.expect("both sets are adopted");
+        assert_eq!(probed.described_files(), 3, "every member, not one set's");
+        assert_eq!(probed.described_length("a-one.bin"), Some(1_000));
+        assert_eq!(probed.described_length("a-two.bin"), Some(2_000));
+        assert_eq!(
+            probed.described_length("b-one.bin"),
+            Some(3_000),
+            "the smaller set's member is described too - this is the one \
+             the pre-union code answered None for"
+        );
+        assert_eq!(probed.block_size, 4_096, "the largest set's, not the last");
+
+        // Which article came back first is download order and must
+        // decide nothing.
+        let other = probe_blobs(&[&b, &a])
+            .await
+            .expect("order is not a verdict");
+        assert_eq!(other.block_size, 4_096);
+        assert_eq!(other.described_files(), 3);
+    }
+
+    /// Two rules the union may not lose.
+    ///
+    /// A zero block size divides every consumer by zero and is not a
+    /// set anybody posted, and `ProbedSet::block_size` promises its
+    /// callers it is never one. `par2::parse_main` is what actually
+    /// holds that - it refuses a zero slice size, so such a Main packet
+    /// never becomes a set at all - and this pins the promise at the
+    /// door rather than at the parser, because the door is what the
+    /// caller reads. The retain inside `probe_par2_sets` is the belt
+    /// behind it and cannot fire today, which is stated at its own site
+    /// rather than dressed up as a live check here. And a name two SETS
+    /// describe with different lengths
+    /// identifies no single file, exactly as a name two MEMBERS of one
+    /// set disagree about does: the caller must be told nothing rather
+    /// than one of the two, because a length attached to the wrong file
+    /// misplaces that file's block grid.
+    #[tokio::test]
+    async fn the_union_keeps_the_zero_block_and_ambiguous_name_rules() {
+        let good = par2_blob(0x11, 4_096, &[("keep.bin", 100), ("shared.bin", 500)]);
+        let zero = par2_blob(0x22, 0, &[("divides-by-zero.bin", 200)]);
+
+        let probed = probe_blobs(&[&good, &zero])
+            .await
+            .expect("the good set survives");
+        assert_eq!(probed.block_size, 4_096, "never a zero block size");
+        assert_eq!(probed.described_length("keep.bin"), Some(100));
+        assert_eq!(
+            probed.described_length("divides-by-zero.bin"),
+            None,
+            "no set, so nothing of it reaches the union either"
+        );
+
+        // Nothing left once that is all there was: `None`, so the
+        // caller's loop moves on to the NEXT server rather than
+        // settling for a block size no consumer could divide by.
+        assert!(
+            probe_blobs(&[&zero]).await.is_none(),
+            "a lone zero-block set is no answer at all"
+        );
+
+        // Two sets, one name, two lengths.
+        let rival = par2_blob(0x33, 4_096, &[("shared.bin", 999)]);
+        let probed = probe_blobs(&[&good, &rival])
+            .await
+            .expect("both sets adopted");
+        assert_eq!(
+            probed.described_length("shared.bin"),
+            None,
+            "two sets disagreeing about a name identify neither"
+        );
+        assert_eq!(
+            probed.described_length("keep.bin"),
+            Some(100),
+            "and the disagreement is scoped to the name, not the probe"
+        );
+    }
+
     /// The second id is not decoration: a recovery volume interleaves
     /// its critical packets between slices, so the Main copy can sit
     /// megabytes past the first article. The probe passes head AND tail
@@ -1691,5 +2026,101 @@ mod tests {
             "expected the read to stop at the cap, got {err:?}"
         );
         conn.quit().await;
+    }
+
+    /// A leg whose replies are SHIFTED by one must leave every cell
+    /// Unknown, never file the wrong verdict against the article behind
+    /// the one that went unanswered.
+    ///
+    /// The pipelined sweep tracks its ids in a positional queue, and
+    /// until 28 Aug 2026 it read them with the bare `read_stat`, which
+    /// returns the verdict and validates nothing. A server or an
+    /// upstream frontend that under-replies once puts every later reply
+    /// on that leg against the wrong article for the rest of the leg -
+    /// so a 430 the server meant for id 1 is filed as MISSING against
+    /// id 0, `union_missing` names articles the server actually holds,
+    /// and on a big enough post that is a false Impossible fast-abort.
+    /// `read_stat_checked` catches it on the first reply, before any
+    /// store, so the cell it was reading and every cell behind it stay
+    /// Unknown - and an Unknown never condemns an article.
+    ///
+    /// The mock cannot express this (its STAT arm always answers, and
+    /// always echoes), so the server here is a bespoke listener that
+    /// swallows the first STAT, answers the rest with an echoing 430,
+    /// and then closes. Reverting the call site to `read_stat` fails
+    /// this test with three MISSING cells and a `union_missing` naming
+    /// ids 0 to 2.
+    #[tokio::test]
+    async fn a_leg_whose_replies_are_shifted_leaves_unknowns_and_never_condemns() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        // The fixture's id count, known to both ends: the listener
+        // closes once it has consumed them all rather than sitting on
+        // the last unanswered slot, so the leg ends on a read error in
+        // seconds instead of on the sweep's 20 s reply timeout. That
+        // matters for the PRE-FIX behaviour too - reverting the call
+        // site must fail this test fast, not after a stall.
+        const NIDS: usize = 4;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (r, mut w) = sock.into_split();
+            let mut r = BufReader::new(r);
+            w.write_all(b"200 shifted mock ready\r\n").await.unwrap();
+            let mut seen = 0usize;
+            let mut line = String::new();
+            while {
+                line.clear();
+                r.read_line(&mut line).await.unwrap_or(0) > 0
+            } {
+                let Some(id) = line.trim().strip_prefix("STAT ") else {
+                    continue;
+                };
+                seen += 1;
+                // The under-reply: the first STAT is consumed and never
+                // answered, so every reply after it lands one slot early.
+                if seen == 1 {
+                    continue;
+                }
+                // Echoing the id is what makes the desync detectable at
+                // all; a provider that echoes nothing is invisible here
+                // and is exactly why a missing id must not be an error.
+                if w.write_all(format!("430 no such article {id}\r\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if seen == NIDS {
+                    return;
+                }
+            }
+        });
+
+        // A template config for a listener the mock never started: the
+        // sweep needs every field, and only the address differs.
+        let template = MockServer::start(Default::default(), Chaos::default()).await;
+        let mut cfg = template.server_config();
+        cfg.host = addr.ip().to_string();
+        cfg.port = addr.port();
+
+        let ids: Vec<String> = (0..NIDS).map(|i| format!("<shift-{i}@mock>")).collect();
+        let out = tokio::time::timeout(
+            Duration::from_secs(20),
+            stat_sweep(&[cfg], &ids, 1, ids.len()),
+        )
+        .await
+        .expect("the shifted sweep hung");
+
+        assert_eq!(
+            out.server_counts(0),
+            (0, 0, ids.len()),
+            "a desynced leg may not bank a single verdict"
+        );
+        assert!(
+            out.union_missing().is_empty(),
+            "a shifted refusal must never condemn an article"
+        );
     }
 }

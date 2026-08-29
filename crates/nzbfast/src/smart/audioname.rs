@@ -38,7 +38,8 @@
 //! there turns a directory those passes decline to touch into one they
 //! will delete from. This module only ever renames.
 
-use super::{ext_of, is_generic_stem};
+use super::ext_of;
+use super::filing::is_generic_stem;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 

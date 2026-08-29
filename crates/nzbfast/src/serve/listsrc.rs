@@ -83,18 +83,35 @@ struct ListSpool {
     items: Vec<SyncedItem>,
 }
 
+/// The spool file, from the spool DIRECTORY rather than from a
+/// `Daemon`. [`seed_lists`] runs while the daemon is being constructed,
+/// so it has the directory and no `Daemon` to ask.
+fn spool_file(spool: &std::path::Path) -> PathBuf {
+    spool.join("list-watchlist.json")
+}
+
 fn spool_path(d: &Daemon) -> PathBuf {
-    d.spool.join("list-watchlist.json")
+    spool_file(&d.spool)
+}
+
+/// Same split as [`spool_file`]: the bytes, addressed by path, so the
+/// construction-time mint of a `client_id` can write them too.
+fn write_spool_at(path: &std::path::Path, client_id: &str, items: &[SyncedItem]) {
+    let spool = ListSpool {
+        client_id: client_id.to_string(),
+        items: items.to_vec(),
+    };
+    if let Ok(body) = serde_json::to_vec(&spool) {
+        let _ = crate::persist::write_atomic(path, &body);
+    }
 }
 
 fn write_spool(d: &Daemon) {
-    let spool = ListSpool {
-        client_id: d.lists.client_id.lock_ok().clone(),
-        items: d.lists.items.lock_ok().clone(),
-    };
-    if let Ok(body) = serde_json::to_vec(&spool) {
-        let _ = crate::persist::write_atomic(&spool_path(d), &body);
-    }
+    write_spool_at(
+        &spool_path(d),
+        &d.lists.client_id.lock_ok(),
+        &d.lists.items.lock_ok(),
+    );
 }
 
 impl Daemon {
@@ -381,31 +398,56 @@ pub(super) fn list_sources_pass(d: &Arc<Daemon>, todo: &[ListSource]) -> usize {
 // The loop
 // ---------------------------------------------------------------------------
 
-/// Restore the sources and the items they own, then poll them.
+/// §151's whole state, read at CONSTRUCTION rather than when its sync
+/// loop is spawned.
 ///
-/// Same shape as `spawn_watchlist_watcher`: the source list is a live
-/// setting re-read every pass, so dashboard edits apply without a
-/// restart, and the items are spooled so a restart does not re-add
-/// everything and re-grab it.
-pub(super) fn spawn_list_sync(daemon: &Arc<Daemon>, settings_path: &std::path::Path) {
-    // Did the source list load, or is `sources` empty because we could not
-    // read it? The spool filter below turns on that distinction, so it is
+/// This is the §74 startup-ordering guard applied to the OTHER half of
+/// the watchlist. [`Daemon::watch_items`] is the union of the user's own
+/// `watchlist` and the synced rows here, and `Daemon::instant_matcher`
+/// compiles that union into the name test the ingest legs install as an
+/// arrival watch - so a reader of `lists.items` starts long before this
+/// subsystem's own task does. Both legs (`spawn_index_scan` and
+/// `spawn_tip_watcher`) are spawned before `spawn_list_sync` in
+/// `spawn_core_tasks`, and a `tokio::spawn`ed task can begin running on
+/// another worker the instant it is spawned, so loading the items inside
+/// that spawn left the two racing: a tip tick that read the union first
+/// saw only the user's own rows, and a release matching a SYNCED row
+/// arrived unseen - complete, matching, sitting in the index with
+/// nothing to say it had landed, until the 60 s periodic pass.
+///
+/// The same defect on the user's own rows is `startup::seed_watchlist`,
+/// and it is the nightly armv7-cross red of 28 Aug 2026 written up
+/// there. Bounded the same way (the periodic pass is a minute away, so
+/// it is latency and never a lost grab) and fixed the same way: seeded
+/// in `build_daemon`, so the fields are populated before ANY task
+/// exists and no future spawn order can reopen it.
+///
+/// Three behaviours move here unchanged, and each is load-bearing:
+/// `sources_known`, the orphan drop, and the `client_id` mint. Their
+/// reasons are at their sites below. The ORDER matters too - the
+/// sources are loaded first because the item filter reads them.
+pub(super) fn seed_lists(settings_path: &std::path::Path, spool: &std::path::Path) -> ListState {
+    // Did the source list load, or is it empty because we could not read
+    // it? The spool filter below turns on that distinction, so it is
     // tracked rather than inferred from emptiness.
     let mut sources_known = true;
+    let mut sources: Vec<ListSource> = Vec::new();
     if let Some(v) = load_settings(settings_path).get("list_sources") {
         match serde_json::from_value(v.clone()) {
-            Ok(l) => *daemon.lists.sources.lock_ok() = l,
+            Ok(l) => sources = l,
             Err(e) => {
                 warn!(target: "list", "ignoring saved list_sources setting: {e}");
                 sources_known = false;
             }
         }
     }
-    let path = spool_path(daemon);
+    let mut client_id = String::new();
+    let mut items: Vec<SyncedItem> = Vec::new();
+    let path = spool_file(spool);
     if let Some(v) = crate::persist::load_json_with_backup(&path) {
         match serde_json::from_value::<ListSpool>(v) {
             Ok(s) => {
-                *daemon.lists.client_id.lock_ok() = s.client_id;
+                client_id = s.client_id;
                 // Filtered against the sources that actually exist. Every
                 // spooled item is OWNED by a source, and `set_list_sources`
                 // drops the items of a source the user deleted - so an item
@@ -421,14 +463,9 @@ pub(super) fn spawn_list_sync(daemon: &Arc<Daemon>, settings_path: &std::path::P
                 // filtering against it would silently delete every synced
                 // item the user has - a worse outcome than keeping a few
                 // orphans the next successful save will drop anyway.
-                let items = if sources_known {
-                    let live: std::collections::HashSet<u64> = daemon
-                        .lists
-                        .sources
-                        .lock_ok()
-                        .iter()
-                        .map(|s| s.id)
-                        .collect();
+                items = if sources_known {
+                    let live: std::collections::HashSet<u64> =
+                        sources.iter().map(|s| s.id).collect();
                     let total = s.items.len();
                     let kept: Vec<_> = s
                         .items
@@ -447,20 +484,40 @@ pub(super) fn spawn_list_sync(daemon: &Arc<Daemon>, settings_path: &std::path::P
                 } else {
                     s.items
                 };
-                *daemon.lists.items.lock_ok() = items;
             }
             Err(e) => warn!(target: "list", "ignoring {}: {e}", path.display()),
         }
     }
-    if daemon.lists.client_id.lock_ok().is_empty() {
+    if client_id.is_empty() {
         // Plex wants a stable per-install identifier on every request,
         // and it is what the user sees in their account's authorised
         // devices list. Minted once and kept in the spool.
         if let Some(id) = random_apikey() {
-            *daemon.lists.client_id.lock_ok() = id;
-            write_spool(daemon);
+            client_id = id;
+            write_spool_at(&path, &client_id, &items);
         }
     }
+    ListState {
+        sources: Mutex::new(sources),
+        items: Mutex::new(items),
+        client_id: Mutex::new(client_id),
+        ..Default::default()
+    }
+}
+
+/// Poll the configured sources.
+///
+/// Same shape as `spawn_watchlist_watcher`: the source list is a live
+/// setting re-read every pass, so dashboard edits apply without a
+/// restart, and the items are spooled so a restart does not re-add
+/// everything and re-grab it.
+///
+/// The restore itself is NOT here - it happens at construction, in
+/// [`seed_lists`], because readers of `lists.items` are spawned before
+/// this is. It takes no `settings_path` for that reason: putting the
+/// load back means re-plumbing the parameter, which is an act rather
+/// than an accident.
+pub(super) fn spawn_list_sync(daemon: &Arc<Daemon>) {
     let d = daemon.clone();
     tokio::spawn(async move {
         // Next-sync deadlines, keyed by source id. A removed source's
@@ -1031,6 +1088,133 @@ mod tests {
         assert_eq!(
             d.lists.sources.lock_ok()[0].interval_secs,
             crate::listsrc::MIN_INTERVAL_SECS
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // §151 construction-time seeding (`seed_lists`)
+    // ---------------------------------------------------------------
+    // The startup-ordering guard, from the other end. `Daemon::watch_items`
+    // is the union of the user's own watchlist and these synced rows, and
+    // that union is what `Daemon::instant_matcher` compiles into the arrival
+    // watch both ingest legs install - legs spawned before `spawn_list_sync`.
+    // See `seed_lists` above for the race that left, and
+    // `startup::seed_watchlist` for the nightly armv7-cross red that proved
+    // it on the other half.
+    //
+    // Not indexer-gated: `mod listsrc` is unconditional, so these run in the
+    // slim build and are tested there.
+
+    /// A settings file with one source, id 5.
+    const SRC_5: &str = r#"{"list_sources":[{"id":5,"name":"Plex","kind":"plex",
+        "mode":"rss","url":"https://example.invalid/rss"}]}"#;
+
+    fn settings_at(dir: &PathBuf, body: &str) -> PathBuf {
+        let p = dir.join("settings.json");
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    /// The §151 spool, written by hand so a test can say what was in it.
+    fn spool_at(dir: &PathBuf, body: &str) {
+        std::fs::write(dir.join("list-watchlist.json"), body).unwrap();
+    }
+
+    fn synced(src: u64, id: u64) -> String {
+        format!(
+            r#"{{"src":{src},"item":{{"id":{id},"kind":"tv","title":"Wanted Show",
+               "seasons":"","episodes":"","min_quality":"any",
+               "target_quality":"1080p","enabled":true}}}}"#
+        )
+    }
+
+    /// A settings file with a source in it and a spool holding that
+    /// source's items produce a POPULATED `lists` at CONSTRUCTION, so
+    /// `Daemon::watch_items` is whole before the first task exists. This
+    /// used to be loaded inside `spawn_list_sync`, which is spawned after
+    /// both ingest legs.
+    #[test]
+    fn the_synced_list_is_seeded_from_settings_and_spool() {
+        let t = TmpDir::new("seed-ok");
+        let p = settings_at(&t.0, SRC_5);
+        spool_at(
+            &t.0,
+            &format!(r#"{{"client_id":"cid-kept","items":[{}]}}"#, synced(5, 7)),
+        );
+        let st = seed_lists(&p, &t.0);
+        assert_eq!(st.sources.lock_ok().len(), 1, "the source was not seeded");
+        assert_eq!(st.sources.lock_ok()[0].id, 5);
+        {
+            let items = st.items.lock_ok();
+            assert_eq!(items.len(), 1, "the spooled item was not seeded");
+            assert_eq!(items[0].src, 5);
+            assert_eq!(items[0].item.id, 7);
+        }
+        assert_eq!(
+            *st.client_id.lock_ok(),
+            "cid-kept",
+            "the spooled client identifier was not kept"
+        );
+    }
+
+    /// The orphan drop: a spooled item whose `src` names a source that no
+    /// longer exists is discarded, because nothing should be watched on
+    /// behalf of an account the user deleted (Codex sweep 12 Aug F6a).
+    #[test]
+    fn a_spooled_item_of_a_deleted_source_is_dropped() {
+        let t = TmpDir::new("seed-orphan");
+        let p = settings_at(&t.0, SRC_5);
+        spool_at(
+            &t.0,
+            &format!(
+                r#"{{"client_id":"cid","items":[{},{}]}}"#,
+                synced(5, 7),
+                synced(9, 8)
+            ),
+        );
+        let st = seed_lists(&p, &t.0);
+        let items = st.items.lock_ok();
+        assert_eq!(items.len(), 1, "the orphan was not dropped");
+        assert_eq!(items[0].src, 5);
+    }
+
+    /// The `sources_known` path, which is the one that must NOT filter: a
+    /// `list_sources` setting that did not PARSE is ignorance rather than a
+    /// fact, so filtering the spool against the resulting empty source list
+    /// would silently delete every synced item the user has.
+    #[test]
+    fn an_unparseable_list_sources_keeps_every_spooled_item() {
+        let t = TmpDir::new("seed-unparseable");
+        let p = settings_at(&t.0, r#"{"list_sources":"not a list"}"#);
+        spool_at(
+            &t.0,
+            &format!(r#"{{"client_id":"cid","items":[{}]}}"#, synced(9, 8)),
+        );
+        let st = seed_lists(&p, &t.0);
+        assert!(st.sources.lock_ok().is_empty());
+        assert_eq!(
+            st.items.lock_ok().len(),
+            1,
+            "an unreadable source list must not delete the user's synced items"
+        );
+    }
+
+    /// Nothing saved yet: empty lists rather than a refusal to build the
+    /// daemon, and the Plex client identifier is minted once and written to
+    /// the spool, so the next construction reads the same one back.
+    #[test]
+    fn a_fresh_install_seeds_empty_and_mints_a_stable_client_id() {
+        let t = TmpDir::new("seed-fresh");
+        let p = settings_at(&t.0, "{}");
+        let st = seed_lists(&p, &t.0);
+        assert!(st.sources.lock_ok().is_empty());
+        assert!(st.items.lock_ok().is_empty());
+        let minted = st.client_id.lock_ok().clone();
+        assert!(!minted.is_empty(), "no client identifier was minted");
+        assert_eq!(
+            *seed_lists(&p, &t.0).client_id.lock_ok(),
+            minted,
+            "the minted client identifier was not persisted"
         );
     }
 }

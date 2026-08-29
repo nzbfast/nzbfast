@@ -344,11 +344,15 @@ mod app {
             rt.as_ref().map(|r| r.token.as_str()),
             &nonce,
         );
-        // This ARMS and never disarms, and the distinction is
-        // load-bearing: `probe` is the attach scan's primitive and walks
-        // up to fifty candidate PORTS, so a stranger on one of them must
-        // not strip the proof we hold for another. `recheck_listener` is
-        // the port-scoped caller that may clear.
+        // This records the verdict's own answer, both ways: a proven
+        // listener arms, and an ATTACHABLE-but-unproven one (Adopted -
+        // an nzbfast shape with no runtime.json to hold it to) stores
+        // false, which keeps an adopted port keyless. What it must NOT
+        // do is clear on a STRANGER: `probe` is the attach scan's
+        // primitive and walks up to fifty candidate PORTS, so a stranger
+        // on one of them must not strip the proof we hold for another -
+        // hence the attachable() gate. `recheck_listener` is the
+        // port-scoped caller that may clear on a stranger.
         if verdict.attachable() {
             crate::probe_body::record_identity_proven(verdict.proves_identity());
         }
@@ -641,7 +645,9 @@ mod app {
         // the scan range, unchanged: the daemon applies `settings.json`
         // over the `--port` we pass, so spawning at a stale runtime port
         // would start an engine that binds somewhere else and leave the
-        // tray polling a port nothing is on.
+        // tray polling a port nothing is on. The upgrade arms below obey
+        // the same rule: after stopping an older engine they spawn and
+        // poll at the SAVED port, not the port that engine held.
         let saved = crate::probe_body::load_port(data_dir);
         let mut spawn_at = None;
         for p in crate::probe_body::handoff_candidates(data_dir) {
@@ -660,7 +666,13 @@ mod app {
                     // daemon someone deliberately updated ahead of the
                     // tray would be the same silent surprise in reverse).
                     if upgrade_restart_if_older(p, data_dir) {
-                        spawn_at = Some(p);
+                        // Spawn and poll where settings will bind, not the
+                        // port the old engine happened to hold: the child
+                        // applies `settings.json` over `--port`, so when
+                        // the two disagree a spawn at `p` binds the saved
+                        // port while the 15 s poll below watches `p` and
+                        // then kills the healthy child.
+                        spawn_at = Some(saved.unwrap_or(p));
                         break;
                     }
                     return (p, None); // attach - not ours to manage
@@ -682,7 +694,9 @@ mod app {
                     // tray may still attach to rather than spawn beside.
                     v if v.attachable() => {
                         if upgrade_restart_if_older(p, data_dir) {
-                            spawn_at = Some(p);
+                            // Same rule as the handoff arm above: poll the
+                            // port settings will bind, not the one freed.
+                            spawn_at = Some(saved.unwrap_or(p));
                             break;
                         }
                         return (p, None);
@@ -1007,9 +1021,17 @@ mod app {
     /// tray's window so its process exits and its image file unlocks.
     /// Both halves are cooperative - nothing here terminates a process.
     fn legacy_shutdown(data_dir: &Path) {
-        if let Some(port) = crate::probe_body::load_port(data_dir)
-            && probe(port, data_dir).attachable()
-        {
+        // Every attachable port this data dir's files name, `runtime.json`
+        // first (the helper dedups) - not `load_port` alone. That function
+        // answers "where should a daemon be STARTED", so `settings.json`
+        // wins it, and when the configured port was taken the live engine
+        // sits on the runtime port instead: probing only the settings port
+        // left it running and the installer against a locked exe. Same
+        // order the NZB handoff and `ensure_daemon` already use.
+        for port in crate::probe_body::handoff_candidates(data_dir) {
+            if !probe(port, data_dir).attachable() {
+                continue;
+            }
             let tls = tls_for(port, data_dir);
             let url = keyed_url(
                 format!("{}/api?mode=shutdown&output=json", origin(port, tls)),
@@ -1450,7 +1472,10 @@ mod app {
         refresh_tip(hwnd, true);
     }
 
-    /// Start a replacement engine after the current one died.
+    /// Start a replacement engine after the current one died - but ask
+    /// `ensure_daemon`'s first question first: an engine any of this data
+    /// dir's files still name is re-attached to (or, Silent on the
+    /// runtime port, asked to stop) rather than doubled.
     ///
     /// RE-RESOLVES THE PORT, and that is not tidiness. `App.port` is
     /// written once, when `ensure_daemon` returned at startup, and never
@@ -1470,10 +1495,91 @@ mod app {
     /// generation and has to prove itself again before this tray will
     /// hand it the API key. The readiness probe in the child watcher
     /// re-establishes it exactly as `ensure_daemon` does.
+    /// Point an already-borrowed App back at a live listener instead of
+    /// spawning: the engine survived, only the tray's belief died. The
+    /// dead child (if any) was already reaped by the watchdog's
+    /// `try_wait`; `probe` re-recorded the identity proof on the
+    /// attachable verdict that got us here.
+    fn reattach(app: &mut App, hwnd: HWND, port: u16) {
+        app.child = None;
+        app.child_dead = false;
+        // Attached again - not ours to manage until a restart WE perform.
+        app.owner = false;
+        app.watch.restarted();
+        app.probe_now = false;
+        app.probed_at = Instant::now();
+        app.port = port;
+        save_port(&app.data_dir, port);
+        balloon(
+            hwnd,
+            "nzbfast",
+            "The download engine is still running - reconnected to it.",
+        );
+    }
+
     fn restart_daemon(hwnd: HWND) {
         APP.with(|a| {
             let mut a = a.borrow_mut();
             let app = a.as_mut().unwrap();
+            // Same FIRST question as `ensure_daemon`, in the same order
+            // (`runtime.json` before the settings port): is an engine
+            // still up? The Restart item is drawn once three silent
+            // probes call the listener gone, and a long index hold
+            // (~80 s, TODO 166) reads exactly like that from here - so
+            // spawning without asking starts a SECOND `serve` over the
+            // same spool, index and watch folder. `serve.lock` usually
+            // kills the newcomer after ~3 s; where it cannot, both stay.
+            for p in crate::probe_body::handoff_candidates(&app.data_dir) {
+                if probe(p, &app.data_dir).attachable() {
+                    reattach(app, hwnd, p);
+                    return;
+                }
+            }
+            // A Silent runtime port is what a live engine wedged in a
+            // long transaction looks like: ask it to stop, and give it a
+            // bounded moment. Waking it may instead ANSWER our probe -
+            // then it is healthy and we re-attach - and only a port gone
+            // Free proves it stopped. The shutdown POST is best-effort:
+            // with the proof cleared it goes keyless and a live engine
+            // refuses it, which the attachable arm then absorbs.
+            if let Some(p) = crate::probe_body::runtime(&app.data_dir).map(|r| r.port)
+                && probe(p, &app.data_dir) == Verdict::Silent
+            {
+                let tls = tls_for(p, &app.data_dir);
+                let url = keyed_url(
+                    format!("{}/api?mode=shutdown&output=json", origin(p, tls)),
+                    &app.data_dir,
+                    proof(p, &app.data_dir),
+                );
+                let _ = agent(2000, tls).post(&url).send_string("");
+                let t0 = Instant::now();
+                let mut last = Verdict::Silent;
+                while t0.elapsed() < Duration::from_secs(10) {
+                    last = probe(p, &app.data_dir);
+                    if last.attachable() {
+                        reattach(app, hwnd, p);
+                        return;
+                    }
+                    if last != Verdict::Silent {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                if last == Verdict::Silent {
+                    // Still holding the socket and still saying nothing:
+                    // most likely a live engine mid-hold, and starting a
+                    // second serve beside it is the one outcome worse
+                    // than waiting. Refuse rather than spawn.
+                    balloon(
+                        hwnd,
+                        "nzbfast",
+                        &format!(
+                            "The engine on port {p} is busy and did not stop within 10 s. Try Restart again in a minute."
+                        ),
+                    );
+                    return;
+                }
+            }
             let saved = crate::probe_body::load_port(&app.data_dir);
             let port = saved
                 .into_iter()

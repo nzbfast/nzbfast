@@ -21,26 +21,47 @@
 //! never a fix inside this module: a measurement round that turns into
 //! a fix loses the table, which is the deliverable.
 //!
-//! **And, since TODO 306, one REGRESSION test beside the table.** Round
-//! A's finding F4 was that no demotion arm can fire inside ~69 s, so a
-//! dead post that grinds itself out faster than that holds the queue
-//! for its whole run - measured here at 16.7 s against a 1.0 s control,
-//! `set aside never`. The fix is an early post-is-gone arm gated on
-//! run-cumulative evidence rather than on elapsed time
-//! (`serve/tasks/stall.rs::gone_evidence`), and
-//! [`a_dead_head_is_set_aside_at_shipped_thresholds`] is the only test
-//! anywhere that pins it AT THE SHIPPED THRESHOLDS. That distinction is
+//! **And, since TODO 306, FIVE REGRESSION tests beside the table.**
+//! Round A's finding F4 was that no demotion arm can fire inside ~69 s,
+//! so a dead post that grinds itself out faster than that holds the
+//! queue for its whole run - measured here at 16.7 s against a 1.0 s
+//! control, `set aside never`. The fix is an early post-is-gone arm
+//! gated on run-cumulative evidence rather than on elapsed time
+//! (`serve/tasks/stall.rs::gone_evidence`), with a PARTIAL twin for the
+//! takedown that lands some bytes first
+//! (`serve/tasks/stall.rs::partial_gone_defer`);
+//! [`a_dead_head_is_set_aside_at_shipped_thresholds`] and
+//! [`a_partial_head_is_set_aside_at_shipped_thresholds`] are the only
+//! tests anywhere that pin them AT THE SHIPPED THRESHOLDS, and
+//! [`a_dead_provider_sets_the_head_aside_and_the_queue_drains`] closes
+//! F7's other half, the outage arm that had no coverage of any kind.
+//! That distinction is
 //! the entire point: F7 measured that all seven pre-existing
 //! `NZBFAST_DEFER_WARMUP_SECS` overrides under `crates/nzbfast/tests/`
 //! compress the warmup to 1-2 s, so this mechanism's whole coverage ran
-//! in a regime the product never ships in. It ASSERTS rather than
-//! reporting, and it is one test rather than a sweep, so the measuring
-//! rows above keep their character: a row that surprises you is still
-//! a table entry and still gets its own TODO section.
+//! in a regime the product never ships in. They ASSERT rather than
+//! reporting, and they are a handful of tests rather than a sweep, so
+//! the measuring rows above keep their character: a row that surprises
+//! you is still a table entry and still gets its own TODO section.
+//!
+//! The fifth is TODO 308's and is the only one whose subject is a
+//! DRAINING predecessor rather than the hub owner:
+//! [`a_draining_head_behind_a_dead_provider_is_set_aside_and_the_queue_drains`].
+//! Round A found that row on the way to F7 and filed it - a head that
+//! hands over while still holding articles only an unreachable server
+//! could serve held all four queued jobs, with no terminal row anywhere
+//! for the whole 150 s budget. Measured at the SHIPPED provider
+//! thresholds on 27 Aug 2026 it is not a wedge but a 613.7 s wait, the
+//! pool's own consecutive bounce ladder being the only thing that ever
+//! releases it. The fix is one line and no new detector: `watched`
+//! already prefers a draining predecessor and already carries that
+//! job's own gauges, and the outage arm reached past them to the hub -
+//! which after a hand-over belongs to the successor. See
+//! `serve/outage.rs::outages_in`.
 //!
 //! **Why the daemon and not `run_get`.** Every mechanism in question is
 //! the daemon's - `pick_job`'s ordering key in `serve/daemon.rs`, the
-//! four mid-flight demotion arms in `serve/tasks/stall.rs`, and the
+//! five mid-flight demotion arms in `serve/tasks/stall.rs`, and the
 //! idle-server sidecar beside them. The CLI has no queue at all, which
 //! is why the existing matrix could not have asked this question
 //! however it was written.
@@ -178,22 +199,23 @@ impl Arm {
 /// [`DEFER_ENV`] says why the compressed set exists. The SHIPPED set is
 /// the row that answers what any of this costs a real user, and it is
 /// cheap to run precisely because of what it measures: at 45 s of
-/// warmup and a 30 s window, three of the four demotion arms in
-/// `serve/tasks/stall.rs` cannot be reached before about 69 s of one
-/// job (`warmup`, then a window at least 80% full), and the WINDOWED
-/// post-is-gone arm additionally wants 64 refusals answered inside one
-/// window with not a byte arriving.
+/// warmup and a 30 s window, the demotion arms in
+/// `serve/tasks/stall.rs` that still take an elapsed-time gate cannot
+/// be reached before about 69 s of one job (`warmup`, then a window at
+/// least 80% full), and the WINDOWED post-is-gone arm additionally
+/// wants 64 refusals answered inside one window with not a byte
+/// arriving.
 ///
 /// That was true of all of them until TODO 306, which is what made a
 /// broken job that grinds itself out in under a minute hold the queue
 /// for its whole run - and it is still true of the outage and
 /// single-server-bound arms, deliberately, because a job that is
-/// starting slowly must not be benched for it. The EARLY post-is-gone
-/// arm is the exception and reads the run instead - but only for a post
-/// that has landed NOTHING, so of the two shipped rows here it speaks
-/// for S5 and correctly stands down on S6, whose first third arrives.
-/// S6 @shipped is therefore still `set aside never`, and it is the
-/// remaining box under TODO 306 rather than a row that got missed.
+/// starting slowly must not be benched for it. The two post-is-gone
+/// arms are the exception. The EARLY one reads the run, and speaks only
+/// for a post that has landed NOTHING, which is S5. The PARTIAL one
+/// reads a FLATLINE inside the window rather than the whole of it, and
+/// is what speaks for S6, whose first third arrives - both twins fire
+/// with no warmup, and each is bounded by its own evidence instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Watchdog {
     Compressed,
@@ -353,6 +375,29 @@ struct Broken {
     /// Healthy peer SERVERS behind the faulted one (shape 10's fleet-5
     /// arm). Zero everywhere else.
     peer_servers: usize,
+    /// UNREACHABLE servers appended to the fleet: they accept TCP and
+    /// tear the connection down before the greeting, forever, and carry
+    /// no articles at all. Zero everywhere but `W1-refused-plus-dead`.
+    ///
+    /// A separate count from [`Broken::peer_servers`] because the
+    /// difference is the whole of W1: a healthy peer server ANSWERS, so
+    /// a fleet built out of them can always reach a verdict, while one
+    /// of these can neither serve nor refuse - the pool has to wait out
+    /// its own outage ladder before it can say anything about an
+    /// article only this server might have held.
+    down_servers: usize,
+    /// Extra JSON fields for each server object in the daemon's config,
+    /// by FLEET INDEX - 0 is the faulted server, 1.. are the
+    /// [`Broken::peer_servers`] behind it. An entry that is empty, or
+    /// missing entirely, leaves that server at host/port/tls alone,
+    /// which is what every shape but `U1-unprobed-server` wants.
+    ///
+    /// It exists because one shape's whole fault is a SETTING rather
+    /// than a message-id: a `retention_days` short enough to rule the
+    /// head's post out is how a server ends up up, healthy and never
+    /// asked, which is the one fleet the windowed post-is-gone arm has
+    /// to itself.
+    server_extra: Vec<String>,
     /// Daemon environment this shape needs on top of [`DEFER_ENV`].
     env: Vec<(&'static str, &'static str)>,
     /// Why this shape's fault cannot be scoped to one post.
@@ -365,6 +410,8 @@ impl Broken {
             fx,
             chaos,
             peer_servers: 0,
+            down_servers: 0,
+            server_extra: Vec::new(),
             env: Vec::new(),
             fleetwide: None,
         }
@@ -733,14 +780,28 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
         // and which puts a zero-byte window with hundreds of refusals in
         // it AFTER real progress - the only way into the post-is-gone
         // arm that leaves anything to resume.
+        //
+        // THREE TIMES `S5`'s article count, and that is a measurement
+        // rather than a round number (TODO 306, 26 Aug 2026). What this
+        // row has to make observable is a FLATLINE, and at the shipped
+        // thresholds the watchdog samples every 5 s - so the earliest
+        // any flatline arm can speak is one tick of phase plus its own
+        // minimum, and nothing shorter than about 15 s of flatline can
+        // be seen at all. At 1200 articles this post ground itself out
+        // in 10.7 s TOTAL with roughly 8 s of flatline in it, which is
+        // inside the rig's own sampling noise: the row would have
+        // reported `set aside` or `never` depending on where the
+        // daemon's tick phase happened to fall. The arriving third is
+        // still 1200 articles, which is `S5` entire, so the two rows
+        // stay readable against each other.
         "S6-dead-tail-at-scale" => {
             let mut fx = Fixture::new(&format!("qprog-s6-{}{}", arm.tag(), wd.tag()));
             let data = peer_payload(98);
-            let mut big = Vec::with_capacity(4_800_000);
-            while big.len() < 4_800_000 {
+            let mut big = Vec::with_capacity(14_400_000);
+            while big.len() < 14_400_000 {
                 big.extend_from_slice(&data);
             }
-            big.truncate(4_800_000);
+            big.truncate(14_400_000);
             fx.add_file("tail.bin", &big, 4_000);
             fx.date = unix_now() - 21 * 86_400;
             let p = plan(&fx);
@@ -750,18 +811,283 @@ fn broken_for(shape: &str, arm: Arm, wd: Watchdog) -> Option<Broken> {
             chaos.missing.extend(ids[ids.len() / 3..].to_vec());
             Broken::new(fx, chaos)
         }
+        // ---- The OUTAGE row. ----
+        //
+        // The one shape here whose fault is not a message-id at all,
+        // and the one demotion arm round A's F7 measured as having no
+        // end-to-end coverage of ANY kind: grepping
+        // `has had no usable connection for` over `crates/` finds it
+        // only at its definition in `serve/tasks/stall.rs`, and until
+        // this row nothing anywhere set `NZBFAST_SERVER_DOWN_SECS`
+        // either. The other two windowed arms have regressions in
+        // `crates/nzbfast/tests/daemon.rs`; this is the arm that stops
+        // one unreachable provider starving a whole queue, and it is
+        // the one that had nothing. Its incident is 11-12 Aug 2026, two
+        // soak jobs holding the queue for 25 minutes.
+        //
+        // **The post is HEALTHY and that is the whole point.** Every
+        // other shape in this module breaks the head; this one breaks
+        // the PROVIDER and leaves the head alone, which is what makes
+        // the outage arm the only one that can speak:
+        //
+        // * not a byte arrives, so the `single-server-bound` arm's
+        //   `total == 0` bail takes it before it looks at anything;
+        // * nothing is REFUSED - a server granting no connection
+        //   answers nothing at all - so `articles_missing` stays 0 on
+        //   every server, `gone_evidence` finds `probed == 0` and both
+        //   post-is-gone arms stand down by construction rather than by
+        //   a compressed threshold;
+        // * the pool cannot dispatch a single article, so the job's
+        //   work queue never runs dry and the runner never hands over
+        //   to its successor - which is what keeps the head the ACTIVE
+        //   job the watchdog is watching.
+        //
+        // That last one is not a detail. A head that hands over stops
+        // being `d.active_dl` (`serve/tasks/worker.rs`), and no
+        // mid-flight demotion arm watches a job that has handed over,
+        // correctly - its successor is already downloading, so it is no
+        // longer what the queue is waiting on.
+        //
+        // **The outage is held by the TEST, not by a clock.** See
+        // `Chaos::outage`: `refuse_connect_ms` runs from the mock's own
+        // start, and this rig starts the mock, spawns a daemon, waits
+        // for it to bind, uploads four jobs and only then resumes, so a
+        // fixed window would have to be guessed long enough to outlive
+        // all of that on the slowest box it ever runs on. The research
+        // file's own provenance note measures every figure in its table
+        // shifting by about 2x under a full nextest sweep, which is
+        // exactly the margin such a guess would be betting. `qprog_row`
+        // releases this one on the first `[defer]` line instead.
+        //
+        // `NZBFAST_SERVER_DOWN_SECS` is compressed for the same reason
+        // the watchdog thresholds are, and it is the only threshold
+        // this row moves: shipped is 60 s and the arm wants
+        // `o.secs >= max(span, that)`, so at 60 s no row in this module
+        // could reach the arm at all. The wall a real user pays is that
+        // 60 s plus what this row reports.
+        "O1-provider-outage" => {
+            let mut fx = Fixture::new(&format!("qprog-o1-{}{}", arm.tag(), wd.tag()));
+            fx.add_file("stranded.bin", &peer_payload(99), PEER_ART);
+            let mut b = Broken::new(
+                fx,
+                Chaos {
+                    outage: true,
+                    ..Default::default()
+                },
+            );
+            b.env = vec![("NZBFAST_SERVER_DOWN_SECS", "2")];
+            b.fleetwide = Some(
+                "the provider is gone, so the peers cannot run either \
+                 until it is back - what the row measures is that the \
+                 head does not keep the runner through the outage and \
+                 is behind them when it ends",
+            );
+            b
+        }
+        // ---- The UNPROBED-SERVER row. ----
+        //
+        // The fleet the WINDOWED post-is-gone arm has to itself, and
+        // the only shape in this module built out of a SETTING rather
+        // than a message-id or a socket.
+        //
+        // Round A's finding F12 measured that arm the way F7 measured
+        // the outage one: grepping `came back missing and not a byte
+        // arrived` over `crates/` found it at its own definition in
+        // `serve/tasks/stall.rs`, in `demotion_arm` below, and in a
+        // unit test asserting the three sentences do not collide -
+        // nowhere asserting it FIRES. Mutating it off outright
+        // (`if false && total == 0 && ...`) left
+        // `gone_post_defers_so_the_queue_moves_on` passing unchanged
+        // and every row in this module byte-identical, arm column
+        // included. It could have been deleted and nothing in the tree
+        // would have noticed.
+        //
+        // Neither step that got it there was wrong, which is why the
+        // answer is a new shape rather than a repair. TODO 306 gave the
+        // post-is-gone verdict two faster twins, and at every threshold
+        // set this rig runs one of them reaches it first: the EARLY arm
+        // takes it off the run before the window bookkeeping, and the
+        // PARTIAL arm off a flatline inside a window that need not be
+        // full. So on any fleet where both twins are ELIGIBLE, the
+        // windowed arm is unreachable by construction and no row can
+        // pin it.
+        //
+        // **What the twins ask that this one does not** is
+        // `fleet_answered`: every server must have itself answered a
+        // refusal, or be granting no connection at all. A server that
+        // is up and has simply never been asked stands both of them
+        // down forever - it might be the one holding the post - while
+        // the windowed arm has no such condition and speaks off the
+        // window alone.
+        //
+        // `retention_days` is how a real install produces that server,
+        // and it produces it deliberately rather than by accident: a
+        // provider configured with a retention window shorter than the
+        // post's age is seeded into every article's `tried_430` at
+        // queue-build time (`nzbkit::pool::retention_mask`), so it is
+        // never dispatched to, never refuses anything, and never goes
+        // down. A shallow primary in front of a deep secondary is an
+        // ordinary fleet, and this is what it costs when the deep one
+        // has been taken down.
+        //
+        // The second server holds the head's articles and would SERVE
+        // them if it were ever asked, which is deliberate: if retention
+        // exclusion ever stopped working, this row fails by the head
+        // COMPLETING rather than by quietly re-routing onto a twin.
+        //
+        // COMPRESSED thresholds, and that is a decision rather than a
+        // saving. Its two siblings run at the shipped set because their
+        // claim IS a clock - TODO 306 made a demotion reachable inside
+        // 69 s, which is only meaningful at 45 s of warmup and a 30 s
+        // window. This arm makes no such claim: it is the slow one, by
+        // design, and what has to be pinned is that it SPEAKS for the
+        // fleet its twins cannot. The gates are the same gates at
+        // smaller numbers.
+        //
+        // 900 articles at a charged refusal is the article count, and
+        // it is a MEASURED floor rather than a round number. The
+        // windowed arm cannot speak before `warmup` (3 s here) or
+        // before a window 80% full (4 s), so a head that grinds itself
+        // out in five seconds reports `never` and says nothing about
+        // the arm at all. Measured 27 Aug 2026 with the arm mutated off
+        // - which is how long the head holds the runner when nothing
+        // demotes it - 600 articles grind for 8.7 s and 900 for 12.7 s,
+        // against a verdict that lands by 5.4 s. The margin is the
+        // point of the larger figure, and it only ever grows: the grind
+        // is a wall-clock quantity (the mock SLEEPS `missing_delay_ms`
+        // per refusal, so a faster box does not shorten it) while a
+        // loaded one stretches it, and the two gates it has to outlive
+        // are fixed seconds. That is the direction the research file's
+        // provenance note asks for, every figure in its table moving by
+        // about 2x under a full nextest sweep.
+        "U1-unprobed-server" => {
+            let mut fx = Fixture::new(&format!("qprog-u1-{}{}", arm.tag(), wd.tag()));
+            let data = peer_payload(100);
+            let mut big = Vec::with_capacity(3_600_000);
+            while big.len() < 3_600_000 {
+                big.extend_from_slice(&data);
+            }
+            big.truncate(3_600_000);
+            fx.add_file("unprobed.bin", &big, 4_000);
+            // Older than the shallow server's window below, and the
+            // same 21 days as `S5`/`S6` so the three at-scale takedown
+            // rows stay readable against each other.
+            fx.date = unix_now() - 21 * 86_400;
+            let p = plan(&fx);
+            let mut chaos = Chaos::default();
+            p.role(Role::Everything)
+                .expect_nonempty(&p)
+                .missing(&mut chaos);
+            let mut b = Broken::new(fx, chaos);
+            b.peer_servers = 1;
+            b.server_extra = vec![
+                // The deep server: unlimited retention, refuses every
+                // article of the head's post.
+                String::new(),
+                // The shallow one: healthy, dialled, and ruled out of
+                // this post by its own retention window. It is what
+                // `fleet_answered` returns `None` on.
+                "\"retention_days\":7".to_string(),
+            ];
+            b.fleetwide = Some(
+                "the second server's retention window is a property of \
+                 the SERVER, so a peer post older than 7 days would be \
+                 ruled out of it too - the peers here are undated, so \
+                 they are not",
+            );
+            b
+        }
+        // ---- The W1 row: a REFUSING server and an UNREACHABLE one. ----
+        //
+        // TODO 308. The one shape in this module whose fault is neither
+        // a message-id nor a socket but the PAIR of them, and the only
+        // one that has ever held the whole queue rather than the head.
+        //
+        // Round A found it on the way to `O1-provider-outage` and filed
+        // it rather than fixing it: two configured providers, one up
+        // and refusing every article of the head's post, one accepting
+        // TCP and closing before the greeting. Peer0 fetched every byte
+        // of its payload and its JOB never finished, peers 1 and 2
+        // never started, and the head sat in `Downloading` for the
+        // whole 150 s budget.
+        //
+        // **Why it is not `O1` with an extra server.** O1's provider
+        // grants no connection AT ALL, so the pool cannot dispatch a
+        // single article, the head's work queue never runs dry, the
+        // runner never hands over, and the head stays `d.active_dl` -
+        // which is exactly what leaves it demotable. Here the live
+        // server DOES answer: it refuses everything, the dispatchable
+        // work runs out, and the runner hands over
+        // (`serve/tasks/worker.rs`) while the head still holds articles
+        // that only the unreachable server could ever have served. A
+        // job that has handed over is nobody's to demote by design, so
+        // no arm in `serve/tasks/stall.rs` can speak for it - and the
+        // runner then parks on that head's network drain before it will
+        // settle ANY successor, which is why peer0 downloaded its bytes
+        // and still never reached a terminal row.
+        //
+        // **The dead server carries no articles**, which is what makes
+        // it different in kind from every other fleet in this module: a
+        // peer server ANSWERS, so a fleet of them always reaches a
+        // verdict. This one can neither serve nor refuse, so the only
+        // thing that can ever release the head's last articles is the
+        // pool's own outage ladder giving up on it.
+        //
+        // `NZBFAST_SERVER_OUTAGE_MINS` is that ladder's control and is
+        // the one threshold this row moves. Shipped is 15 minutes of
+        // accumulated no-session time per server per run, above a
+        // consecutive bounce horizon of about ten
+        // (`nzbkit::pool::OUTAGE_BUDGET`, `CAP_PROBE_BOUNCES`), so at
+        // shipped figures no row in this module could reach the far end
+        // of it: the wall a real user pays is what this row reports
+        // plus the difference between that horizon and this one.
+        "W1-refused-plus-dead" => {
+            let mut fx = Fixture::new(&format!("qprog-w1-{}{}", arm.tag(), wd.tag()));
+            let data = peer_payload(101);
+            fx.add_file("wedged.bin", &data, PEER_ART);
+            let p = plan(&fx);
+            let mut chaos = Chaos::default();
+            p.role(Role::Everything)
+                .expect_nonempty(&p)
+                .missing(&mut chaos);
+            let mut b = Broken::new(fx, chaos);
+            b.down_servers = 1;
+            b.env = vec![
+                // The outage arm's own gate, compressed exactly as
+                // `O1-provider-outage` compresses it and for the same
+                // reason: shipped is 60 s and no row in this module
+                // lives that long.
+                ("NZBFAST_SERVER_DOWN_SECS", "2"),
+                // The pool's give-up ladder, and the one threshold this
+                // row moves that O1 does not. It is what bounds the row
+                // when NOTHING demotes: the head's last articles are
+                // parked on a server only that ladder can retire, so at
+                // the shipped 15 minutes a row with the arm off does not
+                // fail, it TIMES OUT - and "stranded" is a much worse
+                // failure message than "set aside never". Compressed to
+                // one minute, the un-demoted row terminates at ~61 s,
+                // well inside [`ROW_BUDGET`] and four times the ~5 s the
+                // arm takes, so the two verdicts cannot be confused.
+                ("NZBFAST_SERVER_OUTAGE_MINS", "1"),
+            ];
+            b.fleetwide = Some(
+                "the unreachable server is a property of the FLEET, so                  the peers are behind it too - what the row measures is                  that they are behind the HEAD as well, which is the                  defect",
+            );
+            b
+        }
         other => panic!("unknown shape {other:?}"),
     })
 }
 
-/// Which of the four mid-flight demotion arms in
-/// `serve/tasks/stall.rs` wrote this `[defer]` line.
+/// Which of the mid-flight demotion arms in `serve/tasks/stall.rs`
+/// wrote this `[defer]` line.
 ///
-/// FOUR since TODO 306: post-is-gone has an EARLY twin that reads the
-/// run rather than a rolling window, and the two are kept apart here
-/// because which one spoke is the whole of what that section changed.
-/// The early one is tested first: both sentences say "came back
-/// missing", which is deliberate (the 14 Aug regression in
+/// FIVE since TODO 306: post-is-gone has an EARLY twin that reads the
+/// run rather than a rolling window, and a PARTIAL twin that reads a
+/// flatline inside it, and the three are kept apart here because which
+/// one spoke is the whole of what that section changed. The two twins
+/// are tested first: all three sentences say "came back missing", which
+/// is deliberate (the 14 Aug regression in
 /// `crates/nzbfast/tests/daemon.rs` asserts on that phrase to
 /// distinguish a refusal verdict from a dead-server one), so only the
 /// clause around it separates them.
@@ -780,6 +1106,8 @@ fn demotion_arm(line: &str) -> &'static str {
         "server-outage"
     } else if line.contains("answered so far came back missing") {
         "post-is-gone-early"
+    } else if line.contains("carries what is left of this post") {
+        "post-is-gone-partial"
     } else if line.contains("came back missing and not a byte arrived") {
         "post-is-gone"
     } else if line.contains("the other servers had nothing for this job") {
@@ -867,11 +1195,40 @@ async fn qprog_row(shape: &str, arm: Arm, wd: Watchdog) -> Option<Row> {
     for _ in 0..broken.as_ref().map(|b| b.peer_servers).unwrap_or(0) {
         servers.push(MockServer::start(articles.clone(), Chaos::default()).await);
     }
+    // The unreachable tail of the fleet. EMPTY article map on purpose:
+    // this server never answers anything, so what it holds is
+    // unobservable, and handing it the union would make a later reader
+    // think the fault was scoped by id like every other shape's.
+    for _ in 0..broken.as_ref().map(|b| b.down_servers).unwrap_or(0) {
+        servers.push(
+            MockServer::start(
+                HashMap::new(),
+                Chaos {
+                    refuse_connect_ms: 86_400_000,
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+    }
+    // `Broken::server_extra` by fleet index, so a shape whose fault is
+    // a SETTING can express it. Read by position rather than zipped, so
+    // a shape naming an extra for server 1 alone still says nothing
+    // about server 0.
+    let extra = broken
+        .as_ref()
+        .map(|b| b.server_extra.clone())
+        .unwrap_or_default();
     let addrs: Vec<String> = servers
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
+            let more = match extra.get(i) {
+                Some(e) if !e.is_empty() => format!(",{e}"),
+                _ => String::new(),
+            };
             format!(
-                "{{\"host\":\"{}\",\"port\":{},\"tls\":false}}",
+                "{{\"host\":\"{}\",\"port\":{},\"tls\":false{more}}}",
                 s.addr.ip(),
                 s.addr.port()
             )
@@ -960,9 +1317,21 @@ async fn qprog_row(shape: &str, arm: Arm, wd: Watchdog) -> Option<Row> {
         "{shape}: the broken post must be at the HEAD, got {order:?}"
     );
 
+    // The test's hold on the provider, for the shapes whose fault IS
+    // the provider. Released on the first `[defer]` line rather than on
+    // a wall clock - `O1-provider-outage`'s own comment carries why -
+    // so the row measures where the head ENDS UP relative to the peers
+    // and never how fast this box booted a daemon.
+    let outage_ctl = broken
+        .as_ref()
+        .filter(|b| b.chaos.outage)
+        .map(|_| servers[0].outage_control());
+    let log_path = d.log_path();
+
     let t0 = Instant::now();
     let names = peer_names.clone();
     let observed = tokio::task::spawn_blocking(move || {
+        let mut outage_ctl = outage_ctl;
         qprog_http(port, "/api?mode=resume&output=json", None);
         let mut done: Vec<Option<Duration>> = vec![None; HEALTHY];
         let mut head_at: Option<(Duration, String)> = None;
@@ -980,6 +1349,22 @@ async fn qprog_row(shape: &str, arm: Arm, wd: Watchdog) -> Option<Row> {
             }
             if done.iter().all(Option::is_some) && head_at.is_some() {
                 break;
+            }
+            // The provider comes back the moment the watchdog has
+            // spoken. Not before - the whole row is about what it says
+            // - and not later than that, because the peers are behind
+            // the same dead provider and would be set aside in their
+            // turn, which would leave the ORDER this row asserts on to
+            // whichever deferred job `pick_job` reaches first. The
+            // watchdog's own thresholds give this poll about seven
+            // seconds of slack to land in.
+            if let Some(ctl) = &outage_ctl
+                && std::fs::read_to_string(&log_path)
+                    .unwrap_or_default()
+                    .contains("[defer]")
+            {
+                ctl.end_outage();
+                outage_ctl = None;
             }
             if t0.elapsed() > ROW_BUDGET {
                 break;
@@ -1263,6 +1648,86 @@ async fn a_dead_head_is_set_aside_at_shipped_thresholds() {
     );
 }
 
+/// TODO 306's SECOND regression: the partial takedown, at the shipped
+/// thresholds, and the only test anywhere that pins the flatline arm.
+///
+/// Its sibling above covers the head that lands NOTHING, which the
+/// early arm can judge off run-cumulative evidence with no clock in it
+/// at all. This is the shape that arm correctly stands down on: the
+/// first third of the post arrives, so "not a byte since this job
+/// started" is false by construction and only a FLATLINE can speak.
+/// Round A measured this row holding the queue for its whole run at
+/// these thresholds, `set aside never`, because the windowed arm needs
+/// 45 s of warmup and a window 80% full and the job is over long
+/// before.
+///
+/// **What it asserts and what it deliberately does not**, which is its
+/// sibling's list with one addition. The pins are the PARTIAL arm
+/// spoke - not merely that something demoted the job, because the
+/// distinction between the two twins is the whole of what this section
+/// added - the head went round again, every peer drained, and a peer
+/// finished before the head reached its own terminal row. There is no
+/// wall-clock assertion: the research file's provenance note says every
+/// figure in that table shifts with load and the RATIOS are what it is
+/// for.
+///
+/// The RESUME line is pinned too, and it is the one thing this row can
+/// say that no other test in the tree can. The mid-flight demotion's
+/// whole claim is that it is cheap because the journal keeps what
+/// landed; S5 lands zero bytes, so a rerun that refetched everything
+/// and one that resumed perfectly look identical there. Here the
+/// arriving third has to come back off disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_head_is_set_aside_at_shipped_thresholds() {
+    // par2-gate: `S6-dead-tail-at-scale` is a partly-refused post with
+    // no PAR2 set at all - one of only two shapes in this module that
+    // never call `par2 create`. The gate resolves helper names
+    // tree-wide, so it sees `qprog_row` reaching par2 through the
+    // shapes this test does NOT build; a probe in this body would be
+    // asking a question this test's answer cannot depend on.
+    let r = qprog_row("S6-dead-tail-at-scale", Arm::Charged, Watchdog::Shipped)
+        .await
+        .expect("S6 needs no par2 binary, so every box can run this row");
+    print_qprog_row(&r);
+    assert!(
+        r.defers.iter().any(|a| a == "post-is-gone-partial"),
+        "the PARTIAL post-is-gone arm must set a half-refused head aside \
+         at SHIPPED thresholds - the early arm cannot, because bytes \
+         arrived, and the windowed one cannot inside 69 s. defers={:?} \
+         head={} first={:?}",
+        r.defers,
+        r.broken_end,
+        r.first_healthy
+    );
+    assert!(
+        r.head_runs >= 2,
+        "set aside means it went to the BACK and was picked up again, \
+         which is the second plan banner: head_runs={} defers={:?}",
+        r.head_runs,
+        r.defers
+    );
+    assert_eq!(
+        r.stranded, 0,
+        "every healthy peer must reach a terminal row: {} stranded, end={}",
+        r.stranded, r.broken_end
+    );
+    let first = r.first_healthy.expect("a peer completed");
+    let head = r.broken_settled.expect("the head reached a terminal row");
+    assert!(
+        first < head,
+        "a healthy job behind the half-dead head must finish BEFORE it, \
+         or the queue never moved: first={first:?} head={head:?} defers={:?}",
+        r.defers
+    );
+    assert!(
+        r.resumed.contains("article(s) already on disk") && !r.resumed.starts_with('0'),
+        "the rerun must resume from the journal rather than start over - \
+         that is the whole claim a mid-flight demotion rests on: \
+         resume={:?}",
+        r.resumed
+    );
+}
+
 /// The AT-SCALE rows - the only ones that run long enough for a
 /// mid-flight demotion to be reachable at all.
 ///
@@ -1284,4 +1749,293 @@ async fn queue_progress_at_scale() {
         "S6-dead-tail-at-scale",
     ])
     .await;
+}
+
+/// TODO 306's second box: the `server-outage` demotion arm, driven end
+/// to end for the first time.
+///
+/// Round A's finding F7 measured this as the one arm in
+/// `serve/tasks/stall.rs` with no coverage of any kind. Its reason text
+/// appears nowhere in `crates/` but at its own definition, no test
+/// anywhere drove a server that grants no connection while another job
+/// waited, and nothing set `NZBFAST_SERVER_DOWN_SECS`, which is the
+/// gate that decides whether it may speak at all. The other two
+/// windowed arms have regressions in `crates/nzbfast/tests/daemon.rs`.
+/// This is the arm whose job is to stop one unreachable provider
+/// starving a whole queue - the 11-12 Aug 2026 soak, two jobs holding
+/// the queue for 25 minutes - and it had nothing.
+///
+/// **It is a SINGLE-provider row, deliberately, and that is the answer
+/// to F8.** That finding is a code reading: with one configured
+/// provider and any byte flow at all, no arm is reachable. True, and
+/// routinely read one step too far, as "a single-provider install has
+/// no demotion at all". It does not follow and it is false. The gates
+/// that shut on one provider are the ones that need somewhere ELSE to
+/// route to - `single-server-bound` bails on `deltas.len() < 2` because
+/// with one server there is nothing to route around, which is the
+/// code's own comment. The two arms that speak for a job getting
+/// NOTHING do not care how many servers there are: this row fires the
+/// outage arm on a fleet of one, and
+/// [`a_dead_head_is_set_aside_at_shipped_thresholds`] already fires the
+/// early post-is-gone arm on a fleet of one at SHIPPED thresholds
+/// (`S5-dead-post-at-scale` sets no `peer_servers`, so its whole fleet
+/// is the one mock it faults). So TODO 306's fix reaches the
+/// single-provider install, which is most of them, and what F8 really
+/// says is narrower: the arm a one-provider user never gets is the one
+/// about routing, and the mitigation they do get is for the job that is
+/// taking nothing at all.
+///
+/// **What it asserts and what it deliberately does not.** No wall-clock
+/// figure appears anywhere in it, for the reason the research file's
+/// own provenance note gives: every second in that table shifts by
+/// about 2x under a full nextest sweep, and the RATIOS are what it is
+/// for. The pins are that the outage arm SPOKE, that the head went
+/// round again, that every peer drained, and that a peer finished
+/// before the head did - an ordering claim no amount of load inverts,
+/// and the one that means "the queue moved". All four are false if the
+/// arm stops firing: without it the head keeps the runner for the whole
+/// outage and is first through the moment it lifts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_provider_sets_the_head_aside_and_the_queue_drains() {
+    // par2-gate: `O1-provider-outage` posts one file and builds no
+    // recovery set at all. `qprog_row` reaches `par2 create` only
+    // through the shapes this test does not build, and the gate
+    // resolves helper names tree-wide.
+    let r = qprog_row("O1-provider-outage", Arm::Free, Watchdog::Compressed)
+        .await
+        .expect("O1 builds no recovery set, so every box can run this row");
+    print_qprog_row(&r);
+    assert!(
+        r.defers.iter().any(|a| a == "server-outage"),
+        "a head that can reach no provider at all must be set aside by \
+         the server-outage arm - it is the only arm that can speak for \
+         this shape, since nothing is refused and no byte arrives. \
+         defers={:?} head={} first={:?}",
+        r.defers,
+        r.broken_end,
+        r.first_healthy
+    );
+    assert!(
+        r.head_runs >= 2,
+        "set aside means it went to the BACK and was picked up again, \
+         which is the second plan banner: head_runs={} defers={:?}",
+        r.head_runs,
+        r.defers
+    );
+    assert_eq!(
+        r.stranded, 0,
+        "every healthy peer must drain once the provider is back: {} \
+         stranded, head={}",
+        r.stranded, r.broken_end
+    );
+    let first = r.first_healthy.expect("a peer completed");
+    let head = r.broken_settled.expect("the head reached a terminal row");
+    assert!(
+        first < head,
+        "the head was set aside FIRST, so a peer must finish before it \
+         - a head that came back ahead of the queue it was moved behind \
+         was never really set aside: first={first:?} head={head:?} \
+         defers={:?}",
+        r.defers
+    );
+}
+
+/// TODO 306's residue, and the only test anywhere that pins the
+/// WINDOWED post-is-gone arm.
+///
+/// Round A's finding F12 measured that arm exactly as F7 measured the
+/// outage one above: its reason text appears in `crates/` only at its
+/// own definition, in [`demotion_arm`], and in a unit test asserting
+/// the three post-is-gone sentences do not collide. Mutating it off -
+/// `if false && total == 0 && ...` - left
+/// `gone_post_defers_so_the_queue_moves_on` passing in 5.6 s and every
+/// row in this module byte-identical, arm column included. It could
+/// have been deleted and nothing in the tree would have noticed.
+///
+/// **Why it had drifted out of reach, which is the part worth reading
+/// before touching this row.** Neither step that got it there was
+/// wrong. Its own regression asserts on `came back missing`, which all
+/// three post-is-gone arms share deliberately (that is what tells a
+/// refusal verdict from a dead-server one, the 14 Aug 2026 incident),
+/// so it cannot say which arm spoke; and TODO 306 then gave the verdict
+/// two faster twins, either of which reaches it first on any fleet
+/// where both are ELIGIBLE. The EARLY arm is evaluated before the
+/// window bookkeeping and takes the verdict off the run; the PARTIAL
+/// arm reads a flatline inside a window that need not be full. The
+/// windowed arm asks for a FULL window and a warmup on top of it, so it
+/// is last by construction and unreachable wherever its twins can
+/// speak.
+///
+/// **So the row is built out of the one condition the twins have and it
+/// does not**: `fleet_answered`. Both twins require every server to
+/// have itself answered a refusal, or to be granting no connection at
+/// all; a server that is up and has simply never been asked stands both
+/// of them down forever, because it might be the one holding the post.
+/// `U1-unprobed-server` is that fleet, produced the way a real install
+/// produces it - a shallow provider whose `retention_days` cannot cover
+/// a 21-day-old post, in front of a deep one that refuses every article
+/// of it.
+///
+/// **What it asserts, and the one assertion that is the deliverable.**
+/// The pins are that the WINDOWED arm spoke, that neither twin did -
+/// which is what makes this a test OF that arm rather than of the
+/// verdict, and is the assertion the `if false &&` mutation has to
+/// break - that the head went round again, that every peer drained, and
+/// that a peer finished before the head reached its own terminal row.
+/// No wall-clock figure appears anywhere in it, for the reason the
+/// research file's provenance note gives: every second in that table
+/// moves by about 2x under a full nextest sweep, and the ORDERING claim
+/// is the one that means "the queue moved" and that no amount of load
+/// inverts.
+///
+/// It runs at COMPRESSED thresholds where its two siblings run at the
+/// shipped ones, and that is a decision. Their claim IS a clock - TODO
+/// 306 made a demotion reachable inside 69 s - which is only meaningful
+/// at 45 s of warmup and a 30 s window. This arm makes no such claim:
+/// it is the slow one by design, and what needs pinning is that it
+/// speaks at all for the fleet its twins cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unprobed_server_leaves_the_windowed_arm_to_speak() {
+    // par2-gate: `U1-unprobed-server` posts one file and builds no
+    // recovery set at all. `qprog_row` reaches `par2 create` only
+    // through the shapes this test does not build, and the gate
+    // resolves helper names tree-wide.
+    let r = qprog_row("U1-unprobed-server", Arm::Charged, Watchdog::Compressed)
+        .await
+        .expect("U1 builds no recovery set, so every box can run this row");
+    print_qprog_row(&r);
+    assert!(
+        r.defers.iter().any(|a| a == "post-is-gone"),
+        "the WINDOWED post-is-gone arm must set aside a head whose only \
+         answering server refuses everything while a second is up and \
+         unasked - it is the only arm that can speak for this fleet. \
+         defers={:?} head={} first={:?}",
+        r.defers,
+        r.broken_end,
+        r.first_healthy
+    );
+    assert!(
+        !r.defers
+            .iter()
+            .any(|a| a == "post-is-gone-early" || a == "post-is-gone-partial"),
+        "neither faster twin may speak here, or this row is testing the \
+         VERDICT and not the arm: both ask `fleet_answered` for every \
+         server to have refused something itself, and the shallow \
+         server never gets asked at all. A twin in this list means the \
+         retention exclusion stopped holding. defers={:?}",
+        r.defers
+    );
+    assert!(
+        r.head_runs >= 2,
+        "set aside means it went to the BACK and was picked up again, \
+         which is the second plan banner: head_runs={} defers={:?}",
+        r.head_runs,
+        r.defers
+    );
+    assert_eq!(
+        r.stranded, 0,
+        "every healthy peer must reach a terminal row: {} stranded, end={}",
+        r.stranded, r.broken_end
+    );
+    let first = r.first_healthy.expect("a peer completed");
+    let head = r.broken_settled.expect("the head reached a terminal row");
+    assert!(
+        first < head,
+        "a healthy job behind the dead head must finish BEFORE it, or \
+         the queue never moved: first={first:?} head={head:?} \
+         defers={:?}",
+        r.defers
+    );
+}
+
+/// TODO 308: the outage arm, asked about the job it is JUDGING rather
+/// than about whatever the hub happens to own.
+///
+/// The one row in this module that has ever held the whole queue rather
+/// than the head, and the only regression here whose subject is a
+/// DRAINING predecessor. Round A measured it and filed it: two
+/// providers, one up and refusing every article of the head's post, one
+/// accepting TCP and closing before the greeting. Peer0 fetched every
+/// byte of its payload and its JOB never reached a terminal row, peers
+/// 1 and 2 never started, and the head sat in `Downloading` for the
+/// whole 150 s budget - zero of four jobs settled, three runs the same.
+///
+/// **Why no arm spoke, which is the part worth reading before touching
+/// this.** Nothing here was missing. `watched` already prefers a
+/// draining predecessor over the hub owner, and carries that job's own
+/// gauges and stop handles precisely because "the hub's are the
+/// successor's by now"; the outage arm then reached PAST them to
+/// `server_outages(&d)`, which reads the hub. So for the one job the
+/// queue was waiting on, the arm asked the SUCCESSOR's fleet whether
+/// the predecessor's provider was down - and the successor was
+/// downloading happily off the healthy server, so the answer was no,
+/// forever. `serve/outage.rs::outages_in` is the same census over named
+/// gauges and is what the arm asks now.
+///
+/// **And why the twins cannot cover it.** Both post-is-gone arms want
+/// refusals to still be LANDING (`early_gone_defer` arms on one tick
+/// and requires more misses on the next; `partial_gone_defer` reads a
+/// flatline with bytes already in). This head's refusals all land in
+/// the first fraction of a second and the fleet then goes silent
+/// waiting on a socket, which is the outage arm's shape by
+/// construction and is what its own comment says: "the pool is waiting
+/// on a socket, the retry logic has nothing to retry".
+///
+/// **What it asserts, and the one assertion that is the deliverable.**
+/// The pins are that the OUTAGE arm spoke, that the head went round
+/// again, that every peer drained, and that a peer finished before the
+/// head reached its own terminal row. No wall-clock figure appears in
+/// any of them, for the reason the research file's provenance note
+/// gives - every second in that table moves by about 2x under a full
+/// nextest sweep - and the ORDERING claim is the one that means "the
+/// queue moved" and that no amount of load inverts. All four are false
+/// with the fix reverted: measured 27 Aug 2026, the reverted row
+/// reports `set aside never`, `starts 1`, and a first peer settling at
+/// the same instant as the head because nothing settles until the
+/// pool's own ladder retires the dead provider.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_draining_head_behind_a_dead_provider_is_set_aside_and_the_queue_drains() {
+    // par2-gate: `W1-refused-plus-dead` posts one file and builds no
+    // recovery set at all. `qprog_row` reaches `par2 create` only
+    // through the shapes this test does not build, and the gate
+    // resolves helper names tree-wide.
+    let r = qprog_row("W1-refused-plus-dead", Arm::Free, Watchdog::Compressed)
+        .await
+        .expect("W1 builds no recovery set, so every box can run this row");
+    print_qprog_row(&r);
+    assert!(
+        r.defers.iter().any(|a| a == "server-outage"),
+        "a head that has HANDED OVER and still holds articles only an \
+         unreachable server could serve must be set aside by the \
+         server-outage arm - it is the only arm that can speak for this \
+         shape, the refusals having all landed before the first tick. \
+         An empty list means the arm is reading the hub's gauges again, \
+         which after a hand-over are the successor's. defers={:?} \
+         head={} first={:?}",
+        r.defers,
+        r.broken_end,
+        r.first_healthy
+    );
+    assert!(
+        r.head_runs >= 2,
+        "set aside means it went to the BACK and was picked up again, \
+         which is the second plan banner: head_runs={} defers={:?}",
+        r.head_runs,
+        r.defers
+    );
+    assert_eq!(
+        r.stranded, 0,
+        "every healthy peer must reach a terminal row: {} stranded, end={}",
+        r.stranded, r.broken_end
+    );
+    let first = r.first_healthy.expect("a peer completed");
+    let head = r.broken_settled.expect("the head reached a terminal row");
+    assert!(
+        first < head,
+        "a healthy job behind the wedged head must finish BEFORE it, or \
+         the queue never moved - peer0 downloading every byte of its \
+         payload and still not settling is this defect's own \
+         fingerprint: first={first:?} head={head:?} defers={:?}",
+        r.defers
+    );
 }

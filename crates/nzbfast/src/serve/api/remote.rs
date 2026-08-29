@@ -126,11 +126,33 @@ pub(in crate::serve) fn rename_by_ids(d: &Arc<Daemon>, ids: &[i64], newname: &st
         .filter(|j| ids.contains(&nzo_int(&j.lock_ok().nzo_id)))
         .cloned()
         .collect();
-    let mut ok = false;
+    let mut fences = Vec::new();
+    let mut renamed: Vec<(Arc<Mutex<Job>>, String)> = Vec::new();
     for j in targets {
-        ok |= rename_queued(d, &j, newname).is_ok();
+        let old_name = j.lock_ok().name.clone();
+        if let Ok(fence) = rename_queued(d, &j, newname) {
+            fences.push(fence);
+            renamed.push((j, old_name));
+        }
     }
-    ok
+    if fences.is_empty() {
+        return false;
+    }
+    // Persisted HERE, with every fence still held, not left to
+    // `jr_editqueue`'s tail save: a refused store has to roll the moved
+    // trees back under the fences, and by the tail they are gone (Codex
+    // C10). The label goes back first, before any fence lifts, so no
+    // job can start carrying the new name over the restored path.
+    if d.save_queue() {
+        return true;
+    }
+    for (j, old_name) in renamed {
+        j.lock_ok().name = old_name;
+    }
+    for f in fences {
+        f.rollback();
+    }
+    false
 }
 
 /// NZBGet's `editqueue GroupSetParameter`. The one parameter clients
@@ -166,21 +188,19 @@ pub(in crate::serve) fn set_parameter(d: &Arc<Daemon>, ids: &[i64], param: &str)
 /// SAB's `mode=queue&name=rename` and NZBGet's `GroupSetName`.
 ///
 /// Persisting the result is the CALLER's, as it is for the
-/// `requeue_category` this wraps - and both fronts do it, `rename_arm`
-/// directly and `rename_by_ids` through the tail `save_queue` every
-/// `jr_editqueue` subcommand gets. That second one is a save several
-/// arms away from the verb that earned it, so it reads as absent: it
-/// was reported on 20 Aug 2026 as a rename lost across a restart, which
-/// it is not. It stays a caller's job because the two doors keep
+/// `requeue_category` this wraps - and both fronts do it, with the
+/// returned fence still held and the save's verdict checked: a refused
+/// store rolls the whole edit back, label and moved bytes together
+/// (Codex C10). It stays a caller's job because the two doors keep
 /// writing after this returns (the password, on the SAB side), and one
-/// save at the end of the request stores the whole edit rather than a
+/// save at the end of the batch stores the whole edit rather than a
 /// half-applied record - and renames N jobs in one queue.json rewrite
 /// rather than N. `remote_compat.rs` pins the NZBGet door end to end.
 pub(in crate::serve) fn rename_queued(
     d: &Arc<Daemon>,
     job: &Arc<Mutex<Job>>,
     newname: &str,
-) -> Result<(), &'static str> {
+) -> Result<queue::Relocation, &'static str> {
     // Untrusted: a single contained path component, like enqueue - the
     // name is joined under out_root when the directory is derived.
     let newname = nzbkit::disk::sanitize_filename(newname.trim());
@@ -197,7 +217,7 @@ pub(in crate::serve) fn rename_queued(
     // OLD name beside the directory derived from the new one - the two
     // halves of one rename, disagreeing, in the record the user reads.
     // Non-queued jobs are already refused inside.
-    let _fence = queue::requeue_category(d, job, &newname, &cat)?;
+    let fence = queue::requeue_category(d, job, &newname, &cat)?;
     // Test hook: hold exactly that second window open - the directory
     // is published and the label has not caught up yet - so the suite
     // can let the runner at the job inside it. It is two statements
@@ -224,7 +244,9 @@ pub(in crate::serve) fn rename_queued(
     // doors from one place, and the second bump on the SAB path costs
     // an idle poll one payload.
     d.queue_rev.fetch_add(1, Ordering::Relaxed);
-    Ok(())
+    // The fence travels to the caller: its save has to run under it,
+    // and a refused save rolls the relocation back through it.
+    Ok(fence)
 }
 
 /// SAB's `mode=queue&name=rename&value=<nzo>&value2=<name>[&value3=<pw>]`.
@@ -250,19 +272,46 @@ pub(in crate::serve) fn rename_arm(
         .filter(|j| hit_id(&j.lock_ok().nzo_id))
         .cloned()
         .collect();
-    let mut n = 0;
+    let mut fences = Vec::new();
+    let mut renamed: Vec<(Arc<Mutex<Job>>, String, Option<String>)> = Vec::new();
     for j in &targets {
-        if rename_queued(d, j, newname).is_ok() {
+        let (old_name, old_pw) = {
+            let g = j.lock_ok();
+            (g.name.clone(), g.password.clone())
+        };
+        if let Ok(fence) = rename_queued(d, j, newname) {
             if let Some(pw) = pw {
                 j.lock_ok().password = Some(pw.to_string());
             }
-            n += 1;
+            fences.push(fence);
+            renamed.push((j.clone(), old_name, old_pw));
         }
     }
-    if n > 0 {
-        d.save_queue();
+    if fences.is_empty() {
+        return json!({"status": false});
     }
-    json!({"status": n > 0})
+    // Saved with every fence still held, and its verdict checked: a
+    // refused store rolls the whole edit back - label, password, record
+    // and moved bytes - before the fences lift, so nothing can start
+    // against a half-undone rename (Codex C10).
+    if d.save_queue() {
+        json!({"status": true})
+    } else {
+        for (j, old_name, old_pw) in renamed {
+            let mut g = j.lock_ok();
+            g.name = old_name;
+            g.password = old_pw;
+        }
+        for f in fences {
+            f.rollback();
+        }
+        json!({
+            "status": false,
+            "error": "the rename could not be written to the queue store - it was \
+                      undone. Check free space and write permission on the data \
+                      folder",
+        })
+    }
 }
 
 /// SAB's `mode=queue&name=change_complete_action&value=<action>`.

@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
     if std::fs::write(&path, data).is_err() {
         return;
     }
-    if let Ok(a) = nzbkit::zip::Archive::open(&[path.clone()]) {
+    if let Ok(a) = nzbkit::zip::Archive::open(std::slice::from_ref(&path)) {
         for e in a.entries() {
             // Bound the sink: a valid header may legitimately claim a
             // huge entry, and the fuzzer should not be measuring RAM.

@@ -92,6 +92,13 @@ name: publish-export
 on:
   push:
     branches: ['**']
+    # `tools/site-leak-scan.py` is on this list because the export's leak
+    # scan DRIVES it since 26 Aug 2026: publish-public.sh adjudicates a
+    # bare-name hit with its `--split` region model rather than taking a
+    # match in compressed bytes at face value, so a change there changes
+    # what the export refuses. packaging/tests/publish-export-completes.sh
+    # --paths derives that roster from publish-public.sh itself and
+    # reddens the author who adds an input without naming it here.
     paths:
       - 'packaging/publish-public.sh'
       - 'packaging/PUBLIC_MANIFEST'
@@ -99,8 +106,17 @@ on:
       - 'packaging/README.public.md'
       - 'packaging/public-hooks/**'
       - 'packaging/tests/publish-export-completes.sh'
+      - 'tools/site-leak-scan.py'
       - '.github/workflows/ci-private.yml'
       - '.github/workflows/leak-check.yml'
+      # The browser journey suite's workflow is an INPUT because
+      # publish-public.sh STRIPS it: the `journeys/` suite it runs is
+      # not on the manifest, so a published workflow would point at a
+      # directory the public tree does not have and fail on its first
+      # push. That makes an edit to this file an edit to what the
+      # export has to remove, which is what the --paths arm derives
+      # and why it reddened without this line.
+      - '.github/workflows/journeys.yml'
       - '.github/workflows/publish-export.yml'
   schedule:
     # 07:20 UTC daily. Off the hour on purpose - GitHub queues scheduled runs

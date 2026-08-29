@@ -242,6 +242,27 @@ impl ResumeState {
             .map(|f| f.len)
             .sum()
     }
+
+    /// The FULL size of the widest slot the journal has placements for -
+    /// in a volume set, the largest volume that will be replayed.
+    ///
+    /// TODO 309(a), 27 Aug 2026: this is the quantity the replay's held
+    /// bytes actually track, and `placement_bytes` above is not. Measured
+    /// on the F4 rig at a fixed ~2.1 GB replayed, four volume sizes, 48
+    /// resumed legs: the peak held is `0` to about SEVEN volumes and never
+    /// more, so at 32 MB volumes it topped out at 9 MB and at 256 MB
+    /// volumes at 1782 MB - a 200x spread in a quantity that
+    /// `placement_bytes` reports as identical. `plan.rs
+    /// resume_map_admits` is the one reader; its doc comment carries the
+    /// budget ladder that turned that into a rule.
+    ///
+    /// The slot's RECORDED size, not the bytes restored of it: a slot
+    /// half on disk still holds up to a whole volume once the rest of it
+    /// arrives from the wire, so the restored fraction is the wrong
+    /// bound and it is the wrong one in the unsafe direction.
+    pub fn largest_slot_bytes(&self) -> u64 {
+        self.slots.values().map(|r| r.size).max().unwrap_or(0)
+    }
 }
 
 /// What [`restore`] managed to rebuild from a placement journal.
@@ -280,6 +301,35 @@ pub struct Restored {
     /// change); its `D` articles are refused admission, so it lands here
     /// never and in `wire_outputs` always.
     pub plaintext_outputs: HashMap<String, ([u8; 16], [u8; 16])>,
+    /// Articles the journal recorded a placement for and that this
+    /// restore REFUSED, because the file their bytes were written into
+    /// no longer opens or is no longer long enough to hold the span
+    /// ([`restore_for`]'s admission check, pinned by `a source too short
+    /// for its span must drop its article`), with the bytes those
+    /// articles covered.
+    ///
+    /// TODO 309(b), 28 Aug 2026. Nothing in the engine reads this - a
+    /// dropped article simply refetches, which is the correct and safe
+    /// outcome and is why the drop is not an error. It is counted
+    /// because the SYMPTOM was indistinguishable from an ordinary
+    /// resume: the restore banner reports what it restored, so bytes
+    /// that went back on the wire because something outside nzbfast
+    /// moved, truncated or deleted a job's partial output showed up
+    /// only as a smaller number, with nothing anywhere naming the
+    /// cause. `get/plan.rs` is the one reader and it prints a line.
+    ///
+    /// Deliberately NOT merged with `dropped_crypto` below: the two
+    /// have different causes and different remedies, and a single
+    /// counter would make a passwordless resume of an encrypted set
+    /// report that something had touched the user's files.
+    pub dropped_source: (usize, u64),
+    /// Articles refused because their plaintext-once (`D`) fragments
+    /// could not be re-encrypted - no password, missing `E` facts, or an
+    /// output whose domain the records contradict. Same TODO 309(b)
+    /// disclosure, separate cause: these bytes refetch because the
+    /// resume cannot reconstruct what the wire sent, not because
+    /// anything on disk moved.
+    pub dropped_crypto: usize,
 }
 
 pub struct SlotSeed {
@@ -306,6 +356,47 @@ pub struct SlotSeed {
 }
 
 impl Journal {
+    /// Parse an existing journal WITHOUT opening it for append.
+    ///
+    /// [`Journal::open`] is the only other reader of this file and it is
+    /// a WRITE: it creates the directory, opens the file for append, and
+    /// TRUNCATES it outright when the fingerprint does not match. So
+    /// nothing that merely wants to LOOK at a journal may call it - and
+    /// the caller this exists for (TODO 309(d): the demotion watchdog
+    /// asking what a requeue will cost) is looking at the journal a
+    /// RUNNING job still holds open.
+    ///
+    /// Three things it deliberately does not do, each stated rather than
+    /// left to be found:
+    ///
+    /// * **It does not check the fingerprint against an NZB.** A caller
+    ///   holding the NZB bytes calls `open`; this one does not have them,
+    ///   and the journal it is asking about is the one the job in front
+    ///   of it is writing, which matches by construction. What it does
+    ///   require is a v1 header, so a file that is not a journal at all
+    ///   answers `None` rather than parsing as an empty one.
+    /// * **It sees only what has been FLUSHED.** [`Journal`] batches its
+    ///   records, so a peek taken mid-run undercounts by up to one
+    ///   pending batch. Bounded, and in the direction that under-reports
+    ///   a cost rather than inventing one.
+    /// * **It costs what a resume costs.** This is [`parse_lines`], the
+    ///   same parser `open` runs, so the transient allocation is the one
+    ///   the very next run of this job makes anyway. A second, cheaper
+    ///   parser that summed fragment lengths without building the state
+    ///   was considered and refused: it would be a copy-paste sibling of
+    ///   the record grammar, free to drift, for a saving nobody measured.
+    pub fn peek(dir: &Path) -> Option<ResumeState> {
+        let f = File::open(dir.join(".nzbfast.journal")).ok()?;
+        let mut lines = utf8_lines(std::io::BufReader::new(f));
+        lines
+            .next()?
+            .starts_with("nzbfast-journal v1 ")
+            .then_some(())?;
+        let mut resume = ResumeState::default();
+        parse_lines(lines, &mut resume);
+        Some(resume)
+    }
+
     /// Open (or create) the journal for an NZB. Returns the journal and
     /// the resume state parsed from it (empty on a fresh run or when the
     /// existing journal belongs to a different NZB).
@@ -901,6 +992,55 @@ pub use self::restore::{
 mod tests {
     use super::*;
 
+    /// [`Journal::peek`] is what the demotion watchdog reads (TODO
+    /// 309(d)), and the whole of its value is that it agrees with
+    /// [`Journal::open`] without WRITING - `open` creates the file,
+    /// opens it for append and truncates it on a fingerprint mismatch,
+    /// none of which may happen to a journal a running job still holds.
+    ///
+    /// So the three claims: it agrees on `placement_bytes`, it leaves
+    /// the file byte-identical, and it refuses a file that is not a
+    /// journal rather than parsing it as an empty one - which is what
+    /// stops a stray file in an out_dir reading as "nothing restored".
+    #[test]
+    fn peek_agrees_with_open_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-journal-peek-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(Journal::peek(&dir).is_none(), "no journal, no answer");
+
+        let (j, _) = Journal::open(&dir, b"<nzb/>").unwrap();
+        for i in 0..3u64 {
+            j.record_placed(
+                0,
+                &format!("<a{i}@x>"),
+                None,
+                "vol.part01.rar",
+                3_000,
+                &[Frag::identity("vol.part01.rar", i * 1_000, 1_000)],
+            );
+        }
+        j.flush();
+        let path = dir.join(".nzbfast.journal");
+        let before = std::fs::read(&path).unwrap();
+
+        let peeked = Journal::peek(&dir).expect("a journal we just wrote");
+        assert_eq!(peeked.placement_bytes(), 3_000);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a peek must not touch the file the running job is appending to"
+        );
+        // And it agrees with the reader the rerun itself will use.
+        drop(j);
+        let (_j2, resume) = Journal::open(&dir, b"<nzb/>").unwrap();
+        assert_eq!(resume.placement_bytes(), peeked.placement_bytes());
+
+        // Not a journal: refused, not read as empty.
+        std::fs::write(&path, b"hello\nR 0 <a@x>\n").unwrap();
+        assert!(Journal::peek(&dir).is_none(), "no v1 header, no answer");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn journal_roundtrip_and_fingerprint() {
         let dir = std::env::temp_dir().join(format!("nzbfast-journal-{}", std::process::id()));
@@ -929,6 +1069,54 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// TODO 309(a): `largest_slot_bytes` reports the widest slot's FULL
+    /// recorded size, and `placement_bytes` the sum of the fragments -
+    /// two numbers a resumed run needs separately, because the replay's
+    /// held bytes track the first and the admission gate used to be
+    /// written against only the second.
+    #[test]
+    fn the_widest_slot_is_its_recorded_size_and_not_its_restored_bytes() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-journal-wide-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nzb = b"<nzb>wide</nzb>";
+
+        let (j, resume) = Journal::open(&dir, nzb).unwrap();
+        assert_eq!(resume.placement_bytes(), 0);
+        assert_eq!(resume.largest_slot_bytes(), 0, "no placements, no slots");
+
+        // Slot 0 is a big volume with a SMALL restored fragment; slot 1 a
+        // small volume that happens to be fully restored. The sum of the
+        // fragments makes slot 1 look like the larger of the two, and it
+        // is the one that can hold less.
+        j.record_placed(
+            0,
+            "<a@x>",
+            None,
+            "big.part01.rar",
+            256_000_000,
+            &[Frag::identity("big.part01.rar", 0, 1_000)],
+        );
+        j.record_placed(
+            1,
+            "<b@x>",
+            None,
+            "small.part01.rar",
+            8_000_000,
+            &[Frag::identity("small.part01.rar", 0, 8_000)],
+        );
+        drop(j);
+
+        let (_j, resume) = Journal::open(&dir, nzb).unwrap();
+        assert_eq!(resume.placement_bytes(), 9_000);
+        assert_eq!(
+            resume.largest_slot_bytes(),
+            256_000_000,
+            "the widest slot is the 256 MB volume, however little of it is on disk"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// One record torn mid-multibyte (ENOSPC, power loss) must not hide
     /// the valid records appended after it. `lines()` +
     /// `map_while(Result::ok)` stopped permanently at the first
@@ -936,7 +1124,12 @@ mod tests {
     /// every retry, forever.
     #[test]
     fn a_torn_journal_line_does_not_hide_the_records_after_it() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-torn-{}", std::process::id()));
+        // NOT "-torn-": `malformed_and_torn_lines_are_ignored` already
+        // owns that directory, and two tests sharing one journal dir in
+        // one process clobber each other's records (found 27 Aug 2026
+        // as a parallel-run flake, len 3 vs 2).
+        let dir =
+            std::env::temp_dir().join(format!("nzbfast-journal-tornafter-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         let nzb = b"<nzb>torn</nzb>";
@@ -1168,6 +1361,27 @@ mod tests {
             "an identity span stays in its own file at its own offset"
         );
 
+        // 27 Aug 2026 sweep F1: a §293 donation lands AFTER the
+        // map-shape restore and forces the run onto the adopt shape,
+        // whose seeds assert their spans are in the volume files - so
+        // `get()` re-runs the restore MATERIALISING on the SAME state
+        // the no-materialise pass already walked. Pin what that re-run
+        // relies on: same admissions, and the volume bytes really land.
+        let redone = restore_for(&dir, &resume, None, true);
+        assert_eq!(
+            redone.ids, restored.ids,
+            "the re-run admits the same articles"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("vol.part1.rar")).unwrap()[5_000..15_000],
+            inner[10_000..20_000],
+            "the re-run put the span's bytes into the volume"
+        );
+        assert!(
+            redone.seeds.iter().all(|s| s.sources.is_empty()),
+            "re-run seeds are volume-resident, exactly what the adopt path asserts"
+        );
+
         // And the twin: with materialisation ON, nothing changes from
         // what every earlier caller has always got.
         let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
@@ -1181,6 +1395,83 @@ mod tests {
         assert!(
             mat.seeds.iter().all(|s| s.sources.is_empty()),
             "materialised seeds carry no source list - every span is in the volume"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TODO 309(b), 28 Aug 2026: a refused article is COUNTED, so the
+    /// resume can say the bytes went back on the wire.
+    ///
+    /// The refusal itself is right and is pinned above; what was wrong
+    /// is that it was invisible. `get/plan.rs` reports what it
+    /// restored, so an out-dir something outside nzbfast had moved,
+    /// truncated or deleted resumed looking exactly like an ordinary
+    /// resume with less on disk.
+    ///
+    /// Both directions, and the zero side is the one that matters: a
+    /// counter that fires on a clean resume would put a "your files
+    /// moved" warning in front of every user who ever pauses, which is
+    /// worse than the silence it replaces.
+    #[test]
+    fn a_refused_article_is_counted_so_the_resume_can_say_the_bytes_refetch() {
+        let dir = qdir("dropcount");
+        let plain: Vec<u8> = (0..30_000u32).map(|i| (i % 13) as u8).collect();
+        std::fs::write(dir.join("plain.bin"), &plain).unwrap();
+        let nzb = b"<nzb>dropcount</nzb>";
+
+        let (j, _) = Journal::open(&dir, nzb).unwrap();
+        // Admitted: an identity span wholly inside the file.
+        j.record_placed(
+            0,
+            "<ok@x>",
+            Some(("plain.bin".to_string(), 30_000)),
+            "ignored",
+            0,
+            &[frag("plain.bin", 2_000, 2_000, 4_000)],
+        );
+        drop(j);
+        let (_j, resume) = Journal::open(&dir, nzb).unwrap();
+        let clean = restore_for(&dir, &resume, None, false);
+        assert!(clean.ids.contains("<ok@x>"));
+        assert_eq!(
+            clean.dropped_source,
+            (0, 0),
+            "an ordinary resume must report nothing dropped, or every pause warns"
+        );
+        assert_eq!(clean.dropped_crypto, 0);
+
+        // Now the shape the disclosure exists for: a second article
+        // whose bytes are past the end of the file they were written
+        // into. Two fragments, one of them fine, because an article is
+        // admitted only whole - the honest figure is BOTH fragments,
+        // since the whole article refetches.
+        let (j, _) = Journal::open(&dir, nzb).unwrap();
+        j.record_placed(
+            1,
+            "<gone@x>",
+            None,
+            "vol.part1.rar",
+            40_000,
+            &[
+                frag("plain.bin", 1_000, 0, 500),
+                frag("plain.bin", 29_000, 500, 8_000),
+            ],
+        );
+        drop(j);
+        let (_j, resume) = Journal::open(&dir, nzb).unwrap();
+        let dropped = restore_for(&dir, &resume, None, false);
+        assert!(
+            dropped.ids.contains("<ok@x>") && !dropped.ids.contains("<gone@x>"),
+            "the readable article still restores - one bad article is not a failed resume"
+        );
+        assert_eq!(
+            dropped.dropped_source,
+            (1, 8_500),
+            "the refused article is counted whole, both fragments"
+        );
+        assert_eq!(
+            dropped.dropped_crypto, 0,
+            "a source that moved is not a password problem - the two causes stay apart"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

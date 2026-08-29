@@ -10,6 +10,8 @@ use std::path::Path;
 // ---------------------------------------------------------------------------
 
 pub(crate) fn bench_cpu(mb: usize) {
+    // cpu-workers-gate: bench-cpu measures this box's per-stage compute
+    // ceiling, the same reason sysbench asks directly.
     let cores = std::thread::available_parallelism().map_or(8, |n| n.get());
     let bytes = mb * 1024 * 1024;
     let payload: Vec<u8> = (0..bytes)
@@ -1033,6 +1035,329 @@ pub(crate) async fn run_fetch(
 /// with stream=1 - Force priority + player-handoff links - then hand the
 /// .m3u to the OS default player. The download side is the daemon's; this
 /// is just the one-command front door for "watch it now".
+/// The multipart boundary the `addfile` submit uses. Named once: the
+/// body builder and the `Content-Type` header have to agree, and they
+/// are no longer in the same function.
+const STREAM_BOUNDARY: &str = "----nzbfaststream";
+
+/// Percent-encode everything that is not an unreserved character.
+fn urlenc(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// A v6 literal carrying an INTERFACE SCOPE, in any spelling this
+/// command can be handed one: `fe80::1%en0`, the RFC 6874
+/// `fe80::1%25en0`, bracketed or bare, with or without a `:port`.
+///
+/// It exists because A URL AUTHORITY CANNOT CARRY ONE, and that is a
+/// property of the WHATWG URL standard rather than of `ureq` or of this
+/// code: `url` 2.5.8's IPv6 parser has no `%` branch at all, so it
+/// refuses `%en0`, the percent-encoded `%25en0` and even a numeric
+/// `%26` alike. Every browser address bar refuses them for the same
+/// reason, which is why the dashboard could never take the spelling
+/// either. Measured in two independent implementations of that standard
+/// on 27 Aug 2026 (`research/STREAM-FE80-SCOPE-ID-2026-08-27.md`).
+///
+/// So a scoped literal is REFUSED HERE, at the spelling, rather than
+/// built into a base that dies later at URL parse - which is what it did
+/// until 27 Aug 2026, under the headline "no daemon at ... start one
+/// with `nzbfast serve`", sending the user to look for a daemon that was
+/// running fine. The bare spelling reached the OTHER arm below and was
+/// told to bracket itself, which produces exactly that base: advice that
+/// dead-ends.
+///
+/// WHAT IS LOST IS SMALLER THAN IT LOOKS, and the refusal names the
+/// replacement, because one that does not is just a later dead end. A
+/// NAME carries the scope by itself: getaddrinfo fills in
+/// `sin6_scope_id` and returns one answer per (address, interface) pair,
+/// so `--host nas.local` reaches a daemon listening on nothing but a
+/// scoped link-local address - measured end to end the same day, against
+/// a listener bound to no other address. Reaching a scoped literal
+/// additionally needs a daemon started off its default `--bind 0.0.0.0`,
+/// which is IPv4-only. The pre-URL submit (`d55d0c879^`) did reach the
+/// BARE spelling, through `TcpStream::connect((host, port))`; the
+/// BRACKETED one has never worked in any release, because std does not
+/// strip brackets before handing the host to getaddrinfo.
+fn has_v6_scope_id(h: &str) -> bool {
+    // Bracketed or not: the zone sits INSIDE the brackets, so the
+    // address is whatever precedes the literal's first '%'.
+    let inner = match h.strip_prefix('[') {
+        Some(r) => r.split(']').next().unwrap_or(r),
+        None => h,
+    };
+    // Only a real v6 literal. A '%' anywhere else - a percent-encoded
+    // byte in a host name, say - is somebody else's mistake and earns
+    // somebody else's message.
+    inner
+        .split_once('%')
+        .is_some_and(|(addr, _)| addr.parse::<std::net::Ipv6Addr>().is_ok())
+}
+
+/// The refusal [`has_v6_scope_id`] earns: the cause, and the spellings
+/// that do work. Written once because both arms of [`daemon_base`] reach
+/// it, and a message that drifts between them is one nobody can grep
+/// for.
+///
+/// The example zone is FIXED rather than echoed back from what the user
+/// typed. Echoing it re-derives the percent-encoded form by prepending
+/// `25`, which is right for `%en0` and gibberish for somebody who has
+/// already tried `%25en0`: they were told not to type `%2525en0`. What
+/// they typed is quoted at the head of the message anyway, so nothing is
+/// lost by naming the RULE instead of their own string.
+fn scoped_v6_refusal(host: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "--host {host:?}: a URL cannot carry an interface scope, so an IPv6 address with a \
+         `%<interface>` suffix has no spelling this client can use - neither the bare `%en0` \
+         form nor the percent-encoded `%25en0` one. Name the daemon instead \
+         (--host nas.local): a name carries the scope for you. Or give it an address that \
+         needs none - a ULA or global IPv6 address, or its IPv4 address."
+    )
+}
+
+/// The daemon base URL that `--host` and `--port` name, with no trailing
+/// slash.
+///
+/// `--host` takes either shape. A BARE host is what this command has
+/// always taken and keeps its meaning exactly - plaintext, on `--port`.
+/// A full `http(s)://` base is the new one, and it is the only way to
+/// reach a daemon started with `--tls-cert`/`--tls-key`: that serves ONE
+/// listener and ONE scheme, so a plaintext-only client cannot address it
+/// by any spelling of a host name.
+///
+/// A port INSIDE the URL wins over `--port`. A URL that names none takes
+/// `--port`, and deliberately not the scheme default: nzbfast's daemon
+/// answers on 6789 whichever scheme it serves, so 443 would be the wrong
+/// guess for every real install.
+///
+/// BRACKETS FIRST for IPv6, the rule `notify::smtp::send_email` and
+/// `Daemon::predb_irc_config` already write down: a literal v6 address is
+/// full of colons, so `rsplit_once(':')` reads the last one as the port
+/// separator. A bare `--host ::1` is bracketed on the way in, because the
+/// old code handed it to `TcpStream::connect` as a tuple and a URL cannot
+/// take it unbracketed.
+///
+/// A PATH is refused rather than ignored. Nothing here serves the API
+/// under a prefix, and silently dropping one would send the request
+/// somewhere the user did not name.
+fn daemon_base(host: &str, port: u16) -> Result<String> {
+    let h = host.trim();
+    if h.is_empty() {
+        anyhow::bail!("--host is empty");
+    }
+    // The SCHEME is split off before any trailing slash is trimmed.
+    // Trimming first turns a bare `https://` into `https:`, which then
+    // parses as a HOST called `https:` and dials `http://https::6789` -
+    // silently, and at a plaintext port.
+    let Some((scheme, rest)) = h.split_once("://") else {
+        // Bare host: unchanged behaviour, plus the bracketing a URL needs.
+        let h = h.trim_end_matches('/');
+        if h.is_empty() || h.contains(['/', '?', '#']) {
+            anyhow::bail!("--host {host:?}: give a host name, or a full http(s):// base");
+        }
+        // A scope id has no URL spelling at all, so it is refused at the
+        // spelling rather than built into a base that dies at URL parse
+        // under a headline blaming the daemon.
+        if has_v6_scope_id(h) {
+            return Err(scoped_v6_refusal(host));
+        }
+        // A bracketed literal may carry its own port, which wins over
+        // `--port` the same way a port inside a full base does; one
+        // without a port takes `--port`. Appending `:6789` after
+        // `[::1]:8080` would be the quiet reinterpretation this
+        // function's contract refuses.
+        if let Some(inner) = h.strip_prefix('[') {
+            let Some(end) = inner.find(']') else {
+                anyhow::bail!("--host {host:?}: unclosed '[' in an IPv6 literal");
+            };
+            let after = &inner[end + 1..];
+            if after.is_empty() {
+                return Ok(format!("http://{h}:{port}"));
+            }
+            if after
+                .strip_prefix(':')
+                .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return Ok(format!("http://{h}"));
+            }
+            anyhow::bail!("--host {host:?}: what follows the ']' is not a :port");
+        }
+        // An unbracketed v6 literal is bracketed on the way in - the old
+        // code handed it to TcpStream::connect as a tuple, and a URL
+        // cannot take it unbracketed.
+        if h.parse::<std::net::Ipv6Addr>().is_ok() {
+            return Ok(format!("http://[{h}]:{port}"));
+        }
+        // The universal `host:port` spelling: its port wins over
+        // `--port`. Not a v6 literal (checked above), so a second colon
+        // means neither shape and is REFUSED rather than bracketed as
+        // if it were one - the mangled URL would send the user chasing
+        // a daemon that is running fine.
+        return Ok(match h.rsplit_once(':') {
+            Some((hh, p))
+                if !hh.is_empty()
+                    && !hh.contains(':')
+                    && !p.is_empty()
+                    && p.bytes().all(|b| b.is_ascii_digit()) =>
+            {
+                format!("http://{hh}:{p}")
+            }
+            Some(_) => anyhow::bail!(
+                "--host {host:?}: not an IPv6 literal and not host:port - bracket a v6 \
+                 address ([{h}]), or name the port with --port"
+            ),
+            None => format!("http://{h}:{port}"),
+        });
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        anyhow::bail!("--host {h}: only http:// and https:// bases are understood");
+    }
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() {
+        anyhow::bail!("--host {h}: no host after the scheme");
+    }
+    if rest.contains(['/', '?', '#']) {
+        anyhow::bail!(
+            "--host {h}: give the daemon's base only (scheme, host and port) - \
+             the API is served at the root, so a path here would not be used"
+        );
+    }
+    // Same refusal in the scheme arm: `http://[fe80::1%en0]:6789` is the
+    // spelling the bare arm's old advice produced, and it is the one the
+    // URL parser refuses.
+    if has_v6_scope_id(rest) {
+        return Err(scoped_v6_refusal(host));
+    }
+    // An unbracketed v6 literal in a full base: bracket it the way the
+    // bare-host path does, rather than reading its last group as a
+    // port (or appending one), both of which yield a URL nothing can
+    // parse.
+    if rest.parse::<std::net::Ipv6Addr>().is_ok() {
+        return Ok(format!("{scheme}://[{rest}]:{port}"));
+    }
+    let has_port = if let Some(inner) = rest.strip_prefix('[') {
+        inner.split_once("]:").is_some()
+    } else {
+        rest.rsplit_once(':')
+            .is_some_and(|(_, p)| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    Ok(if has_port {
+        format!("{scheme}://{rest}")
+    } else {
+        format!("{scheme}://{rest}:{port}")
+    })
+}
+
+/// A file name that can sit inside a quoted MIME header value without
+/// closing it or starting a header line of its own. A name is chosen by
+/// whoever wrote the file, which is not always whoever runs this.
+///
+/// Separate from [`stream_request`] so it can be tested on names that
+/// CANNOT EXIST ON DISK. The first version of this test built its
+/// hostile name by creating a real file, which is fine on macOS and
+/// Linux and is refused outright by Windows - `"`, `\` and control
+/// characters are all illegal in a Win32 path - so it passed every
+/// local gate on this fleet and took `windows-unit` red on main. The
+/// rule is the CLAUDE.md SIXTEENTH gate's: a test fixture that only
+/// some platforms can build is a test only some platforms run.
+fn mime_filename(name: &str) -> String {
+    name.chars()
+        .filter(|c| *c != '"' && *c != '\\' && !c.is_control())
+        .collect()
+}
+
+/// The request `nzbfast stream` submits: the full URL, and the body
+/// (empty for the GET shape).
+///
+/// **NO CREDENTIAL IS IN EITHER.** This used to splice `&apikey=<key>`
+/// into the request target, which puts the key in every access log,
+/// every proxy log and - via `--host`, which is any machine - on the
+/// wire to a remote box. The key rides `X-Api-Key` now, the header the
+/// daemon has merged into its param map since v1.0.14 and the one TODO
+/// 61d moved the dashboard's own navigations onto. TODO 290 F-20.
+///
+/// Split out from the send - the shape [`player_argv`] already uses for
+/// the player spawn - so a test can read the exact target and assert the
+/// thing that is invisible at the call site.
+fn stream_request(base: &str, nzb: &str) -> Result<(String, Vec<u8>)> {
+    let lower = nzb.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Ok((
+            format!(
+                "{base}/api?mode=addurl&output=json&stream=1&name={}",
+                urlenc(nzb)
+            ),
+            Vec::new(),
+        ));
+    }
+    let bytes = std::fs::read(nzb).with_context(|| format!("reading {nzb}"))?;
+    let fname = mime_filename(
+        &std::path::Path::new(nzb)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy(),
+    );
+    let mut b = Vec::new();
+    b.extend_from_slice(
+        format!(
+            "--{STREAM_BOUNDARY}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"{fname}\"\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    b.extend_from_slice(&bytes);
+    b.extend_from_slice(format!("\r\n--{STREAM_BOUNDARY}--\r\n").as_bytes());
+    Ok((format!("{base}/api?mode=addfile&output=json&stream=1"), b))
+}
+
+/// The warning a plaintext submit to a NON-loopback daemon earns, if it
+/// earns one.
+///
+/// It is a warning and NOT a refusal, and that is a decision rather than
+/// an omission. `nzbfast serve` binds `0.0.0.0` and speaks plain HTTP by
+/// DEFAULT - a NAS reached from a laptop is the topology the product
+/// documents - so a client that refused what the server's own default
+/// serves would be this one subcommand disagreeing with `serve`. What is
+/// worth saying is what the user cannot see: the key and the NZB cross
+/// the network readable, and there is now a spelling that fixes it.
+fn plaintext_remote_warning(base: &str) -> Option<String> {
+    let rest = base.strip_prefix("http://")?;
+    let hostname = match rest.strip_prefix('[') {
+        Some(inner) => inner.split(']').next().unwrap_or("").to_string(),
+        None => rest.rsplit_once(':').map_or(rest, |(h, _)| h).to_string(),
+    };
+    let local = hostname.eq_ignore_ascii_case("localhost")
+        || hostname.eq_ignore_ascii_case("localhost.localdomain")
+        || hostname
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    (!local).then(|| {
+        // A v6 literal is printed BRACKETED, or the remedy dead-ends:
+        // `daemon_base` reads an unbracketed literal's last group as a
+        // port, and only the bracketed spelling parses.
+        let spelling = if hostname.contains(':') {
+            format!("[{hostname}]")
+        } else {
+            hostname.clone()
+        };
+        format!(
+            "warning: {hostname} is not this machine and the request is plain HTTP, so the API \
+             key and the NZB cross the network readable. Serve the daemon with --tls-cert/--tls-key \
+             and pass --host https://{spelling} to encrypt it."
+        )
+    })
+}
+
+/// `nzbfast stream`: submit an NZB (file or URL) to the running daemon
+/// with stream=1 - Force priority + player-handoff links - then hand the
+/// .m3u to the OS default player. The download side is the daemon's; this
+/// is just the one-command front door for "watch it now".
 pub(crate) fn stream_cmd(
     nzb: &str,
     host: &str,
@@ -1040,71 +1365,66 @@ pub(crate) fn stream_cmd(
     apikey: Option<&str>,
     no_open: bool,
 ) -> Result<()> {
-    use std::io::{Read as _, Write as _};
-    fn urlenc(s: &str) -> String {
-        s.bytes()
-            .map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    (b as char).to_string()
-                }
-                _ => format!("%{b:02X}"),
-            })
-            .collect()
+    let base = daemon_base(host, port)?;
+    let (url, body) = stream_request(&base, nzb)?;
+    if let Some(w) = plaintext_remote_warning(&base) {
+        eprintln!("{w}");
     }
-    let key_q = apikey.map(|k| format!("&apikey={k}")).unwrap_or_default();
-    const BOUNDARY: &str = "----nzbfaststream";
-    let (path, body): (String, Vec<u8>) = if nzb.starts_with("http://")
-        || nzb.starts_with("https://")
-    {
-        (
-            format!(
-                "/api?mode=addurl&output=json&stream=1{key_q}&name={}",
-                urlenc(nzb)
-            ),
-            Vec::new(),
+    // The crate's shared client, not a hand-rolled socket: that is what
+    // makes an `https://` base reachable at all, and what puts this on
+    // the same trust anchors (`NZBFAST_EXTRA_CA`) as every other TLS
+    // path here. Generous timeout - an `addurl` submit waits for the
+    // daemon to fetch the NZB from wherever it lives.
+    let agent = crate::netfetch::daemon_api_agent(120);
+    let mut req = agent.request(if body.is_empty() { "GET" } else { "POST" }, &url);
+    if let Some(k) = apikey {
+        req = req.set("X-Api-Key", k);
+    }
+    let sent = if body.is_empty() {
+        req.call()
+    } else {
+        req.set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={STREAM_BOUNDARY}"),
         )
-    } else {
-        let bytes = std::fs::read(nzb).with_context(|| format!("reading {nzb}"))?;
-        let fname = std::path::Path::new(nzb)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        let mut b = Vec::new();
-        b.extend_from_slice(
-                format!(
-                    "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"name\"; filename=\"{fname}\"\r\n\r\n"
-                )
-                .as_bytes(),
-            );
-        b.extend_from_slice(&bytes);
-        b.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
-        (format!("/api?mode=addfile&output=json&stream=1{key_q}"), b)
+        .send_bytes(&body)
     };
-    let mut s = std::net::TcpStream::connect((host, port))
-        .with_context(|| format!("no daemon at {host}:{port} - start one with `nzbfast serve`"))?;
-    if body.is_empty() {
-        write!(
-            s,
-            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
-        )?;
-    } else {
-        write!(
-            s,
-            "POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Type: multipart/form-data; boundary={BOUNDARY}\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        )?;
-        s.write_all(&body)?;
+    let (code, text) = match sent {
+        Ok(r) => (r.status(), r.into_string().unwrap_or_default()),
+        Err(ureq::Error::Status(c, r)) => (c, r.into_string().unwrap_or_default()),
+        Err(ureq::Error::Transport(t)) => {
+            let brief = crate::notify::transport_brief(&t);
+            // Our OWN guard refusing the address is not "nothing is
+            // listening", and telling that user to start a daemon sends
+            // them to look in the wrong place.
+            if brief.contains("refusing to fetch an internal address") {
+                anyhow::bail!("--host {base}: {brief}");
+            }
+            anyhow::bail!(
+                "no daemon at {base} - start one with `nzbfast serve` ({brief}){}",
+                if base.starts_with("https://") {
+                    "\n  self-signed certificate? point this client at it with \
+                     NZBFAST_EXTRA_CA=<cert.pem>"
+                } else {
+                    ""
+                }
+            );
+        }
+    };
+    if (300..400).contains(&code) {
+        anyhow::bail!(
+            "{base} answered {code} (a redirect). This client does not follow one, because the \
+             API key rides a header and a redirect would carry it to whatever host answered. \
+             Point --host at the daemon itself."
+        );
     }
-    let mut raw = String::new();
-    s.read_to_string(&mut raw)?;
-    let json_body = raw.split("\r\n\r\n").nth(1).unwrap_or("").trim();
-    let v: serde_json::Value = serde_json::from_str(json_body)
-        .with_context(|| format!("bad daemon response: {json_body}"))?;
+    let snippet: String = text.trim().chars().take(200).collect();
+    let v: serde_json::Value = serde_json::from_str(text.trim())
+        .with_context(|| format!("bad daemon response ({code}): {snippet}"))?;
     if v["status"].as_bool() != Some(true) {
         anyhow::bail!(
             "daemon refused: {}",
-            v["error"].as_str().unwrap_or(json_body)
+            v["error"].as_str().unwrap_or(&snippet)
         );
     }
     println!(
@@ -1387,6 +1707,344 @@ mod player_handoff {
             Some("apikey")
         );
         assert_eq!(credential_param("http://h/m3u/n#apikey=k"), Some("apikey"));
+    }
+}
+
+#[cfg(test)]
+mod stream_submit {
+    use super::*;
+
+    /// TODO 290 F-20, the half that leaked. The key used to be spliced
+    /// into the request target as `&apikey=<key>`, which puts it in the
+    /// daemon's access log, in any reverse proxy in front of it, and -
+    /// because `--host` is any machine - on the wire to a remote box.
+    /// It rides `X-Api-Key` now, and NO target this command builds may
+    /// name a credential in any spelling, in either submit shape.
+    ///
+    /// Asserted against the real target rather than against the absence
+    /// of a `format!` argument: the leak was one interpolation away from
+    /// looking correct, which is why `credential_param` exists at all.
+    #[test]
+    fn no_submit_target_ever_carries_a_credential() {
+        let base = "http://nas.local:6789";
+        let (url, body) = stream_request(base, "https://idx.example/get/abc.nzb").unwrap();
+        assert!(body.is_empty(), "an http(s) nzb is the GET shape");
+        assert_eq!(credential_param(&url), None, "{url}");
+        let f = tmp_nzb("nocred", b"<nzb/>");
+        let (url, body) = stream_request(base, f.to_str().unwrap()).unwrap();
+        assert!(!body.is_empty(), "a file nzb is the POST shape");
+        assert_eq!(credential_param(&url), None, "{url}");
+        // …and not merely absent from the query: nothing that looks like
+        // a key is anywhere in either target.
+        for u in [
+            stream_request(base, "https://idx.example/x.nzb").unwrap().0,
+            stream_request(base, f.to_str().unwrap()).unwrap().0,
+        ] {
+            let low = u.to_ascii_lowercase();
+            for name in ["apikey", "api_key", "nzbkey"] {
+                assert!(!low.contains(name), "{u} names {name}");
+            }
+        }
+    }
+
+    /// The submit targets themselves, so a reshuffle of the query has to
+    /// be deliberate. `mode`, `output` and `stream=1` are what the daemon
+    /// dispatches on; the URL shape percent-encodes the whole link, so an
+    /// `&` inside it cannot start a parameter of our own.
+    #[test]
+    fn the_submit_targets_are_the_two_api_shapes() {
+        let (url, _) = stream_request(
+            "https://nas.local:6789",
+            "https://idx.example/g?id=1&apikey=SEKRIT",
+        )
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://nas.local:6789/api?mode=addurl&output=json&stream=1\
+             &name=https%3A%2F%2Fidx.example%2Fg%3Fid%3D1%26apikey%3DSEKRIT"
+        );
+        // The indexer's own key is inside the encoded NAME, which is a
+        // value and not a parameter of ours - the daemon needs the link
+        // whole to fetch it.
+        assert_eq!(credential_param(&url), None);
+        let f = tmp_nzb("shape", b"<nzb/>");
+        let (url, _) = stream_request("http://127.0.0.1:6789", f.to_str().unwrap()).unwrap();
+        assert_eq!(
+            url,
+            "http://127.0.0.1:6789/api?mode=addfile&output=json&stream=1"
+        );
+    }
+
+    /// A filename reaches a MIME header, so it must not be able to close
+    /// the quoted string or open a second header line. Whoever wrote the
+    /// file is not always whoever runs this.
+    ///
+    /// Driven through `mime_filename` on a name that CANNOT EXIST ON
+    /// DISK, rather than by creating a file called it. The first version
+    /// of this test did create one, which macOS and Linux allow and
+    /// Windows refuses outright - `"`, `\` and control characters are
+    /// illegal in a Win32 path - so it passed every gate on this fleet
+    /// and took `windows-unit` red on main. A fixture only some
+    /// platforms can build is a test only some platforms run.
+    #[test]
+    fn a_hostile_filename_cannot_forge_a_multipart_header() {
+        let clean = mime_filename("evil\"\r\nX-Injected: 1\\x");
+        // The injected text survives as inert characters - what must not
+        // survive is its ability to end the quoted value or to start a
+        // line.
+        assert!(!clean.contains('"'), "{clean:?}");
+        assert!(!clean.contains('\\'), "{clean:?}");
+        assert!(!clean.chars().any(char::is_control), "{clean:?}");
+        assert_eq!(clean, "evilX-Injected: 1x");
+        // A name that needs no cleaning is passed through untouched.
+        assert_eq!(
+            mime_filename("Some.Show.S01E01.nzb"),
+            "Some.Show.S01E01.nzb"
+        );
+        // And the header the real body builds from such a name is one
+        // line carrying exactly its two quoted values.
+        let f = tmp_nzb("shape-guard.nzb", b"PAYLOAD");
+        let (_, body) = stream_request("http://h:6789", f.to_str().unwrap()).unwrap();
+        let whole = String::from_utf8_lossy(&body).to_string();
+        let head = whole.split("\r\n\r\n").next().unwrap().to_string();
+        assert_eq!(head.lines().count(), 2, "one header line only: {head:?}");
+        assert_eq!(
+            head.matches('"').count(),
+            4,
+            "two quoted values only: {head}"
+        );
+        assert!(head.starts_with(&format!("--{STREAM_BOUNDARY}\r\nContent-Disposition:")));
+        assert!(
+            body.ends_with(format!("\r\n--{STREAM_BOUNDARY}--\r\n").as_bytes()),
+            "the body must still close the multipart"
+        );
+    }
+
+    /// TODO 290 F-20, the half that made a TLS daemon unreachable. A
+    /// bare `--host` keeps its old plaintext meaning exactly; a full
+    /// base is the new spelling, and it is the only way to address a
+    /// `--tls-cert` daemon, which serves one listener and one scheme.
+    #[test]
+    fn a_host_is_either_a_bare_name_or_a_full_base() {
+        // Unchanged: the shape every existing caller passes.
+        assert_eq!(
+            daemon_base("127.0.0.1", 6789).unwrap(),
+            "http://127.0.0.1:6789"
+        );
+        assert_eq!(
+            daemon_base("nas.local", 8080).unwrap(),
+            "http://nas.local:8080"
+        );
+        // New: a scheme is honoured, and https is what a --tls-cert
+        // daemon answers.
+        assert_eq!(
+            daemon_base("https://nas.local", 6789).unwrap(),
+            "https://nas.local:6789"
+        );
+        // A port INSIDE the URL wins over --port…
+        assert_eq!(
+            daemon_base("https://nas.local:443", 6789).unwrap(),
+            "https://nas.local:443"
+        );
+        // …and a URL without one takes --port, NOT the scheme default:
+        // the daemon answers on 6789 whichever scheme it serves.
+        assert_eq!(
+            daemon_base("https://nas.local", 9999).unwrap(),
+            "https://nas.local:9999"
+        );
+        // Scheme case is not the user's problem, and a trailing slash is
+        // what a copied browser address bar hands you.
+        assert_eq!(
+            daemon_base("HTTPS://nas.local:6789/", 1).unwrap(),
+            "https://nas.local:6789"
+        );
+    }
+
+    /// Brackets first, the rule `notify::smtp::send_email` already
+    /// writes down: a literal v6 address is full of colons, so the last
+    /// one is not a port separator. The bare form has to be bracketed on
+    /// the way in too - the old code handed it to `TcpStream::connect`
+    /// as a tuple, and a URL cannot take it unbracketed.
+    #[test]
+    fn an_ipv6_literal_is_bracketed_and_its_colons_are_not_a_port() {
+        assert_eq!(daemon_base("::1", 6789).unwrap(), "http://[::1]:6789");
+        assert_eq!(
+            daemon_base("http://[2001:db8::1]", 6789).unwrap(),
+            "http://[2001:db8::1]:6789"
+        );
+        assert_eq!(
+            daemon_base("http://[2001:db8::1]:8080", 6789).unwrap(),
+            "http://[2001:db8::1]:8080"
+        );
+        assert_eq!(daemon_base("[::1]", 6789).unwrap(), "http://[::1]:6789");
+        // A bracketed literal's own port wins over --port; :6789 must
+        // NOT be appended after it.
+        assert_eq!(
+            daemon_base("[::1]:8080", 6789).unwrap(),
+            "http://[::1]:8080"
+        );
+        // A full base carrying an unbracketed v6 literal is bracketed,
+        // not read as host "2001" port "db8::5" - this is the spelling
+        // plaintext_remote_warning used to print.
+        assert_eq!(
+            daemon_base("https://2001:db8::5", 6789).unwrap(),
+            "https://[2001:db8::5]:6789"
+        );
+    }
+
+    /// The universal `host:port` spelling parses as host plus port
+    /// rather than being bracketed as if it were a v6 literal - the
+    /// mangled `http://[nas.local:8080]:6789` diagnosed a healthy
+    /// daemon as absent.
+    #[test]
+    fn a_bare_host_port_is_a_host_and_a_port() {
+        assert_eq!(
+            daemon_base("nas.local:8080", 6789).unwrap(),
+            "http://nas.local:8080"
+        );
+        assert_eq!(
+            daemon_base("192.168.1.9:8080", 6789).unwrap(),
+            "http://192.168.1.9:8080"
+        );
+        // Neither a v6 literal nor host:port is refused, never guessed.
+        for bad in ["nas.local:http", "a:b:c", "[::1", "[::1]x"] {
+            assert!(daemon_base(bad, 6789).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// An IPv6 SCOPE ID is refused at the spelling, in every spelling,
+    /// and the refusal names what to type instead.
+    ///
+    /// A URL authority cannot carry one: `url` 2.5.8's IPv6 parser has no
+    /// `%` branch at all, so the bare form, the RFC 6874 percent-encoded
+    /// form and a numeric zone are refused alike, and every browser's
+    /// address bar refuses them for the same reason (both measured
+    /// 27 Aug 2026). Until then `daemon_base` BUILT a base out of the
+    /// bracketed spelling and let it die at URL parse, which `stream_cmd`
+    /// then reported as "no daemon at ... start one with `nzbfast serve`"
+    /// - a person sent to look for a daemon that was running fine.
+    ///
+    /// The last assertion is the one with the history behind it. The bare
+    /// spelling used to be told to BRACKET itself, and bracketing is what
+    /// produces the base that cannot parse, so the old advice was a loop.
+    /// A refusal that does not name the working spelling only moves the
+    /// dead end, so the message is pinned on naming one.
+    #[test]
+    fn an_ipv6_scope_id_is_refused_with_the_spelling_that_works() {
+        for bad in [
+            "fe80::1%en0",   // the bare form the pre-URL submit reached
+            "[fe80::1%en0]", // what the old advice told you to type
+            "[fe80::1%en0]:8080",
+            "fe80::1%en0:8080",
+            "fe80::1%25en0", // RFC 6874, refused by the URL parser too
+            "[fe80::1%25en0]",
+            "[fe80::1%1]",               // a NUMERIC zone is no better
+            "http://[fe80::1%en0]:6789", // and the same in a full base
+            "https://[fe80::1%en0]",
+            "http://fe80::1%en0",
+        ] {
+            let e = daemon_base(bad, 6789)
+                .expect_err(&format!("{bad:?} must be refused, never built into a base"))
+                .to_string();
+            assert!(
+                e.contains("interface scope"),
+                "{bad:?} must be refused for the RIGHT reason: {e}"
+            );
+            // The replacement, or the refusal is just a later dead end.
+            assert!(
+                e.contains("nas.local"),
+                "{bad:?} must name a spelling that works: {e}"
+            );
+            // And never the advice that produced the unparseable base.
+            assert!(
+                !e.contains("bracket a v6"),
+                "{bad:?} must not be told to bracket itself: {e}"
+            );
+        }
+        // The scope id is the whole of what is refused: the same
+        // addresses without one keep working, in both arms.
+        assert_eq!(
+            daemon_base("fe80::1", 6789).unwrap(),
+            "http://[fe80::1]:6789"
+        );
+        assert_eq!(
+            daemon_base("[fe80::1]:8080", 6789).unwrap(),
+            "http://[fe80::1]:8080"
+        );
+        assert_eq!(
+            daemon_base("http://[fe80::1]:6789", 1).unwrap(),
+            "http://[fe80::1]:6789"
+        );
+        // And a '%' that is not a v6 zone earns somebody else's message,
+        // not this one.
+        for other in ["nas%20local", "nas.local"] {
+            let msg = daemon_base(other, 6789).unwrap_or_else(|e| e.to_string());
+            assert!(!msg.contains("interface scope"), "{other:?}: {msg}");
+        }
+    }
+
+    /// A base this command cannot honour is REFUSED, never quietly
+    /// reinterpreted: a dropped path would send the submit somewhere the
+    /// user did not name, and a foreign scheme is a typo worth reading.
+    #[test]
+    fn an_unusable_base_is_refused_rather_than_reinterpreted() {
+        for bad in [
+            "https://nas.local/nzbfast",
+            "https://nas.local:6789/api",
+            "https://nas.local:6789?x=1",
+            "ftp://nas.local",
+            "unix://var/run/x",
+            "https://",
+            "",
+            "   ",
+        ] {
+            assert!(daemon_base(bad, 6789).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// Plain HTTP to a machine that is not this one earns a WARNING and
+    /// not a refusal - `nzbfast serve` binds 0.0.0.0 and speaks plain
+    /// HTTP by default, so refusing what the server's own default serves
+    /// would break every working LAN install. Loopback is silent, and so
+    /// is TLS anywhere.
+    #[test]
+    fn a_plaintext_submit_off_this_machine_warns_and_is_not_refused() {
+        for quiet in [
+            "http://127.0.0.1:6789",
+            "http://localhost:6789",
+            "http://[::1]:6789",
+            "https://nas.local:6789",
+            "https://203.0.113.7:6789",
+        ] {
+            assert_eq!(plaintext_remote_warning(quiet), None, "{quiet}");
+        }
+        for loud in ["http://nas.local:6789", "http://192.168.1.9:6789"] {
+            let w = plaintext_remote_warning(loud).expect(loud);
+            // The message must name the fix, or it is only an alarm.
+            assert!(w.contains("--tls-cert"), "{w}");
+            assert!(w.contains("--host https://"), "{w}");
+        }
+        // A v6 remedy has to be the spelling daemon_base can parse: the
+        // BRACKETED literal, not the bare one whose last group reads as
+        // a port.
+        let w = plaintext_remote_warning("http://[2001:db8::5]:6789").expect("v6 remote warns");
+        assert!(w.contains("--host https://[2001:db8::5]"), "{w}");
+        assert!(
+            daemon_base("https://[2001:db8::5]", 6789).is_ok(),
+            "and that spelling round-trips through daemon_base"
+        );
+    }
+
+    fn tmp_nzb(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "nzbfast-stream-{}-{}",
+            std::process::id(),
+            name.bytes().map(|b| format!("{b:02x}")).collect::<String>()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        p
     }
 }
 

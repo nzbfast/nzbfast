@@ -10,10 +10,24 @@ use std::path::{Path, PathBuf};
 
 // finish_run's own reach across the pipeline's other halves: the
 // post-drain census and the settle/repair ladder both run inside it.
+use crate::failkind::{Classified, FailKind};
+
 use super::census::{Census, take_census};
 use super::settle::{SettleVerdict, settle_verify_repair};
 use super::workers::{self, CauseSplit, PendingR};
 use tracing::{info, warn};
+
+/// The pipeline's terminal failure as one value: the build tag and the
+/// producer's classification, together.
+///
+/// TODO 307 item 1. Both halves belong to every `bail!` that ends a job
+/// - `with_build` because the daemon copies this sentence into a bug
+/// report, the kind because the daemon otherwise rebuilds it by reading
+/// the sentence back. One call so a new terminal failure cannot acquire
+/// one and forget the other.
+fn classified(kind: FailKind, msg: String) -> Classified {
+    Classified::new(kind, with_build(msg))
+}
 
 /// How the unpack tail left the job. The orchestrator destructures the
 /// fields back onto the inline names.
@@ -893,6 +907,7 @@ pub(super) fn finish_job(
     recovery_unobtainable: bool,
     missing_430: &Arc<CauseSplit>,
     takedown_430: &Arc<CauseSplit>,
+    unasked_430: &Arc<CauseSplit>,
     retention_skipped: u64,
     retention_skipped_payload: u64,
     transport_failed: &Arc<CauseSplit>,
@@ -931,13 +946,16 @@ pub(super) fn finish_job(
             // false file the sparing rule exists to withhold. Fail
             // instead, and keep the journal so a retry can finish the
             // cleanup.
-            anyhow::bail!(with_build(format!(
-                "download complete, but {} partial metadata file(s) could not be \
-                 removed: {} - refusing to report success while a holed file that \
-                 looks real remains in the output directory (fix permissions and retry)",
-                kept.len(),
-                kept.join(", ")
-            )))
+            anyhow::bail!(classified(
+                FailKind::Local,
+                format!(
+                    "download complete, but {} partial metadata file(s) could not be \
+                     removed: {} - refusing to report success while a holed file that \
+                     looks real remains in the output directory (fix permissions and retry)",
+                    kept.len(),
+                    kept.join(", ")
+                )
+            ))
         }
         if no_extract {
             info!(
@@ -955,9 +973,14 @@ pub(super) fn finish_job(
     // pastes when they say "every file failed".
     print_failure_diagnostics(servers, stats);
     if let Some(why) = reextract_failed {
-        anyhow::bail!(with_build(format!(
-            "{why} - the verified files are still in the output directory"
-        )))
+        // An extraction that failed over payload PAR2 already certified:
+        // this machine's, not the post's, which is what the string
+        // classifier's catch-all also answers. Stated, so it no longer
+        // depends on the catch-all staying where it is.
+        anyhow::bail!(classified(
+            FailKind::Local,
+            format!("{why} - the verified files are still in the output directory")
+        ))
     }
     // Nothing below this point certified the payload, and a one-pass job
     // has already written it: take it out of circulation before the
@@ -985,6 +1008,11 @@ pub(super) fn finish_job(
             // these as if it were - see `workers::CauseSplit`.
             missing_430: missing_430.payload(),
             takedown_430: takedown_430.payload(),
+            // No `unasked_430_recovery` twin to feed, and the discarded
+            // `.recovery()` half is deliberate: see the field's own doc
+            // comment in `diag.rs`. Every clause that claims a whole
+            // fleet answered is a PAYLOAD clause.
+            unasked_430: unasked_430.payload(),
             retention_excluded: retention_skipped_payload,
             transport_failed: transport_failed.payload(),
             missing_430_recovery: missing_430.recovery(),
@@ -1009,7 +1037,13 @@ pub(super) fn finish_job(
             backbones,
             post_age_days,
         };
-        let mut msg = incomplete_reason(incomplete, derrs, &causes);
+        // TODO 307 item 1: the census states which of the six kinds this
+        // is, in the same statement that writes the sentence. Every
+        // clause appended below is deliberately incapable of moving it -
+        // the same contract the openings have always had with
+        // `fail_kind`, now checked by the type rather than by the
+        // reader remembering to append.
+        let (kind, mut msg) = incomplete_verdict(incomplete, derrs, &causes);
         // TODO 305. The repair ARITHMETIC, when it ran on a download that
         // was already short and came up against a post that never
         // carried enough parity to cover the damage. Until now that
@@ -1050,18 +1084,22 @@ pub(super) fn finish_job(
         {
             msg.push_str(&format!("; {}", short.clause()));
         }
-        anyhow::bail!(with_build(msg))
+        anyhow::bail!(classified(kind, msg))
     } else if let Some(short) = repair_shortfall {
         // Which of the post's two halves let the user down. §282 item 4
         // added the second clause: a recovery set the provider will not
         // serve reads identically to a shredded payload from here, and
         // the remedies are opposite - see [`RepairShortfall`].
-        anyhow::bail!(with_build(format!(
-            "verification failed and PAR2 repair could not complete: {}",
-            short.clause()
-        )))
+        anyhow::bail!(classified(
+            FailKind::Unrepairable,
+            format!(
+                "verification failed and PAR2 repair could not complete: {}",
+                short.clause()
+            )
+        ))
     } else {
-        anyhow::bail!(with_build(
+        anyhow::bail!(classified(
+            FailKind::Unrepairable,
             "verification failed and PAR2 repair could not complete".into()
         ))
     }
@@ -1498,6 +1536,7 @@ pub(super) async fn finish_run(
     decoded_bytes: &Arc<AtomicU64>,
     missing_430: &Arc<CauseSplit>,
     takedown_430: &Arc<CauseSplit>,
+    unasked_430: &Arc<CauseSplit>,
     transport_failed: &Arc<CauseSplit>,
     transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
     decode_error_sample: &crate::diag::DecodeSampleCell,
@@ -1521,6 +1560,10 @@ pub(super) async fn finish_run(
     // the failed predecessor's output on a switch job; empty
     // otherwise. Threaded like `cancel`.
     donor_dirs: &[PathBuf],
+    // PLAN M31: duplicate postings whose ARTICLES the settle pass may
+    // borrow bad blocks from. See `get::dupefill`; the disk half is
+    // `donor_dirs` above and is a different, already-shipped thing.
+    donor_nzbs: &[PathBuf],
     hub: &Option<Arc<StreamHub>>,
     stream_owner: &str,
     budget: &nzbkit::mem::MemBudget,
@@ -1597,6 +1640,7 @@ pub(super) async fn finish_run(
         &note_activity,
         cancel,
         donor_dirs,
+        donor_nzbs,
     )
     .await?;
 
@@ -1728,6 +1772,7 @@ pub(super) async fn finish_run(
         ),
         missing_430,
         takedown_430,
+        unasked_430,
         retention_skipped,
         retention_skipped_payload,
         transport_failed,
@@ -1889,6 +1934,7 @@ mod tests {
             false,
             &Arc::new(CauseSplit::default()),
             &Arc::new(CauseSplit::default()),
+            &Arc::new(CauseSplit::default()),
             0,
             0,
             &Arc::new(CauseSplit::default()),
@@ -1939,6 +1985,7 @@ mod tests {
             0,
             0,
             false,
+            &Arc::new(CauseSplit::default()),
             &Arc::new(CauseSplit::default()),
             &Arc::new(CauseSplit::default()),
             0,
@@ -2011,6 +2058,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// TODO 307 item 1: every terminal failure this function bails with
+    /// STATES its classification, and the sentence beside it is
+    /// unchanged.
+    ///
+    /// The end-to-end half of the carry, and the only test that has both
+    /// ends of it in one place: `finish_job` is the producer, and the
+    /// `anyhow::Error` it returns is exactly the value `serve::postproc`
+    /// reads `e.to_string()` and `failkind::code_of_error` off. A bail
+    /// that went back to `with_build(..)` alone would leave `fail_code`
+    /// unset and put every job-terminal caller back on the string
+    /// classifier - silently, because the message would be identical.
+    ///
+    /// Each row asserts BOTH: the kind the producer declared, and that
+    /// the sentence still classifies to the same thing. They agree today
+    /// and must, but only one of them is what the daemon now reads.
+    #[test]
+    fn every_terminal_failure_states_its_kind_and_keeps_its_sentence() {
+        use crate::failkind::{FailKind, code_of_error};
+        let d = tdir("stated");
+        let rows: Vec<(Result<()>, FailKind, &str)> = vec![
+            (
+                run_finish(&d, false, Some("boom".into()), 3, 2, None),
+                FailKind::Local,
+                "boom",
+            ),
+            (
+                run_finish(&d, false, None, 3, 0, None),
+                FailKind::MissingArticles,
+                "download incomplete",
+            ),
+            (
+                run_finish(&d, false, None, 0, 0, None),
+                FailKind::Unrepairable,
+                "repair could not complete",
+            ),
+            (
+                run_finish(
+                    &d,
+                    false,
+                    None,
+                    0,
+                    0,
+                    Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+                ),
+                FailKind::Unrepairable,
+                "repair could not complete",
+            ),
+        ];
+        for (r, want, needle) in rows {
+            let e = r.expect_err("this arm fails");
+            let m = e.to_string();
+            assert!(m.contains(needle), "the sentence moved: {m}");
+            assert!(
+                m.contains("[nzbfast "),
+                "the build tag is part of the contract: {m}"
+            );
+            assert_eq!(code_of_error(&e), Some(want), "unstated or wrong: {m}");
+            assert_eq!(
+                crate::failkind::fail_kind(&m),
+                want,
+                "the stated kind and the sentence have parted company: {m}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// A good finish retires the journal and returns Ok.
     #[test]
     fn a_good_finish_retires_the_journal() {
@@ -2046,6 +2159,7 @@ mod tests {
             0,
             0,
             false,
+            &Arc::new(CauseSplit::default()),
             &Arc::new(CauseSplit::default()),
             &Arc::new(CauseSplit::default()),
             0,
@@ -2313,6 +2427,8 @@ mod tests {
     fn census_slot(is_par2: bool, missing: usize) -> Arc<FileSlot> {
         Arc::new(FileSlot {
             hint: String::new(),
+            hint_is_posted_name: false,
+            name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main: is_par2,
             sample_skipped: false,
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),

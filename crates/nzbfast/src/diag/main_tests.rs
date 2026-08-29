@@ -291,6 +291,175 @@ fn a_server_leaving_mid_run_disqualifies_the_gone_verdict() {
     );
 }
 
+/// Cursor sweep finding 8's follow-on: the typed cause reaches the
+/// person reading the summary.
+///
+/// `MissingCause::Unasked` landed instrument-first: the pool knew a loss
+/// had been decided by a fleet that had already shrunk, and said so in a
+/// `get`-log `warn!` that no user ever opens. The failure
+/// summary went on spending `missing_430`, so the sentence a user acts
+/// on still read "confirmed missing by every server": a claim about the
+/// POST, for a loss OUR OWN fleet caused. The two send someone to two
+/// different places - looking for another copy of the release, or back
+/// to the provider that stopped.
+///
+/// The whole-fleet clauses must therefore spend `asked_430`, and when
+/// nothing was asked they must not appear at all.
+#[test]
+fn an_unasked_loss_never_claims_a_whole_fleet_refused() {
+    let backbones: Vec<String> = vec!["backbone-a".to_string()];
+    let msg = super::incomplete_reason(
+        3,
+        0,
+        &LossCauses {
+            missing_430: 9,
+            unasked_430: 9,
+            par2_slots: 0,
+            missing_segments: 9,
+            total_segments: 4506,
+            bytes_arrived: 1_879_000_000,
+            post_age_days: 9,
+            left_servers: &[],
+            backbones: &backbones,
+            ..no_causes()
+        },
+    );
+    assert!(
+        msg.contains("9 segment(s) were written off while the fleet was short"),
+        "{msg}"
+    );
+    // The false sentence, in both the places it is spelled.
+    assert!(
+        !msg.contains("confirmed missing by every server"),
+        "nothing was confirmed by every server - the fleet had shrunk: {msg}"
+    );
+    assert!(
+        !msg.contains("backbone(s)"),
+        "counting the backbones behind a verdict nobody gave dresses a \
+         departure up as a unanimous vote: {msg}"
+    );
+    // Appending a clause must not move the OPENING: `fail_kind` and the
+    // *arr health mapping key on it.
+    assert!(msg.starts_with("download incomplete"), "{msg}");
+    assert_eq!(
+        crate::failkind::fail_kind(&msg),
+        crate::failkind::FailKind::MissingArticles
+    );
+}
+
+/// The sixth exclusion in [`super::missing_articles_proven_stale`], and
+/// the case the fifth one cannot see.
+///
+/// The fifth keys on the `left_servers` clause, which is latched by
+/// `pool::runlife::note_server_dark` - and that latch is SKIPPED once
+/// the run is aborting or draining, so a torn-down run can reach a
+/// terminal `Unasked` with `left_servers` empty. Both are the same
+/// physical event and both must keep the one automatic retry: a
+/// suppressed retry is also FINAL (indexer dead-report, FailureLink
+/// re-grab, duplicate promotion), and the segments it would refetch are
+/// exactly the ones no complete fleet ever voted on.
+#[test]
+fn an_unasked_loss_is_never_proven_stale() {
+    fn aged(unasked: u64) -> LossCauses<'static> {
+        LossCauses {
+            missing_430: 12,
+            unasked_430: unasked,
+            missing_segments: 1965,
+            total_segments: 4506,
+            bytes_arrived: 1_879_000_000,
+            post_age_days: 9,
+            left_servers: &[],
+            ..no_causes()
+        }
+    }
+    let short_fleet = super::incomplete_reason(1, 0, &aged(4));
+    // The age is still stated: that is honest, and Gary asked for it.
+    assert!(
+        short_fleet.contains("well past the minutes-to-hours"),
+        "{short_fleet}"
+    );
+    assert!(
+        !super::missing_articles_proven_stale(&short_fleet),
+        "segments written off by a fleet that had shrunk are not proven \
+         absent, whatever the post's age: {short_fleet}"
+    );
+    // Control: the identical aged run where every refusal came from a
+    // whole fleet IS proven stale and does lose its retry. Without this
+    // the assertion above passes on a gate that stopped working.
+    let whole = super::incomplete_reason(1, 0, &aged(0));
+    assert!(super::missing_articles_proven_stale(&whole), "{whole}");
+}
+
+/// A run can be BOTH at once, and the standing warning is the first cut
+/// of the stall message: it reassured a user the failure was "not
+/// evidence that anything is missing" about a release four providers had
+/// just called short 2031 times. So the new clause must never suppress
+/// the old one - the two figures partition `missing_430` and neither
+/// walks the other back.
+#[test]
+fn a_run_with_asked_and_unasked_losses_reports_both() {
+    let backbones: Vec<String> = vec!["backbone-a".to_string(), "backbone-b".to_string()];
+    let msg = super::incomplete_reason(
+        3,
+        0,
+        &LossCauses {
+            missing_430: 12,
+            unasked_430: 5,
+            par2_slots: 0,
+            missing_segments: 12,
+            total_segments: 4506,
+            bytes_arrived: 1_879_000_000,
+            post_age_days: 9,
+            backbones: &backbones,
+            ..no_causes()
+        },
+    );
+    // The refusals a whole fleet really gave: 12 less the 5 nobody was
+    // asked for. Reporting 12 here is the defect; reporting nothing is
+    // the over-correction.
+    assert!(
+        msg.contains("7 segment(s) were confirmed missing by every server"),
+        "{msg}"
+    );
+    assert!(
+        msg.contains("5 segment(s) were written off while the fleet was short"),
+        "{msg}"
+    );
+    // Real opinions were given, so the backbones behind them still count.
+    assert!(msg.contains("asked 2 backbone(s)"), "{msg}");
+}
+
+/// The stall arm reaches its own `return` before any clause above, so
+/// the honest count has to be spent inside it too. A stalled run that
+/// also shrank its fleet must not tell the user its abandoned segments
+/// were "confirmed missing by every server that has the post".
+#[test]
+fn a_stall_that_also_shrank_its_fleet_does_not_claim_a_unanimous_refusal() {
+    let msg = super::incomplete_reason(
+        94,
+        0,
+        &LossCauses {
+            stalled: true,
+            missing_430: 2031,
+            unasked_430: 31,
+            par2_slots: 4,
+            ..no_causes()
+        },
+    );
+    assert!(msg.contains("connection pool stalled"), "{msg}");
+    assert!(
+        msg.contains("2000 segment(s) WERE confirmed missing"),
+        "the 31 the fleet never asked for are not part of that count: {msg}"
+    );
+    // The four providers that DID call the release short are still
+    // reported: this is the clause that exists to stop the stall
+    // vouching for a post servers have refused.
+    assert!(
+        !msg.contains("No server said any article was missing"),
+        "{msg}"
+    );
+}
+
 /// Sweep 8, M7: a recovery article's failure must not decide
 /// anything about the payload. Both matrices from the handoff, and
 /// both are a wrong verdict on the pre-split counters.
@@ -924,6 +1093,7 @@ fn no_causes() -> LossCauses<'static> {
     LossCauses {
         missing_430: 0,
         takedown_430: 0,
+        unasked_430: 0,
         retention_excluded: 0,
         transport_failed: 0,
         missing_430_recovery: 0,

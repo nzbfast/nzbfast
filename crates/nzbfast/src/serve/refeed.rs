@@ -374,9 +374,21 @@ impl Daemon {
             }
             found
         };
-        // Outside the history lock: the upsert takes it itself.
+        // Outside the history lock: the publish takes it itself.
+        // `history_publish` and not the raw upsert: the depth IS the
+        // one-level cap, so a refused append the rewrite could still
+        // rescue would reload the record at depth 0 - a later retry of
+        // it then completes below REFEED_MAX_DEPTH and its output is
+        // scanned for grandchildren past the declared cap (Codex C12).
         if let Some(job) = filed {
-            let _ = self.history_upsert_if_present(&job);
+            self.history_publish(&job, || {
+                format!(
+                    "{}: the child's refeed depth did not reach the store - a \
+                     restart reloads it at depth 0, so a retry of it can spawn \
+                     a generation past the one-level cap",
+                    job.lock_ok().name
+                )
+            });
         }
         false
     }

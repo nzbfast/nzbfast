@@ -20,10 +20,12 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import app.nzbfast.mobile.api.NzbSize
 import app.nzbfast.mobile.api.NzbfastClient
 import app.nzbfast.mobile.api.PlaybackJob
 import app.nzbfast.mobile.api.PlaybackSnapshot
@@ -33,6 +35,8 @@ import app.nzbfast.mobile.ui.HomeScreen
 import app.nzbfast.mobile.ui.NzbfastTheme
 import app.nzbfast.mobile.ui.PlayerScreen
 import app.nzbfast.mobile.ui.ServerSetupScreen
+import app.nzbfast.mobile.ui.SettingsScreen
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -48,6 +52,7 @@ sealed class Screen {
     data object ServerSetup : Screen()
     data object Home : Screen()
     data object Add : Screen()
+    data object Settings : Screen()
     data class Player(val nzoId: String, val url: String, val title: String) : Screen()
 }
 
@@ -100,6 +105,33 @@ class MainActivity : ComponentActivity() {
 
     private var pollJob: Job? = null
 
+    /**
+     * Free bytes where downloads actually land on THIS phone (TODO 281
+     * AN3). Sampled at onStart and after every add rather than polled:
+     * `StatFs` is a syscall against the filesystem the app is writing to,
+     * and a figure that is a few seconds old is not what makes a disk
+     * fill up.
+     *
+     * Zero in server mode, where the volume that matters is the daemon's
+     * and `diskspace_gb` on the contract is the answer.
+     */
+    private var freeBytes by mutableLongStateOf(0L)
+
+    /** The export folder's display name, or null for keep-in-app. */
+    private var exportFolder by mutableStateOf<String?>(null)
+
+    /**
+     * Whether this activity is between onStart and onStop.
+     *
+     * Gates the poll. `lifecycleScope` lives until onDestroy, so without
+     * this the activity kept polling every two seconds behind a screen
+     * nobody was looking at - and, since TODO 281 AN2, would have fought
+     * the service over it: the service stops the engine when the queue
+     * drains off screen, and a background poll would see that as the
+     * engine dying and start it again.
+     */
+    private var visible = false
+
     /** The in-flight on-device startup, so two ways in cannot race one
      *  another - see [startDeviceEngine]. */
     private var deviceStartJob: Job? = null
@@ -107,10 +139,54 @@ class MainActivity : ComponentActivity() {
     private val client: NzbfastClient?
         get() = connection?.let { NzbfastClient(it.baseUrl, it.apiKey) }
 
+    /**
+     * True while a picker WE launched is on top.
+     *
+     * A picker is another app's activity, so ours stops - and the engine
+     * service reads "not on screen" as permission to shut an idle engine
+     * down. Choosing the very first NZB is precisely the moment the queue
+     * IS idle, so without this the engine went away while the user was
+     * still browsing for the file they were about to add. Measured on the
+     * emulator, 26 Aug 2026.
+     */
+    private var awaitingPicker = false
+
     private val pickNzb =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            awaitingPicker = false
             if (uri != null) addFromUri(uri)
         }
+
+    /**
+     * The SAF folder picker behind AN3's export.
+     *
+     * `OpenDocumentTree` is the only way to be given write access to a
+     * place outside app-private storage without asking for a
+     * storage-wide permission, which is the permission Play reviews
+     * hardest and which this app has no business holding: it needs one
+     * folder, chosen by the person who owns it.
+     */
+    private val pickExportTree =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            awaitingPicker = false
+            if (uri != null) {
+                Settings.setExportTree(this, uri)
+                exportFolder = treeLabel(uri)
+                note = "Finished downloads will be copied to that folder."
+            }
+        }
+
+    /**
+     * The Android 13 notification permission.
+     *
+     * A foreground service still RUNS without it - the grant governs
+     * whether its notification is shown - so the failure it prevents is
+     * silent rather than loud: downloads work, and the one surface that
+     * reports them to somebody who has left the app is invisible. Asked
+     * for once, when on-device mode is chosen, and never insisted on.
+     */
+    private val askNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -138,6 +214,7 @@ class MainActivity : ComponentActivity() {
             }
             null -> {}
         }
+        exportFolder = Settings.exportTree(this)?.let(::treeLabel)
         watchEngineExits()
         handleIntent(intent)
 
@@ -151,6 +228,70 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)
+    }
+
+    /**
+     * On screen. Three things follow from that and each is one half of a
+     * pair with [onStop].
+     *
+     * The service is asked for again because it may have stopped ITSELF:
+     * since TODO 281 AN2 a drained queue with the app off screen ends the
+     * engine, and coming back is the moment to have one again - asking
+     * here rather than letting the first failed poll discover it means the
+     * engine is usually up before Home has finished drawing.
+     * `startForegroundService` on a service that is already running is
+     * just another onStartCommand, so this is idempotent.
+     */
+    override fun onStart() {
+        super.onStart()
+        visible = true
+        EngineService.setForeground(true)
+        refreshFreeSpace()
+        if (Store.savedMode(this) == Mode.DEVICE && connection != null) {
+            startForegroundService(Intent(this, EngineService::class.java))
+        }
+    }
+
+    override fun onStop() {
+        visible = false
+        // Still "in use" while a picker we launched is up - see
+        // [awaitingPicker]. Every other way out of this activity is a real
+        // departure, and an idle engine should not outlive one.
+        EngineService.setForeground(awaitingPicker)
+        super.onStop()
+    }
+
+    /**
+     * Re-read free space on the volume downloads actually land on.
+     *
+     * Keyed on the LIVE connection rather than on the saved mode, which
+     * is what it read at first and was wrong: on a first run the mode is
+     * saved part-way through `useDevice`, so a reading taken at onStart -
+     * before any of that - answered zero and the Add screen then said
+     * free space was not known on a phone that had 8.6 GB of it. Called
+     * at onStart, on every path that establishes a device connection, and
+     * whenever a screen that shows the figure is opened.
+     */
+    private fun refreshFreeSpace() {
+        freeBytes = if (connection?.mode == Mode.DEVICE) {
+            DeviceProfile.freeBytes(DeviceProfile.downloadDir(this))
+        } else {
+            0L
+        }
+    }
+
+    /**
+     * A folder name a person can recognise, out of a tree URI.
+     *
+     * The document id is the readable part ("primary:Download"); the rest
+     * of the URI is a provider authority and percent-encoding. Falling
+     * back to the whole URI is ugly rather than wrong, and only a provider
+     * that mints opaque ids gets there.
+     */
+    private fun treeLabel(uri: Uri): String {
+        val id = runCatching { android.provider.DocumentsContract.getTreeDocumentId(uri) }
+            .getOrNull() ?: return uri.toString()
+        return id.substringAfter(':').ifEmpty { id }
     }
 
     /** True while the activity is in a PiP window: the player hides its
@@ -235,6 +376,7 @@ class MainActivity : ComponentActivity() {
             snapshot = null
             screen = Screen.Home
         }
+        ensureNotificationPermission()
         startForegroundService(Intent(this, EngineService::class.java))
         busy = true
         deviceStartJob = lifecycleScope.launch {
@@ -250,6 +392,7 @@ class MainActivity : ComponentActivity() {
             }
             note = null
             connection = Store.deviceConnection(this@MainActivity, proven)
+            refreshFreeSpace()
             startPolling()
         }
     }
@@ -324,7 +467,9 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun AppScaffold() {
         val s = screen
-        BackHandler(enabled = s is Screen.Add || s is Screen.Player) {
+        BackHandler(
+            enabled = s is Screen.Add || s is Screen.Player || s is Screen.Settings,
+        ) {
             screen = Screen.Home
         }
         SideEffect { updatePipParams() }
@@ -350,13 +495,22 @@ class MainActivity : ComponentActivity() {
                                 TextButton(onClick = { togglePauseAll(paused) }) {
                                     Text(if (paused) "Resume all" else "Pause all")
                                 }
+                                TextButton(onClick = {
+                                    refreshFreeSpace()
+                                    screen = Screen.Settings
+                                }) {
+                                    Text("Settings")
+                                }
                             },
                         )
                     }
                 },
                 floatingActionButton = {
                     if (s is Screen.Home) {
-                        FloatingActionButton(onClick = { screen = Screen.Add }) {
+                        FloatingActionButton(onClick = {
+                            refreshFreeSpace()
+                            screen = Screen.Add
+                        }) {
                             Text("+")
                         }
                     }
@@ -376,6 +530,8 @@ class MainActivity : ComponentActivity() {
                         ServerSetupScreen(
                             busy = busy,
                             status = note,
+                            suggestedConnections = DeviceProfile.connectionsForLine(this@MainActivity),
+                            lineNote = lineNote(),
                             onTest = ::testNewsServer,
                             onSave = ::saveNewsServer,
                         )
@@ -385,23 +541,71 @@ class MainActivity : ComponentActivity() {
                             snapshot = snapshot,
                             speedHistory = speedHistory,
                             statusLine = note,
+                            freeBytesLocal = freeBytes,
+                            // Export copies from a LOCAL path, so it is
+                            // on-device mode only: a remote daemon's
+                            // `storage` names a directory on that machine,
+                            // and a phone opening it would find nothing or,
+                            // worse, something else.
+                            canExport = connection?.mode == Mode.DEVICE && exportFolder != null,
                             onPlay = ::play,
                             onPauseJob = { io { client?.pauseJob(it) } },
                             onResumeJob = { io { client?.resumeJob(it) } },
-                            onDeleteJob = { io { client?.deleteJob(it, deleteFiles = false) } },
-                            onDeleteHistory = {
-                                io { client?.deleteHistory(it, deleteFiles = false) }
+                            onDeleteJob = { id, files ->
+                                io { client?.deleteJob(id, deleteFiles = files) }
                             },
+                            onDeleteHistory = { id, files ->
+                                io { client?.deleteHistory(id, deleteFiles = files) }
+                            },
+                            onExport = ::exportJob,
                         )
                     }
                     is Screen.Add -> androidx.compose.foundation.layout.Box(mod) {
                         AddScreen(
                             busy = busy,
                             status = note,
+                            freeText = freeSpaceLine(),
                             onPickFile = {
+                                awaitingPicker = true
                                 pickNzb.launch(arrayOf("*/*"))
                             },
                             onSubmitLink = ::addLink,
+                        )
+                    }
+                    is Screen.Settings -> androidx.compose.foundation.layout.Box(mod) {
+                        SettingsScreen(
+                            sourceLabel = connection?.let {
+                                if (it.mode == Mode.DEVICE) "This phone" else it.baseUrl
+                            } ?: "Not connected",
+                            exportFolder = exportFolder,
+                            pauseOnMetered = Settings.pauseOnMetered(this@MainActivity),
+                            freeText = freeSpaceLine(),
+                            profileLines = profileLines(),
+                            onPickExportFolder = {
+                                awaitingPicker = true
+                                pickExportTree.launch(null)
+                            },
+                            onClearExportFolder = {
+                                Settings.setExportTree(this@MainActivity, null)
+                                exportFolder = null
+                            },
+                            onPauseOnMetered = {
+                                Settings.setPauseOnMetered(this@MainActivity, it)
+                                // Apply against the network the phone is on
+                                // NOW: the service's callback only fires on a
+                                // capability CHANGE, so without this the new
+                                // setting waits for the network to move.
+                                EngineService.notifyMeteredPolicyChanged()
+                                // Re-read into a state the recomposition can
+                                // see: the switch is drawn from the prefs and
+                                // nothing else would tell Compose they moved.
+                                note = if (it) {
+                                    "Downloads will hold on a metered network."
+                                } else {
+                                    "Downloads will run on any network."
+                                }
+                            },
+                            onDisconnect = ::disconnect,
                         )
                     }
                     is Screen.Player -> {}
@@ -410,11 +614,122 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // ---- settings surface helpers ----
+
+    private fun freeSpaceLine(): String = when {
+        connection?.mode != Mode.DEVICE ->
+            "%.1f GB free where the server saves".format(snapshot?.diskFreeGb ?: 0.0)
+        freeBytes > 0 -> "${DeviceProfile.humanBytes(freeBytes)} free on this phone"
+        else -> "Free space on this phone is not known"
+    }
+
+    private fun lineNote(): String {
+        val mbit = DeviceProfile.downstreamMbit(this)
+        val n = DeviceProfile.connectionsForLine(this)
+        return if (mbit > 0) {
+            "$n connections, sized for the $mbit Mbit/s this network reports. " +
+                "Your provider's own limit still applies."
+        } else {
+            "$n connections. This network does not report a speed, so this is " +
+                "the low end. Your provider's own limit still applies."
+        }
+    }
+
+    /**
+     * What the phone told the engine about itself (TODO 281 AN4), read
+     * back from the same functions that produced the arguments, so the
+     * readout cannot drift from what was actually passed.
+     */
+    private fun profileLines(): List<String> = listOf(
+        "Memory budget: ${DeviceProfile.memLimitArg(this)} " +
+            "(of ${DeviceProfile.humanBytes(DeviceProfile.totalRamBytes(this))} on this device)",
+        "Decode and repair workers: ${DeviceProfile.cpuWorkers()} " +
+            "(of ${Runtime.getRuntime().availableProcessors()} cores)",
+        lineNote(),
+    )
+
+    private fun disconnect() {
+        pollJob?.cancel()
+        pollJob = null
+        deviceStartJob?.cancel()
+        if (Store.savedMode(this) == Mode.DEVICE) {
+            stopService(Intent(this, EngineService::class.java))
+        }
+        Store.clear(this)
+        connection = null
+        snapshot = null
+        note = null
+        screen = Screen.Connect
+    }
+
+    /**
+     * Copy one finished job into the chosen folder, on demand.
+     *
+     * The path comes from `mode=history` because the playback contract
+     * does not carry one - see the `storage` field on HistorySlot for why
+     * it does not and why this is the one caller that needs it.
+     */
+    private fun exportJob(job: PlaybackJob) {
+        val tree = Settings.exportTree(this) ?: return
+        val cl = client ?: return
+        busy = true
+        note = null
+        lifecycleScope.launch {
+            val msg = withContext(Dispatchers.IO) {
+                val row = runCatching { cl.history() }.getOrNull()
+                    ?.firstOrNull { it.nzoId == job.nzoId }
+                when {
+                    row == null || row.storage.isEmpty() ->
+                        "Could not find that download on this phone any more."
+                    else -> {
+                        val r = Exporter.export(
+                            this@MainActivity,
+                            tree,
+                            File(row.storage),
+                            job.name,
+                            job.nzoId,
+                        )
+                        if (r.error != null) {
+                            "Could not save it: ${r.error}"
+                        } else {
+                            Settings.markExported(this@MainActivity, job.nzoId)
+                            if (r.copied == 0) {
+                                "Already saved to your folder."
+                            } else {
+                                "Saved ${r.copied} file(s) to your folder."
+                            }
+                        }
+                    }
+                }
+            }
+            busy = false
+            note = msg
+        }
+    }
+
     // ---- connect flows ----
+
+    /**
+     * Ask for the notification permission if this Android has one and it
+     * has not been answered yet.
+     *
+     * Called from the two places the engine is started, rather than at
+     * launch: a permission prompt on first open, before the user has said
+     * they want anything to run on the phone at all, is a prompt with no
+     * context - and in server mode there is no service and nothing to
+     * notify about, so it would never be asked for at all.
+     */
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (!granted) askNotifications.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+    }
 
     private fun useDevice() {
         busy = true
         note = null
+        ensureNotificationPermission()
         startForegroundService(Intent(this, EngineService::class.java))
         lifecycleScope.launch {
             // Identity BEFORE the credential. `local.version()` used to be
@@ -438,6 +753,7 @@ class MainActivity : ComponentActivity() {
             val configured = withContext(Dispatchers.IO) {
                 runCatching { client!!.serversConfigured() }.getOrDefault(false)
             }
+            refreshFreeSpace()
             if (configured) {
                 note = null
                 screen = Screen.Home
@@ -473,12 +789,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun testNewsServer(host: String, port: Int, tls: Boolean, user: String, pass: String) {
+    private fun testNewsServer(
+        host: String,
+        port: Int,
+        tls: Boolean,
+        user: String,
+        pass: String,
+        conns: Int,
+    ) {
         busy = true
         note = null
         lifecycleScope.launch {
             val r = withContext(Dispatchers.IO) {
-                runCatching { client!!.serverTest(host, port, tls, user, pass) }
+                runCatching { client!!.serverTest(host, port, tls, user, pass, conns) }
                     .getOrElse { app.nzbfast.mobile.api.ServerTestResult(false, it.message ?: "failed") }
             }
             busy = false
@@ -486,12 +809,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveNewsServer(host: String, port: Int, tls: Boolean, user: String, pass: String) {
+    private fun saveNewsServer(
+        host: String,
+        port: Int,
+        tls: Boolean,
+        user: String,
+        pass: String,
+        conns: Int,
+    ) {
         busy = true
         note = null
         lifecycleScope.launch {
             val ok = withContext(Dispatchers.IO) {
-                runCatching { client!!.serverSave(host, port, tls, user, pass) }
+                runCatching { client!!.serverSave(host, port, tls, user, pass, conns) }
                     .getOrDefault(false)
             }
             busy = false
@@ -588,18 +918,78 @@ class MainActivity : ComponentActivity() {
                     val stream = contentResolver.openInputStream(uri)
                         ?: error("could not read the file")
                     val bytes = client!!.readSharedNzb(stream, name)
-                    client!!.addFile(name, bytes)
+                    val room = roomFor(bytes)
+                    if (room is Room.No) error(room.why)
+                    AddOutcome(client!!.addFile(name, bytes), (room as? Room.Tight)?.why)
                 }
             }
             busy = false
+            refreshFreeSpace()
             result.fold(
-                onSuccess = { r ->
-                    note = if (r.ok) "Added." else "Add failed: ${r.error ?: "unknown error"}"
+                onSuccess = { o ->
+                    val r = o.result
+                    note = when {
+                        !r.ok -> "Add failed: ${r.error ?: "unknown error"}"
+                        o.warning != null -> "Added. ${o.warning}"
+                        else -> "Added."
+                    }
                     if (r.ok) screen = Screen.Home
                 },
                 onFailure = { note = "Add failed: ${it.message}" },
             )
         }
+    }
+
+    private data class AddOutcome(
+        val result: app.nzbfast.mobile.api.AddResult,
+        val warning: String?,
+    )
+
+    /** The verdict of the pre-enqueue disk check - see [roomFor]. */
+    private sealed class Room {
+        data object Yes : Room()
+        data class Tight(val why: String) : Room()
+        data class No(val why: String) : Room()
+    }
+
+    /**
+     * TODO 281 AN3's free-space truth, applied to the file in hand.
+     *
+     * Only in ON-DEVICE mode: in server mode the filesystem that matters
+     * belongs to the daemon and this phone's `StatFs` describes an
+     * unrelated volume, so the check would be an authoritative-sounding
+     * answer to the wrong question. The daemon's own min-free hold covers
+     * that side and always did.
+     *
+     * Two tiers, because the two mistakes are not the same size. Not
+     * enough room for the PAYLOAD is a certain failure some hours in, and
+     * telling somebody that up front is the whole point - so it refuses.
+     * Not enough room for the payload plus the space an extract needs
+     * beside it is a MAYBE, since a post that is not an archive needs no
+     * such room, and refusing on a maybe would be the app substituting a
+     * guess for the daemon's real guards. So that one is said out loud
+     * and the add goes ahead.
+     */
+    private fun roomFor(nzb: ByteArray): Room {
+        if (connection?.mode != Mode.DEVICE) return Room.Yes
+        val payload = NzbSize.estimatePayloadBytes(nzb)
+        if (payload <= 0L) return Room.Yes
+        val free = DeviceProfile.freeBytes(DeviceProfile.downloadDir(this))
+        if (free <= 0L) return Room.Yes
+        val human = DeviceProfile.humanBytes(payload)
+        if (free < payload) {
+            return Room.No(
+                "that download is about $human and this phone has " +
+                    "${DeviceProfile.humanBytes(free)} free"
+            )
+        }
+        if (free < NzbSize.estimatePeakBytes(nzb)) {
+            return Room.Tight(
+                "It is about $human, and unpacking it may need about that much " +
+                    "again. There is ${DeviceProfile.humanBytes(free)} free."
+            )
+        }
+        return Room.Yes
     }
 
     private fun addLink(link: String) {
@@ -681,7 +1071,10 @@ class MainActivity : ComponentActivity() {
                 // One poll for everything: readiness rides the job rows
                 // (no per-job probes) and the telemetry feeds the player
                 // overlay, so keep polling while the player is up.
-                if (cl != null && (screen is Screen.Home || screen is Screen.Player)) {
+                //
+                // `visible` is the third condition and the newest: see the
+                // field for why an off-screen activity must not poll.
+                if (visible && cl != null && (screen is Screen.Home || screen is Screen.Player)) {
                     val snap = withContext(Dispatchers.IO) {
                         runCatching { cl.playback() }.getOrNull()
                     }

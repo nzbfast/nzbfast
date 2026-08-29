@@ -325,6 +325,7 @@ impl Daemon {
             total_bytes,
             out_dir,
             fail_message: String::new(),
+            fail_code: None,
             fail_detail: String::new(),
             finished_at: None,
             finished_unix: None,
@@ -357,6 +358,7 @@ impl Daemon {
             library,
             insurance: self.insurance_at_add(priority, duplicate || hold_for.is_some(), library),
             insurance_attempts: 0,
+            insurance_note: String::new(),
             fetched: false,
             tombstone: false,
             relocating: 0,
@@ -396,6 +398,7 @@ impl Daemon {
             // A fresh job has never crossed between the two stores.
             move_seq: 0,
             archive_shape: String::new(),
+            resume_route: None,
             inner_crc: 0,
             identity_name: String::new(),
             identity_imdb: String::new(),

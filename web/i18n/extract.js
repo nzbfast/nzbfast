@@ -97,6 +97,14 @@ Object.assign(out, {
   'shape.one-pass': 'one-pass', 'shape.unlock-at-end': 'unlocked at the end',
   'shape.on-disk': 'unpacked after download', 'shape.mixed-pass': 'partly on disk',
   'shape.inner-7z': '7z inside', 'shape.inner-rar': 'RAR inside',
+  // Post-age buckets: rendered via t('pq.age.b'+key, AGE_EN[key]) from
+  // the daemon's own bucket key, so the key is computed at the call
+  // site and the scrape above cannot see it. The RANGES are
+  // nzbkit::oracle::age_bucket's and must not move here; what a
+  // catalogue translates is the day/year marker.
+  'pq.age.b0': '0-1d', 'pq.age.b1': '1-7d', 'pq.age.b2': '7-30d',
+  'pq.age.b3': '30-90d', 'pq.age.b4': '90-365d', 'pq.age.b5': '1-3y',
+  'pq.age.b6': '3y+',
   // sysbench bottleneck tags
   'bench.bn.network': 'network', 'bench.bn.compute': 'compute', 'bench.bn.disk': 'disk',
   // Speed units: rendered via unit(k) = t('unit.'+k, UNIT_EN[k]). Latin
@@ -131,6 +139,7 @@ Object.assign(out, {
   'snd.ev.alldone': 'Queue finished', 'snd.ev.failed': 'Download failed',
   'snd.ev.password': 'Password needed', 'snd.ev.pause': 'Paused / resumed',
   'snd.ev.conn': 'Connection lost / restored', 'snd.ev.update': 'Update available',
+  'snd.ev.warn': 'Warning', 'snd.ev.refuse': 'Error or refused action',
   // INTEREST_LABELS: the opt-in indexing choices. Built from a table
   // keyed by the daemon's interest keys, so t() is called with a
   // variable and the scraper cannot see them.
@@ -223,6 +232,16 @@ Object.assign(out, {
   'err.no such server': 'no such server',
   'err.unknown server index': 'unknown server index',
   'err.connect timed out (12 s)': 'connect timed out (12 s)',
+  // The two delete arms in serve/api/queue/payload.rs. Both answer a
+  // request that matched no row, and both used to answer it with no
+  // `error` at all - which the dashboard's three bulk delete controls
+  // read as success and reported in green. They are two sentences and
+  // not one because "may have just finished" is true of a queued row
+  // and false of a history row, which by definition finished long ago.
+  'err.nothing in the queue matched that - it may have just finished, or been removed already':
+    'nothing in the queue matched that - it may have just finished, or been removed already',
+  'err.nothing in your history matched that - it may have been removed already':
+    'nothing in your history matched that - it may have been removed already',
   // M32 route controls (serve/servers.rs): these landed in the
   // reference by hand without joining this list, so the next regen
   // silently dropped them - they must live HERE to survive extract.

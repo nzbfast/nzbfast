@@ -1,6 +1,6 @@
 [package]
 name = "nzbfast"
-version = "1.2.4"
+version = "1.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,7 +17,7 @@ rars = { path = "../../vendor/rars", features = ["parallel"] }
 # Native 7z extraction (Apache-2.0, pure Rust - keeps the zero-external-tools
 # stance). Decode-only: no `compress` encoder, no wasm; aes256/bzip2/ppmd
 # cover the encrypted + non-LZMA methods real posts use.
-sevenz-rust2 = { version = "0.21", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
+sevenz-rust2 = { version = "0.22", default-features = false, features = ["aes256", "bzip2", "ppmd"] }
 anyhow = "1"
 # `env` backs `--config`'s NZBFAST_CONFIG fallback: the container sets that
 # variable for the daemon, and without it a `docker exec … import-sab` wrote
@@ -149,12 +149,40 @@ windows-sys = { version = "0.61", features = [
 # feature. Built in with `cargo build --features ktls`, then armed at
 # run time with NZBFAST_KTLS=1.
 [features]
-default = ["indexer"]
+default = ["indexer", "dashboard"]
 # The indexer stack: newsgroup index + scan loop, Spotnet, availability
 # oracle, wall/browse, and the metadata enrichment workers. Slim builds
 # (phones, small boxes) disable it; queue/history/download pipeline are
 # untouched and sqlite drops out of the binary entirely.
-indexer = ["nzbkit/indexer", "dep:image"]
+#
+# It PULLS IN `dashboard`, because the wall is a dashboard page: /wall is
+# served by the same `respond_shell` the dashboard is, off the same shared
+# design tokens, so an indexer with no page to render it on is not a
+# configuration anything wants. Stating it here is what keeps every
+# existing `#[cfg(feature = "indexer")]` site correct with no second
+# condition on it - indexer implies dashboard, so WALL_HTML exists
+# wherever the shell machinery does.
+indexer = ["nzbkit/indexer", "dep:image", "dashboard"]
+# The browser-facing web UI: the dashboard and wall shells, the user's own
+# stylesheet, the 27 i18n catalogues, the 16 manuals, the favicons and the
+# web manifest - about 11.5 MB of source before build.rs gzips it, and
+# every byte of it exists to be read in a browser.
+#
+# ON in `default`, so every desktop build is exactly what it was. OFF in
+# the slim build, which is what the PHONES are: both mobile shells drive
+# the engine over the local API and render natively (SwiftUI, Compose),
+# and TODO 281 IO3b wants it gone from the STORE binary in particular -
+# an app that ships a whole web UI reachable at localhost is the
+# web-shaped app App Review guideline 4.2 is about, and it is a door
+# nothing in the product opens.
+#
+# A headless small box that wants the web UI without the indexer builds
+# `--no-default-features --features dashboard`. Nothing user-facing has
+# ever documented a slim build, so this takes nothing away from anyone;
+# what it buys is that the dashboard-off configuration is COMPILED BY CI
+# on every push - `slim-check`, and both legs of mobile-targets.yml -
+# rather than being a store-only shape nobody builds until a release.
+dashboard = []
 ktls = ["nzbkit/ktls"]
 # Embedded/in-process hosting (the iOS staticlib via crates/nzbfast-ffi).
 # Off by default: src/lib.rs compiles to EMPTY without it, so the lib
@@ -190,7 +218,7 @@ rcgen = { version = "0.14.9", default-features = false, features = ["crypto", "p
 # Dev-only on purpose: resolver 2 does not unify dev-dependency features
 # into a normal build, so `cargo build` still links the decode-only
 # configuration declared above and the shipped binary gains no encoder.
-sevenz-rust2 = { version = "0.21", default-features = false, features = [
+sevenz-rust2 = { version = "0.22", default-features = false, features = [
     "aes256",
     "bzip2",
     "ppmd",

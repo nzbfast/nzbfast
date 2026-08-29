@@ -134,6 +134,13 @@ async fn playback_contract_answers_readiness_and_scoped_tokens() {
         assert!(v["stream"]["readers"].is_number(), "{body}");
         assert!(v["stream"]["runway_wait_ms"].is_number(), "{body}");
         assert_eq!(v["stream"]["zero_filled_bytes"], 0, "{body}");
+        // The drain latch (TODO 281 AN2, additive). The job above has
+        // reached history, so the queue is not merely empty - the tail
+        // is done too, which is the half `queue_total` cannot say. The
+        // false case is asserted at the foot of this test, after a
+        // second upload re-arms it: a key that answered a constant
+        // would pass one of these two and not both.
+        assert_eq!(v["queue_idle"], true, "{body}");
 
         let h = &v["history"][0];
         assert_eq!(h["nzo_id"], nzo.as_str(), "{body}");
@@ -210,6 +217,9 @@ async fn playback_contract_answers_readiness_and_scoped_tokens() {
         assert_eq!(q["playback"]["ready"], false, "{body}");
         assert_eq!(q["playback"]["reason"], "not_started", "{body}");
         assert!(q["mb"].is_number() && q["percentage"].is_number(), "{body}");
+        // Enqueue re-arms the drain latch, so a queue holding work says
+        // so even though this one is paused and nothing is moving.
+        assert_eq!(v["queue_idle"], false, "{body}");
     })
     .await
     .unwrap();

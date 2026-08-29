@@ -563,6 +563,15 @@ from your account page there, then <b>Apply indexers</b>. <b>Test</b> asks the s
 it supports and shows what came back, which proves the address and the key in one click.
 A saved key is never shown again: the box says so, and leaving it blank keeps the key it
 already has.</p>
+<p><b>nzbindex, with no account needed.</b> Settings → Search indexers →
+<b>+ Add indexer</b>, then set the row's first field to <code>nzbindex</code> instead of
+naming an account. It searches nzbindex.com directly over its own documented API, no key
+required, though nzbindex accepts one too, for a higher limit on its side. It indexes
+what was actually posted rather than a curated release list, so it turns up things the
+accounts above will not, and many of its results carry scrambled names as the price of
+that. Downloads still queue and unpack like any other job. <b>Complete only</b>, on by
+default, keeps out posts that are missing parts and can never finish; the size, age and
+newsgroup fields beside it narrow a search further.</p>
 <p><b>Searching.</b> Open <b>🎬 wall</b> in the header and choose <b>Releases</b>.
 The dropdown beside the search box decides where a search looks: <b>This index</b>, which
 is what this machine has scanned itself, <b>Indexers</b>, or <b>Both</b>. Your choice is
@@ -1126,7 +1135,10 @@ superseded copy was removed), <code>queue.idle</code>,
 <code>queue.paused</code> and <code>queue.resumed</code> (the queue stopped or
 started again, whoever or whatever did it), <code>queue.finished_action</code>
 (the queue-finished action was armed, ran or was cancelled), <code>giveup.tripped</code>,
-<code>disk.low</code>, <code>storage.slow</code>, <code>quota.reached</code>
+<code>disk.low</code>, <code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> and <code>server.block_spent</code> (a prepaid
+block account is down to the last 15% of the data you bought, or has used all
+of it)
 and <code>update.available</code> (a newer nzbfast release was found). Each carries
 <code>schema_version</code> (currently 1; new keys may appear without a bump -
 ignore what you do not know), a monotonic <code>seq</code>, and an
@@ -1304,6 +1316,13 @@ client does cross-job overlap.</li>
 <li><b>Cross-job soak</b>: while a finished job's tail (verify/extract) completes on
 disk, the next job's download already owns the line.</li>
 </ul>
+<p><b>With only one provider configured</b>, this can only catch a post that has
+gone completely dead - nothing at all arriving from it, whether every article is
+refused or the provider simply stops answering. A job that is merely slow but
+still receiving some bytes is left alone, because there is no second provider to
+move it to. Configure a second provider and nzbfast can also notice a post that
+one server no longer carries and route or defer around it instead of waiting the
+job out.</p>
 <h3 id="oracle">The availability oracle</h3>
 <p>Takedowns are the main reason a Usenet download fails, and they are predictable:
 the same release goes missing on one backbone while another still has it. nzbfast
@@ -1492,6 +1511,7 @@ the <b>API key</b> (full control) and the <b>NZB key</b> (add-only:
 <tr><td>Diagnostics</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code>: status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: any user, API key as password)</td></tr>
 <tr><td>Preview / playback</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP ranges; starting a parked library job needs <code>?t=</code> token or key), <code>/m3u/&lt;id&gt;</code> (needs key or the job's own token; mints the token), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Monitoring</td><td><code>/metrics</code> answers Prometheus text exposition format 0.0.4: download rate, queue depth and bytes, per-provider connections, outages and article counts, memory by subsystem, and uptime. Base units throughout (bytes, seconds), so the dashboard converts and nothing arrives pre-rounded. GET only, and it needs the full API key by default. Set <code>metrics_open</code> to serve it without one, which is the usual Prometheus arrangement: it carries no job names and no paths, but it does publish each configured provider's hostname to anyone who can reach the port.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Files &amp; locations</h2>

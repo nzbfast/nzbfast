@@ -1499,3 +1499,127 @@ async fn a_resumed_run_rejournals_the_plaintext_once_articles_it_replays() {
         "resumed output differs from a cold run's"
     );
 }
+
+/// TODO 309(b), 28 Aug 2026: when something outside nzbfast shortens a
+/// job's partial output between the pause and the unpause, the resume
+/// SAYS the bytes went back on the wire.
+///
+/// The refusal itself has always been right and is pinned in
+/// `nzbkit::journal` (`a source too short for its span must drop its
+/// article`): an article whose recorded bytes are no longer there
+/// refetches, which is the only safe answer. What was wrong is that it
+/// was invisible. `[resume] restored N article(s)` reports what
+/// SUCCEEDED, so a resume that silently put a gigabyte back on the wire
+/// - on a metered line, the most expensive thing in this whole section
+/// - read exactly like an ordinary resume with less on disk.
+///
+/// Two halves, and the second is the one that makes the first worth
+/// having: the line fires AND the job still finishes byte-identical.
+/// Dropping an article is a bandwidth cost, never a correctness one, and
+/// a disclosure that arrived alongside a corrupted payload would be
+/// telling the user about the wrong problem.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shortened_partial_output_says_its_articles_are_fetched_again() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("resume-shortened");
+    let inner = payload(3_000_000, 61);
+    let n_vols = 4;
+    let per = inner.len() / n_vols;
+    let mut vol_names: Vec<String> = Vec::new();
+    let mut pos = 0usize;
+    for i in 0..n_vols {
+        let len = if i == 0 {
+            per + 1
+        } else if i < n_vols - 1 {
+            per
+        } else {
+            inner.len() - pos
+        };
+        let part = &inner[pos..pos + len];
+        pos += len;
+        let vol = fixtures::rar5_volume_n(
+            &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
+            i as u64,
+        );
+        let name = format!("r.part{}.rar", i + 1);
+        fx.add_file(&name, &vol, 25_000);
+        vol_names.push(name);
+    }
+    {
+        let names: Vec<&str> = vol_names.iter().map(String::as_str).collect();
+        assert!(fx.add_par2(20, &names, 25_000), "par2 create failed");
+    }
+    let total_articles = fx.articles.len() as u64;
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            delay_ms: 10,
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let served = srv.served.clone();
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    // Run 1: kill with real placements recorded, exactly as the
+    // one-pass resume legs above do.
+    kill9_run1(
+        &cfg,
+        &nzb,
+        &out,
+        &served,
+        total_articles,
+        (2, 5),
+        Some("R "),
+        &[],
+    )
+    .await;
+
+    // The user action this test is about, in the only form a test can
+    // stage it: something outside nzbfast shortened the file the
+    // placements point into. Half, so SOME articles survive - a run
+    // where everything drops proves less, because the interesting
+    // claim is that one bad article is not a failed resume.
+    let payload_out = out.join("movie.mkv");
+    let before = std::fs::metadata(&payload_out)
+        .unwrap_or_else(|e| panic!("run 1 wrote no direct-extract output to truncate: {e}"))
+        .len();
+    assert!(before > 0, "run 1's output is empty - nothing to shorten");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&payload_out)
+        .unwrap()
+        .set_len(before / 2)
+        .unwrap();
+
+    let (log, ok) = {
+        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
+        tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+            .await
+            .unwrap()
+    };
+    assert!(ok, "{log}");
+    assert!(
+        log.contains("their bytes are no longer there"),
+        "the resume dropped articles for a shortened source and said nothing:\n{log}"
+    );
+    // The other cause must NOT be claimed: nothing here is encrypted,
+    // and a resume that blamed the password would send the reader
+    // hunting for a problem they do not have.
+    assert!(
+        !log.contains("without the archive password"),
+        "a shortened file was reported as a password problem:\n{log}"
+    );
+    // And the point of the whole design: refetching is SAFE.
+    assert_eq!(
+        std::fs::read(&payload_out).unwrap(),
+        inner,
+        "a resume over a shortened output did not rebuild the payload"
+    );
+    assert!(!out.join(".nzbfast.journal").exists());
+}

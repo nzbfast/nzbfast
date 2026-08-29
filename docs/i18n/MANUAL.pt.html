@@ -551,6 +551,17 @@ endereço web normal chega; uma entrada Prowlarr parece-se com
 que veio de volta, o que prova o endereço e a chave num clique. Uma chave guardada nunca
 é mostrada outra vez: a caixa diz isso, e deixá-la em branco mantém a que já lá
 está.</p>
+<p><b>nzbindex, sem precisar de conta.</b> Ajustes → Pesquisar nos indexadores →
+<b>+ Adicionar indexador</b>, e ponha o primeiro campo da linha em <code>nzbindex</code>
+em vez de nomear uma conta. Pesquisa no nzbindex.com diretamente através da sua própria
+API documentada, sem precisar de chave, embora o nzbindex também aceite uma, para um
+limite mais alto do lado dele. Indexa o que foi realmente publicado em vez de uma lista
+de lançamentos escolhida, por isso encontra coisas que as contas acima não têm, ao preço
+de que muitos dos seus resultados trazem nomes baralhados. As transferências continuam a
+entrar na fila e a ser descompactadas como qualquer outro trabalho.
+<b>Apenas completos</b>, ligado por omissão, mantém de fora publicações a que faltam
+partes e que nunca poderão terminar; os campos de tamanho, idade e newsgroup ao lado
+restringem ainda mais uma pesquisa.</p>
 <p><b>Pesquisar.</b> Abra <b>🎬 o mural</b> no cabeçalho e escolha <b>Lançamentos</b>. A
 lista pendente ao lado da caixa de pesquisa decide onde a pesquisa olha: <b>Este
 índice</b>, ou seja o que esta máquina analisou por si, <b>Indexadores</b>, ou
@@ -1112,7 +1123,8 @@ da pasta vigiada), <code>nzb.refeed</code> (o próprio arquivo NZB de um downloa
 acompanhamento chegou e a cópia substituída foi removida),
 <code>queue.idle</code>, <code>queue.paused</code> e <code>queue.resumed</code> (a fila parou ou voltou a andar, seja quem ou o que for que o tenha feito), <code>queue.finished_action</code>
 (a ação de fim de fila foi armada, executada ou cancelada), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> e <code>update.available</code> (foi encontrada uma versão mais recente do nzbfast). Cada um carrega
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> e <code>server.block_spent</code> (uma conta de bloco pré-paga chegou aos últimos 15% dos dados comprados, ou gastou tudo) e <code>update.available</code> (foi encontrada uma versão mais recente do nzbfast). Cada um carrega
 <code>schema_version</code> (atualmente 1; chaves novas podem aparecer sem incremento -
 ignore o que você não conhece), um <code>seq</code> monotônico e um
 carimbo de tempo <code>at</code> em milissegundos.</p>
@@ -1273,6 +1285,7 @@ cliente faz sobreposição entre trabalhos.</li>
 <li><b>Absorção entre trabalhos</b>: enquanto a cauda de um trabalho concluído (verificação/extração) termina no
 disco, o download do próximo trabalho já domina a linha.</li>
 </ul>
+<p><b>Com apenas um provedor configurado</b>, isto só consegue detectar um post completamente morto - não chega absolutamente nada dele, seja porque cada artigo é recusado, seja porque o provedor simplesmente para de responder. Um trabalho que está apenas lento mas ainda recebe alguns bytes é deixado em paz, porque não há um segundo provedor para o qual movê-lo. Configure um segundo provedor e o nzbfast também poderá perceber que um servidor deixou de ter um post e encaminhá-lo ou adiá-lo em vez de esperar o trabalho terminar.</p>
 <h3 id="oracle">O oráculo de disponibilidade</h3>
 <p>As remoções são a principal razão para um download de Usenet falhar, e são
 previsíveis: a mesma release desaparece de um backbone enquanto outro ainda a tem. O
@@ -1456,6 +1469,7 @@ a <b>chave de API</b> (controle total) e a <b>chave NZB</b> (apenas adição:
 <tr><td>Diagnóstico</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>JSON-RPC do NZBGet</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (autenticação Basic: qualquer usuário, chave de API como senha)</td></tr>
 <tr><td>Pré-visualização / reprodução</td><td><code>/stream/&lt;nzo_id&gt;</code> (intervalos HTTP; iniciar um trabalho de biblioteca estacionado precisa de token <code>?t=</code> ou chave), <code>/m3u/&lt;id&gt;</code> (precisa da chave ou do token da própria tarefa; gera o token), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Monitorização</td><td><code>/metrics</code> responde no formato de exposição de texto Prometheus 0.0.4: velocidade de transferência, profundidade e bytes da fila, ligações por fornecedor, falhas e contagens de artigos, memória por subsistema e tempo em funcionamento. Unidades base em tudo (bytes, segundos), de modo que o painel converte e nada chega pré-arredondado. Apenas GET, e por predefinição precisa da chave API completa. Defina <code>metrics_open</code> para o servir sem chave, que é a disposição habitual com o Prometheus: não leva nomes de trabalhos nem caminhos, mas publica o nome de anfitrião de cada fornecedor configurado a qualquer pessoa que alcance a porta.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Arquivos e locais</h2>

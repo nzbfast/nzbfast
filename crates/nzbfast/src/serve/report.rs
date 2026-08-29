@@ -97,6 +97,78 @@ fn layer_said(layer: &str) -> &'static str {
     }
 }
 
+/// TODO 309: which route a RESUMED run took, and what the gate weighed.
+///
+/// Nothing at all for a job that replayed nothing, which is every job
+/// that was not a resume - see [`crate::streamhub::ResumeRoute`] for
+/// why absence is the honest answer there and not a route of its own.
+///
+/// This is the one cost difference in the engine that the user did not
+/// choose and could not see: 1.02x payload of device I/O against 2.53x,
+/// measured on §94 A's rig, decided by a gate on a memory budget. The
+/// figures are printed beside the verdict because the next question
+/// after "it took the slow route" is always "why", and the answer is
+/// two comparisons rather than one - the gate admits on either.
+///
+/// English, like the rest of this file, and deliberately not the
+/// dashboard's sentences: this is an artefact for pasting, those are UI
+/// copy in 27 languages.
+///
+/// Two sources, and the caller resolves them in the order
+/// [`Daemon::report_whyslow`] resolves its own: the LIVE hub cell if
+/// this job owns it, then the record. The live one has to win where
+/// both exist. `Job::resume_route` is written by the postproc tail, so
+/// on a job that is still Downloading it holds the PREVIOUS run's
+/// answer or nothing at all - and a retry routed differently from the
+/// attempt before it is exactly the case a user is looking at when they
+/// press Create report on a slow job.
+fn report_resume(r: Option<&crate::streamhub::ResumeRoute>) -> String {
+    let Some(r) = r else {
+        return String::new();
+    };
+    let mb = |b: u64| format!("{:.1} MB", b as f64 / 1e6);
+    let mut o = String::from("\n== the resume ==\n");
+    line(
+        &mut o,
+        "route",
+        match r.mapped {
+            true => "replayed the restored parts back through the one-pass path",
+            false => "rebuilt the volume files on disk and unpacked from them",
+        },
+    );
+    line(
+        &mut o,
+        "cost",
+        match r.mapped {
+            true => "about 1.02x the payload in device I/O (TODO 94 A)",
+            false => {
+                "about 2.53x the payload in device I/O, against 1.02x for the one-pass path (TODO 94 A)"
+            }
+        },
+    );
+    // Zero for a route restored from a record that predates the
+    // figures, and `line` prints nothing for an empty value - so an old
+    // record says which way it went and claims nothing else.
+    if r.restored_bytes > 0 {
+        line(&mut o, "already on disk", mb(r.restored_bytes));
+    }
+    if r.budget_bytes > 0 {
+        line(&mut o, "held-span budget", mb(r.budget_bytes));
+    }
+    if r.widest_slot_bytes > 0 {
+        line(
+            &mut o,
+            "widest part",
+            format!(
+                "{} (the budget a new pipeline could seat was {})",
+                mb(r.widest_slot_bytes),
+                mb(r.seatable_bytes)
+            ),
+        );
+    }
+    o
+}
+
 /// TODO 207: the same section for a job that is no longer on the wire,
 /// off the record instead of off the core. No receipts - the samples
 /// they came from are a process-global ring that means nothing after a
@@ -173,6 +245,12 @@ impl Daemon {
         // locked here yet.
         let saved = job.lock_ok().whyslow.clone();
         let slow = self.report_whyslow(nzo_id, saved);
+        // TODO 309: the LIVE route, read the same way and in the same
+        // window - before the record is locked, because taking another
+        // container's lock while holding a Job is the shape this tree
+        // deadlocks in. Owner-tagged, so a job that does not own the hub
+        // gets None here and falls back to its own record below.
+        let live_route = self.hub.resume_route_for(nzo_id);
         let j = job.lock_ok();
 
         o.push_str("nzbfast download report\n");
@@ -191,6 +269,7 @@ impl Daemon {
                 "{} {} · {} cores · {} GB RAM",
                 std::env::consts::OS,
                 std::env::consts::ARCH,
+                // cpu-workers-gate: reporting the machine, not sizing a pool.
                 std::thread::available_parallelism().map_or(0, |n| n.get()),
                 nzbkit::mem::physical_ram().map_or(0, |b| b / 1_000_000_000),
             ),
@@ -268,17 +347,16 @@ impl Daemon {
             );
         }
 
+        o.push_str(&report_resume(
+            live_route.as_ref().or(j.resume_route.as_ref()),
+        ));
         o.push_str(&slow);
 
         if !j.fail_message.is_empty() {
             o.push_str("\n== why it failed ==\n");
             o.push_str(&j.fail_message);
             o.push('\n');
-            line(
-                &mut o,
-                "classified",
-                format!("{:?}", fail_kind(&j.fail_message)),
-            );
+            line(&mut o, "classified", format!("{:?}", j.fail_kind()));
             if let Some(at) = j.auto_retry_at {
                 line(&mut o, "retrying at", secs(Some(at as i64)));
                 line(
@@ -706,6 +784,201 @@ mod tests {
         assert!(
             !out.contains("right now"),
             "a finished job has no live receipts to print: {out}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TODO 309: the resume section, both ways, and the silence that is
+    /// the whole point of the third case.
+    ///
+    /// The route is the largest per-job cost difference this engine has
+    /// - 1.02x payload of device I/O against 2.53x - and it is decided
+    /// by a gate on a memory budget with the user pressing nothing. The
+    /// report is the artefact somebody actually sends when a job was
+    /// slow, so it is where that has to be readable.
+    #[test]
+    fn the_report_names_the_resume_route_and_is_silent_when_there_was_none() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-rep-res-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let d = super::super::testutil::test_daemon(&dir);
+        let job = Arc::new(Mutex::new(
+            crate::serve::job_from_json(&serde_json::json!({
+                "nzo_id": "SABnzbd_nzo_nzbfast1",
+                "name": "Some.Release-GRP",
+                "nzb_path": dir.join("j.nzb"),
+                "out_dir": &dir,
+                "state": "Completed",
+            }))
+            .expect("job_from_json"),
+        ));
+
+        // The timestamp is the one line that legitimately moves between
+        // two renders a millisecond apart, so the comparison below drops
+        // it rather than racing it.
+        let render = |d: &Daemon, job: &Arc<Mutex<Job>>| {
+            d.render_report("SABnzbd_nzo_nzbfast1", job)
+                .lines()
+                .filter(|l| !l.starts_with("report made:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // A job that replayed nothing says nothing, and this is the
+        // assertion the other two are measured against: without it a
+        // reader cannot tell "this run took the one-pass route" from
+        // "this was never a resume".
+        let plain = render(&d, &job);
+        assert!(!plain.contains("== the resume =="), "{plain}");
+
+        // Mapped: the cheap route, named as such.
+        job.lock_ok().resume_route = Some(crate::streamhub::ResumeRoute {
+            mapped: true,
+            restored_bytes: 800_000_000,
+            budget_bytes: 1_930_000_000,
+            widest_slot_bytes: 256_000_000,
+            seatable_bytes: 1_930_000_000,
+        });
+        let mapped = render(&d, &job);
+        assert!(mapped.contains("== the resume =="), "{mapped}");
+        assert!(mapped.contains("one-pass path"), "{mapped}");
+        assert!(mapped.contains("1.02x"), "{mapped}");
+        assert!(mapped.contains("already on disk: 800.0 MB"), "{mapped}");
+        assert!(
+            mapped.contains("held-span budget: 1930.0 MB"),
+            "the gate weighed it against this: {mapped}"
+        );
+        assert!(mapped.contains("widest part: 256.0 MB"), "{mapped}");
+        // ...and NOTHING else about the report moved. A section that
+        // also rewrote a neighbour would be reporting two runs at once.
+        assert_eq!(
+            mapped.replace(&report_resume(job.lock_ok().resume_route.as_ref()), ""),
+            plain
+        );
+
+        // Declined: the 2.53x route, which is what the report exists
+        // for. It must not read as an ordinary resume.
+        job.lock_ok().resume_route = Some(crate::streamhub::ResumeRoute {
+            mapped: false,
+            restored_bytes: 2_236_500_000,
+            budget_bytes: 970_000_000,
+            widest_slot_bytes: 256_000_000,
+            seatable_bytes: 270_000_000,
+        });
+        let declined = render(&d, &job);
+        assert!(
+            declined.contains("rebuilt the volume files on disk"),
+            "{declined}"
+        );
+        assert!(declined.contains("2.53x"), "{declined}");
+        assert!(
+            declined.contains("already on disk: 2236.5 MB"),
+            "over the 970.0 MB budget, which is arm 1 refusing: {declined}"
+        );
+        assert!(
+            declined.contains("a new pipeline could seat was 270.0 MB"),
+            "and arm 2 refusing, which is the other half of the why: {declined}"
+        );
+        // The cost line names the one-pass figure as the comparison, so
+        // it is the ROUTE sentence that has to be absent, not the words.
+        assert!(
+            !declined.contains("replayed the restored parts"),
+            "{declined}"
+        );
+
+        // A record restored from before the figures existed knows which
+        // way it went and claims nothing else - `line` prints no clause
+        // for a zero, so there are no 0.0 MB numbers to misread.
+        job.lock_ok().resume_route = Some(crate::streamhub::ResumeRoute {
+            mapped: false,
+            ..Default::default()
+        });
+        let bare = render(&d, &job);
+        assert!(bare.contains("rebuilt the volume files on disk"), "{bare}");
+        assert!(!bare.contains("already on disk"), "{bare}");
+        assert!(!bare.contains("0.0 MB"), "{bare}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TODO 309: the LIVE arm, which is the shape `report_whyslow`
+    /// already has and this section shipped without.
+    ///
+    /// `Job::resume_route` is written by the postproc tail, so a report
+    /// pulled while the job is still DOWNLOADING - which is when a user
+    /// watching a slow job actually presses Create report - had nothing
+    /// to print, even though the hub has held the verdict since intake.
+    /// And where both exist the LIVE one wins: a retry can route
+    /// differently from the attempt before it, and the record still
+    /// holds that earlier attempt's answer until this run's tail runs.
+    #[test]
+    fn the_resume_section_reads_the_live_route_before_the_record() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-rep-live-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let d = super::super::testutil::test_daemon(&dir);
+        let job = Arc::new(Mutex::new(
+            crate::serve::job_from_json(&serde_json::json!({
+                "nzo_id": "SABnzbd_nzo_nzbfast1",
+                "name": "Some.Release-GRP",
+                "nzb_path": dir.join("j.nzb"),
+                "out_dir": &dir,
+                "state": "Downloading",
+            }))
+            .expect("job_from_json"),
+        ));
+
+        // Downloading, tail not run, so the record carries nothing - and
+        // before the live arm this was the whole of the answer.
+        assert!(
+            !d.render_report("SABnzbd_nzo_nzbfast1", &job)
+                .contains("== the resume =="),
+            "the fixture must start with nothing on the record"
+        );
+
+        // The run published its verdict at intake, which is where the
+        // hub picks it up.
+        *d.hub.resume_route.lock_ok() = Some((
+            "SABnzbd_nzo_nzbfast1".into(),
+            crate::streamhub::ResumeRoute {
+                mapped: false,
+                restored_bytes: 2_236_500_000,
+                budget_bytes: 970_000_000,
+                widest_slot_bytes: 256_000_000,
+                seatable_bytes: 270_000_000,
+            },
+        ));
+        let live = d.render_report("SABnzbd_nzo_nzbfast1", &job);
+        assert!(live.contains("rebuilt the volume files on disk"), "{live}");
+        assert!(live.contains("already on disk: 2236.5 MB"), "{live}");
+
+        // A STALE record from the previous attempt must not win over
+        // the run the reader is looking at.
+        job.lock_ok().resume_route = Some(crate::streamhub::ResumeRoute {
+            mapped: true,
+            restored_bytes: 8_000_000,
+            ..Default::default()
+        });
+        let both = d.render_report("SABnzbd_nzo_nzbfast1", &job);
+        assert!(
+            both.contains("rebuilt the volume files on disk"),
+            "the live verdict wins: {both}"
+        );
+        assert!(!both.contains("already on disk: 8.0 MB"), "{both}");
+
+        // ...and the hub is owner-tagged, so ANOTHER job's report falls
+        // back to its own record rather than borrowing this verdict.
+        let other = Arc::new(Mutex::new(
+            crate::serve::job_from_json(&serde_json::json!({
+                "nzo_id": "SABnzbd_nzo_nzbfast2",
+                "name": "Other.Release-GRP",
+                "nzb_path": dir.join("o.nzb"),
+                "out_dir": &dir,
+                "state": "Completed",
+            }))
+            .expect("job_from_json"),
+        ));
+        let foreign = d.render_report("SABnzbd_nzo_nzbfast2", &other);
+        assert!(
+            !foreign.contains("== the resume =="),
+            "a job that does not own the hub prints nothing: {foreign}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

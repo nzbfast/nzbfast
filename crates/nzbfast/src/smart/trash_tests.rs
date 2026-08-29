@@ -350,3 +350,59 @@ fn a_temp_path_is_never_worth_the_trash() {
 // which empties that test's fixtures into the developer's real Trash.
 // The setting itself is one atomic store, and the sweeps now read it
 // once at their entry and pass the answer down (see `remove_user_file`).
+
+/// The recoverable-delete DEFAULT must follow what the platform's trash
+/// arm can actually do.
+///
+/// Nothing pinned this predicate before, and it shipped wrong: it said
+/// android and iOS had a system trash while `trash_delete_bounded`'s arm
+/// for exactly those two can only return `Err`. The route stayed on, so
+/// every delete-the-files-too refused, kept the payload and dropped the
+/// history row anyway - 40 MB measured on the Android emulator (26 Aug
+/// 2026) and 38 MB on iOS (27 Aug 2026), both behind an answer of
+/// `{"removed":1,"status":true}`.
+///
+/// This test reads the HOST's answer, so between the mac dev box and
+/// CI's ubuntu runner it covers the two arms of the linux/freebsd
+/// carve-out that the Unraid incident bought. The two mobile arms cannot
+/// be observed from here at all: they are pinned instead by the
+/// `const _: () = assert!(..)` inside that refusing arm, which is
+/// evaluated when compiling FOR those targets and was verified to fire
+/// when the predicate is put back the way it shipped.
+#[test]
+fn the_recoverable_default_follows_the_platform_that_has_to_honour_it() {
+    let no_trash_here = cfg!(any(target_os = "android", target_os = "ios"));
+    assert_eq!(
+        super::platform_has_no_system_trash(),
+        no_trash_here,
+        "the no-system-trash list must name android and iOS, and nothing else"
+    );
+
+    // A platform with no trash to move anything into may never default
+    // the recoverable route on: the arm behind it can only refuse.
+    if super::platform_has_no_system_trash() {
+        assert!(
+            !super::trash_suits_this_platform(),
+            "the route is on for a platform whose trash arm can only refuse"
+        );
+    }
+
+    // The server carve-out, kept separate because it is a POLICY choice
+    // rather than a capability fact, and is the reason a user lost an
+    // SSD a directory at a time to `.Trash-<uid>` on Unraid.
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        assert!(
+            !super::trash_suits_this_platform(),
+            "linux and freebsd installs must delete outright unless asked otherwise"
+        );
+    }
+
+    // macOS and Windows keep the Trash: it is a real, user-visible one
+    // that a desktop session empties.
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        assert!(
+            super::trash_suits_this_platform(),
+            "the desktop platforms must keep their recoverable default"
+        );
+    }
+}

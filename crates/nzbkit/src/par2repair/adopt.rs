@@ -15,6 +15,31 @@
 //! matching offset" has to survive the fan-out exactly. How each pass
 //! earns that is spelled out at [`sliding_scan`] and [`adopt_blocks`].
 
+//! WHY A PARTIAL DONATION IS REPORTED ON THE *UNREPAIRABLE* VERDICT
+//! (29 Aug 2026). [`RepairReport::blocks_adopted`] only reaches a
+//! caller through `RepairStatus::Repaired`, so a donation that bridged
+//! SOME of the damage and still came up short used to leave no trace
+//! on any surface: every shortfall line named `needed` and `have` and
+//! nothing else. That is not cosmetic. A bench round on 28 Aug 2026
+//! counted `block(s) adopted from` over a whole daemon log, found
+//! zero, and recorded "the donor bridged nothing" as an open question
+//! - while the arithmetic in that same log (290 blocks bad at verify,
+//! 268 needed at the native verdict) says adoption had in fact found
+//! 22 of them and the repair was simply still short. The count is what
+//! separates a partial donation from no donation, so
+//! `RepairStatus::Unrepairable` carries it too.
+//!
+//! What that round also measured, and it is the thing to check before
+//! reading a low adoption count as a defect: adoption is a BLOCK-level
+//! mechanism, so two postings damaged at disjoint ARTICLE positions
+//! are not disjoint to it. That set's PAR2 block was 1,536,000 bytes
+//! and its articles 768,000, exactly two per block, so a stride-2
+//! article mask poisons every block spanning an eligible pair in BOTH
+//! postings - the two logs report the identical `13/14 blocks bad` per
+//! volume. Only the block at the edge of the damaged range can be
+//! donated. `a_donor_damaged_at_the_complementary_article_phase_*` in
+//! `unit_tests.rs` pins both halves of that arithmetic.
+
 use super::*;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -117,11 +142,7 @@ pub(super) fn md5_of_file(path: &Path, limit: Option<u64>) -> Result<[u8; 16], R
 /// deep queue of concurrent whole-file reads on a spinning disk or a
 /// network share - the same 8 the syndrome feed readers settled on.
 fn adoption_workers(files: usize) -> usize {
-    std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .min(8)
-        .min(files)
-        .max(1)
+    crate::mem::cpu_workers().min(8).min(files).max(1)
 }
 
 /// Hash the candidates named by `want` in parallel, filling the matching

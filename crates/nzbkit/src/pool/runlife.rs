@@ -137,6 +137,62 @@ pub(super) async fn park_or_quit(cfg: &PoolConfig, server: &ServerConfig, conn: 
     }
 }
 
+/// Where a DRAINED session goes when its worker LEAVES the run: back to
+/// the warm pool for whatever comes next, or closed because the prepaid
+/// block that paid for it is spent.
+///
+/// One rule, asked at every exit that hands a drained session on, and it
+/// is [`release_shed_conn`]'s §96.5 half generalised - it was that
+/// function's alone until 27 Aug 2026, and the shed is not the only exit
+/// that can be reached with the budget latched. The rule, in its own
+/// words: `Shared::over_budget` latches for the run, and the daemon's
+/// runner rules a host whose block spend has reached its size out of the
+/// NEXT job's pool outright (`serve::sidecar`'s `excluded_hosts`), so a
+/// session parked on that host is a provider slot held for a job that
+/// will never take it - pure cost until the warm pool's idle bound reaps
+/// it, and against a per-account session cap that slot is one another
+/// server's fleet cannot have. §96.5's own bow-out at the top of
+/// `'session` already says as much: that worker leaves "before it can
+/// dial (or keep) a session the account can no longer pay for".
+///
+/// **What it fixes, and how the asymmetry got there.** `9b442b1ce` split
+/// the shed's two reasons and gave the spent block a quit, but
+/// [`stand_down`] - the session loop's own ABORT exit - kept asking only
+/// `inflight.is_empty()`. The inner loop reads the abort flag BEFORE it
+/// reaches the shed, so the two are not merely inconsistent on paper: a
+/// worker whose pipeline drains in the same pass a sibling's bytes push
+/// the fleet over budget parks on a host the shed's own rule says must
+/// quit, one slot per racing worker, held until the 300 s idle reap.
+/// Found by the 27 Aug 2026 v1.2.4 tranche sweep (finding R3) and fixed
+/// by giving every drained exit the same question rather than the one
+/// that was found.
+///
+/// **Cost, and who it can reach.** One relaxed load and a compare on an
+/// exit path. `budget_bytes` is 0 for every server without a prepaid
+/// block - which is every server on an unmetered account, and every
+/// server on a CLI run, since the budget comes from the daemon's usage
+/// ledger - and `over_budget` answers false on 0 before it loads
+/// anything. So the population this can change is exactly "a block
+/// account that has spent its block", the population the shed already
+/// judged this way.
+///
+/// Pinned by `an_abort_exit_does_not_park_a_session_on_a_spent_block`
+/// alongside the shed's own
+/// `a_shed_for_a_spent_prepaid_block_quits_its_session`.
+pub(super) async fn release_drained_conn(
+    cfg: &PoolConfig,
+    server: &ServerConfig,
+    shared: &Shared,
+    idx: usize,
+    conn: Connection,
+) {
+    if shared.over_budget(idx) {
+        conn.quit().await;
+    } else {
+        park_or_quit(cfg, server, conn).await;
+    }
+}
+
 /// Hot-spare filler: keeps ONE authenticated connection parked for its
 /// server until the run ends, re-dialling whenever a worker claims it.
 /// Ends with the run (`finished`), on user abort, or on graceful drain -
@@ -146,13 +202,20 @@ pub(super) async fn park_or_quit(cfg: &PoolConfig, server: &ServerConfig, conn: 
 /// below bounds how late it notices. Quits whatever it still holds on
 /// every exit path. Connect failures back off 5 s - a provider at its
 /// connection cap refuses the spare and that refusal must not become a
-/// dial storm against the very cap the workers depend on.
+/// dial storm against the very cap the workers depend on. A spent
+/// prepaid block ends the filler too (F14, 27 Aug sweep):
+/// `over_budget` latches for the run, [`release_drained_conn`]'s rule
+/// applies to a parked spare as much as to a drained worker's session,
+/// and without this exit the filler held - and re-dialled - an
+/// authenticated slot against the capped account for the rest of the
+/// run.
 pub(super) async fn spare_filler(shared: Arc<Shared>, server: ServerConfig, idx: usize) {
     let mut finished = shared.finished.subscribe();
     loop {
         if *finished.borrow()
             || shared.aborted.load(Ordering::Acquire)
             || shared.draining.load(Ordering::Acquire)
+            || shared.over_budget(idx)
         {
             break;
         }
@@ -219,9 +282,28 @@ impl WorkerLife {
     /// worker of the whole run - exactly one caller ever sees it.
     pub(super) fn retire(mut self) -> bool {
         self.retired = true;
+        self.count_out();
+        self.shared.workers_live.fetch_sub(1, Ordering::AcqRel) == 1
+    }
+
+    /// This worker's `alive` decrement - unless a hand-over claim
+    /// already took it. `claim_handoff` reserves the leftover by
+    /// decrementing `alive` AT the claim (27 Aug sweep finding 25), and
+    /// records the pre-paid decrement in `handoff_retired`; consuming
+    /// one here instead of decrementing again keeps each departure
+    /// counted exactly once. Which worker consumes it does not matter -
+    /// `alive` is a count, and the CAS at the claim guarantees the
+    /// pre-paid decrement never crossed 1 -> 0, so `note_server_dark`
+    /// still fires on whichever exit actually takes the last body.
+    fn count_out(&self) {
+        if self.shared.handoff_retired[self.idx]
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+            .is_ok()
+        {
+            return;
+        }
         let prev = self.shared.alive[self.idx].fetch_sub(1, Ordering::Relaxed);
         note_server_dark(&self.shared, self.idx, prev);
-        self.shared.workers_live.fetch_sub(1, Ordering::AcqRel) == 1
     }
 }
 
@@ -230,8 +312,7 @@ impl Drop for WorkerLife {
         if self.retired {
             return; // retire() already did the arithmetic
         }
-        let prev = self.shared.alive[self.idx].fetch_sub(1, Ordering::Relaxed);
-        note_server_dark(&self.shared, self.idx, prev);
+        self.count_out();
         self.shared.workers_live.fetch_sub(1, Ordering::AcqRel);
     }
 }

@@ -23,14 +23,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
 /**
- * Add an NZB: document picker, or paste an nzblnk / http link. The
- * share-target path (ACTION_SEND / ACTION_VIEW) lands directly in
- * MainActivity and does not pass through here.
+ * Add an NZB: document picker, or paste an nzblnk link. The share-target
+ * path (ACTION_SEND / ACTION_VIEW) lands directly in MainActivity and
+ * does not pass through here.
+ *
+ * [freeText] is TODO 281 AN3's free-space truth on the surface where it
+ * is still cheap to act on. A phone has one small filesystem and no
+ * dialog to offer when it fills; saying how much room is left next to the
+ * button that fills it is the whole of what the desktop's disk-truth
+ * check does, moved to the moment before the commitment rather than the
+ * one after it. The size of the file actually chosen is checked against
+ * it separately, once the bytes are in hand - see MainActivity.
  */
 @Composable
 fun AddScreen(
     busy: Boolean,
     status: String?,
+    freeText: String,
     onPickFile: () -> Unit,
     onSubmitLink: (String) -> Unit,
 ) {
@@ -58,6 +67,10 @@ fun AddScreen(
                 Button(onClick = onPickFile, enabled = !busy) {
                     Text("Choose file")
                 }
+                Text(
+                    freeText,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
 

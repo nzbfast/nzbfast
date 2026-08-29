@@ -20,6 +20,15 @@
 //! `pub(super)` reads "pub in pool", which puts these back in front of
 //! pool.rs AND its other children (pool/queue.rs calls
 //! `other_can_take`) exactly as the private ones were.
+//!
+//! `live_mask` / `participation_mask` / `missing_cause` joined them on
+//! 28 Aug 2026 (27 Aug sweep finding 8), because they are the same
+//! subject one step further on: the fill gate asks WHO MAY TAKE this
+//! article, and those three answer when the pool may stop asking and
+//! what the silence meant. The defect that brought them here is the one
+//! the paragraph above already names - a mask that reads as unanimous
+//! invents a `Gone` for an article some backbone still holds - reached
+//! by a different route, so they belong beside it and not a file away.
 
 use super::*;
 
@@ -50,6 +59,84 @@ pub(super) fn servers_mask(n: usize) -> u32 {
 }
 
 impl Shared {
+    /// Bits of every server that still has at least one worker running.
+    /// A server whose workers all bowed out (connect exhaustion) can never
+    /// answer for its untried articles - terminal decisions must be made
+    /// against this mask, not the full server set.
+    ///
+    /// It answers WHEN the pool may stop asking, and nothing else.
+    /// [`Self::participation_mask`] answers the other half - what the
+    /// silence MEANT - and the two must not be confused: this one shrinks
+    /// under the verdict's feet by design.
+    pub(super) fn live_mask(&self) -> u32 {
+        let mut m = 0u32;
+        for (si, a) in self.alive.iter().enumerate() {
+            if a.load(Ordering::Relaxed) > 0 {
+                m |= server_bit(si);
+            }
+        }
+        m
+    }
+
+    /// Bits of every server that COULD have been asked: one that has held
+    /// a usable connection at some point in this run, plus (for the
+    /// window before the first dial lands) anything still live. Latching,
+    /// never shrinking - which is exactly what [`Self::live_mask`] is not.
+    ///
+    /// The 27 Aug 2026 sweep's finding 8: the terminal test is
+    /// `tried_430 & live == live`, so the instant a server's LAST worker
+    /// leaves mid-run its bit drops out of `live` and the survivors'
+    /// refusals read as unanimous. The article is written off having been
+    /// refused by everyone who was asked and never offered to the server
+    /// that might have held it. `note_server_dark` latched `left_mid_run`
+    /// for the failure summary and fed no verdict at all.
+    ///
+    /// A frozen mask CANNOT replace `live` in that test - the comment
+    /// above the verdict in `next_work` is the reason: an item nothing
+    /// can serve rotates in the queue forever and deadlocks the run. So
+    /// the fix splits the question in two. Terminality still asks `live`
+    /// (unchanged, and the run still ends). This mask decides what the
+    /// terminal report SAYS: unanimous over the servers that could answer
+    /// ([`MissingCause::Gone`]), or forced by a fleet that shrank
+    /// ([`MissingCause::Unasked`]).
+    ///
+    /// The population is "ever held a usable connection" and not "ever
+    /// had a worker", deliberately. A server that never got a socket up
+    /// - a typo'd host, a refused login - was never a candidate for any
+    /// article, and counting it would downgrade EVERY verdict of every
+    /// run that carries one misconfigured entry, which is the noise that
+    /// gets a distinction ignored. That server already has its own line
+    /// in the failure summary ("no usable connection for the entire
+    /// run"), off the same `connected` latch this reads.
+    pub(super) fn participation_mask(&self) -> u32 {
+        let mut m = self.live_mask();
+        for (si, c) in self.connected.iter().enumerate() {
+            if c.load(Ordering::Relaxed) {
+                m |= server_bit(si);
+            }
+        }
+        m
+    }
+
+    /// The terminal cause for an article whose `tried_430` has just gone
+    /// unanimous over [`Self::live_mask`]. THE ONE PLACE that judgement
+    /// is made: three sites reach a unanimous verdict (the `next_work`
+    /// queue scan and both 430 paths in `session`), and a rule spelled
+    /// out three times is one that holds in two of them.
+    ///
+    /// `dark` is the participating servers this article was never
+    /// refused by - by construction the ones that went out without
+    /// seeing it, since live-unanimity means every live server is
+    /// already in `tried_430`.
+    pub(super) fn missing_cause(&self, tried_430: u32, takedown: bool) -> MissingCause {
+        let dark = (self.participation_mask() & !tried_430).count_ones();
+        if dark == 0 {
+            MissingCause::Gone { takedown }
+        } else {
+            MissingCause::Unasked { takedown, dark }
+        }
+    }
+
     /// Bits a level-L server must see in tried_430 before it may take
     /// queued work: every live server on a lower level.
     pub(super) fn required_mask(&self, level: u32) -> u32 {

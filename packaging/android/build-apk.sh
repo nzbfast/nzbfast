@@ -5,8 +5,14 @@
 # production keystore decision is out of scope here.
 #
 # Prereqs: ANDROID_HOME (build-tools + a platforms/android-NN), JDK 17+,
-# and the slim engine binary built first:
-#   cargo ndk -t arm64-v8a --platform 26 build --release -p nzbfast --no-default-features
+# and the slim engine binary built first. `--features dashboard` is NOT
+# optional for THIS kit: its whole UI is the embedded dashboard in a
+# WebView, and since TODO 281 IO3b (28 Aug 2026) the pages are a default
+# feature that `--no-default-features` drops - so without it the WebView
+# opens on a 404. The compose app next door correctly builds without it:
+# its UI is native and it only ever calls the API.
+#   cargo ndk -t arm64-v8a --platform 26 build --release -p nzbfast \
+#     --no-default-features --features dashboard
 #
 # Usage: ./build-apk.sh [path-to-engine-binary]
 set -eu

@@ -43,7 +43,7 @@ impl Index {
                 blocked: false,
             });
         }
-        let low = target_bytes / EVICT_LOW_WATER_DEN * EVICT_LOW_WATER_NUM;
+        let low = evict_low_water(target_bytes, policy);
 
         // The authoritative protection check. The `NOT IN` binds below are
         // an optimisation that keeps protected rows out of the candidate
@@ -64,79 +64,11 @@ impl Index {
             .filter(|s| !s.is_empty())
             .collect();
 
-        // -- candidate query, built once --
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        let mut wheres: Vec<String> = Vec::new();
-        if !policy.kinds.is_empty() {
-            // Bound parameters, never interpolated - `kinds` comes off the
-            // settings API. Note an unclassified row (kind = '') matches no
-            // filter, so a kind-restricted eviction spares it: protect
-            // more, never less.
-            let ph: Vec<String> = policy
-                .kinds
-                .iter()
-                .map(|k| {
-                    params.push(Box::new(k.clone()));
-                    format!("?{}", params.len())
-                })
-                .collect();
-            wheres.push(format!("r.kind IN ({})", ph.join(",")));
-        }
-        // NULL TRAP: the schema comment on `wall_hidden` records that one
-        // NULL key makes `x NOT IN (SELECT ...)` evaluate NULL for every
-        // row and silently disable the whole prune. These `NOT IN` lists
-        // are immune by construction - they are bound literals from Rust
-        // `i64`/`String`, never a subquery and never NULL - and the left
-        // sides (`releases.id` PRIMARY KEY, `releases.title_key` NOT NULL)
-        // cannot be NULL either. No subquery form is used anywhere in this
-        // path for exactly that reason.
-        let mut budget = EVICT_PROTECT_BIND_CAP;
-        for chunk in protected.release_ids.chunks(EVICT_PROTECT_CHUNK) {
-            if budget == 0 {
-                break;
-            }
-            let take = chunk.len().min(budget);
-            budget -= take;
-            let ph: Vec<String> = chunk[..take]
-                .iter()
-                .map(|id| {
-                    params.push(Box::new(*id));
-                    format!("?{}", params.len())
-                })
-                .collect();
-            wheres.push(format!("r.id NOT IN ({})", ph.join(",")));
-        }
-        for chunk in protected.title_keys.chunks(EVICT_PROTECT_CHUNK) {
-            if budget == 0 {
-                break;
-            }
-            let keys: Vec<&String> = chunk.iter().filter(|s| !s.is_empty()).collect();
-            let take = keys.len().min(budget);
-            if take == 0 {
-                continue;
-            }
-            budget -= take;
-            let ph: Vec<String> = keys[..take]
-                .iter()
-                .map(|k| {
-                    params.push(Box::new((*k).clone()));
-                    format!("?{}", params.len())
-                })
-                .collect();
-            wheres.push(format!("r.title_key NOT IN ({})", ph.join(",")));
-        }
-        let where_sql = if wheres.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", wheres.join(" AND "))
-        };
-        let limit_ph = params.len() + 1;
-        let offset_ph = params.len() + 2;
-        let sql = format!(
-            "SELECT r.id, r.title_key, {EVICT_PAYLOAD_SQL} FROM releases r
-             {where_sql} ORDER BY {} LIMIT ?{limit_ph} OFFSET ?{offset_ph}",
-            evict_order_sql(policy.order)
-        );
+        // -- candidate query, built once, SHARED with evict_preview --
+        // The preview's whole promise is that it walks the exact sequence
+        // a real eviction would, so the two must build their SQL through
+        // the one function below and can never drift.
+        let (sql, params) = candidate_query(policy, protected);
 
         // -- the eviction loop --
         //
@@ -268,7 +200,223 @@ impl Index {
         })
     }
 
+    /// What `evict_to` WOULD delete, without deleting it. Walks the same
+    /// candidate query in the same order (they share `candidate_query`,
+    /// so they cannot drift) and stops where the estimator says the low
+    /// water mark is reached - or at `max_examine` rows, because on a
+    /// tens-of-millions-row index an unbounded read-only walk is still a
+    /// long time inside the write lock the caller holds.
+    ///
+    /// The byte figure is the raw payload estimate at scale 1.0. A real
+    /// eviction fits its scale from what each batch actually frees, so on
+    /// overhead-dominated rows (tiny segments) the preview can OVERSTATE
+    /// the rows needed by up to ~25%; on the blob-dominated rows that
+    /// actually fill this database it is within ~1% (the measured bounds
+    /// in `evict_to`'s comment). A preview is an estimate, and the report
+    /// says so by carrying `est_` names.
+    pub fn evict_preview(
+        &self,
+        target_bytes: u64,
+        policy: &EvictPolicy,
+        protected: &Protected,
+        max_examine: usize,
+    ) -> rusqlite::Result<EvictPreview> {
+        let live = self.live_bytes()?;
+        let mut out = EvictPreview {
+            live_bytes: live,
+            target_bytes,
+            low_bytes: if target_bytes == 0 {
+                0
+            } else {
+                evict_low_water(target_bytes, policy)
+            },
+            ..Default::default()
+        };
+        // 0 = unlimited: nothing would be evicted, and that is an answer.
+        if target_bytes == 0 || live <= target_bytes {
+            out.reachable = true;
+            return Ok(out);
+        }
+        let need = (live - out.low_bytes) as f64;
+
+        let prot_ids: std::collections::HashSet<i64> =
+            protected.release_ids.iter().copied().collect();
+        let prot_keys: std::collections::HashSet<&str> = protected
+            .title_keys
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let (sql, params) = candidate_query(policy, protected);
+        let mut by_kind: std::collections::HashMap<String, (usize, u64)> =
+            std::collections::HashMap::new();
+        let mut payload = 0f64;
+        let mut offset = 0usize;
+        let mut examined = 0usize;
+        'walk: loop {
+            let page: Vec<(i64, String, i64, String)> = {
+                let mut stmt = self.db.prepare_cached(&sql)?;
+                let mut binds: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(|b| b.as_ref()).collect();
+                let lim = EVICT_PAGE as i64;
+                let off = offset as i64;
+                binds.push(&lim);
+                binds.push(&off);
+                stmt.query_map(binds.as_slice(), |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?
+            };
+            if page.is_empty() {
+                break; // ran out of candidates: the cap is not reachable
+            }
+            let exhausted = page.len() < EVICT_PAGE;
+            offset += page.len();
+            for (id, key, pl, kind) in &page {
+                examined += 1;
+                if prot_ids.contains(id) || prot_keys.contains(key.as_str()) {
+                    out.protected_skipped += 1;
+                    continue;
+                }
+                out.rows += 1;
+                let b = (*pl).max(0) as u64;
+                out.est_bytes += b;
+                payload += b as f64;
+                let slot = by_kind.entry(kind.clone()).or_default();
+                slot.0 += 1;
+                slot.1 += b;
+                if payload >= need {
+                    out.reachable = true;
+                    break 'walk;
+                }
+                if examined >= max_examine {
+                    out.truncated = true;
+                    break 'walk;
+                }
+            }
+            if exhausted {
+                break;
+            }
+            if examined >= max_examine {
+                out.truncated = true;
+                break;
+            }
+        }
+        out.by_kind = {
+            let mut v: Vec<(String, usize, u64)> =
+                by_kind.into_iter().map(|(k, (n, b))| (k, n, b)).collect();
+            v.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+            v
+        };
+        Ok(out)
+    }
+
     // -- Spotnet spots (M14j) - curated metadata layered over the raw index --
+}
+
+/// The candidate SELECT `evict_to` deletes from and `evict_preview`
+/// reads, built ONCE here so the two can never disagree about what is
+/// eligible. Returns the SQL (with `LIMIT ?n OFFSET ?n+1` as the last
+/// two placeholders) and the bound parameters for everything before them.
+fn candidate_query(
+    policy: &EvictPolicy,
+    protected: &Protected,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut wheres: Vec<String> = Vec::new();
+    if !policy.kinds.is_empty() {
+        // Bound parameters, never interpolated - `kinds` comes off the
+        // settings API. Note an unclassified row (kind = '') matches no
+        // filter, so a kind-restricted eviction spares it: protect
+        // more, never less.
+        let ph: Vec<String> = policy
+            .kinds
+            .iter()
+            .map(|k| {
+                params.push(Box::new(k.clone()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        wheres.push(format!("r.kind IN ({})", ph.join(",")));
+    }
+    if !policy.keep_kinds.is_empty() {
+        // The protective direction of the same filter: rows of these
+        // kinds are simply never candidates, whatever `kinds` says - a
+        // kind named in both lists is KEPT, because when two settings
+        // disagree the answer that deletes less is the safe one. An
+        // unclassified row ('' kind) is NOT covered: this list names
+        // kinds, and '' is the absence of one. `NOT IN` over bound
+        // literals - see the NULL-trap note below.
+        let ph: Vec<String> = policy
+            .keep_kinds
+            .iter()
+            .map(|k| {
+                params.push(Box::new(k.clone()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        wheres.push(format!("r.kind NOT IN ({})", ph.join(",")));
+    }
+    if let Some(scope_sql) = evict_scope_sql(policy.scope) {
+        wheres.push(scope_sql.to_string());
+    }
+    // NULL TRAP: the schema comment on `wall_hidden` records that one
+    // NULL key makes `x NOT IN (SELECT ...)` evaluate NULL for every
+    // row and silently disable the whole prune. These `NOT IN` lists
+    // are immune by construction - they are bound literals from Rust
+    // `i64`/`String`, never a subquery and never NULL - and the left
+    // sides (`releases.id` PRIMARY KEY, `releases.title_key` NOT NULL,
+    // `releases.kind` NOT NULL) cannot be NULL either. No subquery form
+    // is used anywhere in this path for exactly that reason.
+    let mut budget = EVICT_PROTECT_BIND_CAP;
+    for chunk in protected.release_ids.chunks(EVICT_PROTECT_CHUNK) {
+        if budget == 0 {
+            break;
+        }
+        let take = chunk.len().min(budget);
+        budget -= take;
+        let ph: Vec<String> = chunk[..take]
+            .iter()
+            .map(|id| {
+                params.push(Box::new(*id));
+                format!("?{}", params.len())
+            })
+            .collect();
+        wheres.push(format!("r.id NOT IN ({})", ph.join(",")));
+    }
+    for chunk in protected.title_keys.chunks(EVICT_PROTECT_CHUNK) {
+        if budget == 0 {
+            break;
+        }
+        let keys: Vec<&String> = chunk.iter().filter(|s| !s.is_empty()).collect();
+        let take = keys.len().min(budget);
+        if take == 0 {
+            continue;
+        }
+        budget -= take;
+        let ph: Vec<String> = keys[..take]
+            .iter()
+            .map(|k| {
+                params.push(Box::new((*k).clone()));
+                format!("?{}", params.len())
+            })
+            .collect();
+        wheres.push(format!("r.title_key NOT IN ({})", ph.join(",")));
+    }
+    let where_sql = if wheres.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", wheres.join(" AND "))
+    };
+    let limit_ph = params.len() + 1;
+    let offset_ph = params.len() + 2;
+    let sql = format!(
+        "SELECT r.id, r.title_key, {EVICT_PAYLOAD_SQL}, r.kind FROM releases r
+         {where_sql} ORDER BY {} LIMIT ?{limit_ph} OFFSET ?{offset_ph}",
+        evict_order_sql(policy.order)
+    );
+    (sql, params)
 }
 
 /// Which releases give way first when the index has to shrink.
@@ -296,12 +444,67 @@ pub enum EvictOrder {
     Smallest,
 }
 
+/// Which rows are candidates AT ALL, before any order is applied. The
+/// junk threshold is the same `>= 50` the ladder's rung 0/1 and
+/// `prune_stale_partials` use, so the three can never disagree about
+/// what "junk" means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvictScope {
+    /// Default: every row is a candidate (the orders decide sequence).
+    #[default]
+    All,
+    /// Only rows already scored junk (`junk >= 50`).
+    Junk,
+    /// Only incomplete rows (`complete = 0`).
+    Incomplete,
+    /// Junk OR incomplete - the union, which is exactly "never delete
+    /// real, complete content, whatever the cap says". Under this scope
+    /// a cap the junk cannot satisfy reports `blocked` rather than
+    /// reaching into the wall's real rows.
+    JunkOrIncomplete,
+}
+
+/// The scope's WHERE fragment; `None` for All so the common case adds
+/// no clause at all.
+fn evict_scope_sql(scope: EvictScope) -> Option<&'static str> {
+    match scope {
+        EvictScope::All => None,
+        EvictScope::Junk => Some("r.junk >= 50"),
+        EvictScope::Incomplete => Some("r.complete = 0"),
+        EvictScope::JunkOrIncomplete => Some("(r.junk >= 50 OR r.complete = 0)"),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EvictPolicy {
     pub order: EvictOrder,
     /// Restrict eviction to these kinds ("movie"/"tv"/"software"/"other").
     /// Empty = all kinds.
     pub kinds: Vec<String>,
+    /// Kinds that are NEVER evicted, whatever `kinds` says - the
+    /// protective complement. A kind in both lists is kept. Empty =
+    /// nothing is exempt by kind.
+    pub keep_kinds: Vec<String>,
+    /// Which rows are candidates at all. Default All.
+    pub scope: EvictScope,
+    /// How far below the cap an eviction empties, in percent of the
+    /// cap: `Some(20)` evicts to 80% of the target. `None` = the
+    /// default `EVICT_HEADROOM_DEFAULT_PCT`. Clamped to 0..=50 - past
+    /// 50 the "headroom" would be deleting most of a database the user
+    /// said could be twice the size. 0 means evict exactly to the cap,
+    /// which weakens the anti-thrash promise (see the hysteresis note
+    /// on `EVICT_HEADROOM_DEFAULT_PCT`) but is an honest request.
+    pub headroom_pct: Option<u32>,
+}
+
+/// The low water mark a policy's headroom asks for. Shared by
+/// `evict_to` and `evict_preview` so the two stop at the same line.
+fn evict_low_water(target_bytes: u64, policy: &EvictPolicy) -> u64 {
+    let pct = policy
+        .headroom_pct
+        .unwrap_or(EVICT_HEADROOM_DEFAULT_PCT)
+        .min(50) as u64;
+    target_bytes / 100 * (100 - pct)
 }
 
 /// What the daemon forbids evicting. index.rs NEVER reaches out for this -
@@ -339,7 +542,41 @@ pub struct EvictReport {
     pub blocked: bool,
 }
 
-/// Evict down to this fraction of the cap rather than to the cap itself.
+/// What `evict_preview` reports: the candidates a real eviction at the
+/// same target and policy would take, summed but untouched. Every byte
+/// figure is the raw payload estimate (scale 1.0 - see the method doc
+/// for the measured error bounds), which is why the names say `est_`.
+#[derive(Debug, Clone, Default)]
+pub struct EvictPreview {
+    /// Rows the walk selected for deletion.
+    pub rows: usize,
+    /// Their estimated payload bytes.
+    pub est_bytes: u64,
+    /// Per-kind breakdown of the same rows: (kind, rows, est bytes),
+    /// biggest first. `""` is a row that never classified.
+    pub by_kind: Vec<(String, usize, u64)>,
+    /// The live size the walk started from, and the line it walked to.
+    pub live_bytes: u64,
+    pub target_bytes: u64,
+    pub low_bytes: u64,
+    /// True when the candidates reach the low water mark (per the
+    /// estimate). False = a real eviction would stop short too: the
+    /// scope, kinds filters and protections leave too little.
+    pub reachable: bool,
+    /// Candidates the walk itself stepped over because they are
+    /// protected. A SMALL protected set is excluded inside the SQL and
+    /// never reaches the walk, so this is usually 0; it counts the rows
+    /// the bind-cap optimisation could not exclude, exactly as the real
+    /// eviction's Rust-side re-check does. The daemon reports the full
+    /// protected-set size separately.
+    pub protected_skipped: usize,
+    /// True when the walk hit its `max_examine` bound before an answer:
+    /// the figures are a floor, not the total.
+    pub truncated: bool,
+}
+
+/// Evict down to this far below the cap rather than to the cap itself,
+/// unless the policy names its own `headroom_pct`.
 ///
 /// HYSTERESIS. Without a gap, a database sitting one page over the cap
 /// would be trimmed back to exactly the cap, the next scan pass would
@@ -349,8 +586,7 @@ pub struct EvictReport {
 /// backlog. Emptying to 90% buys roughly a tenth of the cap of headroom,
 /// so on a 2 GB cap the index has ~200 MB to refill before eviction is
 /// due again - hours of scanning, not one pass.
-const EVICT_LOW_WATER_NUM: u64 = 9;
-const EVICT_LOW_WATER_DEN: u64 = 10;
+const EVICT_HEADROOM_DEFAULT_PCT: u32 = 10;
 
 /// Rows examined (and at most deleted) per batch. Bounds how long one
 /// `prune_batch` holds the write lock against the parallel scanners'
@@ -577,7 +813,7 @@ mod tests {
             let target = ev_target(&ix);
             let policy = EvictPolicy {
                 order,
-                kinds: vec![],
+                ..Default::default()
             };
             let rep = ix.evict_to(target, &policy, &Protected::default()).unwrap();
             let left = ev_ids(&ix);
@@ -761,6 +997,7 @@ mod tests {
         let policy = EvictPolicy {
             order: EvictOrder::Oldest,
             kinds: vec!["tv".into()],
+            ..Default::default()
         };
         let rep = ix.evict_to(1, &policy, &Protected::default()).unwrap();
         assert_eq!(rep.removed, 4);
@@ -831,7 +1068,7 @@ mod tests {
                 db_before / 2,
                 &EvictPolicy {
                     order: EvictOrder::Oldest,
-                    kinds: vec![],
+                    ..Default::default()
                 },
                 &Protected::default(),
             )
@@ -947,7 +1184,7 @@ mod tests {
         let target = before / 2;
         let policy = EvictPolicy {
             order: EvictOrder::Oldest,
-            kinds: vec![],
+            ..Default::default()
         };
         let rep = ix.evict_to(target, &policy, &Protected::default()).unwrap();
         assert!(
@@ -971,6 +1208,265 @@ mod tests {
     }
 
     #[test]
+    fn evict_keep_kinds_are_never_candidates_even_at_maximum_pressure() {
+        let (dir, ix) = ev_open("keepkinds");
+        for i in 1..=4i64 {
+            ev_rel(
+                &ix,
+                i,
+                0,
+                1,
+                1000 * i,
+                100,
+                "tv",
+                &format!("t:k{i}"),
+                EV_BLOB,
+            );
+        }
+        for i in 5..=8i64 {
+            ev_rel(
+                &ix,
+                i,
+                0,
+                1,
+                1000 * i,
+                100,
+                "movie",
+                &format!("m:k{i}"),
+                EV_BLOB,
+            );
+        }
+        // An unclassified row: keep_kinds names kinds, and '' is the
+        // absence of one, so it stays a candidate.
+        ev_rel(&ix, 9, 0, 1, 10, 100, "", "", EV_BLOB);
+
+        let policy = EvictPolicy {
+            order: EvictOrder::Oldest,
+            keep_kinds: vec!["tv".into()],
+            ..Default::default()
+        };
+        let rep = ix.evict_to(1, &policy, &Protected::default()).unwrap();
+        assert_eq!(rep.removed, 5, "movies and the unclassified row go");
+        assert_eq!(
+            ev_ids(&ix),
+            vec![1, 2, 3, 4],
+            "kept kinds survive an impossible cap"
+        );
+        assert!(rep.blocked, "the cap was not reached and it must say so");
+        teardown(&dir, ix);
+    }
+
+    #[test]
+    fn evict_keep_wins_when_a_kind_is_in_both_lists() {
+        let (dir, ix) = ev_open("keepboth");
+        ev_eight(&ix); // all movies
+        let policy = EvictPolicy {
+            order: EvictOrder::Oldest,
+            kinds: vec!["movie".into()],
+            keep_kinds: vec!["movie".into()],
+            ..Default::default()
+        };
+        let rep = ix.evict_to(1, &policy, &Protected::default()).unwrap();
+        assert_eq!(rep.removed, 0, "keep outranks the restriction list");
+        assert!(rep.blocked);
+        assert_eq!(ev_ids(&ix).len(), 8);
+        teardown(&dir, ix);
+    }
+
+    #[test]
+    fn evict_scope_junk_incomplete_never_touches_real_complete_content() {
+        let (dir, ix) = ev_open("scope");
+        // 1-2 junk, 3-4 incomplete, 5-8 real complete content.
+        ev_rel(&ix, 1, 80, 1, 1_000, 100, "movie", "m:sa:2020", EV_BLOB);
+        ev_rel(&ix, 2, 90, 0, 2_000, 100, "movie", "m:sb:2020", EV_BLOB);
+        ev_rel(&ix, 3, 0, 0, 3_000, 100, "movie", "m:sc:2020", EV_BLOB);
+        ev_rel(&ix, 4, 0, 0, 4_000, 100, "movie", "m:sd:2020", EV_BLOB);
+        for i in 5..=8i64 {
+            ev_rel(
+                &ix,
+                i,
+                0,
+                1,
+                1000 * i,
+                100,
+                "movie",
+                &format!("m:se{i}:2020"),
+                EV_BLOB,
+            );
+        }
+        let policy = EvictPolicy {
+            scope: EvictScope::JunkOrIncomplete,
+            ..Default::default()
+        };
+        // Impossible cap: everything the scope allows must go, and not
+        // one row past it.
+        let rep = ix.evict_to(1, &policy, &Protected::default()).unwrap();
+        assert_eq!(rep.removed, 4);
+        assert_eq!(
+            ev_ids(&ix),
+            vec![5, 6, 7, 8],
+            "real complete rows survive whatever the cap says"
+        );
+        assert!(rep.blocked, "stopped short of the cap, on purpose");
+
+        // The narrower scopes each take only their own class.
+        let (dir2, ix2) = ev_open("scope-junk");
+        ev_rel(&ix2, 1, 80, 1, 1_000, 100, "movie", "m:ja:2020", EV_BLOB);
+        ev_rel(&ix2, 2, 0, 0, 2_000, 100, "movie", "m:jb:2020", EV_BLOB);
+        ev_rel(&ix2, 3, 0, 1, 3_000, 100, "movie", "m:jc:2020", EV_BLOB);
+        let junk_only = EvictPolicy {
+            scope: EvictScope::Junk,
+            ..Default::default()
+        };
+        ix2.evict_to(1, &junk_only, &Protected::default()).unwrap();
+        assert_eq!(ev_ids(&ix2), vec![2, 3], "junk scope takes only junk");
+        let inc_only = EvictPolicy {
+            scope: EvictScope::Incomplete,
+            ..Default::default()
+        };
+        ix2.evict_to(1, &inc_only, &Protected::default()).unwrap();
+        assert_eq!(
+            ev_ids(&ix2),
+            vec![3],
+            "incomplete scope takes only incomplete"
+        );
+        teardown(&dir, ix);
+        teardown(&dir2, ix2);
+    }
+
+    #[test]
+    fn evict_headroom_controls_how_far_below_the_cap_it_empties() {
+        // Same fixture, three headrooms: deeper headroom must land the
+        // live size lower (or equal - row granularity can tie), and 0
+        // must still get under the cap itself.
+        let mut lands: Vec<u64> = Vec::new();
+        for (tag, hr) in [("hr0", Some(0u32)), ("hr10", None), ("hr40", Some(40u32))] {
+            let (dir, ix) = ev_open(&format!("headroom-{tag}"));
+            ev_eight(&ix);
+            let target = ev_target(&ix);
+            let policy = EvictPolicy {
+                order: EvictOrder::Oldest,
+                headroom_pct: hr,
+                ..Default::default()
+            };
+            let rep = ix.evict_to(target, &policy, &Protected::default()).unwrap();
+            assert!(
+                rep.live_after <= target,
+                "{tag}: {} must be under the cap {target}",
+                rep.live_after
+            );
+            let low = evict_low_water(target, &policy);
+            assert!(
+                rep.live_after <= low,
+                "{tag}: {} must reach its own low water {low}",
+                rep.live_after
+            );
+            lands.push(rep.live_after);
+            teardown(&dir, ix);
+        }
+        assert!(
+            lands[2] <= lands[1] && lands[1] <= lands[0],
+            "deeper headroom lands lower: {lands:?}"
+        );
+    }
+
+    #[test]
+    fn evict_preview_matches_the_eviction_it_predicts_and_deletes_nothing() {
+        let (dir, ix) = ev_open("preview");
+        ev_eight(&ix);
+        let target = ev_target(&ix);
+        let policy = EvictPolicy {
+            order: EvictOrder::Oldest,
+            ..Default::default()
+        };
+        let pv = ix
+            .evict_preview(target, &policy, &Protected::default(), usize::MAX)
+            .unwrap();
+        assert_eq!(ev_ids(&ix).len(), 8, "a preview deletes nothing");
+        assert!(pv.rows > 0 && pv.reachable && !pv.truncated);
+        assert_eq!(
+            pv.by_kind.iter().map(|(_, n, _)| n).sum::<usize>(),
+            pv.rows,
+            "the per-kind breakdown accounts for every row"
+        );
+        assert_eq!(pv.by_kind[0].0, "movie");
+
+        // The prediction against the real thing, on the blob-dominated
+        // shape where the estimator is near-exact: the same policy at the
+        // same target must delete what the preview said, within the one
+        // batch of slack the fitted scale can move it.
+        let rep = ix.evict_to(target, &policy, &Protected::default()).unwrap();
+        assert!(
+            (rep.removed as i64 - pv.rows as i64).abs() <= 1,
+            "preview said {} rows, eviction took {}",
+            pv.rows,
+            rep.removed
+        );
+
+        // Under the cap already: an honest empty answer, reachable, no walk.
+        let pv2 = ix
+            .evict_preview(u64::MAX, &policy, &Protected::default(), usize::MAX)
+            .unwrap();
+        assert_eq!(pv2.rows, 0);
+        assert!(pv2.reachable);
+
+        // Unlimited: same shape.
+        let pv3 = ix
+            .evict_preview(0, &policy, &Protected::default(), usize::MAX)
+            .unwrap();
+        assert_eq!((pv3.rows, pv3.est_bytes), (0, 0));
+        assert!(pv3.reachable);
+        teardown(&dir, ix);
+    }
+
+    #[test]
+    fn evict_preview_reports_protection_truncation_and_unreachable_caps() {
+        let (dir, ix) = ev_open("preview-edges");
+        ev_eight(&ix);
+        // A small protected set is excluded in the SQL, so the walk never
+        // sees it: skipped stays 0 and the survivors are simply absent
+        // from the count. Same behaviour as the real eviction.
+        let small = Protected {
+            title_keys: vec!["m:fixture 2:2020".into()],
+            release_ids: vec![1],
+        };
+        let policy = EvictPolicy {
+            order: EvictOrder::Oldest,
+            ..Default::default()
+        };
+        let pv = ix
+            .evict_preview(ev_target(&ix), &policy, &small, usize::MAX)
+            .unwrap();
+        assert_eq!(pv.protected_skipped, 0, "SQL-excluded, never walked");
+        assert!(pv.rows > 0 && pv.reachable);
+
+        // A max_examine bound of 3: the walk stops early and says so.
+        let pv2 = ix.evict_preview(1, &policy, &small, 3).unwrap();
+        assert!(pv2.truncated, "{pv2:?}");
+        assert!(!pv2.reachable);
+        assert!(pv2.rows <= 3);
+
+        // Past the bind cap - the shape the Rust-side re-check exists
+        // for, exercised exactly as the bindcap eviction test does: 30k
+        // filler ids spend the SQL budget, the real ids ride at the END
+        // where no `NOT IN` can reach them, and only the walk's own
+        // check can spare them. Impossible cap: unreachable, zero rows,
+        // and protected_skipped says why.
+        let mut ids: Vec<i64> = (1_000_000..1_030_000).collect();
+        ids.extend(1..=8i64);
+        let all = Protected {
+            title_keys: vec![],
+            release_ids: ids,
+        };
+        let pv3 = ix.evict_preview(1, &policy, &all, usize::MAX).unwrap();
+        assert_eq!(pv3.rows, 0);
+        assert!(!pv3.reachable);
+        assert_eq!(pv3.protected_skipped, 8);
+        assert_eq!(ev_ids(&ix).len(), 8);
+        teardown(&dir, ix);
+    }
+
+    #[test]
     fn evict_estimator_lands_near_the_target_after_compact() {
         let (dir, ix) = ev_open("estim");
         ev_uneven(&ix);
@@ -982,7 +1478,7 @@ mod tests {
                 target,
                 &EvictPolicy {
                     order: EvictOrder::Oldest,
-                    kinds: vec![],
+                    ..Default::default()
                 },
                 &Protected::default(),
             )
@@ -995,7 +1491,7 @@ mod tests {
         assert!(rep.needs_compact);
         ix.compact().unwrap();
         let actual = ix.db_bytes().unwrap();
-        let low = target / EVICT_LOW_WATER_DEN * EVICT_LOW_WATER_NUM;
+        let low = evict_low_water(target, &EvictPolicy::default());
         println!(
             "estimator: cap {before} -> target {target} (low water {low}), \
              removed {} rows, real post-compact size {actual} = {:.1}% of target",

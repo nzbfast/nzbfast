@@ -433,6 +433,87 @@ fn route_m3u(req: tiny_http::Request, d: &Arc<Daemon>, id: &str, query: &str) {
     );
 }
 
+/// `GET /metrics`: the Prometheus scrape.
+///
+/// AUTH IS THE FULL API KEY BY DEFAULT, with `metrics_open` to lift it,
+/// and both halves of that were a decision rather than a default.
+///
+/// Behind the key, because the body is a read of this daemon's state -
+/// queue depth, provider hostnames, memory - and every other read of
+/// that state on this port already needs the key. Prometheus can send
+/// one: a scrape config takes `authorization` or a `params:` entry, and
+/// `?apikey=` and the `X-Api-Key` header both work here, the same two
+/// spellings the rest of the API takes.
+///
+/// And a switch to open it, because the CONVENTION is an
+/// unauthenticated scrape and there are real installs where the key is
+/// the wrong tool - a scrape config in a shared repository has nowhere
+/// tidy to keep a secret, and an exporter on a private network has
+/// already been isolated by the network. An operator in that position
+/// should not have to choose between scraping and having an API key at
+/// all. What opening it publishes is written at `Daemon::metrics_open`
+/// and in the manual: no job names and no paths, but each configured
+/// provider's HOSTNAME as a label.
+///
+/// A keyless install stays open either way, which is not this route
+/// being lax - it is `full_key_ok`'s first arm, and on such an install
+/// every other endpoint is already answering the same caller.
+///
+/// GET only. A scrape is a read, and a POST that answered would be a
+/// route a browser form could reach cross-origin.
+fn route_metrics(req: tiny_http::Request, d: &Arc<Daemon>, query: &str) {
+    if req.method() != &tiny_http::Method::Get {
+        let _ = req.respond(tiny_http::Response::from_string("GET required").with_status_code(405));
+        return;
+    }
+    let open = d.metrics_open.load(Ordering::Relaxed);
+    let ok = open || {
+        let mut sp = parse_query(query);
+        if let Some(k) = header_apikey(&req) {
+            sp.entry("apikey".to_string()).or_insert(k);
+        }
+        let given = sp.get("apikey").map(String::as_str);
+        let a = d.apikey.lock_ok().clone();
+        let n = d.nzbkey.lock_ok().clone();
+        full_key_ok(given, &a, &n)
+    };
+    if !ok {
+        // Counted into the same bad-key ladder as every other
+        // credentialed route: a scraper misconfigured with the wrong key
+        // retries forever, which is exactly the shape the ladder exists
+        // to damp, and leaving this route out of it would give a guesser
+        // one door with no rate limit on it.
+        let blocked = d.note_auth_failure(peer_ip(&req), "metrics");
+        let _ = req.respond(if blocked {
+            tiny_http::Response::from_string("too many bad keys").with_status_code(429)
+        } else {
+            tiny_http::Response::from_string("apikey required").with_status_code(401)
+        });
+        return;
+    }
+    // Built by hand rather than through `respond_page`, and the reason
+    // is the ETag that helper attaches: a scraper sending
+    // `If-None-Match` would be answered 304 with no body, and a metrics
+    // series that stops moving is a monitoring failure that looks like a
+    // quiet system. It cannot happen today - `uptime_seconds` changes on
+    // every scrape, so the hash never repeats - but a body whose
+    // freshness is an accident of one gauge is not a contract. The gzip
+    // goes with it: this body is a few kilobytes, against a scrape every
+    // fifteen seconds on a local network.
+    let body = metrics::render(d);
+    let mut resp = tiny_http::Response::from_string(body).with_header(
+        tiny_http::Header::from_bytes(
+            &b"Content-Type"[..],
+            metrics::METRICS_CONTENT_TYPE.as_bytes(),
+        )
+        .expect("static content type header"),
+    );
+    if let Ok(h) = tiny_http::Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..]) {
+        resp.add_header(h);
+    }
+    let _ = req.respond(resp);
+}
+
 fn route_watch(req: tiny_http::Request, d: &Arc<Daemon>, query: &str) {
     // One-link streaming: GET /watch?url=<nzb-url> enqueues at
     // Force priority and redirects to the .m3u - bookmark it,
@@ -1006,13 +1087,25 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                 // API is broken" rather than "this API is picky". The same
                 // miss hit /newznab/api/, i.e. an *arr pointing an indexer
                 // here. Normalize ONE trailing slash for route matching.
-                // "/" must survive - it is the dashboard - and every
-                // sub-path arm below already trims its own remainder, so
-                // this only ever reaches the exact-match arms.
+                // "/" must survive the trim - trimmed to "" it would
+                // match no arm at all. It is the dashboard shell only
+                // when `dashboard` is on (TODO 281 IO3b made that a
+                // droppable feature); in the slim build it falls through
+                // to the 404 at the foot of this loop, which is still an
+                // answer and not a panic. Every sub-path arm below
+                // already trims its own remainder, so this only ever
+                // reaches the exact-match arms.
                 let path = match path.strip_suffix('/') {
                     Some("") | None => path,
                     Some(trimmed) => trimmed,
                 };
+                // TODO 281 IO3b: the whole browser-facing surface -
+                // this shell, the stylesheet, the catalogues, the manuals
+                // and the favicons - is `dashboard`-gated. Without it an
+                // unknown path falls through to the 404 at the foot of
+                // this loop, which is the honest answer for a build that
+                // carries no page: there is no hidden door to find.
+                #[cfg(feature = "dashboard")]
                 if path == "/" || path == "/index.html" {
                     // The daemon state the page needs BEFORE its first
                     // paint - locale, indexer switches - is stamped in by
@@ -1031,6 +1124,7 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                 // reachability, and the content is the user's own CSS.
                 // Missing file = an empty 200, so a browser console stays
                 // clean for the 99% who never wrote one.
+                #[cfg(feature = "dashboard")]
                 if path == "/custom.css" {
                     respond_page(req, user_css(&d.cfg_path), "text/css; charset=utf-8");
                     continue;
@@ -1047,6 +1141,7 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                     continue;
                 }
                 // §5 i18n catalogues (key→string JSON, embedded like the HTML).
+                #[cfg(feature = "dashboard")]
                 if let Some(lang) = path
                     .strip_prefix("/i18n/")
                     .and_then(|f| f.strip_suffix(".json"))
@@ -1070,6 +1165,7 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                 // Browser icons and the web manifest, embedded like the pages.
                 // Unauthenticated on purpose: a browser fetches a favicon and a
                 // manifest without our session, and they carry nothing private.
+                #[cfg(feature = "dashboard")]
                 if let Some((body, mime)) = web_icon(path) {
                     let _ = req.respond(
                         tiny_http::Response::from_data(body)
@@ -1097,6 +1193,13 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                     route_stream(req, &d, path, query);
                     continue;
                 }
+                // The Prometheus scrape. Ahead of the API dispatcher and
+                // not an arm of it: it answers text, takes no `mode=`,
+                // and is a GET or nothing.
+                if path == "/metrics" {
+                    route_metrics(req, &d, query);
+                    continue;
+                }
                 if let Some(id) = path.strip_prefix("/preview/probe/") {
                     route_preview_probe(req, &d, id, query);
                     continue;
@@ -1105,6 +1208,7 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                     route_preview_media(req, &d, id, query);
                     continue;
                 }
+                #[cfg(feature = "dashboard")]
                 if path == "/manual" || path == "/manual/" || path.starts_with("/manual/") {
                     // The full user manual, embedded like the dashboard so
                     // every install carries its own docs. §5 i18n: /manual/<lang>

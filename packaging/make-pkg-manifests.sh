@@ -87,7 +87,6 @@ ReleaseDate: $REL_DATE
 AppsAndFeaturesEntries:
 - DisplayName: nzbfast
   Publisher: nzbfast
-  DisplayVersion: $VER
   ProductCode: '{72B5B673-54D7-46ED-BDDC-C7D3E571D242}_is1'
 Installers:
 - Architecture: x64

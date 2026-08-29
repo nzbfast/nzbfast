@@ -1,5 +1,15 @@
 # nzbfast on Android - adb test kit
 
+> **The RELEASE artifact is `build-release-apk.sh` in this directory**
+> (TODO 281 AN5, 27 Aug 2026). It cross-builds the slim engine, stages
+> it, assembles, signs with the project's release keystore and verifies with
+> apksigner, producing `out/nzbfast-<ver>-android-arm64.apk`. Neither
+> `build-apk.sh` nor `run-on-device.sh` below is a release path: the
+> first signs with a throwaway debug key and the second pushes a bare
+> binary to /data/local/tmp. `.claude/skills/release-bundle` has the
+> keystore location, the certificate fingerprint to compare an upload
+> against, and why a second key would be a second app.
+>
 > The native Jetpack Compose app now lives in `compose-app/` (screens,
 > ExoPlayer test preview, remote mode - see its README and
 > CONTRACT.md). The WebView APK below stays as the fallback shell; its
@@ -15,8 +25,17 @@ This is the Phase 0 shape from `research/PLAN-ANDROID.md`: no app yet,
 just the engine binary under adb. The slim build (`--no-default-features`)
 compiles out the indexer stack (index, Spotnet, oracle ledger,
 enrichment) and with it sqlite; the download pipeline - NNTP, yEnc
-decode, PAR2 verify/repair, extraction - and the embedded dashboard are
-all there.
+decode, PAR2 verify/repair, extraction - is all there.
+
+THE DASHBOARD IS NO LONGER PART OF THE SLIM BUILD (TODO 281 IO3b,
+28 Aug 2026): it is a `dashboard` cargo feature, on in `default` and
+dropped by `--no-default-features`, so the iOS store binary and the
+release APK's engine carry no web UI at all. THIS kit is the one place
+in this directory that still needs it - a WebView shell whose entire UI
+is that page - so every command below asks for it back with
+`--features dashboard`. Do not copy that flag into `compose-app/`: the
+release APK is the Compose app, its UI is native, and it correctly
+ships without the pages.
 
 ## Build
 
@@ -30,7 +49,8 @@ cargo install cargo-ndk
 From the repo root (ANDROID_NDK_HOME must point at an installed NDK):
 
 ```sh
-cargo ndk -t arm64-v8a -p 26 build --release -p nzbfast --no-default-features
+cargo ndk -t arm64-v8a -p 26 build --release -p nzbfast \
+  --no-default-features --features dashboard
 cp target/aarch64-linux-android/release/nzbfast packaging/android/nzbfast-android-arm64
 ```
 

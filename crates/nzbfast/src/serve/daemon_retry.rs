@@ -384,7 +384,7 @@ impl Daemon {
             // it there at all, and this is the belt to that brace - a
             // failed record's pause flag describes nothing either way.
             j.paused = false;
-            j.fail_message.clear();
+            j.clear_failure();
             // §207: the verdict goes with the run it explained. `stamp`
             // only overwrites on Some, so a re-run too short (or too
             // unclassifiable) to earn one would otherwise keep the first

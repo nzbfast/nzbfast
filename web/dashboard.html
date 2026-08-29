@@ -49,6 +49,10 @@ addEventListener('appinstalled',function(){
      serve.rs from web/ui-tokens.html. Inlined ahead of this page's own
      <style> so page rules can still override a token if they must. -->
 __NZBFAST_UI_TOKENS__
+<!-- The shared press/warning/error sound engine, substituted by
+     assets.rs from web/ui-sound.html. One copy for both shell pages -
+     the wall used to carry a stale hand-made fork of it. -->
+__NZBFAST_UI_SOUND__
 <!--
   nzbfast dashboard - richer visual layer over the daemon's JSON API.
   Self-contained (no external deps): all charts are hand-rolled canvas
@@ -2172,7 +2176,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
        renderBusyChips; empty span costs nothing when the daemon is
        doing nothing in the background. -->
   <span id="busyChips" style="display:contents"></span>
-  <button class="ghost" id="pauseBtn" onclick="togglePause()" data-i18n-title="hdr.pause.title" title="Pause - lets in-flight article downloads finish, then stops. Nothing is re-downloaded on resume." data-i18n="hdr.pause">Pause</button>
+  <button class="ghost" id="pauseBtn" onclick="togglePause()" data-i18n-title="hdr.pause.title" title="Pause - lets in-flight article downloads finish, then stops. Whatever is already on disk is kept, and a paused download keeps its place for as long as you like." data-i18n="hdr.pause">Pause</button>
   <button class="ghost mini" id="pauseNowBtn" onclick="pauseNow()" style="display:none" data-i18n-title="hdr.pausenow.title" title="Pause now - stops instantly and frees the line; the few in-flight articles re-download on resume." data-i18n="hdr.pausenow">now</button>
   <!-- Offline is not a louder Pause. Pause stops the QUEUE and leaves
        indexing running, so the account stays occupied; offline hangs up
@@ -2180,6 +2184,8 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
        only one or two addresses at once, so "let me use this from my
        laptop" needs the second one, and needs it without waiting out an
        idle timeout. -->
+  <button class="ghost" id="sndBtn" data-noblip onclick="toggleSounds()" aria-pressed="true"
+    data-i18n-title="set.snd.master" title="Sounds" aria-label="Sounds"><span id="sndIcon" aria-hidden="true">🔊</span></button>
   <button class="ghost" id="netBtn" onclick="toggleOffline()" data-i18n-title="hdr.online.title" title="Online - connected to your providers. Disconnect hangs up every connection, so another machine or another app can use the account. Downloads pause and pick up where they left off.">
     <span class="dot" id="netDot" aria-hidden="true"></span><span id="netTxt" data-i18n="hdr.online">Online · disconnect</span></button>
 </header>
@@ -2352,7 +2358,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
      the queue is empty, for the same reason that one is: a button
      whose whole job is already done is noise. -->
 <button class="ghost" id="qClear" style="float:inline-end;margin-top:-4px;margin-inline-start:10px;display:none"
-  onclick="clearQueue(this)" data-i18n-title="queue.clear.title"
+  data-snd="remove" onclick="clearQueue(this)" data-i18n-title="queue.clear.title"
   title="Remove every download from the queue. Nothing is deleted from disk."
   data-i18n="queue.clear">Clear queue</button>
 <span class="dim mono" id="qfree" style="float:inline-end;text-transform:none;letter-spacing:0;font-weight:400"></span>
@@ -2378,11 +2384,11 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
      those arms); category loops the single-item op per row. -->
 <div class="bulkbar" id="qselbar" role="toolbar" data-i18n-title="sel.q.bar" title="Actions for the selected downloads" aria-label="Actions for the selected downloads">
   <span class="count" id="qselcount"></span>
-  <button class="ghost mini" onclick="qBulk('pause')" data-i18n-title="sel.pause.title" title="Pause the selected downloads" data-i18n="sel.pause">⏸ Pause</button>
-  <button class="ghost mini" onclick="qBulk('resume')" data-i18n-title="sel.resume.title" title="Resume the selected downloads" data-i18n="sel.resume">▶ Resume</button>
+  <button class="ghost mini" data-snd="off" onclick="qBulk('pause')" data-i18n-title="sel.pause.title" title="Pause the selected downloads" data-i18n="sel.pause">⏸ Pause</button>
+  <button class="ghost mini" data-snd="on" onclick="qBulk('resume')" data-i18n-title="sel.resume.title" title="Resume the selected downloads" data-i18n="sel.resume">▶ Resume</button>
   <select class="ctl" id="qselPrio" onchange="qBulkPrio(this)" data-i18n-title="sel.prio.title" title="Set the priority of the selected downloads" aria-label="Set the priority of the selected downloads"></select>
   <select class="ctl" id="qselCat" onchange="qBulkCat(this)" data-i18n-title="sel.cat.title" title="Move the selected downloads to a category" aria-label="Move the selected downloads to a category"></select>
-  <button class="ghost mini" onclick="qBulkDelete()" data-i18n-title="sel.qdel.title" title="Remove the selected downloads from the queue. Nothing is deleted from disk." data-i18n="sel.remove">✕ Remove</button>
+  <button class="ghost mini" data-snd="remove" onclick="qBulkDelete()" data-i18n-title="sel.qdel.title" title="Remove the selected downloads from the queue. Nothing is deleted from disk." data-i18n="sel.remove">✕ Remove</button>
   <button class="ghost mini" onclick="selClear('q')" data-i18n="sel.clear">Clear selection</button>
 </div>
   <div class="cardscroll"><table id="queue"><thead><tr><th class="selcol" onclick="selCellClick(event,'q',this)"><input type="checkbox" id="qSelAll" onclick="selAllClick(this,'q')" data-i18n-title="sel.q.all" title="Select every download listed" aria-label="Select every download listed"></th><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.left">Left</th><th data-i18n="col.eta">ETA</th><th style="width:210px" data-i18n="col.progress">Progress</th><th style="width:110px"></th></tr></thead><tbody></tbody></table>
@@ -2471,7 +2477,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 <div class="card" id="histCard">
   <h3 data-i18n="hist.title">History <span class="dim" id="vhsum" style="text-transform:none;letter-spacing:0;font-weight:400"></span>
     <button class="ghost" id="histClear" style="float:inline-end;margin-top:-4px;display:none"
-      onclick="clearHistDone(this)" data-i18n="hist.clear">Clear completed</button></h3>
+      data-snd="remove" onclick="clearHistDone(this)" data-i18n="hist.clear">Clear completed</button></h3>
   <div class="chartwrap" style="height:46px;margin-bottom:8px;display:none"><canvas id="vhChart" data-i18n-title="hist.vh.title" title="Bad PAR2 blocks per download, oldest → newest - a rising tail means articles are arriving damaged"></canvas></div>
   <!-- Downloads whose record was deleted but whose files are still on
        disk, one line each. It lives HERE, under History, because the row
@@ -2500,9 +2506,9 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
      same as the per-row ✕); retry loops the single-item op per row. -->
 <div class="bulkbar" id="hselbar" role="toolbar" data-i18n-title="sel.h.bar" title="Actions for the selected history entries" aria-label="Actions for the selected history entries">
   <span class="count" id="hselcount"></span>
-  <button class="ghost mini" onclick="hBulkRetry()" data-i18n-title="sel.retry.title" title="Retry the selected downloads: each resumes from what already arrived" data-i18n="sel.retry">↻ Retry</button>
-  <button class="ghost mini" onclick="hBulkDelete()" data-i18n-title="sel.hdel.title" title="Remove the selected entries from history (files stay on disk)" data-i18n="sel.remove">✕ Remove</button>
-  <button class="ghost mini" onclick="hBulkDeleteFiles()" data-i18n-title="sel.hfiles.title" title="Remove the selected entries AND delete their downloaded files from disk" data-i18n="sel.delfiles">Remove + delete files</button>
+  <button class="ghost mini" data-snd="top" onclick="hBulkRetry()" data-i18n-title="sel.retry.title" title="Retry the selected downloads: each resumes from what already arrived" data-i18n="sel.retry">↻ Retry</button>
+  <button class="ghost mini" data-snd="remove" onclick="hBulkDelete()" data-i18n-title="sel.hdel.title" title="Remove the selected entries from history (files stay on disk)" data-i18n="sel.remove">✕ Remove</button>
+  <button class="ghost mini" data-snd="remove" onclick="hBulkDeleteFiles()" data-i18n-title="sel.hfiles.title" title="Remove the selected entries AND delete their downloaded files from disk" data-i18n="sel.delfiles">Remove + delete files</button>
   <button class="ghost mini" onclick="selClear('h')" data-i18n="sel.clear">Clear selection</button>
 </div>
   <div class="cardscroll"><table id="hist"><thead><tr><th class="selcol" onclick="selCellClick(event,'h',this)"><input type="checkbox" id="hSelAll" onclick="selAllClick(this,'h')" data-i18n-title="sel.h.all" title="Select every history entry listed" aria-label="Select every history entry listed"></th><th data-i18n="col.name">Name</th><th class="hsize" data-i18n="col.size">Size</th><th class="hacts"></th></tr></thead><tbody></tbody></table>
@@ -2517,7 +2523,24 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
      number of accounts you have configured. The chart keeps its own grip
      and stays out of the scroller. -->
   <div class="cardscroll"><table id="usageTbl"><thead><tr><th data-i18n="usage.provider">Provider</th><th data-i18n="usage.today">Today</th><th data-i18n="usage.7d">7 days</th><th data-i18n="usage.30d">30 days</th></tr></thead>
-    <tbody><tr><td colspan="4" class="dim" data-i18n="usage.none">no downloads recorded yet</td></tr></tbody></table></div>
+    <tbody><tr><td colspan="4" class="dim" data-i18n="usage.none">no downloads recorded yet</td></tr></tbody></table>
+<!-- Prepaid blocks. The day columns above say what each provider has
+     COST; this says what is left of what you paid for, which is the
+     question a block account is bought to ask and which lived only on
+     the Settings page until stage 2 of the block-account design. Every
+     figure is our own accounting - no provider-reported balance, ever
+     (that design's section 3). Empty and hidden unless a block is
+     configured, which is the normal install. -->
+    <div id="usageBlocks" style="display:none;margin-top:8px"></div>
+<!-- Provider quality: the same providers, judged on what they DELIVERED
+     rather than on what they cost. It sits in this card and not on a
+     page of its own because it is the other half of one question - the
+     rows above say what each account was worth in gigabytes, these say
+     whether the gigabytes arrived - and because a section nobody
+     navigates to is a section nobody reads. Fed by the same
+     mode=usage poll, so it costs no extra request; hidden until the
+     ledger has a finished download in it. -->
+    <div id="usageQuality" style="display:none;margin-top:10px"></div></div>
   <div class="cardgrip" data-card="usageCard" tabindex="0" role="separator" aria-orientation="horizontal"></div>
 </div>
 
@@ -2530,7 +2553,7 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
   <h3 data-i18n="bench.title">System benchmark
     <span class="h3tools">
       <select class="ctl" id="benchSched" data-i18n-title="bench.sched.title" title="run the benchmark automatically when the queue is idle" aria-label="run the benchmark automatically when the queue is idle"
-        onchange="api('config',`&name=bench_interval&value=${this.value}`).then(j=>toast(j.error?tErr(j.error):t('bench.schedSaved','Benchmark schedule saved.'),!!j.error))">
+        onchange="const s=this;api('config',`&name=bench_interval&value=${s.value}`).then(j=>{toast(j.error?tErr(j.error):t('bench.schedSaved','Benchmark schedule saved.'),!!j.error);if(j.error){s.blur();loadBenchHist();}})">
         <option value="0" data-i18n="bench.sched.none">no schedule</option>
         <option value="6" data-i18n="bench.sched.6">every 6 h</option>
         <option value="12" data-i18n="bench.sched.12">every 12 h</option>
@@ -2738,6 +2761,9 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <span><input type="checkbox" id="sv_warm">
       <button class="ghost sm" onclick="benchWarm(this)" data-i18n="set.srv.warm.bench">Measure</button>
       <span class="hint" id="sv_warmres"></span></span></div>
+    <div class="row"><label data-i18n="set.srv.carry">Speed per connection<span class="hint" data-i18n="set.srv.carry.hint">how fast ONE connection to this server actually runs, measured rather than assumed. It matters because nzbfast decides how many connections to open by dividing your line speed by what it expects each one to carry, and on some routes - a provider on the other side of the world is the usual one - each connection runs far slower than that, so the number it opens is too small and your line sits half empty. Measuring costs a little of your allowance and opens real connections for a few seconds, so it only ever runs when you press this. Nothing is changed by it: it tells you what it found</span></label>
+      <span><button class="ghost sm" onclick="measureCarry(this)" data-i18n="set.srv.carry.btn">Measure</button>
+      <span class="hint" id="sv_carryres"></span></span></div>
     <div class="row"><label data-i18n="set.srv.ips">Addresses allowed at once<span class="hint" data-i18n="set.srv.ips.hint">how many places may use this account at the same time, from your provider's plan. Not the same as connections above: that is how many connections ONE machine opens, this is how many machines, sites or homes may connect at all. Leave blank if you do not know and nzbfast will use a safe guess</span></label>
       <input class="txt sm" type="number" min="0" max="999" id="sv_maxips" data-i18n-placeholder="set.srv.ips.ph" placeholder="unknown"></div>
     <div class="infobox" id="sv_ipsnote">
@@ -2840,6 +2866,13 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
   <h3 data-i18n="set.perf.title">Connections &amp; performance <span class="badge next" data-i18n="badge.next">applies from the next download</span></h3>
   <div class="row"><label data-i18n="set.perf.conns">Connections<span class="hint" data-i18n="set.perf.conns.hint">sockets PER SERVER for a download (each server's own account limit also applies); use Connection tuning on the dashboard to find the sweet spot</span></label>
     <input class="txt sm" type="number" min="1" max="999" id="s_connections" onchange="setCfg('connections',this.value)"></div>
+  <!-- TODO 312 item 1: the fleet cap, as a number. It has shipped as
+       NZBFAST_LINE_CAP since 23 Aug 2026 and needed a daemon restart
+       and a reading of the source to find; GH #62's reporter found only
+       the =0 form. Empty is the automatic curve, which is what almost
+       everyone should leave it on. -->
+  <div class="row" data-adv="1"><label data-i18n="set.perf.fleet">Total connections across all servers<span class="hint" data-i18n="set.perf.fleet.hint">nzbfast normally chooses this for itself and grows it when a measurement says the line needs more: a small fleet finishes sooner than a large one on most lines, and asking for too many sockets is measurably slower. Leave it empty for that. A number fixes the whole fleet at that many connections, shared out across your servers and still inside each account's own limit above. 0 turns the rule off, so every server dials its own number. Worth setting only if "Why is this slow?" on a download says the connection budget is what is holding it back</span></label>
+    <input class="txt sm" type="number" min="0" max="9999" id="s_line_cap_fleet" data-i18n-placeholder="set.perf.fleet.ph" placeholder="automatic" onchange="setCfg('line_cap_fleet',this.value)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.perf.window">Pipeline window<span class="hint" data-i18n="set.perf.window.hint">commands in flight per connection</span></label>
     <input class="txt sm" type="number" min="1" max="64" id="s_window" onchange="setCfg('window',this.value)"></div>
   <div class="row" data-adv="1"><label data-i18n="set.perf.decoders">Decoder threads</label>
@@ -2880,6 +2913,20 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <option value="d" data-i18n="set.disk.qperiod.d">daily (local midnight)</option><option value="w" data-i18n="set.disk.qperiod.w">weekly (Monday, local time)</option><option value="m" data-i18n="set.disk.qperiod.m">monthly (1st, local time)</option></select></div>
   <div class="row" data-adv="1"><label data-i18n="set.disk.nestdepth">Nested archive depth<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.disk.nestdepth.hint">how many archive-in-archive layers to unpack automatically (default 5); applies to the next download. At the limit the deepest archive is left in place, unpacked no further - the download still completes. Raise only for unusually deep nested releases</span></label>
     <input class="txt sm" type="number" min="1" max="64" id="s_nested_max_depth" onchange="setCfg('nested_max_depth',this.value)"></div>
+</div>
+
+<!-- TODO 304 stage 2. Its own card rather than two rows inside Disk &
+     quota: the budget and the watchlist toggle are one feature and are
+     unreadable apart - a GB figure with no explanation of what spends it
+     reads as another cache setting, and "add watchlist finds paused"
+     reads as a way to make the watchlist do less. A card joins the rail
+     by being written (see SETGROUPS). -->
+<div class="card set" data-sg="download" data-sk="insurance">
+  <h3 data-i18n="set.ins.title">Save paused downloads while you can <span class="badge live" data-i18n="badge.live">live</span></h3>
+  <div class="row"><label data-i18n="set.ins.cap">Disk to use for this<span class="hint" data-i18n="set.ins.cap.hint">Nothing on Usenet stays up forever, so an item you queue paused for later can be half gone by the time you start it. Give this a budget and nzbfast quietly fetches those items' files now, while the posts are still whole, then unpacks one only when you start it. The number is how much disk that may use, in GB; 0 turns it off, which is what it does today. It runs only while nothing else is downloading and steps aside within seconds when a real download arrives, and nothing is ever deleted to make room - at the budget, nothing new is picked up</span></label>
+    <input class="txt sm" type="number" min="0" max="1000000" id="s_insurance_cap_gb" onchange="setCfg('insurance_cap_gb',this.value)"></div>
+  <div class="row"><label data-i18n="set.ins.wl">Add watchlist finds paused<span class="hint" data-i18n="set.ins.wl.hint">New episodes and films the watchlist finds are queued paused instead of downloading straight away, so you decide when each one runs. With a budget above, their files are still fetched in the background while the post is whole, so waiting costs you nothing</span></label>
+    <input type="checkbox" id="s_watchlist_deferred" onchange="setCfg('watchlist_deferred',this.checked?1:0)"></div>
 </div>
 
 <div class="card set" data-sg="download" data-sk="watch">
@@ -3426,14 +3473,25 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
       <option value="newest" data-i18n="set.db.order.newest">newest posts first</option>
       <option value="largest" data-i18n="set.db.order.largest">largest releases first</option>
       <option value="smallest" data-i18n="set.db.order.smallest">smallest releases first</option></select></div>
+  <div class="row evict-sub" style="padding-left:16px"><label data-i18n="set.db.scope">Never delete finished content<span class="hint" data-i18n="set.db.scope.hint">limits what a cleanup may touch at all. With a scope set, a limit the allowed rows cannot satisfy stops short and says so, rather than reaching into real releases</span></label>
+    <select class="sel" id="s_index_evict_scope" style="max-width:320px" onchange="setCfg('index_evict_scope',this.value)">
+      <option value="all" data-i18n="set.db.scope.all">no: anything can go, in the order above</option>
+      <option value="junk_incomplete" data-i18n="set.db.scope.junkinc">yes: only junk and incomplete posts may be deleted</option>
+      <option value="junk" data-i18n="set.db.scope.junk">strictest: only junk posts may be deleted</option>
+      <option value="incomplete" data-i18n="set.db.scope.incomplete">only incomplete posts may be deleted</option></select></div>
   <div class="row evict-sub" style="padding-left:16px"><label data-i18n="set.db.kinds">What can be deleted<span class="hint" data-i18n="set.db.kinds.hint">clear a box to protect that kind: those releases are never deleted to save space. Everything ticked = anything can go</span></label>
     <span style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;font-size:13px">
       <label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="s_evict_k_movie" onchange="saveEvictKinds(this)"><span data-i18n="set.db.kinds.movie">Movies</span></label>
       <label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="s_evict_k_tv" onchange="saveEvictKinds(this)"><span data-i18n="set.db.kinds.tv">TV</span></label>
       <label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="s_evict_k_software" onchange="saveEvictKinds(this)"><span data-i18n="set.db.kinds.software">Software</span></label>
       <label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="s_evict_k_other" onchange="saveEvictKinds(this)"><span data-i18n="set.db.kinds.other">Everything else</span></label></span></div>
+  <div class="row evict-sub" data-adv="1" style="padding-left:16px"><label data-i18n="set.db.headroom">Cleanup headroom (%)<span class="hint" data-i18n="set.db.headroom.hint">how far below the limit a cleanup empties, so the very next scan does not trigger another one. 10 means it deletes down to 90% of the limit; 0 stops exactly at it</span></label>
+    <input class="txt sm" type="number" min="0" max="50" id="s_index_evict_headroom" onchange="setCfg('index_evict_headroom',this.value)"></div>
   <div class="row evict-sub" style="padding-left:16px"><label data-i18n="set.db.evictnow">Apply the limit now<span class="hint" data-i18n="set.db.evictnow.hint">run one pass immediately instead of waiting for the index to reach the limit</span></label>
     <span><button class="ghost" onclick="evictNow(this)" data-i18n="set.db.evictnow.btn">Delete down to the limit…</button></span></div>
+  <div class="row"><label data-i18n="set.db.preview">Preview a cleanup<span class="hint" data-i18n="set.db.preview.hint">counts what a cleanup would delete - to the size in the Shrink box below if you typed one, otherwise to the size limit - and deletes nothing</span></label>
+    <span><button class="ghost" onclick="previewEvict(this)" data-i18n="set.db.preview.btn">What would go?</button></span></div>
+  <div id="evictPreviewOut" class="dim" style="display:none;font-size:12px;line-height:1.55;margin:2px 0 8px"></div>
   <div class="row"><label data-i18n="set.db.shrink">Shrink to<span class="hint" data-i18n="set.db.shrink.hint">a one-off: delete releases until the index fits the size you type. It does not change the size limit above, and like the limit it leaves the file to be compacted once nothing is downloading or scanning</span></label>
     <span><input class="txt sm" id="s_shrink_to" data-i18n-placeholder="set.db.shrink.ph" placeholder="e.g. 10G">
     <button class="ghost" onclick="shrinkIndex(this)" data-i18n="set.db.shrink.btn">Shrink…</button></span></div>
@@ -3591,7 +3649,9 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
   <h3 data-i18n="set.snd.title">Sounds</h3>
   <div class="dim" style="font-size:12.5px;margin:-4px 0 10px" data-i18n="set.snd.blurb">All synthesized right here in the browser: no audio files, nothing stored on the server. Preferences are per-browser.</div>
   <div class="row"><label data-i18n="set.snd.master">Sounds<span class="hint" data-i18n="set.snd.master.hint">master switch for everything below, including the button-press blip</span></label>
-    <input type="checkbox" id="ui_sounds" onchange="sndOn=this.checked; localStorage.nzbfastSounds=this.checked?'on':'off'; if(this.checked)snd('click')"></div>
+    <input type="checkbox" id="ui_sounds" onchange="setSounds(this.checked)"></div>
+  <div class="row"><label data-i18n="set.snd.popup">Pop up errors<span class="hint" data-i18n="set.snd.popup.hint">a refused or failed action also raises a desktop notification, so you see it when this page is behind something else. Errors only - everything else stays in the page</span></label>
+    <input type="checkbox" id="ui_errpopup" onchange="setErrPopup(this)"></div>
   <div class="row"><label data-i18n="set.snd.vol">Volume</label>
     <input type="range" id="ui_vol" min="0" max="100" style="width:180px"
       oninput="sndPrefs.vol=this.value/100; saveSndPrefs()" onchange="previewSnd('complete')"></div>
@@ -4047,13 +4107,17 @@ const DAEMON_LOCALE='__NZBFAST_LOCALE__';   // serve.rs replaces this token
 // A page opened straight from disk keeps the untouched token, and an
 // unreplaced token must mean "on" - that is the state where nothing is
 // hidden, so the fallback can never hide a working feature.
-const IDX_ON='__NZBFAST_INDEX__'!=='0';
+// The casts are load-bearing for tools/checkjs-gate.py and say something
+// true: serve/webasset.rs rewrites these tokens before the page goes out,
+// so what is compared is a string whose value is not known here - without
+// them a checker reads every one of these comparisons as impossible.
+const IDX_ON=(/** @type {string} */('__NZBFAST_INDEX__'))!=='0';
 const IDX_COUNT=+'__NZBFAST_INDEXERS__'||0;
 // Spotnet spots are promoted into the release index as named wall
 // cards, so while they are on the wall exists and the watchlist has
 // arrivals to match - even with the header indexer off, which is the
 // default install.
-const SPOT_ON='__NZBFAST_SPOTS__'==='1';
+const SPOT_ON=(/** @type {string} */('__NZBFAST_SPOTS__'))==='1';
 // This script runs after the markup but DURING parsing, so <body> and
 // the nav already exist and nothing has painted yet: the class lands on
 // body (what the stylesheet keys on) with no flash of the hidden UI.
@@ -5106,6 +5170,10 @@ async function busy(btn, label, fn){
 async function togglePause(){
   // Optimistic: flip the UI immediately, then confirm on the next tick.
   // Plain pause is graceful (finish in-flight, keep the queue for resume).
+  // TODO 309(b): BEFORE the optimistic flip, so a refusal leaves the
+  // button where it was rather than springing it back. Resuming costs
+  // nothing, so only the pause direction asks.
+  if(!paused && !okToPause(null)) return;
   paused=!paused;
   document.getElementById('pauseBtn').textContent = paused?t('hdr.resume','Resume'):t('hdr.pause','Pause');
   document.body.classList.toggle('paused', paused);
@@ -5123,8 +5191,15 @@ let offline=false;
 // to a screen of red that explains nothing.
 async function toggleOffline(){
   const going=!offline;
-  if(going && !confirm(t('hdr.offline.confirm',
-      'Disconnect from your providers?\n\nEvery connection is closed, so you can use the account from another machine or another app. Downloads pause and keep what they have already fetched - nothing is lost, and they carry on where they left off when you reconnect.')))
+  // TODO 309(b) [copy]: same exception as pauseCostOf() everywhere else
+  // on this page - a set that unpacks as it arrives has nothing on disk
+  // for the reconnect to pick up.
+  const opc=going?pauseCostOf(null):null;
+  const offlineMsg = (opc && opc.kind==='refetch')
+    ? t('hdr.offline.confirm.refetch','Disconnect from your providers?\n\nEvery connection is closed, so you can use the account from another machine or another app. Downloads pause - but one of them unpacks as it arrives, so nothing on disk can be picked up again: the {gb} GB it has already fetched would be fetched again when you reconnect.',{gb:pauseCostGB(opc)})
+    : t('hdr.offline.confirm',
+      'Disconnect from your providers?\n\nEvery connection is closed, so you can use the account from another machine or another app. Downloads pause and keep what they have already fetched - nothing is lost, and they carry on where they left off when you reconnect.');
+  if(going && !confirm(offlineMsg))
     return;
   offline=going;
   paintNet();
@@ -5150,12 +5225,19 @@ function paintNet(){
 }
 async function pauseNow(){
   // Immediate abort - free the line at once; in-flight articles re-download.
+  // TODO 309(b): strictly worse than the graceful pause above, so it
+  // asks the same question and asks it first.
+  if(!okToPause(null)) return;
   paused=true;
   document.getElementById('pauseBtn').textContent=t('hdr.resume','Resume');
   document.body.classList.toggle('paused', true);
   reportRefusal(await api('pause','&value2=now')); tick();
 }
 async function pauseFor(mins){
+  // TODO 309(b): a timed pause is a pause. The select is reset either
+  // way, so a refused one does not leave the menu stuck on a duration
+  // that never took.
+  if(mins && !okToPause(null)) mins=0;
   if(mins) reportRefusal(await api('pause','&value='+mins));
   document.getElementById('pauseSel').value='';
   tick();
@@ -7188,6 +7270,99 @@ function altSwitchBlock(s){
   if(s.alt_to_name) out.push(t('drawer.altto','Replaced by {name}, which was downloaded instead.',{name:esc(s.alt_to_name)}));
   return out.length?`<div class="dim" style="font-size:12px;margin-top:7px">${out.join('<br>')}</div>`:'';
 }
+// TODO 304 stage 2: what retention insurance is doing to THIS row.
+//
+// Stage 1 shipped the machinery with no surface at all, and the four
+// states it can leave a row in were indistinguishable on the page: a
+// banked row was "Paused" at 100% exactly like a row nothing had
+// touched, and a background fetch read "Downloading" like an ordinary
+// one. `s.insurance` is null on every row of an ordinary queue, so this
+// is silent unless the feature is on AND this row is in it.
+//
+// The retired state is the one worth the width. The picker gives a post
+// up after three failed background fetches and until now said so only in
+// the log - and a post the fetch cannot get is precisely the post whose
+// articles are going, which is the news the whole feature exists to
+// deliver EARLY, while starting it by hand can still save it.
+function insChip(s){
+  const q=s&&s.insurance; if(!q) return '';
+  // Two of the four states are claims about a row that is WAITING, and a
+  // promotion clears `paused` without clearing `insurance` - so on a row
+  // the user has just started they would read "saved when the line is
+  // free" and "could not be saved" over a download that is running. The
+  // other two stand on any row: `fetching` is paused by construction,
+  // and `banked` is still true (and still the answer to "why is this
+  // finishing so fast") on the row resuming from what was banked.
+  const waiting=s.status==='Paused';
+  if(q.retired) return !waiting?'':` <span class="bad" title="${escA(t('queue.ins.stalled.title','Tried {n} times to fetch this download\'s files early and could not. That usually means the post itself is going: start it now if you still want it.',{n:q.attempts}))}">· ${t('queue.ins.stalled','could not be saved')}</span>`;
+  if(q.banked) return ` <span class="ok" title="${escA(t('queue.ins.saved.title','Every file is on disk already, fetched while the post was still whole. Starting this unpacks what is here instead of downloading it again.'))}">· ${t('queue.ins.saved','saved')}</span>`;
+  if(q.fetching) return ` <span class="ok" title="${escA(t('queue.ins.saving.title','Fetching this download\'s files in the background, while the post is still whole. It runs only while nothing else is downloading and stops within seconds when something is.'))}">· ${t('queue.ins.saving','saving this now')}</span>`;
+  return !waiting?'':` <span class="dim" title="${escA(t('queue.ins.wait.title','This download\'s files will be fetched in the background while the post is still whole, whenever nothing else is downloading.'))}">· ${t('queue.ins.wait','saved when the line is free')}</span>`;
+}
+// ...and the same four states as a sentence, with the control under it.
+//
+// The state sentences are the chip's own tooltips rather than a second
+// set of strings: the chip is the short form of exactly this, and two
+// vocabularies for one state is how the deferred badge and its drawer
+// panel drifted apart before U1.
+function insBlock(s){
+  const q=s&&s.insurance;
+  const cap=(lastQ&&lastQ.insurance_cap_gb)||0;
+  // Nothing to say on an ordinary queue: no feature, no row in it.
+  if(!q&&!cap) return '';
+  const on=!!q;
+  // Same reading as insChip's: the retired and waiting sentences are
+  // claims about a row that has not been started, and a promotion clears
+  // `paused` without clearing `insurance`. The CONTROL below stays on
+  // either way - un-marking a row you have just started is a perfectly
+  // ordinary thing to want.
+  const waiting=s.status==='Paused';
+  const line = !on || (!waiting && !q.banked && !q.fetching)
+    ? ''
+    : q.retired
+    ? t('queue.ins.stalled.title','Tried {n} times to fetch this download\'s files early and could not. That usually means the post itself is going: start it now if you still want it.',{n:q.attempts})
+    : q.banked
+    ? t('queue.ins.saved.title','Every file is on disk already, fetched while the post was still whole. Starting this unpacks what is here instead of downloading it again.')
+    : q.fetching
+    ? t('queue.ins.saving.title','Fetching this download\'s files in the background, while the post is still whole. It runs only while nothing else is downloading and stops within seconds when something is.')
+    : t('queue.ins.wait.title','This download\'s files will be fetched in the background while the post is still whole, whenever nothing else is downloading.');
+  // The daemon's own sentence for the last failure, verbatim, exactly as
+  // the benched panel carries `defer_reason`: "three tries failed" is a
+  // count, and only this says whether the articles are gone or the
+  // provider was simply down.
+  // ...and only under the sentence it is evidence FOR: a stale reason on
+  // a row the user has since started reads as a failure of the download
+  // that is running.
+  const note = on&&q.note&&line
+    ? `<br><span class="dim">${t('drawer.ins.note','Last attempt:')} ${esc(q.note)}</span>`
+    : '';
+  // A row already insured can always be un-insured; insuring one needs
+  // the budget AND a paused row - the daemon's insure_refusal refuses a
+  // running or in-line row outright, so on those the button's only
+  // possible outcome would be its own red refusal toast, and a control
+  // that can never succeed is the defect the whole api contract exists
+  // to stop.
+  const btn = on
+    ? `<button class="ghost mini" title="${escA(t('drawer.ins.off.title','Stop fetching this in the background. Anything already on disk stays, and the download picks up from it whenever you start it.'))}" onclick="insureJob(this,'${escA(s.nzo_id)}',0)">${t('drawer.ins.off','Stop saving this one')}</button>`
+    : cap&&waiting
+    ? `<button class="ghost mini" title="${escA(t('drawer.ins.on.title','Fetch this download\'s files in the background now, while the post is still whole, and unpack them only when you start it.'))}" onclick="insureJob(this,'${escA(s.nzo_id)}',1)">${t('drawer.ins.on','Save this one early')}</button>`
+    : '';
+  const off = on&&!cap
+    ? `<br><span class="warn">${t('drawer.ins.capoff','Saving downloads early is switched off: this one is marked for it but nothing will be fetched until a disk budget is set in Settings, under Downloading.')}</span>`
+    : '';
+  // With the ON button gated on `waiting`, an ordinary unpaused row on
+  // a queue with a budget set now has nothing to say - no empty strip.
+  if(!line&&!note&&!off&&!btn) return '';
+  return `<div class="dim" style="font-size:12px;margin-top:7px;padding-top:7px;border-top:1px dashed var(--line)">${line}${note}${off}${line||off?'<br>':''}${btn}</div>`;
+}
+async function insureJob(btn,id,on){
+  await busy(btn, on?t('busy.saving','Saving…'):t('busy.stopping','Stopping…'), async()=>{
+    mustOk(await api('queue',`&name=insure&value=${encodeURIComponent(id)}&value2=${on}`));
+    toast(on?t('toast.ins.on','This one will be saved in the background.')
+            :t('toast.ins.off','No longer saving this one early.'));
+    tick();
+  });
+}
 function healthBadge(h){
   if(!h||!h.bucket) return '';
   const w=healthWorse(h), b=w?w.bucket:h.bucket;
@@ -7376,11 +7551,12 @@ function histWhen(s, full){
   const d=new Date(s.completed*1000);
   if(full) return d.toLocaleString(LOCALE,{dateStyle:'full',timeStyle:'short'});
   const now=new Date();
-  const o=d.toDateString()===now.toDateString()
+  const o=/** @type {Intl.DateTimeFormatOptions} */(
+    d.toDateString()===now.toDateString()
     ? {timeStyle:'short'}
     : (d.getFullYear()===now.getFullYear()
         ? {day:'numeric',month:'short',hour:'numeric',minute:'2-digit'}
-        : {day:'numeric',month:'short',year:'numeric'});
+        : {day:'numeric',month:'short',year:'numeric'}));
   return d.toLocaleString(LOCALE,o);
 }
 // Failure-driven diversity nudge (see the #divNudge comment in the
@@ -7495,7 +7671,7 @@ function renderHistory(slots){
         ((act==='servers'||act==='retention')?`<button class="ghost mini" title="${escA(t('hist.act.servers.title','Open the server list - this failure was decided by your own server setup'))}" onclick="event.stopPropagation();goSetting('servers')">⚙ ${t('hist.act.servers','Server settings')}</button>`:'')+
         (act==='path'?`<button class="ghost mini" title="${escA(t('hist.act.folder.title','Open this job’s output folder, where the evidence is'))}" onclick="event.stopPropagation();openItem('${s.nzo_id}','folder')">📂 ${t('hist.act.folder','Show the folder')}</button>`:'')+
         (retryable?`<button class="ghost mini${retryDim?' dimbtn':''}" title="${escA(retryTip)}" onclick="event.stopPropagation();retryJob('${s.nzo_id}')">↻ ${t('hist.retry','retry')}</button>`:'')+
-        `<button class="ghost mini" title="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" aria-label="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" onclick="event.stopPropagation();delHist('${s.nzo_id}')">✕</button>`+
+        `<button class="ghost mini" title="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" aria-label="${escA(t('hist.del.title','Remove this entry from history (files stay on disk)'))}" data-snd="remove" onclick="event.stopPropagation();delHist('${s.nzo_id}')">✕</button>`+
         // The same menu the right-click opens - as a visible button,
         // because touch has no right-click and four of these actions
         // (play, show in folder, change category, delete files) had no
@@ -8690,7 +8866,7 @@ async function toggleHistRow(tr){
   // carries no verdict at all and renders no row - absence is absence,
   // never "unknown" and never "line".
   const wv=s.whyslow;
-  if(wv&&['provider','cpu','client','disk','limit','missing'].includes(wv.layer))
+  if(wv&&['provider','cpu','client','disk','limit','missing','fleet','knee'].includes(wv.layer))
     rows.push([t('diag.title','Why is this slow?'),
       whyPhrase(wv)+(wv.held_secs>5
         ? ` <span class="dim">(${esc(t('diag.held','for {n}s',{n:wv.held_secs}))})</span>`:'')]);
@@ -8702,7 +8878,7 @@ async function toggleHistRow(tr){
   rows.push([t('col.location','Location'),
     esc(s.storage||s.path||'')
     +` <button class="ghost mini" title="${escA(t('hist.showfolder.title',"Open this download's folder on the machine running nzbfast"))}" onclick="event.stopPropagation();openItem('${escA(s.nzo_id)}','folder')">📂 ${esc(t('menu.showfolder','Show in folder'))}</button>`
-    +`<div style="margin-top:6px"><button class="ghost mini danger" title="${escA(t('hist.delfiles.title','Remove this entry AND delete the downloaded files from disk. Asks first.'))}" onclick="event.stopPropagation();delHistFiles('${escA(s.nzo_id)}')">🗑 ${esc(t('menu.removefiles','Remove and delete files…'))}</button></div>`]);
+    +`<div style="margin-top:6px"><button class="ghost mini danger" title="${escA(t('hist.delfiles.title','Remove this entry AND delete the downloaded files from disk. Asks first.'))}" data-snd="remove" onclick="event.stopPropagation();delHistFiles('${escA(s.nzo_id)}')">🗑 ${esc(t('menu.removefiles','Remove and delete files…'))}</button></div>`]);
   // UX §18: ...and the OTHER location, when the move stopped part way.
   // Immediately under Location on purpose - that row is the half-truth
   // this one corrects, and a user about to delete "the download folder"
@@ -9398,7 +9574,7 @@ function actSub(s){
   // speed needs no caveat, and a verdict still forming is not news.
   const w=lastQ&&lastQ.whyslow;
   const whyTxt=(s.status==='Downloading'&&w&&w.nzo_id===s.nzo_id
-    &&['provider','cpu','client','disk','limit','missing'].includes(w.layer))
+    &&['provider','cpu','client','disk','limit','missing','fleet','knee'].includes(w.layer))
     ?whyPhrase(w):'';
   // ...and it is a CONTROL, not a remark. The panel that backs this
   // sentence up - what the line can do, what the providers delivered,
@@ -9434,6 +9610,25 @@ function whyPhrase(w){
     case 'client':return t('diag.layer.client','held up inside nzbfast (decode, verify or disk writes)');
     case 'provider':return d?t('diag.layer.provider.host','{s} is the limit',{s:d})
       :t('diag.layer.provider','your providers are the limit');
+    // TODO 312 item 3: OUR OWN cap, and the one verdict on this list
+    // whose remedy is a control on this page. Deliberately numberless,
+    // like every other arm here: the timeline replays past verdicts
+    // carrying only a layer and a token, so a sentence built out of
+    // this second's figures would be false the moment it was replayed.
+    // The numbers ride in the panel's receipts line, where they belong
+    // by the module's own rule.
+    case 'fleet':return t('diag.layer.fleet','held by the connection budget nzbfast set for itself, not by your providers');
+    // TODO 312 item 7: our own MEASUREMENT, which is neither the
+    // provider refusing nor the budget above taking. Detail is the host,
+    // exactly as the provider arm's is, and the sentence names it -
+    // "one of your providers" sends nobody anywhere, and on a
+    // multi-provider install it is the difference between a verdict a
+    // reader can act on and one they cannot. Numberless like every
+    // other arm here: the timeline replays past verdicts carrying only
+    // a layer and a token, so this second's figures would be false the
+    // moment they were replayed. They ride in the receipts line.
+    case 'knee':return d?t('diag.layer.knee.host','{s} is held at a connection limit nzbfast measured itself, not one your provider set',{s:d})
+      :t('diag.layer.knee','held at a connection limit nzbfast measured itself, not one your provider set');
     // Not a layer of the stack at all: the run is asking for articles
     // that are not there, and a miss costs a round trip and returns no
     // bytes. Without this the same evidence read as a shaped provider,
@@ -9473,6 +9668,19 @@ function postAge(secs){
   const days=Math.round(secs/86400);
   return tn('diag.age.day',days,'{n} day','{n} days');
 }
+// The label for wherever a line ceiling's provenance needs to travel
+// into a sentence - `fleet_bound`'s own doc states the limit plainly:
+// the fleet arithmetic is only ever as good as this anchor, and it may
+// be a figure the user TYPED rather than one anything measured. Shared
+// by the panel's bar and its receipts line, and by the server editor's
+// carry probe (`carryText` below), so the three cannot drift apart on
+// what "measured" versus "your line speed setting" means.
+function anchorSrcLbl(src){
+  return {measured:t('diag.src.measured','measured'),
+    line:t('diag.src.line','your line speed setting'),
+    // §210 (d): the mark is this machine's own link, not the line.
+    link:t('diag.src.link',"this machine's network link")}[src]||'';
+}
 // The panel itself: the verdict WITH its receipts. The three-layer gap
 // (line ceiling / what the providers delivered / right now), the
 // per-provider table where shaping is visible by inspection, and the
@@ -9481,11 +9689,10 @@ function postAge(secs){
 function whyslowBlock(s){
   const w=lastQ&&lastQ.whyslow;
   if(!w||w.nzo_id!==s.nzo_id) return '';
-  const srcLbl={measured:t('diag.src.measured','measured'),
-    line:t('diag.src.line','your line speed setting'),
-    bench:t('diag.src.bench','probed'),
-    // §210 (d): the mark is this machine's own link, not the line.
-    link:t('diag.src.link',"this machine's network link")}[w.hardware_src]||'';
+  // `hardware_src` can additionally be "bench" (a probe that beat the
+  // anchor), which `anchorSrcLbl` does not carry - `anchor_src` never
+  // is one, see whyslow.rs's `anchor()`.
+  const srcLbl=w.hardware_src==='bench'?t('diag.src.bench','probed'):anchorSrcLbl(w.hardware_src);
   const bars=[
     [t('diag.bar.now','right now'), +w.achieved_bps||0, ''],
     [t('diag.bar.envelope','providers delivered'), +w.envelope_bps||0, ''],
@@ -9533,6 +9740,52 @@ function whyslowBlock(s){
       // the miss rate that opened the case, the post's own date, and
       // how many UNRELATED upstreams are seeing the same gaps - five
       // resellers of one backbone being one opinion, never five.
+      // TODO 312 item 3: the working behind a `fleet` verdict, and the
+      // module's rule that an asserted verdict travels with its
+      // evidence bites hardest here - this one asks the reader to
+      // change a setting, so it has to show why. Four numbers: what we
+      // opened, what their accounts allow, what one of those sockets
+      // measured, and what this line would want at that rate. The last
+      // is arithmetic and NOT a recommendation: it is only as good as
+      // the line ceiling in the bar above it, which is the same anchor
+      // and may be a figure the user typed - so the receipts line SAYS
+      // SO, in the same sentence, rather than leaving the reader to
+      // notice the bar's own label. Requiring a measured anchor instead
+      // was considered and rejected in `fleet_bound`'s own doc: a fleet
+      // the cap holds down measures its own cap, so a typed line is the
+      // only independent evidence such an install has at all.
+      w.layer==='fleet'?` · ${esc(t('diag.receipts.fleet',
+        'using {m} of the {n} connections your servers allow',
+        {m:+w.fleet_cap||0,n:+w.fleet_configured||0}))}${
+        +w.fleet_carry_bps>0?` · ${esc(t('diag.receipts.fleet.carry',
+          'each one carrying {r}, so this line would want about {i} of them',
+          {r:fmtRate((+w.fleet_carry_bps||0)/1e6),i:+w.fleet_implied||0}))}${
+          anchorSrcLbl(w.anchor_src)?` · ${esc(t('diag.receipts.fleet.anchor',
+            'line ceiling: {src}',
+            {src:anchorSrcLbl(w.anchor_src)}))}`:''}`:''}`:''}${
+      // TODO 312 item 7: the working behind a `knee` verdict, on the
+      // same rule as the block above - this one also asks the reader to
+      // change something, so it has to show why. Four numbers: what our
+      // own auto-tune settled on, how many connections that is costing
+      // right now, how old the measurement is, and what one socket
+      // measured against what this line would want. The AGE is the
+      // receipt that matters most and the one the verdict's own bar is
+      // about: a knee inside its re-probe appointment never gets here.
+      // `postAge` and `diag.receipts.fleet.carry` are REUSED rather than
+      // re-spelled - the carry sentence is the identical claim, and 27
+      // catalogues already carry both.
+      w.layer==='knee'?` · ${esc(t('diag.receipts.knee',
+        'nzbfast measured {n} connections here {a} ago, and is opening {m} fewer than it otherwise would',
+        {n:+w.knee_at||0,a:postAge(Math.max(0,+w.knee_age_secs||0)),m:+w.knee_takes||0}))}${
+        +w.fleet_cap>0?` · ${esc(t('diag.receipts.knee.cap',
+          'your connection budget of {n} is not what is holding this back, so changing it will not help',
+          {n:+w.fleet_cap||0}))}`:''}${
+        +w.knee_carry_bps>0?` · ${esc(t('diag.receipts.fleet.carry',
+          'each one carrying {r}, so this line would want about {i} of them',
+          {r:fmtRate((+w.knee_carry_bps||0)/1e6),i:+w.knee_implied||0}))}${
+          anchorSrcLbl(w.anchor_src)?` · ${esc(t('diag.receipts.fleet.anchor',
+            'line ceiling: {src}',
+            {src:anchorSrcLbl(w.anchor_src)}))}`:''}`:''}`:''}${
       w.layer==='missing'?` · ${esc(t('diag.receipts.missing',
         '{p}% of the articles asked for came back empty',
         {p:num(+w.missing_pct||0,1)}))}${
@@ -9540,6 +9793,13 @@ function whyslowBlock(s){
           {a:postAge(Math.max(0,Date.now()/1000-w.post_unix))}))}`:''}${
         +w.missing_backbones>1?` · ${esc(t('diag.receipts.backbones',
           '{n} unrelated providers report the same gaps',{n:w.missing_backbones}))}`:''}`:''}</div>
+    ${w.layer==='fleet'?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('s_line_cap_fleet')">${
+      esc(t('diag.fleet.setting','Change the connection budget'))}</button> <span class="dim">${
+      esc(t('diag.fleet.setting.note','the new number applies from the next download; a per-server "Use exactly this many" in the server editor lifts it for that server alone'))}</span></div>`:''}
+    ${w.layer==='knee'&&w.knee_host?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('ladderCard')">${
+      esc(t('diag.knee.remeasure','Measure this provider again'))}</button> <button type="button" class="ghost" onclick="landOnServer('${escA(w.knee_host)}')">${
+      esc(t('prov.refused.open','Open this server’s settings'))}</button> <span class="dim">${
+      esc(t('diag.knee.note','Connection tuning measured this provider once and has capped downloads at what it found ever since. Measure it again, or set "Use exactly this many" in the server editor to use your own number instead.'))}</span></div>`:''}
   </div>`;
 }
 // §156 8(d): which scheduler hold is worth drawing. The banner answers
@@ -9579,6 +9839,11 @@ function renderQueue(){
   // mid-drag must not leave a button offering to clear nothing.
   const qc=document.getElementById('qClear');
   if(qc) qc.style.display=qCount(lastQ)?'':'none';
+  // TODO 309(b): the hover half of the pause warning, repainted here
+  // because this runs on every poll and already holds `lastQ`. Above the
+  // drag guard with the other numbers: what pausing costs keeps moving
+  // while a row is mid-drag.
+  paintPauseHint();
   const qf=document.getElementById('qfree');
   if(qf){
     qf.textContent=lastQ?t('queue.free','{gb} GB free',{gb:freeGB.toFixed(1)}):'';
@@ -9699,11 +9964,19 @@ function renderQueue(){
     // job that is already leaving the queue. Removal stays - stopping a
     // repair or an unpack is a legitimate thing to want, and now that
     // the row says which of the two it is, it is an informed choice.
+    // TODO 309(b) [copy]: the row's own pause_cost tells this hover hint
+    // the same thing stopJob()'s confirm already knows below - a set that
+    // unpacks as it arrives leaves nothing on disk for a re-add to pick
+    // up, so the generic "picks up from it" promise is false on exactly
+    // the rows the confirm already carves its own wording out for.
+    const stopTitle = (s.pause_cost && s.pause_cost.kind==='refetch')
+      ? t('queue.stop.title.refetch','Stop this download: it unpacks as it arrives, so nothing on disk can be picked up again - the {gb} GB already fetched would be fetched from the start.',{gb:pauseCostGB(s.pause_cost)})
+      : t('queue.stop.title','Stop this download: partial data stays on disk, and adding the same NZB again picks up from it');
     const ctl = dl
-      ? `<button class="ghost mini" title="${escA(t('queue.stop.title','Stop this download: partial data stays on disk, and adding the same NZB again picks up from it'))}" onclick="stopJob('${s.nzo_id}')">✕ ${t('queue.stop','stop')}</button>`
+      ? `<button class="ghost mini" title="${escA(stopTitle)}" data-snd="remove" onclick="stopJob('${s.nzo_id}')">✕ ${t('queue.stop','stop')}</button>`
       : tail
-      ? `<button class="ghost mini" title="${escA(t('queue.remove.finishing.title','Remove this job. It has already downloaded - this stops the work it is finishing and drops it from the queue.'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" onclick="qOp('delete','${s.nzo_id}')">✕</button>`
-      : `<button class="ghost mini" title="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" aria-label="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" onclick="qOp('${pz?'resume':'pause'}','${s.nzo_id}')">${pz?'▶':'⏸'}</button>`+
+      ? `<button class="ghost mini" title="${escA(t('queue.remove.finishing.title','Remove this job. It has already downloaded - this stops the work it is finishing and drops it from the queue.'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" data-snd="remove" onclick="qOp('delete','${s.nzo_id}')">✕</button>`
+      : `<button class="ghost mini" title="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" aria-label="${escA(pz?t('queue.resume.title','Resume this item'):t('queue.pause.title','Pause this item'))}" data-snd="${pz?'on':'off'}" onclick="qOp('${pz?'resume':'pause'}','${s.nzo_id}')">${pz?'▶':'⏸'}</button>`+
         // A held duplicate gets the same button with its NAME on it.
         // "⏫" is the whole escape hatch from a hold, and a user looking
         // at a row that says "held (duplicate)" and will not start has
@@ -9711,13 +9984,13 @@ function renderQueue(){
         // icon". The label costs a little width on the rows that are
         // stuck and says nothing on the rows that are not.
         (s.priority==='Duplicate'
-          ? `<button class="ghost mini" title="${escA(t('queue.dup.force.title','Download this copy anyway: it releases the duplicate hold and starts this job next.'))}" onclick="forceJob('${s.nzo_id}')">⏫ ${esc(t('queue.dup.force','download anyway'))}</button>`
-          : `<button class="ghost mini" title="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" aria-label="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" onclick="forceJob('${s.nzo_id}')">⏫</button>`)+
+          ? `<button class="ghost mini" title="${escA(t('queue.dup.force.title','Download this copy anyway: it releases the duplicate hold and starts this job next.'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫ ${esc(t('queue.dup.force','download anyway'))}</button>`
+          : `<button class="ghost mini" title="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" aria-label="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫</button>`)+
         // Buttoned reorder beside the drag: drag does not exist on touch,
         // and the only hint for it lives in a hover tooltip.
-        `<button class="ghost mini" title="${escA(t('queue.up.title','Move up the queue'))}" aria-label="${escA(t('queue.up.title','Move up the queue'))}" onclick="qMove('${s.nzo_id}',-1)">↑</button>`+
-        `<button class="ghost mini" title="${escA(t('queue.down.title','Move down the queue'))}" aria-label="${escA(t('queue.down.title','Move down the queue'))}" onclick="qMove('${s.nzo_id}',1)">↓</button>`+
-        `<button class="ghost mini" title="${escA(t('queue.remove.title','Remove from the queue'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" onclick="qOp('delete','${s.nzo_id}')">✕</button>`;
+        `<button class="ghost mini" title="${escA(t('queue.up.title','Move up the queue'))}" aria-label="${escA(t('queue.up.title','Move up the queue'))}" data-snd="up" onclick="qMove('${s.nzo_id}',-1)">↑</button>`+
+        `<button class="ghost mini" title="${escA(t('queue.down.title','Move down the queue'))}" aria-label="${escA(t('queue.down.title','Move down the queue'))}" data-snd="down" onclick="qMove('${s.nzo_id}',1)">↓</button>`+
+        `<button class="ghost mini" title="${escA(t('queue.remove.title','Remove from the queue'))}" aria-label="${escA(t('queue.remove.title','Remove from the queue'))}" data-snd="remove" onclick="qOp('delete','${s.nzo_id}')">✕</button>`;
     // §129 3e: the live storage pause, if one is holding. Read off the
     // whole-queue payload rather than the slot, because the pause is the
     // queue's and only names the job it happened to.
@@ -9782,7 +10055,11 @@ function renderQueue(){
       // What the servers said about this post before the download
       // started (§77). Advisory: it colours the row, it never holds
       // the job back on its own.
-      healthBadge(s.health);
+      healthBadge(s.health)+
+      // TODO 304 stage 2: what retention insurance is doing to this row.
+      // After the health dot deliberately - the health verdict is about
+      // the POST and colours the row, this is about an errand of ours.
+      insChip(s);
     const pzLabel=s.priority==='Duplicate'
       ? `<span class="dim" title="${escA(t('queue.dup.title2','An equivalent release is already downloaded or queued: this copy is held, not stuck. Download it anyway with ⏫, or open the row and give it a priority - either one releases the hold.')+(s.duplicate_key?` [${s.duplicate_key}]`:''))}">· ${t('queue.dup','held (duplicate)')}</span>`
       : `<span class="dim">· ${t('status.paused','paused')}</span>`;
@@ -10545,7 +10822,11 @@ function drawerHtml(s){
     // send, and a preview probe below can be tall enough to push a
     // footer off the screen entirely. The other two branches have no
     // panel, so there it IS the foot.
-    return files+vline+sline+oline+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+altSwitchBlock(s)+pwBlock(s)
+    // TODO 304 stage 2: this branch is where a BACKGROUND fetch lands -
+    // an insurance run is `Downloading` and is the active job while it
+    // runs - so the row that most needs to say it is not an ordinary
+    // download is exactly the one that would have missed the block.
+    return files+vline+sline+oline+whyslowBlock(s)+reportBlock(s)+mediaWarnBlock(s.media)+insBlock(s)+altSwitchBlock(s)+pwBlock(s)
       +`<div style="font-size:12px;margin-top:7px">${nzbBlock(s)}</div>`
       +(previewMode==='off'?'':probeHtml(s.nzo_id));
   }
@@ -10639,6 +10920,11 @@ function drawerHtml(s){
     // queue comes back on its own, and saying so is what stops someone
     // deleting a job whose data is entirely intact.
     storagePauseBlock(s)+
+    // TODO 304 stage 2: the four insurance states as a sentence, the
+    // daemon's own reason when a fetch has been giving up, and the
+    // per-row control. Above the alt offer, which is a verdict about
+    // whether this download can finish at all.
+    insBlock(s)+
     altOfferBlock(s)+
     altSwitchBlock(s)+
     healthDetail(s.health)+
@@ -10711,6 +10997,7 @@ async function qMove(id, delta){
     if(e.target.closest('button,select,input,a,label')) return;
     const tr=e.target.closest('tr.qrow'); if(!tr) return;
     openDrawer = openDrawer===tr.dataset.id ? null : tr.dataset.id;
+    actSnd(openDrawer?'open':'close');
     renderQueue();
   });
   // The same toggle from the keyboard: the rows are focusable
@@ -10820,6 +11107,7 @@ async function qMove(id, delta){
     const to=[...tb.querySelectorAll('tr.qrow')].indexOf(tr);
     tb.__h=null;                       // DOM was hand-mutated - force a redraw
     if(commit && to>=0 && to!==+tr.dataset.i){
+      actSnd('drop');
       const j=await api('queue',`&name=switch&value=${tr.dataset.id}&value2=${to}`);
       if(!j.status) toast(tErr(j.error)||t('toast.movefail','Could not move the item.'), true);
     }
@@ -11229,7 +11517,7 @@ function renderCalendar(j){
   const state=e=>{
     if(e.have) return `<span class="ok">✓ ${esc(e.have)}</span>`;
     if(!e.aired){
-      const dl=Math.round((new Date(e.airdate+'T12:00')-new Date(today+'T12:00'))/864e5);
+      const dl=Math.round((+new Date(e.airdate+'T12:00') - +new Date(today+'T12:00'))/864e5);
       return `<span class="dim">${dl===0?t('cal.today','airs today'):dl===1?t('cal.tomorrow','airs tomorrow'):t('cal.indays','airs in {n} days',{n:dl})}</span>`;
     }
     return `<span class="dim">${t('cal.aired','aired: watching for a post…')}</span>`;
@@ -11440,7 +11728,99 @@ setInterval(()=>{ if(!document.hidden) refreshWatchStatus(); }, 15_000);
 // locked, a stale key) read as a stop that happened. Every caller that
 // wants to say something more must branch on `j.status` (the
 // api-contract rule this page follows everywhere else).
+// ---- TODO 309(b): what pausing costs, said BEFORE the click.
+//
+// A COMPRESSED set writes DECODED bytes, so no fragment of any article
+// it fetched can be described as sitting on disk: its journal shields
+// nothing and a rerun fetches the whole set again (measured 27 Aug 2026,
+// RESUME-ONEPASS-EDGES section 7.5 - a 2.1 GB set left a 72-byte journal
+// and refetched 100%). The daemon prices that on the queue row as
+// `pause_cost`, and this is the half that turns it into a question.
+//
+// TWO MECHANISMS, and the second is not a belt for the first. The
+// warning was ruled on 28 Aug 2026 to belong at hover time, BEFORE the
+// click rather than after it, and that is right and cannot be the whole
+// answer: this page runs on phones (its own `pointer:coarse` branches
+// say so) where there is no hover at all, keyboard use has none either,
+// and a pointer crossing the queue fires it constantly, so nothing at
+// hover can be made prominent enough to stop somebody without being
+// unbearable during ordinary mousing. So the hover hint is the warning
+// and the confirm is the STOP, on the one case that destroys work.
+//
+// THERE IS NO TIME WINDOW and no copy here may imply one. The journal is
+// a file in the job's own out_dir, its only production deletion is on a
+// verified finish, and nothing time-based touches a paused job - so a
+// paused download resumes as well a month later as a minute later. What
+// the click reveals is that THIS job never had a resumable state, not
+// that one is expiring.
+//
+// THE WORST AFFECTED ROW, NEVER THE FIRST ONE. This took the first row
+// with a cost until 28 Aug 2026, on a premise written out here in as
+// many words - "at most one job is on the wire, so at most one row can
+// carry a cost" - which the cross-job hand-over ended: the successor
+// claims the wire while the predecessor is still downloading behind it
+// (`PauseCostState::owners` daemon-side), and every door that reaches
+// this stops BOTH. So the question is not which row has a cost, it is
+// what the worst thing this click can destroy is. A `refetch` outranks
+// a `disk` however many bytes each is - one loses work and the other
+// only time - and within a kind the bigger figure wins, so the sentence
+// the user reads names the largest loss rather than whichever row the
+// payload happened to list first.
+function pauseCostWorse(a,b){
+  const ar=a.kind==='refetch'?1:0, br=b.kind==='refetch'?1:0;
+  return ar!==br ? ar>br : ((a.bytes||0)>(b.bytes||0));
+}
+function pauseCostOf(ids){
+  const slots=(lastQ&&lastQ.slots)||[];
+  // No ids means a whole-queue pause (the header button, the space key,
+  // pause-now, pause-for), which reaches every row; a list means the
+  // rows that door names. Either way the answer is the worst of them.
+  let worst=null;
+  for(const s of slots){
+    const pc=s&&s.pause_cost;
+    if(!pc) continue;
+    if(ids && ids.length && ids.indexOf(s.nzo_id)<0) continue;
+    if(!worst || pauseCostWorse(pc,worst)) worst=pc;
+  }
+  return worst;
+}
+// GB, the unit every figure of this size on this page is already in.
+function pauseCostGB(pc){ return (((pc&&pc.bytes)||0)/1e9).toFixed(1); }
+// True to go ahead. Only the `refetch` kind asks: `disk` is the same
+// download arriving by a slower route, which costs time and no data, and
+// a modal in front of a speed cost is how people learn to click through
+// modals.
+function okToPause(ids){
+  const pc=pauseCostOf(ids);
+  if(!pc || pc.kind!=='refetch') return true;
+  return confirm(t('confirm.pausecost',
+    'Pause this download?\n\nIt unpacks as it arrives, so there is nothing on disk for a resume to pick up: the {gb} GB it has already fetched would be fetched again when it starts. That does not change with time, so there is no hurry to resume it.',
+    {gb:pauseCostGB(pc)}));
+}
+// The hover half, on the header Pause button, repainted from the queue
+// poll. It DROPS data-i18n-title while a live hint is up - applyI18n
+// rewrites titles from that attribute on every locale change, and would
+// otherwise put the generic sentence back over the specific one - and
+// puts it back the moment the cost goes away. Same move paintNet()
+// makes, and for the same reason.
+function paintPauseHint(){
+  const b=document.getElementById('pauseBtn'); if(!b) return;
+  const pc=paused?null:pauseCostOf(null);
+  if(!pc){
+    b.dataset.i18nTitle='hdr.pause.title';
+    b.title=t('hdr.pause.title','Pause - lets in-flight article downloads finish, then stops. Whatever is already on disk is kept, and a paused download keeps its place for as long as you like.');
+    return;
+  }
+  delete b.dataset.i18nTitle;
+  b.title = pc.kind==='refetch'
+    ? t('hdr.pause.cost','Pausing costs this download the {gb} GB it has already fetched: it unpacks as it arrives, so nothing on disk can be picked up again and it starts over. Waiting does not make that worse.',{gb:pauseCostGB(pc)})
+    : t('hdr.pause.cost.disk','Pausing does not lose any of this download. It has {gb} GB on disk, which is more than can be replayed in one pass, so it will unpack from the parts on disk when it resumes and that is slower.',{gb:pauseCostGB(pc)});
+}
 async function qOp(name,id){
+  // TODO 309(b): the one op here that can cost the user work asks first.
+  // The PAGE does not decide which rows those are - `pause_cost` on the
+  // row does - so this stays right if a queued row ever grows one.
+  if(name==='pause' && !okToPause([id])) return {status:false};
   const j=await api('queue',`&name=${name}&value=${id}`);
   if(!j.status) toast(t('toast.nochange','Nothing to change. The item may have just finished.'), true);
   else if(name==='delete') toast(t('toast.qRemoved','Removed from the queue.'));
@@ -11452,7 +11832,16 @@ async function stopJob(id){
   // to history, and its spooled copy of the NZB is deleted - so the
   // only resume route is the user's own copy of the file. The old copy
   // promised a History retry that never existed after a stop.
-  if(!confirm(t('confirm.stop','Stop this download?\n\nIt leaves the queue and history entirely. The partial data stays on disk, and adding the same NZB again picks up from it - but that needs your own copy of the .nzb file.'))) return;
+  // TODO 309(b): the sentence above is false for a set that unpacks as
+  // it arrives - there IS no partial data for the re-add to pick up, so
+  // that row gets its own confirm rather than a contradiction inside one
+  // dialog. A separate key and not an appended clause, so the shipped
+  // wording of `confirm.stop` and its 27 translations stay put.
+  const spc=pauseCostOf([id]);
+  if(spc && spc.kind==='refetch'){
+    if(!confirm(t('confirm.stop.refetch','Stop this download?\n\nIt leaves the queue and history entirely. It also unpacks as it arrives, so nothing it has on disk can be picked up again: the {gb} GB already fetched would be fetched from the start.',{gb:pauseCostGB(spc)}))) return;
+  }
+  else if(!confirm(t('confirm.stop','Stop this download?\n\nIt leaves the queue and history entirely. The partial data stays on disk, and adding the same NZB again picks up from it - but that needs your own copy of the .nzb file.'))) return;
   // Only over a delete the daemon actually took: qOp has already said
   // the refusal in the daemon's own words, and this line replaced it.
   const j = await qOp('delete', id);
@@ -11481,8 +11870,15 @@ async function clearQueue(btn){
   // Live rows ride every page (`pin_live`), so this reads true off a
   // paged queue exactly as it did off a whole one.
   const busyRow=slots.some(s=>s.status==='Downloading'||isTail(s));
+  // TODO 309(b) [copy]: same exception as pauseCostOf() everywhere else
+  // on this page - a set that unpacks as it arrives has nothing on disk
+  // for a re-add to pick up.
+  const qpc=pauseCostOf(null);
+  const clearMsg = (qpc && qpc.kind==='refetch')
+    ? t('confirm.qclear.refetch','Remove everything from the queue?\n\nNo files are deleted, but one of these downloads unpacks as it arrives, so nothing it has on disk can be picked up again: the {gb} GB it has already fetched would be fetched from the start if you add it back.\n\nNothing is filed to history, and this cannot be undone.',{gb:pauseCostGB(qpc)})
+    : t('confirm.qclear','Remove everything from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk, and adding the same NZB again picks up from there - but that needs your own copy of the .nzb file, because the queue\'s copy goes with the row.\n\nNothing is filed to history, and this cannot be undone.');
   if(!confirm((busyRow?t('confirm.qclear.active','This stops the download in progress, and anything still repairing or unpacking.')+'\n\n':'')
-      +t('confirm.qclear','Remove everything from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk, and adding the same NZB again picks up from there - but that needs your own copy of the .nzb file, because the queue\'s copy goes with the row.\n\nNothing is filed to history, and this cannot be undone.'))) return;
+      +clearMsg)) return;
   await busy(btn, t('busy.clearing','Clearing…'), async()=>{
     // mustOk, not a bare await: a refused clear used to fall through to
     // the toast below and report "Removed 0 from the queue." in the
@@ -11563,7 +11959,10 @@ async function retryMove(id){
 async function unlockJob(id){
   const pw=prompt(t('prompt.password','Archive password:'));
   if(!pw) return;
-  const j=await api('set_password',`&value=${encodeURIComponent(id)}&password=${encodeURIComponent(pw)}`);
+  // The password travels in a POST body, never on the request line: a
+  // query string lands in reverse-proxy logs, browser history and any
+  // Referer that follows - the SECRET_CFG reasoning, for archives.
+  const j=await apiPost('set_password',{value:id, password:pw});
   if(j.status) toast(j.unpacking?t('toast.unpacking','Unpacking with the password…'):t('toast.pwsaved','Password saved.'));
   else toast(tErr(j.error)||t('toast.pwfail','Failed to set password.'), true);
   if(j.status&&j.unpacking) watchUnlock(id);
@@ -11608,7 +12007,7 @@ function watchFailRow(f){
   // folders can each hold a rejected file of the SAME name, and the
   // name then picks whichever the daemon's map happened to iterate
   // first. Falls back to the name for a daemon too old to send an id.
-  const del=`<button class="ghost mini" title="${escA(t('queue.wf.del.title','Delete this file from the watch folder'))}" data-n="${escA(f.id||f.name)}" onclick="delWatchFailed(this.dataset.n)">✕ ${esc(t('queue.wf.del','delete'))}</button>`;
+  const del=`<button class="ghost mini" title="${escA(t('queue.wf.del.title','Delete this file from the watch folder'))}" data-n="${escA(f.id||f.name)}" data-snd="remove" onclick="delWatchFailed(this.dataset.n)">✕ ${esc(t('queue.wf.del','delete'))}</button>`;
   // `ingested` is the daemon's own answer to "is the release in hand?",
   // which is exactly the question that decides the icon AND whether
   // deleting the file is safe.
@@ -11833,6 +12232,16 @@ async function jobReport(id){
 // dropped promise: test the answer and report it here instead. tick()
 // runs either way - it is what puts a row the daemon kept back on the
 // list, rather than leaving it deleted on screen only.
+//
+// Every refusal this arm can produce now carries the daemon's own
+// sentence, including the plain per-id miss (a second tab, or a job
+// that finished between paint and click), so reportRefusal has
+// something to print and the `err.rejected` fallback is the backstop it
+// was meant to be rather than the usual answer. `bbc5b0f84` said this
+// sentence HERE, on the page, in these two functions only - which left
+// the bulk pair two controls away with no way to reach it and a green
+// false "cleared" over the same refusal. It moved into the daemon with
+// the fix for that; do not put a copy back on this side.
 async function delHist(id){
   const j=await api('history',`&name=delete&value=${id}`);
   if(!reportRefusal(j)){ tick(); return; }
@@ -11981,7 +12390,11 @@ async function qBulk(op){
   // rather than on the button so it holds however the op was fired.
   const f=document.querySelector('#qselbar :focus'); if(f) f.blur();
   const ids=[...qSel]; if(!ids.length) return;
-  const j=await api('queue',`&name=${op}&value=${ids.join(',')}`);
+  // TODO 309(b): one of the selected rows may be the one on the wire.
+  if(op==='pause' && !okToPause(ids)) return;
+  // The id list rides a JSON POST body (the m_config door): 250 ids is
+  // ~7 KB, and one Show more page past that 414s on the request line.
+  const j=await apiPost('queue',{name:op, value:ids.join(',')});
   if(!j.status) toast(tErr(j.error)||t('toast.nochange','Nothing to change. The item may have just finished.'), true);
   else toast(op==='pause'?tn('sel.paused',ids.length,'{n} download paused.','{n} downloads paused.')
                          :tn('sel.resumed',ids.length,'{n} download resumed.','{n} downloads resumed.'));
@@ -11992,7 +12405,8 @@ async function qBulkPrio(sel){
   if(v==='') return;
   sel.blur();                       // release the :focus render guard
   const ids=[...qSel]; if(!ids.length) return;
-  const j=await api('queue',`&name=priority&value=${ids.join(',')}&value2=${v}`);
+  // Same POST-body id list as qBulk: the selection can outgrow the line.
+  const j=await apiPost('queue',{name:'priority', value:ids.join(','), value2:String(v)});
   if(j.status) toast(t('toast.prio','Priority updated.'));
   else toast(t('toast.nochange','Nothing to change. The item may have just finished.'), true);
   tick();
@@ -12025,9 +12439,28 @@ async function qBulkDelete(){
   if(!confirm(tn('confirm.sel.qdel',ids.length,
       'Remove the selected download from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk. Nothing is filed to history, and this cannot be undone.',
       'Remove {n} selected downloads from the queue?\n\nNo files are deleted: whatever has already arrived stays on disk. Nothing is filed to history, and this cannot be undone.'))) return;
-  const j=await api('queue',`&name=delete&value=${ids.join(',')}`);
-  if(j.status===false&&j.error) toast(tErr(j.error), true);
-  else toast(t('toast.qCleared','Removed {n} from the queue.',{n:num(j.removed||0,0)}));
+  // Same POST-body id list as qBulk: the selection can outgrow the line.
+  const j=await apiPost('queue',{name:'delete', value:ids.join(',')});
+  // `reportRefusal`, not `j.status===false && j.error`. That guard was
+  // only ever as good as the daemon's manners: this arm sent no `error`
+  // on a plain miss, so the guard read false and the handler ran on into
+  // the SUCCESS branch below - a GREEN "Removed 0 from the queue." over
+  // a write that was refused. The daemon carries a sentence now, and
+  // this side no longer depends on it having one: `apiErr` falls back to
+  // `err.rejected`, so the worst case is a thin red toast rather than a
+  // confident green one.
+  //
+  // And the selection SURVIVES a refusal, which is why the clear moved
+  // below the guard. It buys the most on hBulkDelete, whose arm refuses
+  // a whole batch when one row is mid-move and leaves every one of them
+  // on screen: wiping the ticks there makes the user re-tick all of them
+  // to try again. Here it is the same rule rather than a live case - the
+  // queue arm's only refusal is a batch that matched nothing, and the
+  // render tick() fires prunes those ids out of qSel anyway - but a
+  // handler that clears a selection on a write it was told no to is the
+  // wrong shape whether or not today's daemon can hit it.
+  if(!reportRefusal(j)){ tick(); return; }
+  toast(t('toast.qCleared','Removed {n} from the queue.',{n:num(j.removed||0,0)}));
   qSel.clear(); updateSelBar('q');
   tick();
 }
@@ -12036,11 +12469,15 @@ async function hBulkDelete(){
   if(!confirm(tn('confirm.sel.hdel',ids.length,
       'Remove the selected entry from history?\nFiles stay on disk.',
       'Remove {n} selected entries from history?\nFiles stay on disk.'))) return;
-  const j=await api('history',`&name=delete&value=${ids.join(',')}`);
-  // The daemon refuses the WHOLE batch when one row is mid-move - say
-  // its reason rather than a false "cleared".
-  if(j.status===false&&j.error) toast(tErr(j.error), true);
-  else{ toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)})); hSel.clear(); updateSelBar('h'); }
+  // Same POST-body id list as qBulk: two Show more pages outgrow the line.
+  const j=await apiPost('history',{name:'delete', value:ids.join(',')});
+  // The daemon refuses the WHOLE batch when one row is mid-move, and
+  // answers a batch that matched nothing with a sentence of its own -
+  // say either rather than a false "cleared". See qBulkDelete for why
+  // this is `reportRefusal` and not a test for `j.error`.
+  if(!reportRefusal(j)){ tick(); return; }
+  toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}));
+  hSel.clear(); updateSelBar('h');
   tick();
 }
 // Remove + delete files: same comma-separated arm with del_files=1 -
@@ -12050,9 +12487,14 @@ async function hBulkDeleteFiles(){
   if(!confirm(tn('confirm.sel.hfiles',ids.length,
       'Remove the selected entry AND delete its downloaded files from disk?\nThis cannot be undone.',
       'Remove {n} selected entries AND delete their downloaded files from disk?\nThis cannot be undone.'))) return;
-  const j=await api('history',`&name=delete&value=${ids.join(',')}&del_files=1`);
-  if(j.status===false&&j.error) toast(tErr(j.error), true);
-  else{ toast(t('toast.delfiles','Removed: files deleted.')); hSel.clear(); updateSelBar('h'); }
+  // Same POST-body id list as qBulk: two Show more pages outgrow the line.
+  const j=await apiPost('history',{name:'delete', value:ids.join(','), del_files:'1'});
+  // Same guard as hBulkDelete, and it matters more here: this is the
+  // control that promises files off the disk, so a green toast over a
+  // refusal tells the user their disk space came back when it did not.
+  if(!reportRefusal(j)){ tick(); return; }
+  toast(t('toast.delfiles','Removed: files deleted.'));
+  hSel.clear(); updateSelBar('h');
   tick();
 }
 // Retry has no multi-id arm (mode=retry is single-id) - loop it.
@@ -12768,10 +13210,10 @@ function histMenu(e, id, failed){
     it(`onclick="openItem('${id}','file')"`,`▶&nbsp; ${t('menu.play2','Play')}`)+
     it(`onclick="openItem('${id}','folder')"`,`📂&nbsp; ${t('menu.showfolder','Show in folder')}`)+
     it(`onclick="changeCat('${id}')"`,`🗂&nbsp; ${t('menu.changecat','Change category…')}`)+
-    (failed?it(`onclick="retryJob('${id}')"`,`↻&nbsp; ${t('menu.retry','Retry download')}`):'')+
+    (failed?it(`data-snd="top" onclick="retryJob('${id}')"`,`↻&nbsp; ${t('menu.retry','Retry download')}`):'')+
     it(`onclick="jobReport('${id}')"`,`🧾&nbsp; ${t('menu.report','Create report')}`)+
-    `<hr>`+it(`onclick="delHist('${id}')"`,`✕&nbsp; ${t('menu.remove','Remove from history')}`)+
-    it(`class="danger" onclick="delHistFiles('${id}')"`,`🗑&nbsp; ${t('menu.removefiles','Remove and delete files…')}`);
+    `<hr>`+it(`data-snd="remove" onclick="delHist('${id}')"`,`✕&nbsp; ${t('menu.remove','Remove from history')}`)+
+    it(`class="danger" data-snd="remove" onclick="delHistFiles('${id}')"`,`🗑&nbsp; ${t('menu.removefiles','Remove and delete files…')}`);
   document.body.appendChild(m);
   m.addEventListener('keydown', menuKey);
   const btn=e.detail===0 ? (e.target.closest&&e.target.closest('button')) : null;
@@ -12981,9 +13423,116 @@ async function exportLog(){
 
 // M18b data usage: per-provider GB over today / 7 / 30 days.
 function fmtGB(b){ return b>=1e12 ? num(b/1e12,2)+' '+unit('TB') : b>=1e9 ? num(b/1e9,2)+' '+unit('GB') : num(b/1e6,1)+' '+unit('MB'); }
+// What is LEFT of each prepaid block, under the day columns.
+//
+// The BAND is the daemon's (`BlockStanding::band_word`) and the 85% mark
+// is nowhere in this file: one reading of one question, which is the
+// discipline the block-account design's F1 exists to enforce. Rows are
+// reported for a DISABLED server too - its ledger is still true, and
+// saying nothing about a server somebody switched off mid-block is how
+// the balance goes missing at the moment it is asked for - but a
+// disabled server is downloading nothing, so it says so.
+function renderBlocks(blocks){
+  const el=document.getElementById('usageBlocks');
+  if(!el) return;
+  const rows=(blocks||[]).filter(b=>b && b.block_bytes>0);
+  el.style.display=rows.length?'':'none';
+  if(!rows.length){ setHtml(el,''); return; }
+  setHtml(el, `<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px">${esc(t('usage.blocks','Prepaid blocks'))}</div>`+
+    rows.map(b=>{
+      const spent=b.band==='spent', cls=spent?'bad':b.band==='low'?'warn':'dim';
+      const used=t('set.srv.blockused','block {used} of {total} GB used',
+        {used:num((b.block_used||0)/1e9,1),total:(b.block_bytes/1e9).toFixed(0)});
+      const tail=spent?t('set.srv.exhausted','EXHAUSTED, not in the pool')
+                      :t('set.srv.blockleft','{left} GB left',{left:num((b.block_left||0)/1e9,1)});
+      return `<div style="font-size:12px;margin-top:2px">${esc(b.host)} <span class="${cls}">· ${esc(used)} - ${esc(tail)}</span>`+
+        (b.enabled===false?` <span class="warn">· ${esc(t('set.srv.disabled','disabled'))}</span>`:'')+`</div>`;
+    }).join(''));
+}
+// Provider quality over the rolling window the daemon keeps (30 days
+// today; the payload carries the number, so this never spells it).
+//
+// The FIGURES are unconditional and the SENTENCES are not: every advice
+// line arrives from the daemon already gated on how much evidence sits
+// behind it (`provquality::ADVICE_MIN_TRIED` and the thresholds beside
+// it), and this function renders what it is sent rather than deciding
+// again here. Two readings of one threshold is the shape the block
+// account design's F1 exists to refuse, and it would be worse here -
+// the page cannot see the article counts the gate is about.
+//
+// A miss rate is NOT a league table and the copy must never invite one:
+// a provider the pool asks last is asked only for what the one in front
+// of it did not have, so its rate is partly something we did to it. The
+// per-age split is the reading that survives that, which is why it is
+// the row and the overall figure is the lead-in.
+// The seven post-age buckets, by the daemon's own key.
+//
+// The daemon sends `label` too and this deliberately does not use it:
+// `nzbkit::oracle::bucket_label` is one English string per bucket, and
+// the section reads it INSIDE a translated sentence ("at 90-365d old"),
+// which is the mixed-language shape the house copy rules refuse. The
+// BOUNDARIES stay the daemon's - this is a lookup by key, never a
+// second table of day ranges, because a second table is how two
+// surfaces come to disagree about what "a month old" means. The
+// daemon's label is the fallback for a bucket this map has not learned
+// about yet, which is the only thing an eighth bucket could safely do.
+//
+// The keys are computed (`pq.age.b`+key), so they cannot be scraped
+// from here: they are declared in web/i18n/extract.js's dynamic-key
+// family block, beside shape.* and unit.*, which is the documented
+// route for exactly this shape.
+const AGE_EN={'0':'0-1d','1':'1-7d','2':'7-30d','3':'30-90d','4':'90-365d','5':'1-3y','6':'3y+'};
+function ageLabel(key, fallback){
+  if(key==='?') return t('pq.age.unknown','undated');
+  return AGE_EN[key]?t('pq.age.b'+key, AGE_EN[key]):(fallback||key);
+}
+function renderQuality(q){
+  const el=document.getElementById('usageQuality');
+  if(!el) return;
+  const rows=(q&&q.providers)||[], adv=(q&&q.advice)||[];
+  const jobs=(q&&q.jobs)||{};
+  if(!rows.length && !jobs.total){ el.style.display='none'; setHtml(el,''); return; }
+  el.style.display='';
+  const pct=v=>v==null?'-':num(v,v<10?2:1)+'%';
+  const body=rows.map(p=>{
+    const ages=(p.age||[]).filter(a=>a.tried>0).map(a=>
+      `<span style="white-space:nowrap;margin-inline-end:9px">${esc(ageLabel(a.key,a.label))} <span class="mono">${esc(pct(a.miss_pct))}</span></span>`).join('');
+    const caps=p.cap_hours?` <span class="warn">· ${esc(tn('pq.caphours',p.cap_hours,
+      'connection limit reached in {n} hour','connection limit reached in {n} hours'))}</span>`:'';
+    return `<div style="font-size:12px;margin-top:4px">${esc(p.host)} <span class="dim">· `+
+      `${esc(t('pq.missrate','{pct} of articles missing',{pct:pct(p.miss_pct)}))}`+
+      `</span>${caps}<div class="dim" style="font-size:11px;margin-top:1px">${ages||esc(t('pq.noage','no post dates recorded'))}</div></div>`;
+  }).join('');
+  // Every sentence is spelled at its own `t()` / `tn()` call with its
+  // English inline, and never through a helper that takes the key as an
+  // argument: `web/i18n/extract.js` scrapes the literal, so a key
+  // reached through a variable is one no catalogue ever learns about and
+  // one that renders English in all 27 locales with every gate green.
+  const lines=adv.map(a=>{
+    const wrap=x=>`<div class="hint" style="margin-top:4px">${esc(x)}</div>`;
+    switch(a.code){
+      case 'miss_high': return wrap(t('pq.adv.misshigh','{host} did not have {pct} of the articles it was asked for. A provider on a different network is what fills a gap like that.',{host:a.host,pct:pct(a.pct)}));
+      case 'miss_old': return wrap(t('pq.adv.missold','{host} is much shorter on older posts: {pct} of what it was asked for at {bucket} old was not there. That is its real retention, whatever the plan says.',{host:a.host,pct:pct(a.pct),bucket:ageLabel(a.bucket,a.bucket_label)}));
+      case 'capped': return wrap(tn('pq.adv.capped',a.n,'{host} turned down extra connections for {n} hour in this window. Lower its connection count so nothing is wasted asking, or move to a plan that grants more.','{host} turned down extra connections for {n} hours in this window. Lower its connection count so nothing is wasted asking, or move to a plan that grants more.',{host:a.host}));
+      case 'refused': return wrap(tn('pq.adv.refused',a.n,'{host} refused the account outright on {n} download. Check its username and password in Settings.','{host} refused the account outright on {n} downloads. Check its username and password in Settings.',{host:a.host}));
+      case 'one_backbone': return wrap(tn('pq.adv.onebackbone',a.n,'{n} download needed repair or failed while every provider you use was on one network. A post that network has dropped is gone from all of them at once, so a second, unrelated provider is what rescues it.','{n} downloads needed repair or failed while every provider you use was on one network. A post that network has dropped is gone from all of them at once, so a second, unrelated provider is what rescues it.'));
+      case 'second_earned': return wrap(tn('pq.adv.secondearned',a.n,'On {n} download one of your providers was missing articles and another, on a different network, had them. That is the second account paying for itself.','On {n} downloads one of your providers was missing articles and another, on a different network, had them. That is the second account paying for itself.'));
+      default: return '';
+    }
+  }).join('');
+  const done=(jobs.completed||0)+(jobs.rescued||0)+(jobs.repaired||0);
+  const head=t('pq.jobs','{done} of {total} downloads finished, {repaired} needed repair, {failed} failed',
+    {done, total:jobs.total||0, repaired:jobs.repaired||0, failed:jobs.failed||0});
+  setHtml(el, `<div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px">`+
+    `${esc(t('pq.title','Provider quality'))} <span style="text-transform:none;letter-spacing:0">${esc(t('pq.window','· last {n} days',{n:q.days}))}</span></div>`+
+    `<div class="dim" style="font-size:11.5px">${esc(head)}</div>`+body+lines);
+}
 async function refreshUsage(){
   try{
-    const days=(await api('usage')).days||{};
+    const u=await api('usage');
+    renderBlocks(u.blocks);
+    renderQuality(u.quality);
+    const days=u.days||{};
     const today=new Date().toISOString().slice(0,10);
     const cut=n=>{ const d=new Date(Date.now()-n*86400e3); return d.toISOString().slice(0,10); };
     const c7=cut(7), c30=cut(30);
@@ -13658,21 +14207,21 @@ function eventsNearSample(i){
 (function(){
   const cv=document.getElementById('speedChart'), tip=document.getElementById('tip');
   cv.addEventListener('mousemove', e=>{
-    if(speedHist.length<2){ tip.style.opacity=0; return; }
+    if(speedHist.length<2){ tip.style.opacity='0'; return; }
     const r=cv.getBoundingClientRect();
     // Mirror drawArea's right-anchored mapping (last visN samples).
     const n=speedHist.length, step=r.width/(visN(r.width)-1);
     const i=Math.round((n-1)-(r.width-(e.clientX-r.left))/step);
-    if(i<0||i>=n){ tip.style.opacity=0; return; }
+    if(i<0||i>=n){ tip.style.opacity='0'; return; }
     const v=speedHist[i];
     const ago=(n-1-i)*PERIOD;
     // §125: with a link-peak anchor, name the sample as % of it too.
     const pk=linkPeak>0?` · ${pctOfPeak(v)}`:'';
     tip.innerHTML=`${fmtRate(v)}${pk}<br><span class="dim">${ago===0?t('chart.now','now'):t('chart.ago','{n}s ago',{n:ago})}</span>`
       +eventsNearSample(i);
-    tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-8)+'px'; tip.style.opacity=1;
+    tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-8)+'px'; tip.style.opacity='1';
   });
-  cv.addEventListener('mouseleave', ()=>tip.style.opacity=0);
+  cv.addEventListener('mouseleave', ()=>tip.style.opacity='0');
 })();
 // Hover tooltip on the resource chart: all four real values at the cursor.
 // X is anchored right ("now" at the right edge, fixed px/second) - mirror
@@ -13681,17 +14230,17 @@ function eventsNearSample(i){
   const cv=document.getElementById('resChart'), tip=document.getElementById('tip');
   cv.addEventListener('mousemove', e=>{
     const n=resHist.cpu.length;
-    if(n<2){ tip.style.opacity=0; return; }
+    if(n<2){ tip.style.opacity='0'; return; }
     const r=cv.getBoundingClientRect();
     const ago=Math.round((r.width-(e.clientX-r.left))/(r.width/((visN(r.width)-1)*PERIOD)));
     const i=n-1-Math.round(ago/PERIOD);
-    if(i<0||i>=n){ tip.style.opacity=0; return; }
+    if(i<0||i>=n){ tip.style.opacity='0'; return; }
     tip.innerHTML=`CPU ${(resHist.cpu[i]||0).toFixed(0)}% · RAM ${fmtBytes(resHist.ram[i]||0)}<br>`+
       `${t('res.diskwrite.lc','disk write')} ${fmtRate(resHist.dw[i]||0)} · ${t('res.net.lc','net')} ${fmtRate(resHist.net[i]||0)}`+
       `<br><span class="dim">${ago===0?t('chart.now','now'):t('chart.ago','{n}s ago',{n:ago})}</span>`;
-    tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-8)+'px'; tip.style.opacity=1;
+    tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-8)+'px'; tip.style.opacity='1';
   });
-  cv.addEventListener('mouseleave', ()=>tip.style.opacity=0);
+  cv.addEventListener('mouseleave', ()=>tip.style.opacity='0');
 })();
 // "/" focuses search (unless already typing).
 addEventListener('keydown', e=>{
@@ -14019,6 +14568,39 @@ function handleLifeEvents(r){
       // always sent under that name on this ring.
       notice(t('toast.giveup','Stopped chasing {name}: {n} different releases failed. Try again from the Watchlist card.',
         {name:e.name,n:e.threshold}), P_ACT);
+    } else if(e.kind==='server.block_low'||e.kind==='server.block_spent'){
+      // A prepaid block crossing 85% or running out. Both are MOMENTS
+      // and not states, which is why they are here rather than in the
+      // warnings pane: the pane carries the exhausted CONDITION for as
+      // long as it is true (and is what an *arr reads), and the daemon
+      // fires each of these once, on the crossing, re-arming only when
+      // the user tops the account up. Design:
+      // research/BLOCK-ACCOUNT-ECONOMICS-2026-08-27.md § 5.3.
+      //
+      // The action tier on both: there is nothing the engine can do
+      // about either one, and the remedy is a purchase followed by a
+      // button (and a tier named in a COMMENT is counted by the arm
+      // census next door, so this one says the word instead). The
+      // spent one is the alarming one - that account has left the pool
+      // - and the low one is the whole point of the pair, because the
+      // useful moment to be told is before it bites.
+      // Same shape as the Settings list and the usage card: what is
+      // left to one decimal, the block SIZE whole, because a block is
+      // bought in round numbers.
+      const gb=b=>num((b||0)/1e9,1);
+      // The remedy is on the Servers card, so the notice takes you
+      // there rather than just to Settings.
+      const go=()=>{ showSettings(); setTimeout(()=>{
+        const c=document.querySelector('.card.set[data-sk="servers"]');
+        if(c) c.scrollIntoView({block:'start',behavior:REDUCED?'auto':'smooth'});
+      },60); };
+      if(e.kind==='server.block_spent'){
+        notice(t('toast.blockspent','{host} has used all of its prepaid block, so it is not being used for downloads. Top it up, then press Block refilled in Settings.',
+          {host:e.host}), P_ACT, true, go);
+      } else {
+        notice(t('toast.blocklow','{host} has {left} GB left of its {total} GB block.',
+          {host:e.host,left:gb(e.left_bytes),total:((e.block_bytes||0)/1e9).toFixed(0)}), P_ACT, false, go);
+      }
     } else if(e.kind==='job.failed'){
       // A Failed row can be asking for a password too (the in-stream
       // probe saw an encrypted set) - the audible ask keeps its old
@@ -14091,46 +14673,10 @@ async function setNotify(cb){
   if(cb.checked) toast(t('toast.notifyOn','Desktop notifications on.'));
 }
 
-// Click acknowledgment: a short blip + accent pulse the instant any
-// control is PRESSED (pointerdown, not click - no waiting for release),
-// so a press always visibly/audibly lands even while its round-trip
-// runs. Sound is a per-browser preference (Settings → Interface);
-// the flash animation is auto-disabled under prefers-reduced-motion.
-// ---- Sounds: a tiny WebAudio synth behind a master switch, a volume,
-// per-event toggles, and an audible-speed mode (Settings → Sounds). Every
-// sound is synthesized at trigger time from oscillator notes - no audio
-// files. All preferences live in this browser (localStorage), never on
-// the server.
-let sndOn=localStorage.nzbfastSounds!=='off', AC=null, sndMaster=null;
-let sndPrefs=(()=>{ try{ return JSON.parse(localStorage.nzbfastSnd)||{}; }catch(e){ return {}; } })();
-sndPrefs.ev=sndPrefs.ev||{};
-if(!(sndPrefs.vol>=0)) sndPrefs.vol=0.5;
-if(!sndPrefs.speedMode) sndPrefs.speedMode='off';
-if(!(sndPrefs.toneSecs>0)) sndPrefs.toneSecs=2;
-function saveSndPrefs(){ localStorage.nzbfastSnd=JSON.stringify(sndPrefs); }
-function actx(){
-  AC=AC||new (window.AudioContext||window.webkitAudioContext)();
-  if(AC.state==='suspended') AC.resume();
-  if(!sndMaster){ sndMaster=AC.createGain(); sndMaster.connect(AC.destination); }
-  // Perceptual volume: square the slider so 50% sounds like half.
-  sndMaster.gain.value=sndPrefs.vol*sndPrefs.vol;
-  return AC;
-}
-// One enveloped oscillator note - every recipe below is built from these.
-function note(freq,{at=0,dur=.3,type='sine',gain=.09,to=null}={}){
-  const ac=actx(), t=ac.currentTime+at, o=ac.createOscillator(), g=ac.createGain();
-  o.type=type; o.frequency.setValueAtTime(freq,t);
-  if(to) o.frequency.exponentialRampToValueAtTime(to,t+dur);
-  g.gain.setValueAtTime(0.001,t);
-  g.gain.exponentialRampToValueAtTime(gain,t+.015);
-  g.gain.exponentialRampToValueAtTime(0.001,t+dur);
-  o.connect(g); g.connect(sndMaster);
-  o.start(t); o.stop(t+dur+.02);
-}
 // The event registry: key → toggle label + recipe. `dual` recipes take a
 // direction argument (paused/resumed, lost/restored) and preview both.
 const SND={
-  click:    {label:'Button press', play:()=>note(1750,{dur:.07,gain:.1,to:650})},
+  click:    {label:'Button press', play:()=>ACT.click()},
   added:    {label:'Download added', say:1, play:()=>{note(523.25,{dur:.09}); note(783.99,{at:.07,dur:.12});}},
   watchlist:{label:'Watchlist grab', say:1, play:()=>{note(659.26,{dur:.09}); note(880,{at:.08,dur:.09}); note(1318.5,{at:.16,dur:.16,gain:.06});}},
   complete: {label:'Download complete', say:1, play:()=>{note(523.25,{dur:.3}); note(783.99,{at:.13,dur:.3});}},
@@ -14145,6 +14691,8 @@ const SND={
               if(up){ note(440,{dur:.14}); note(880,{at:.11,dur:.22,gain:.07}); }
               else { note(165,{dur:.18,type:'sawtooth',gain:.055}); note(165,{at:.26,dur:.18,type:'sawtooth',gain:.055}); }}},
   update:   {label:'Update available', say:1, play:()=>{note(987.77,{dur:.3,gain:.06}); note(1318.5,{at:.05,dur:.35,gain:.03});}},
+  warn:     {label:'Warning', play:()=>ACT.warn()},
+  refuse:   {label:'Error or refused action', play:()=>ACT.refuse()},
 };
 // ---- Voice announcements: the browser's built-in speech synthesis reads
 // events aloud, naming the file ("Download complete: …"). Entirely local -
@@ -14219,10 +14767,34 @@ function snd(name,arg){
   if(!sndOn || sndPrefs.ev[name]===false) return;
   try{ SND[name].play(arg); }catch(e){}
 }
-function clickBlip(){ snd('click'); }
+// One writer for the master switch, so the header button and the
+// Settings checkbox cannot drift apart - either surface can flip it and
+// both repaint. Turning sounds ON answers with the sound that MEANS on;
+// turning them off answers with silence, which says it better.
+function paintSndBtn(){
+  const b=document.getElementById('sndBtn'); if(!b) return;
+  b.setAttribute('aria-pressed', sndOn?'true':'false');
+  const i=document.getElementById('sndIcon'); if(i) i.textContent=sndOn?'🔊':'🔇';
+}
+function setSounds(on){
+  sndOn=!!on; localStorage.nzbfastSounds=sndOn?'on':'off';
+  const cb=document.getElementById('ui_sounds'); if(cb) cb.checked=sndOn;
+  paintSndBtn();
+  if(sndOn) actSnd('on');
+}
+function toggleSounds(){ setSounds(!sndOn); }
 // ▶ preview: bypasses the master switch and per-event toggle (the click
 // that pressed ▶ is the user gesture WebAudio needs).
 function previewSnd(k){
+  // "Button press" is now a FAMILY - the press blip plus one shape per
+  // thing you can press - so its preview walks the family rather than
+  // playing the plain blip and leaving the rest undiscoverable. Order is
+  // the order you meet them: press, up, down, remove.
+  if(k==='click'){
+    ['click','up','down','remove'].forEach((a,i)=>setTimeout(()=>{
+      try{ ACT[a](); }catch(e){} }, i*420));
+    return;
+  }
   try{ const s=SND[k]; s.play(false); if(s.dual) setTimeout(()=>s.play(true),650); }catch(e){}
 }
 function renderSndEvents(){
@@ -14356,16 +14928,15 @@ let updVersion='';
 // the event's own sentence on the two doors it could see. Do not
 // reintroduce a snapshot diff beside the event: the toast element holds
 // one message, and the later writer wins.
-addEventListener('pointerdown', e=>{
-  const el=e.target.closest('button,select,a,[onclick],input[type=checkbox]');
-  if(!el||el.disabled) return;
-  // A control whose whole purpose is to play a sound must not also fire
-  // the generic button click - you'd hear two sounds at once and could
-  // not tell which one you were auditioning.
-  if(!el.hasAttribute('data-noblip')) clickBlip();
-  el.classList.remove('clickflash'); void el.offsetWidth;
-  el.classList.add('clickflash');
-}, true);
+// Same permission dance as setNotify above: switching this on without
+// asking the browser leaves a preference that can never fire.
+async function setErrPopup(cb){
+  if(cb.checked){
+    const p = typeof Notification!=='undefined' ? await Notification.requestPermission() : 'denied';
+    if(p!=='granted'){ cb.checked=false; toast(t('toast.notifyBlocked','Notifications are blocked by the browser.'), true); return; }
+  }
+  sndPrefs.popupErr=cb.checked; saveSndPrefs();
+}
 function playChime(){ snd('complete'); }
 
 // Drag-and-drop / file-picker NZB upload → mode=addfile (multipart).
@@ -14399,6 +14970,13 @@ function toast(msg, bad, go){
   // A direct toast is the user's own news and outranks a batch that is
   // still playing: drop the remainder rather than making them sit
   // through it to see the answer to what they just clicked.
+  //
+  // And a REFUSED click sounds refused. This is the direct-click path
+  // only - toastRun's batched daemon news goes through toastShow below
+  // and keeps its own event sounds - so one hook here covers every
+  // "could not move the item" and "nothing to change" on the page,
+  // without a second buzz landing on top of the `failed` chime.
+  if(bad){ actSnd('refuse'); popupErr(msg); }
   toastRunQ=[]; toastMore=0;
   toastShow(msg, bad, go, TOAST_MS);
 }
@@ -14666,7 +15244,7 @@ async function adPreview(nzbs){
     const hit=ADPREV.get(ck);
     if(hit){ adChkShow(i, hit); continue; }
     adChkShow(i, {wait:true});
-    let v={reason:'unknown'};
+    let v=/** @type {{reason?:string,health?:any}} */({reason:'unknown'});
     try{
       const fd=new FormData(); fd.append('nzbfile', f, f.name);
       const r=await fetch('/api?mode=nzb_preview',
@@ -14770,6 +15348,10 @@ async function uploadNzbsWith(nzbs, stream, opt){
   for(const f of nzbs){
     try{
       const fd=new FormData(); fd.append('nzbfile', f, f.name);
+      // The archive password rides the multipart body (serve/http.rs
+      // merges its fields into params), never the query string - the
+      // same logs/history/Referer exposure set_password's fix closed.
+      if(opt.pw) fd.append('password', opt.pw);
       // Stream mode (M11 hot box): first file jumps the queue at Force
       // priority and the response's .m3u hands off to the OS player -
       // same navigation the wall's ▶ Play uses. Any extra files in the
@@ -14782,8 +15364,7 @@ async function uploadNzbsWith(nzbs, stream, opt){
       // lets the category's own default priority stand.
       const q=`mode=addfile${wantStream?'&stream=1':''}`
         +(opt.cat?`&cat=${encodeURIComponent(opt.cat)}`:'')
-        +(opt.prio!==''?`&priority=${encodeURIComponent(opt.prio)}`:'')
-        +(opt.pw?`&password=${encodeURIComponent(opt.pw)}`:'');
+        +(opt.prio!==''?`&priority=${encodeURIComponent(opt.prio)}`:'');
       const r=await fetch(`/api?${q}`,
         {method:'POST',body:fd,headers: sent?{'X-Api-Key': sent}:{}});
       const j=await r.json().catch(()=>({}));
@@ -15038,12 +15619,13 @@ if('launchQueue' in window && typeof LaunchParams!=='undefined' && 'files' in La
 function isNzblnk(s){ return /^\s*[<"']*nzblnk:/i.test(s||''); }
 async function addNzblnk(link){
   toast(t('toast.lnkLooking','Looking that link up…'));
-  const sent=key;
   try{
-    const r=await fetch(`/api?mode=addnzblnk&output=json`
-      +`&link=${encodeURIComponent(link.trim())}`, {headers: sent?{'X-Api-Key': sent}:{}});
-    const j=await r.json().catch(()=>({}));
-    if(authFail(j)){ if(await ensureKey(sent)) return addNzblnk(link); return; }
+    // The link rides a JSON POST body (the m_config door): a long
+    // article-id list blows the 8 KB request line, and an nzblnk
+    // password (p=) must stay out of access logs, history and any
+    // Referer. apiPost carries the expired-key retry the bespoke
+    // fetch here used to reimplement.
+    const j=await apiPost('addnzblnk',{link:link.trim()});
     if(!j.status){
       const why = j.reason==='badlink' ? t('toast.lnkBad','That does not look like an nzblnk link.')
         : j.reason==='notfound' ? t('toast.lnkNone','Nothing found for that link. The post may be too new to have been indexed, or too old to still be on your server.')
@@ -15427,7 +16009,8 @@ function escA(s){ return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function sizeStr(b){
   b=+b||0;
   if(!b) return '0';
-  for(const [m,s] of [[1e12,'T'],[1e9,'G'],[1e6,'M'],[1e3,'K']])
+  for(const [m,s] of /** @type {[number,string][]} */(
+      [[1e12,'T'],[1e9,'G'],[1e6,'M'],[1e3,'K']]))
     if(b%m===0) return (b/m)+s;
   return String(b);
 }
@@ -15950,6 +16533,10 @@ async function loadSettings(){
   if(document.activeElement!==aup) aup.checked=!!c.update_checks;
   put('s_update_url', c.update_url??'');
   put('s_connections', c.connections); put('s_window', c.window); put('s_decoders', c.decoders);
+  // TODO 312 item 1: null is the automatic curve, and the field has to
+  // read EMPTY for it - `??''` rather than `||''` on purpose, because 0
+  // is a real value here (the rule turned off) and must survive.
+  put('s_line_cap_fleet', c.line_cap_fleet ?? '');
   // One select over the fast_verify/verify_lean pair. The daemon derives
   // verify_mode from both, so this reads it rather than the bool - and
   // the fast_verify setting stays writable for anything already scripted
@@ -16076,6 +16663,13 @@ async function loadSettings(){
   const win=document.getElementById('s_watchlist_instant');
   if(win&&document.activeElement!==win) win.checked=c.watchlist_instant!==false;
   put('s_watchlist_instant_max', c.watchlist_instant_max??6);
+  // TODO 304 stage 2. Opt-IN, so === true: an absent value must read as
+  // off - the daemon's own default for both of these is off, and a
+  // checkbox that renders on for a feature that is not running is the
+  // worst of the three states.
+  const wdf=document.getElementById('s_watchlist_deferred');
+  if(wdf&&document.activeElement!==wdf) wdf.checked=c.watchlist_deferred===true;
+  put('s_insurance_cap_gb', c.insurance_cap_gb??0);
   put('s_index_gates', c.index_gates||'');
   // Pre feed. Opt-IN, so === true: an absent value must read as off.
   const pdb=document.getElementById('s_predb_enabled');
@@ -16156,6 +16750,8 @@ async function loadSettings(){
   const evc=document.getElementById('s_index_evict');
   if(evc&&document.activeElement!==evc) evc.checked=!!c.index_evict;   // ships OFF
   put('s_index_evict_order', c.index_evict_order||'ladder');
+  put('s_index_evict_scope', c.index_evict_scope||'all');
+  put('s_index_evict_headroom', c.index_evict_headroom ?? 10);
   const ekinds=(Array.isArray(c.index_evict_kinds)?c.index_evict_kinds
     :String(c.index_evict_kinds??'').split(',')).map(s=>String(s).trim()).filter(Boolean);
   EVICT_KIND_BOXES
@@ -16205,14 +16801,20 @@ async function loadSettings(){
   const hOn=hSecs>0||hCount>0||hStick;
   if(hClean&&document.activeElement!==hClean) hClean.checked=hOn;
   histCleanRows(hOn);
+  // Same activeElement guard as every other checkbox here: a slower
+  // sibling save's loadSettings must not write the box back (or repaint
+  // the page via applyHistColor/applyChipColor) under the user's click.
   const hc=document.getElementById('s_history_color_names');
-  if(hc) hc.checked=c.history_color_names!==false;
-  applyHistColor(c.history_color_names!==false);
+  if(hc && document.activeElement!==hc){
+    hc.checked=c.history_color_names!==false;
+    applyHistColor(c.history_color_names!==false);
+  }
   const mc=document.getElementById('s_media_chip_color');
-  if(mc) mc.checked=c.media_chip_color!==false;
+  if(mc && document.activeElement!==mc) mc.checked=c.media_chip_color!==false;
   const sc=document.getElementById('s_shape_chip_color');
-  if(sc) sc.checked=c.shape_chip_color!==false;
-  applyChipColor(c.media_chip_color!==false, c.shape_chip_color!==false);
+  if(sc && document.activeElement!==sc) sc.checked=c.shape_chip_color!==false;
+  if(document.activeElement!==mc && document.activeElement!==sc)
+    applyChipColor(c.media_chip_color!==false, c.shape_chip_color!==false);
   const ub=document.getElementById('s_unit_bits');
   if(ub && document.activeElement!==ub) ub.value=c.unit_bits?'bits':'bytes';
   if(!!c.unit_bits!==UNIT_BITS) applyUnitMode(!!c.unit_bits);
@@ -17189,9 +17791,13 @@ function renderServers(){
     const en=s.enabled!==false;
     let block='';
     if(s.block_bytes>0){
-      const used=s.block_used||0, pct=Math.min(100,100*used/s.block_bytes);
-      const cls=pct>=100?'bad':pct>=85?'warn':'dim';
-      block=` <span class="${cls}">· ${t('set.srv.blockused','block {used} of {total} GB used',{used:num(used/1e9,1),total:(s.block_bytes/1e9).toFixed(0)})}${pct>=100?' - '+t('set.srv.exhausted','EXHAUSTED, not in the pool'):''}</span>`;
+      // The BAND is the daemon's answer (`BlockStanding::band_word`),
+      // not a threshold spelled a second time here: 85% used to be a
+      // literal in this line and in Rust, and two readings of one
+      // question is the shape the block-account design's F1 was.
+      const used=s.block_used||0, spent=s.block_band==='spent';
+      const cls=spent?'bad':s.block_band==='low'?'warn':'dim';
+      block=` <span class="${cls}">· ${t('set.srv.blockused','block {used} of {total} GB used',{used:num(used/1e9,1),total:(s.block_bytes/1e9).toFixed(0)})}${spent?' - '+t('set.srv.exhausted','EXHAUSTED, not in the pool'):' - '+t('set.srv.blockleft','{left} GB left',{left:num((s.block_left||0)/1e9,1)})}</span>`;
     }
     // Reliability. completion_pct is "of the articles this server was
     // ASKED for, how many it had" - but a fill server is only ever queried
@@ -17387,6 +17993,10 @@ async function importServers(btn){ await busy(btn,t('busy.scanning','Scanning…
     imported+=r.added||0;
     toast(t('toast.imported','Imported {n} server(s){skipped}.',
       {n:r.added, skipped:r.skipped?' '+t('toast.imported.skipped','({n} already present)',{n:r.skipped}):''}));
+    if(r.speedlimit_kbps){
+      imported++;
+      toast(t('toast.imported.speedlimit','Imported the speed limit: {kbps} KB/s.',{kbps:r.speedlimit_kbps}));
+    }
     // What the categories half did, and what it could not do. Reported
     // separately because the two halves fail independently: a folder the
     // SAB machine had may simply not exist on this one, which is the
@@ -17440,7 +18050,8 @@ function editServer(i){
     refRow.style.display='';
     document.getElementById('sv_blockused').textContent=
       t('set.srv.blockused','block {used} of {total} GB used',
-        {used:num((s.block_used||0)/1e9,1),total:(s.block_bytes/1e9).toFixed(0)});
+        {used:num((s.block_used||0)/1e9,1),total:(s.block_bytes/1e9).toFixed(0)})
+      +' - '+t('set.srv.blockleft','{left} GB left',{left:num((s.block_left||0)/1e9,1)});
   } else refRow.style.display='none';
   document.getElementById('sv_paid').checked=!!s.block_account;
   paidSuggest();
@@ -17622,6 +18233,170 @@ async function testServer(btn){ await busy(btn,t('busy.testing','Testing…'), a
   if(j.status) toast(t('toast.connected','Connected: {greeting}',{greeting:j.greeting||'OK'}));
   else toast(t('toast.connfail','Connection failed: {err}',{err:tErr(j.error)||t('err.unknown','unknown error')}), true);
 }); }
+// TODO 312 item 2: measure what ONE connection to this server carries,
+// and say what fleet that carry implies for this line.
+//
+// It REPORTS. Nothing here applies anything, and the daemon side keeps
+// nothing either - the panel exists so a user on a slow-per-connection
+// route can SEE the gap between what their line wants and what the cap
+// allows, which until now was visible only in the source. What we then
+// spend on the strength of it is a separate decision (TODO 275 item 1
+// part 3).
+//
+// Confirmed before it runs, always. It is the one control in this
+// editor that spends the user's bandwidth and occupies real provider
+// connections, so it must never be reachable by accident - and on an
+// account that bills every byte the confirm says so in those words
+// rather than leaving them to infer it.
+// `withOff` is the opt-in for a switched-off row, offered by
+// `carryOffNote` below in the panel rather than sitting on the card, so
+// it only appears when there is something to opt into. It rides in the
+// request BODY and not as a query parameter, because this door is
+// reached through `apiPost`, which builds exactly `/api?mode=<mode>`
+// and has no query string to add a flag to; `carry_refusal` in
+// `serve/api/servers.rs` says the same at its own end.
+//
+// The confirm is asked again on that second run, and deliberately: the
+// first one was refused before anything was dialled, so the run that
+// actually spends the user's allowance is this one, and on a metered
+// account it is the one the billing sentence is about.
+async function measureCarry(btn,withOff){
+  const host=document.getElementById('sv_host').value.trim();
+  if(!host){ toast(t('toast.carrynohost','Enter the server address first.'), true); return; }
+  const metered=document.getElementById('sv_paid').checked;
+  const ask=metered
+    ? t('confirm.carry.metered','Measure the speed of one connection to {host}?\n\nThis downloads for a few seconds using real connections. You have marked this account as one where every byte is billed, so the test will be charged to it.',{host})
+    : t('confirm.carry','Measure the speed of one connection to {host}?\n\nThis downloads for a few seconds using real connections, so it uses a little of your allowance. Nothing is changed by it.',{host});
+  if(!confirm(ask)) return;
+  await busy(btn,t('busy.measuring','Measuring…'), async()=>{
+    const out=document.getElementById('sv_carryres');
+    out.textContent=t('set.srv.carry.running','Measuring - this takes about a quarter of a minute.');
+    const j=await apiPost('server_carry',{index:srvEditIdx, server:srvFormData(), include_off:!!withOff});
+    if(!j.status){
+      // Two of the daemon's answers are REFUSALS and not failures, and
+      // each names itself on the response so this panel can say what
+      // happens next instead of red-toasting a sentence the user cannot
+      // act on. Both are drawn IN the panel: a toast that names a fix
+      // and then disappears is the wrong shape for either, and the
+      // switched-off one carries a control that has to stay put to be
+      // clicked.
+      if(j.server_off){ out.innerHTML=carryOffNote(j.host||host); return; }
+      // Not escapable, unlike the switch: the daemon refuses this one
+      // outright, because an opt-in here would be an opt-in to making
+      // the running job slower. And it does NOT promise "when the
+      // download finishes" - the daemon's signal is raised by the
+      // post-processing ticket as well as by the runner, so unpacking
+      // and repair keep it up and that promise would come due early.
+      if(j.downloading){
+        out.innerHTML=`<span>${esc(t('set.srv.carry.busy','Not tested: a download is running. This test opens its own connections, so running it now would take capacity from the job. Unpacking and repair count as running too - try again when nothing is left in the queue.'))}</span>`;
+        return;
+      }
+      // Every other refusal is worth reading here, and the commonest is
+      // not an error at all: an install with no finished downloads has
+      // no articles this server can be measured with, and the daemon
+      // says so in those words rather than inventing a probe population.
+      out.textContent='';
+      toast(tErr(j.error)||t('err.failed','failed'), true);
+      return;
+    }
+    out.textContent=carryText(j);
+  });
+}
+// Name the server this run did not test, and offer to test it - the
+// same job `offerOff` does for the diversity card, and the daemon
+// deliberately reused that door's `include_off` spelling so the two
+// read as one question. Its own key and not `div.offnote` /
+// `div.includeoff`: those are about a LIST and their translations are
+// plural (French answers "Les inclure"), which is wrong over one row.
+function carryOffNote(host){
+  return `<span>${esc(t('set.srv.carry.off','Switched off, so not tested: {host}.',{host}))} <a href="#" onclick="return carryWithOff(this)">${
+    esc(t('set.srv.carry.includeoff','Include it in the check'))}</a></span>`;
+}
+function carryWithOff(a){ measureCarry(a,true); return false; }
+// The sentence under the Measure button. Split out from the handler so
+// the wording is one thing to read, and so the three cases it has to
+// tell apart stay visible: no sockets granted, a carry that scales, and
+// a carry that does not.
+function carryText(j){
+  // A provider that granted nothing is a finding, not a failure - the
+  // account is full from somewhere else, or the plan allows fewer
+  // connections than this row claims. It is also the one case with no
+  // carry to divide, so it is answered first and on its own.
+  if(j.granted_none) return t('set.srv.carry.none','This server accepted no connections at all, so there was nothing to measure. That usually means the account is already in use somewhere else, or your plan allows fewer connections than the box above asks for.');
+  const per=fmtRate((j.carry_bps||0)/1e6);
+  const parts=[t('set.srv.carry.per','About {rate} per connection.',{rate:per})];
+  // What the fleet arithmetic would make of it - only ever shown with
+  // a line reading to divide, and only when the two numbers actually
+  // differ. `implied_fleet` comes back 0 when the carry is meeting the
+  // plan the sizing already makes, which is the case where there is
+  // nothing to report and a number would read as a complaint.
+  if(j.implied_fleet>0 && j.fleet_now>0){
+    parts.push(t('set.srv.carry.fleet','At that speed your line would want about {want} connections in total to fill it. nzbfast is using {now}.',{want:j.implied_fleet,now:j.fleet_now}));
+    // Same rule as the whyslow fleet receipts (`anchorSrcLbl` above):
+    // this arithmetic divides by a line ceiling that may be a figure
+    // the user typed rather than one anything measured, so it says so
+    // rather than leaving that to the API response nobody reads.
+    const carryAnchorLbl=anchorSrcLbl(j.anchor_src);
+    if(carryAnchorLbl) parts.push(t('set.srv.carry.anchor','Line ceiling: {src}.',{src:carryAnchorLbl}));
+    // TODO 312 item 1 put the fleet cap in Settings, so this sentence
+    // no longer sends the reader to the env var that field replaced -
+    // which a NAS, Docker or installer user may have no practical way
+    // to set, and which is exactly the regime this panel was built for
+    // (GH #62). "Total connections across all servers" applies from the
+    // NEXT download with no restart; the per-server pin is the designed
+    // escape for one route, and `get/fleet.rs` names both in its own
+    // log line. The env var is not mentioned: it needs a restart, it
+    // does nothing this field cannot, and naming it here is what put
+    // the reader in the wrong place to begin with.
+    if(j.implied_fleet>j.fleet_max)
+      parts.push(t('set.srv.carry.capped','It will not go above {max} on its own. To go higher, set "Total connections across all servers" in Settings to the number you want - the new number applies from the next download, with no restart. To lift it for this server alone, turn on "Use exactly this many" in this editor.',{max:j.fleet_max}));
+  }
+  // The half a single number cannot tell you, and the half that decides
+  // whether the figure above is worth acting on: doubling the
+  // connections either doubled the total or did nothing.
+  if(j.scaling==='per_connection') parts.push(t('set.srv.carry.scales','Twice as many connections carried twice as much, so more connections here would go faster.'));
+  else if(j.scaling==='line') parts.push(t('set.srv.carry.flat','Twice as many connections carried no more in total, so your line or the route to this server is already full and extra connections would not help.'));
+  else if(j.scaling==='mixed') parts.push(t('set.srv.carry.partly','Twice as many connections carried somewhat more, so there is a little left to gain here but not a lot.'));
+  // Option (c) of the single-server rung decision: when only one rung
+  // could run - an account allowing so few connections that a halved
+  // rung would collide with the two-socket floor - the silence is made
+  // explicit rather than left to be read as a verdict.
+  else if(j.scaling==='unknown' && (j.rungs||[]).length<2) parts.push(t('set.srv.carry.onerung','Whether more connections would help could not be tested, because this account allows too few connections to compare two sizes.'));
+  // TODO 312 item 6(e): the same quantity as it was actually lived,
+  // beside the one this test just measured. `live_carry_bps` is what a
+  // socket carried during the last real download - the persisted form
+  // of whyslow's `fleet_carry_bps`, same division by the sockets that
+  // were dialling - and the two were only ever visible on separate
+  // screens, one of which (the whyslow panel) cannot be on screen while
+  // this reading exists at all, because the probe refuses to run while
+  // a download is going.
+  //
+  // NAMING THE HOST IS THE WHOLE POINT AND NOT DECORATION. The live
+  // figure is a property of the LINE, averaged over every socket every
+  // server had open; this test drove ONE server under better
+  // conditions. On a multi-server install they are not the same
+  // quantity, and a sentence that put two bare numbers together would
+  // quietly claim they were. Naming the scope of each is what makes the
+  // comparison honest, and it is why this cannot reuse
+  // `diag.receipts.fleet.carry`: that key is the whyslow panel's, it
+  // names no host, and its placeholders are a rate and an implied
+  // fleet.
+  //
+  // "at their best" is not hedging either: the banked number is a MAX
+  // over the run (`pool::linecap`'s tick takes `fetch_max`), so a test
+  // reading BELOW it is the interesting case and the reader cannot see
+  // that without knowing which end of the run they are being shown.
+  //
+  // No implied fleet for the live number. That sentence is whyslow's,
+  // it is already printed on the download it belongs to, and a second
+  // "your line would want N" here would read as a rival recommendation
+  // from the same panel.
+  if(j.live_carry_bps>0) parts.push(t('set.srv.carry.live','Your last download\'s connections carried about {live} each at their best, counting every server together. This test measured {host} on its own.',{live:fmtRate(j.live_carry_bps/1e6),host:j.host||''}));
+  // Say what it cost, every time. This is the one control in Settings
+  // that spends the user's allowance.
+  if(j.bytes>0) parts.push(t('set.srv.carry.used','Used {size}.',{size:fmtBytes(j.bytes)}));
+  return parts.join(' ');
+}
 // §36: measure whether keeping connections open helps THIS server, on
 // this link. Only ever ticks the box on a result the samples support -
 // an inconclusive answer leaves it off, because a link we cannot
@@ -18013,9 +18788,12 @@ async function clearSearchLog(btn){
     // "try again in a moment", and the generic line below reads as a
     // permanent failure - which would talk the user out of the retry
     // that works. Same fix preAssign got on the wall page.
+    // Painted red on the refusal arm: the daemon's reason is still a
+    // failure, and a green "try again in a moment" reads as done.
     toast(r&&r.status!==false
       ? t('toast.slogcleared','Recorded searches forgotten.')
-      : ((r&&r.error)||t('toast.slogfail','Could not clear the recorded searches.')));
+      : ((r&&r.error)||t('toast.slogfail','Could not clear the recorded searches.')),
+      !(r&&r.status!==false));
     await refreshSearchLog();
   });
 }
@@ -18104,6 +18882,37 @@ async function refreshDbState(){
         'Last automatic trim: {n} release removed, {when}.',
         'Last automatic trim: {n} releases removed, {when}.',
         {when:new Date(s.last_auto_trim.at*1000).toLocaleString(LOCALE,{dateStyle:'medium',timeStyle:'short'})}));
+    // Has the reclaim ever actually run? The free-space note above says
+    // what a compact WOULD hand back; without this the user has no way
+    // to tell a database that compacts nightly from one where the pass
+    // has never fired. Persisted daemon-side, so it survives a restart.
+    const when=at=>new Date(at*1000).toLocaleString(LOCALE,{dateStyle:'medium',timeStyle:'short'});
+    if(s.last_compact&&s.last_compact.at){
+      // A compaction that reclaimed nothing is not a failure and must
+      // not render as "returning 0 B", which reads like one.
+      notes.push(+s.last_compact.freed_bytes>0
+        ? t('set.db.stat.compact','Last compacted {when}, returning {freed} to the disk.',
+            {when:when(+s.last_compact.at),freed:fmtBytes(+s.last_compact.freed_bytes)})
+        : t('set.db.stat.compact0','Last compacted {when}; there was nothing to reclaim.',
+            {when:when(+s.last_compact.at)}));
+    }else if(!s.ledger_cold&&Number.isFinite(used)&&Number.isFinite(live)&&live<used){
+      // Only worth saying where there is something waiting to be
+      // reclaimed. On a fresh index with no gap it would be a line that
+      // never goes away and never means anything - and never while
+      // `ledger_cold`, because a null last_compact means "not read back
+      // yet" in that window, not "never". This is the only one of the
+      // three that ASSERTS something; the other two just stay quiet.
+      notes.push(t('set.db.stat.nevercompact','It has not been compacted yet; that happens at an idle moment.'));
+    }
+    // What the size limit has cost so far, over the life of this
+    // database rather than of this daemon run. Null until the first
+    // eviction, because "0 releases removed" and "nothing has ever
+    // needed removing" read very differently beside a size limit.
+    if(s.evicted&&+s.evicted.rows>0)
+      notes.push(tn('set.db.stat.evicted', +s.evicted.rows,
+        'The size limit has removed {n} release so far, freeing {size}.',
+        'The size limit has removed {n} releases so far, freeing {size}.',
+        {size:fmtBytes(+s.evicted.live_bytes||0)}));
     setHtml('dbState', parts.join(' · ')
       + notes.map(n=>`<div style="margin-top:4px">${n}</div>`).join(''));
   }catch(e){}
@@ -18156,8 +18965,45 @@ async function shrinkIndex(btn){
     refreshDbState(); pollIdxStats();
   });
 }
+// The dry run behind both delete buttons: the daemon walks the same
+// candidate order a real cleanup would and deletes nothing. The answer
+// renders inline rather than as a toast - it is a figure to read against
+// the controls above it, not an event.
+async function previewEvict(btn){
+  const to=(document.getElementById('s_shrink_to')||{}).value.trim();
+  const cap=(document.getElementById('s_index_max_bytes')||{}).value.trim();
+  if(!to&&(!cap||cap==='0')){ toast(t('toast.needcappv','Set a size limit, or type a size in the Shrink box, to preview against.'), true); return; }
+  const out=document.getElementById('evictPreviewOut');
+  await busy(btn,t('busy.counting','Counting…'), async()=>{
+    const j=await api('index_evict_preview', to?`&value=${encodeURIComponent(to)}`:'');
+    if(!j.status){ toast(tErr(j.error)||t('err.failed','failed'), true); return; }
+    const parts=[];
+    if(!(+j.rows)){
+      parts.push(t('set.db.pv.none','Nothing would be deleted: the index is already under {size}.',{size:fmtBytes(+j.target_bytes)}));
+    }else{
+      parts.push(tn('set.db.pv.head', +j.rows,
+        'A cleanup to {size} would delete about {n} release ({bytes} of index data).',
+        'A cleanup to {size} would delete about {n} releases ({bytes} of index data).',
+        {size:fmtBytes(+j.target_bytes), bytes:fmtBytes(+j.est_bytes)}));
+      // Same labels as the tick boxes above, so the breakdown and the
+      // controls speak one vocabulary. '' is a row that never classified.
+      const kn={movie:t('set.db.kinds.movie','Movies'),tv:t('set.db.kinds.tv','TV'),
+                software:t('set.db.kinds.software','Software'),other:t('set.db.kinds.other','Everything else'),
+                '':t('set.db.pv.unsorted','Unsorted')};
+      const bk=(j.by_kind||[]).map(e=>`${kn[e.kind]??esc(String(e.kind))} ${(+e.rows).toLocaleString(LOCALE)}`).join(' · ');
+      if(bk) parts.push(bk);
+    }
+    if(j.reachable===false&&!j.truncated)
+      parts.push(t('set.db.pv.short','Even deleting all of that would not reach that size.')+' '+shrinkShortfall(j));
+    if(j.truncated)
+      parts.push(t('set.db.pv.more','It stopped counting there: a real cleanup would delete more than this.'));
+    if(out){ out.style.display=''; setHtml('evictPreviewOut', parts.map(p=>`<div>${p}</div>`).join('')); }
+  });
+}
 
 document.getElementById('ui_sounds').checked=sndOn;
+document.getElementById('ui_errpopup').checked=!!sndPrefs.popupErr;
+paintSndBtn();
 document.getElementById('ui_vol').value=Math.round(sndPrefs.vol*100);
 document.getElementById('ui_spdmode').value=sndPrefs.speedMode;
 document.getElementById('ui_tickmb').value=sndPrefs.tickMB>0?sndPrefs.tickMB:'';
@@ -18220,7 +19066,14 @@ function saveSetupLine(){
   // line speed the daemon never took (Codex F-18).
   setCfg('line_speed', n+u.value).then(ok=>{
     if(!ok) return;
-    loadStatus&&loadStatus();
+    // NOT `loadStatus&&loadStatus()`, which is what stood here and threw:
+    // `loadStatus` is declared nowhere, and a bare read of an undeclared
+    // name is a ReferenceError, so the guard that reads as "call it if it
+    // exists" took this toast and the re-render down with it. That idiom is
+    // only safe on a name that IS declared (`loadSettings&&loadSettings()`
+    // in applyRole is), or through `typeof`. checkWelcome() re-reads the
+    // config and re-renders the checklist, which is what this step wants.
+    checkWelcome();
     toast(t('setup.s4.saved','Line speed saved.'));
   });
 }
@@ -18236,6 +19089,7 @@ function skipSetupLine(){
 function renderSetupSteps(c){
   window._lastCfg=c;
   const groups=(c.index_groups||[]).length;
+  /** @type {Array<Record<string,any>>} */
   const steps=[
     {done:!!c.servers_configured,
      t:t('welcome.add','Add your Usenet server'),

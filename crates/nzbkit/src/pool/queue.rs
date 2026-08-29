@@ -107,6 +107,7 @@ impl Shared {
                     dup: false,
                     prebyte_expiries: w.prebyte_expiries,
                     soft_430: w.soft_430,
+                    recheck_430: 0,
                     fenced: false,
                     rearms: w.rearms,
                     ladder: false,

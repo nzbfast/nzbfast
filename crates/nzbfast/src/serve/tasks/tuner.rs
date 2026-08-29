@@ -13,7 +13,17 @@
 
 use super::*;
 
+/// One server ROW's controller state. Keyed by `ServerLive::row_key`
+/// and not by host - two accounts on one provider are supported, and a
+/// host-keyed map let one controller advance on both accounts'
+/// measurements while configuration ORDER decided whose ceiling, pin and
+/// block policy won.
 struct HostState {
+    /// The provider this row is an account on. Carried because the
+    /// map's KEY is the row rather than the host, and the conntune
+    /// store this writes back to is host-keyed on disk (see
+    /// `flush_bucket`).
+    host: String,
     tuner: nzbkit::livetune::ServerTuner,
     shape: nzbkit::shaping::ShapeDetector,
     /// Rolling clean-epoch samples for the CURRENT bucket.
@@ -63,9 +73,22 @@ fn stand_down(
     if !hosts.is_empty() {
         let global = d.connections.load(Ordering::Relaxed).max(1);
         if let Ok(cfg) = nzbkit::config::Config::load(config) {
+            // `live_targets` is keyed by the ROW, so the key has to be
+            // minted the same way the fleet build minted it. Filtered to
+            // ENABLED servers first because that is the filter the fleet
+            // build's config had already been through (`get/plan.rs`),
+            // and `row_keys` numbers rows within a host - so a
+            // switched-off row would otherwise renumber that host's
+            // later rows here and nowhere else. The other filter
+            // (`excluded_hosts`) is per HOST and removes all of a host's
+            // rows together, so it cannot renumber anything: those keys
+            // simply find no target, which is right.
+            let enabled: Vec<&nzbkit::config::ServerConfig> =
+                cfg.servers.iter().filter(|s| s.enabled).collect();
+            let keys = nzbkit::pool::row_keys(enabled.iter().map(|s| s.host.as_str()));
             let targets = d.hub.live_targets.lock_ok();
-            for s in &cfg.servers {
-                if let Some(t) = targets.get(&s.host) {
+            for (s, key) in enabled.iter().zip(&keys) {
+                if let Some(t) = targets.get(key) {
                     t.set(crate::conntune::effective_limit(global, s.connections));
                 }
             }
@@ -96,16 +119,40 @@ fn flush_bucket(
     let cfg_servers = nzbkit::config::Config::load(config)
         .map(|c| c.servers)
         .unwrap_or_default();
-    for (host, st) in hosts.iter_mut() {
-        if st.clean_epochs > 0 {
+    // Keyed by the ROW, written back by HOST: `conntune.json` is
+    // host-keyed ON DISK and stays that way - re-keying the persisted
+    // store is a schema change and a separate decision - so the write
+    // takes `st.host` while the map takes the row key. A host carrying
+    // MORE THAN ONE enabled row skips the write-back entirely: one
+    // host-keyed bucket cannot represent two accounts, so persisting
+    // both rows made the stored target last-writer-wins between them
+    // and summed both rows' clean epochs into one evidence counter -
+    // and the next job then seeded the 24-connection account from the
+    // 4-connection one's learned target. The fleet build skips the SEED
+    // for such rows for the same reason (`get/fleet.rs`), so the store
+    // simply does not speak for a duplicated host, in either direction.
+    let dup_hosts: std::collections::HashSet<&str> = {
+        let mut seen = std::collections::HashSet::new();
+        cfg_servers
+            .iter()
+            .filter(|s| s.enabled)
+            .filter(|s| !seen.insert(s.host.as_str()))
+            .map(|s| s.host.as_str())
+            .collect()
+    };
+    for st in hosts.values_mut() {
+        if st.clean_epochs > 0 && !dup_hosts.contains(st.host.as_str()) {
+            // Enabled rows only, so a switched-off first row cannot
+            // supply the limit - with the duplicate guard above this
+            // resolves the one enabled row the host has.
             let limit = cfg_servers
                 .iter()
-                .find(|s| s.host == *host)
+                .find(|s| s.enabled && s.host == st.host)
                 .map(|s| crate::conntune::effective_limit(global, s.connections))
                 .unwrap_or_else(|| st.tuner.ceiling());
             crate::conntune::update_bucket(
                 config,
-                host,
+                &st.host,
                 cur_bucket,
                 crate::conntune::BucketUpdate {
                     target: st.tuner.target(),
@@ -196,6 +243,10 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
         const CYCLE_SYNC_EPOCHS: u64 = 6;
         let mut epoch_idx: u64 = 0;
         let mut announced_saturated = false;
+        // Keyed by `ServerLive::row_key`, never by host: see
+        // [`HostState`]. The binding keeps its old name because every
+        // line below reads it as "the per-server controllers", and a
+        // server row IS what it holds - one per configured account.
         let mut hosts: std::collections::HashMap<String, HostState> = Default::default();
         // (pool identity, per-host cumulative bytes) at epoch start.
         let mut prev: Option<(Arc<nzbkit::pool::LiveStats>, Vec<(String, u64)>)> = None;
@@ -285,7 +336,15 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
             // `anchor` the saturation test above reads is what sizes
             // the cap, so the walker's clamp grows with the line
             // exactly as the job's own seed does.
-            let line_share = crate::conntune::line_cap_share(live.servers.len(), anchor);
+            // TODO 275 item 1 part 2: through the SEEDED form, or the
+            // clamp would hold the walker under a fleet the job it is
+            // walking inside already opened.
+            let line_share = crate::conntune::line_cap_share(
+                &config,
+                live.servers.len(),
+                anchor,
+                d.line_carry.carry_bps(),
+            );
             if line_saturated != announced_saturated {
                 info!(
                     "live-tune: link {} (fleet {:.0} Mbps vs anchor {:.0} Mbps)",
@@ -324,10 +383,43 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
             let cfg_loaded = nzbkit::config::Config::load(&config);
             let cfg_read = cfg_loaded.is_ok();
             let cfg_servers = cfg_loaded.map(|c| c.servers).unwrap_or_default();
+            // Config BY ROW, not by host. `find(|s| s.host == sl.host)`
+            // took the FIRST row on a hostname, so with two accounts at
+            // one provider the second one was tuned against the first
+            // one's ceiling, pin and block policy - configuration order
+            // decided whose settings governed both. Keys are minted the
+            // way `stand_down` mints them and for the same reasons: over
+            // the ENABLED rows only, because that is the filter the
+            // fleet build's config had already been through, and
+            // `row_keys` numbers rows within a host. A row the user has
+            // since switched off (or a host now excluded) simply has no
+            // entry, which falls through to the global-limit arm below -
+            // the same answer a failed config load gets, and the right
+            // one, since we no longer know that server's ceiling.
+            let cfg_enabled: Vec<&nzbkit::config::ServerConfig> =
+                cfg_servers.iter().filter(|s| s.enabled).collect();
+            let cfg_by_row: std::collections::HashMap<String, &nzbkit::config::ServerConfig> =
+                nzbkit::pool::row_keys(cfg_enabled.iter().map(|s| s.host.as_str()))
+                    .into_iter()
+                    .zip(cfg_enabled.iter().copied())
+                    .collect();
+            // Hosts with more than one enabled row: their rows keep
+            // their live controllers but never write the host-keyed
+            // conntune store - see `flush_bucket`, which carries the
+            // argument and applies the same guard.
+            let dup_hosts: std::collections::HashSet<&str> = {
+                let mut seen = std::collections::HashSet::new();
+                cfg_enabled
+                    .iter()
+                    .filter(|s| !seen.insert(s.host.as_str()))
+                    .map(|s| s.host.as_str())
+                    .collect()
+            };
             let global = d.connections.load(Ordering::Relaxed).max(1);
             let store = crate::conntune::load(&config);
             for (i, sl) in live.servers.iter().enumerate() {
-                let srv_cfg = cfg_servers.iter().find(|s| s.host == sl.host);
+                let row = sl.row_key.as_str();
+                let srv_cfg = cfg_by_row.get(row).copied();
                 // A pin set MID-SESSION leaves the handle the job build
                 // attached in place, so "no handle" only catches servers
                 // pinned before the build. The setting is the pin, and
@@ -340,7 +432,7 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 }
                 let target = {
                     let g = d.hub.live_targets.lock_ok();
-                    g.get(&sl.host).cloned()
+                    g.get(row).cloned()
                 };
                 // No handle = pinned server, sidecar hub, or the
                 // feature raced a config change: nothing to move.
@@ -377,14 +469,14 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 if cfg_read
                     && srv_cfg.is_some()
                     && hosts
-                        .get(&sl.host)
+                        .get(row)
                         .is_some_and(|st: &HostState| !st.tuner.ceiling_matches(ceiling))
                 {
                     info!(
                         "live-tune: {} connections setting changed - re-seating at {ceiling}",
                         sl.host
                     );
-                    hosts.remove(&sl.host);
+                    hosts.remove(row);
                     target.set(ceiling);
                 }
                 // Block-account rule (design §7.7): the live tuner may
@@ -398,7 +490,8 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 // stays as the inference for accounts where they
                 // never told us the size (M7b.2 §5.7).
                 let block = srv_cfg.is_some_and(|s| s.block_account || s.block_bytes.is_some());
-                let st = hosts.entry(sl.host.clone()).or_insert_with(|| HostState {
+                let st = hosts.entry(row.to_string()).or_insert_with(|| HostState {
+                    host: sl.host.clone(),
                     tuner: nzbkit::livetune::ServerTuner::new(target.get(), ceiling, 3),
                     shape: nzbkit::shaping::ShapeDetector::new(
                         store.get(&sl.host).is_some_and(|t| t.shaped.is_some()),
@@ -550,7 +643,10 @@ pub(in crate::serve) fn spawn_live_tuner(daemon: &Arc<Daemon>, config: &std::pat
                 let bucket_stale = tref
                     .and_then(|t| t.buckets.iter().find(|b| b.b == cur_bucket))
                     .is_none_or(|b| now_s.saturating_sub(b.checked) > BUCKET_REFRESH_SECS);
-                if due && (st.tuner.target() != st.persisted_target || bucket_stale) {
+                if due
+                    && !dup_hosts.contains(sl.host.as_str())
+                    && (st.tuner.target() != st.persisted_target || bucket_stale)
+                {
                     crate::conntune::update_bucket(
                         &config,
                         &sl.host,

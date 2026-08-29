@@ -466,7 +466,29 @@ impl Extractor {
                 size: entry.size,
                 pos: 0,
             };
+            if entry.size == 0 {
+                // An explicit empty write is what creates the output
+                // file - io::copy of an empty reader never calls the
+                // sink, and the disk path does land empty members.
+                use std::io::Write as _;
+                // `write`, not `write_all`: write_all skips an empty
+                // buffer without ever calling the sink.
+                let n = sink.write(&[])?;
+                debug_assert_eq!(n, 0);
+                return Ok(true);
+            }
             io::copy(rd, &mut sink)?;
+            // The library hands back Ok on a packed stream that ends
+            // early - CRC is only checked once the declared size is
+            // reached - so a short copy here is the one thing that
+            // would publish a truncated file as though it were whole.
+            if sink.pos != entry.size {
+                return Err(io::Error::other(format!(
+                    "{} is shorter than its declared size",
+                    entry.name
+                ))
+                .into());
+            }
             Ok(true)
         })
     }
@@ -1285,6 +1307,33 @@ mod tests {
             assert_eq!(dir_files(&dir), vec!["F.bin".to_string()], "order {t}");
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    /// A size-0 member lands as an output file: the library invokes the
+    /// callback with an empty reader, io::copy never touches the sink,
+    /// and only the explicit empty write creates the file - the same
+    /// shape the zip and tar chases pin.
+    #[test]
+    fn sevenz_empty_member_lands() {
+        let f = payload(120_000, 104);
+        let arch = sevenz_archive(&[("empty.txt", &[]), ("F.bin", &f)], None, false);
+        let outer = store_outer("inner.7z", &arch);
+        let dir = tmpdir("7z-empty-member");
+        let ex = Extractor::new(&dir, 1, true);
+        let art = 7000usize;
+        for (i, chunk) in outer.chunks(art).enumerate() {
+            ex.write(0, "v.rar", outer.len() as u64, (i * art) as u64, chunk)
+                .unwrap();
+        }
+        let rep = ex.finish().unwrap();
+        assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+        assert_eq!(std::fs::read(dir.join("F.bin")).unwrap(), f);
+        assert_eq!(std::fs::read(dir.join("empty.txt")).unwrap(), b"");
+        assert_eq!(
+            dir_files(&dir),
+            vec!["F.bin".to_string(), "empty.txt".to_string()]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The tail-prefetch handle: classifying the inner 7z calls the

@@ -1,8 +1,18 @@
+// Every consumer of the parent module here (`Path` for the stylesheet,
+// `warn!` for its size refusal, `Precompressed` for the catalogues and
+// manuals) belongs to the browser-facing half, so with `dashboard` off
+// this file needs nothing from `super` - while still owning UI_LOCALES,
+// which the settings boundary reads on every build. Gating the IMPORT
+// rather than waiving `unused_imports` over it: a waiver would suppress
+// the lint for whatever this glob grows to import next, where the cfg
+// says exactly what is true and nothing more.
+#[cfg(feature = "dashboard")]
 use super::*;
 
 /// The dashboard (web/dashboard.html), embedded at compile time so the
 /// daemon binary stays a single self-contained file. Edit the html -
 /// cargo tracks the include and rebuilds.
+#[cfg(feature = "dashboard")]
 pub(super) const DASHBOARD_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../web/dashboard.html"
@@ -18,12 +28,14 @@ pub(super) const DASHBOARD_HTML: &str = include_str!(concat!(
 /// mean a rebuild per tweak, which is the thing being asked for. It is
 /// also why it is a SEPARATE file rather than an edit to the shipped CSS:
 /// it holds only the user's own rules, so an upgrade never touches it.
+#[cfg(feature = "dashboard")]
 pub(super) const USER_CSS_FILE: &str = "custom.css";
 
 /// Refuse to serve a stylesheet larger than this. A hand-written CSS file
 /// is kilobytes; anything past a megabyte is a mistake (a video dropped in
 /// the config folder under the wrong name, a runaway generator), and this
 /// body is read and gzipped on every page load.
+#[cfg(feature = "dashboard")]
 const USER_CSS_MAX: u64 = 1 << 20;
 
 /// The user's stylesheet, or an empty string when there isn't one.
@@ -43,6 +55,7 @@ const USER_CSS_MAX: u64 = 1 << 20;
 /// The path is FIXED - the config file's own directory, one hardcoded
 /// name. No part of the request reaches it, so there is no traversal
 /// surface to defend; a user-settable path would create one.
+#[cfg(feature = "dashboard")]
 pub(super) fn user_css(cfg_path: &Path) -> String {
     use std::io::Read as _;
     let path = cfg_path.with_file_name(USER_CSS_FILE);
@@ -89,6 +102,7 @@ pub(super) fn user_css(cfg_path: &Path) -> String {
 /// same rule is why plain-http access from another machine on the LAN offers
 /// no install at all: 127.0.0.1 is a secure context by definition and
 /// http://192.168.x.x is not.
+#[cfg(feature = "dashboard")]
 pub(super) fn web_icon(path: &str) -> Option<(&'static [u8], &'static str)> {
     Some(match path {
         "/icons/favicon-16.png" => (
@@ -233,6 +247,7 @@ pub(super) const UI_LOCALES: [&str; 28] = [
 /// time rather than resolved by name at run time, so a translation that
 /// loses its file is a compile error naming the key it wanted - not a
 /// page that quietly stops being served.
+#[cfg(feature = "dashboard")]
 macro_rules! precompressed {
     ($key:literal) => {
         Precompressed {
@@ -245,6 +260,7 @@ macro_rules! precompressed {
 /// The catalogue for a UI locale. English is absent on purpose: it is
 /// the source language, it lives inline in the pages, and its catalogue
 /// is the empty object the route answers with directly.
+#[cfg(feature = "dashboard")]
 pub(super) fn i18n_catalog(lang: &str) -> Option<Precompressed> {
     Some(match lang {
         "fr" => precompressed!("i18n-fr"),
@@ -285,9 +301,11 @@ pub(super) fn i18n_catalog(lang: &str) -> Option<Precompressed> {
 
 /// The English manual - and the fallback for a UI locale whose manual is
 /// not translated yet, so the dashboard's book pill never 404s.
+#[cfg(feature = "dashboard")]
 pub(super) const MANUAL_EN: Precompressed = precompressed!("manual-en");
 
 /// Translated manuals.
+#[cfg(feature = "dashboard")]
 pub(super) fn manual_i18n(lang: &str) -> Option<Precompressed> {
     Some(match lang {
         "fr" => precompressed!("manual-fr"),
@@ -318,25 +336,48 @@ pub(super) fn manual_i18n(lang: &str) -> Option<Precompressed> {
 /// Inlined rather than served as `/ui.css` on purpose - an external
 /// stylesheet costs a round trip before first paint, which is exactly the
 /// flash the pre-paint script exists to avoid.
+#[cfg(feature = "dashboard")]
 pub(super) const UI_TOKENS_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../web/ui-tokens.html"
 ));
 
-/// Inline the shared design tokens into a page.
+/// The one press/warning/error sound engine, shared by the dashboard and
+/// the wall: the master switch, the preferences, the WebAudio synth, the
+/// sixteen press recipes, the classifier that picks one for a control,
+/// and the four global hooks. Each shell page carries a
+/// `__NZBFAST_UI_SOUND__` placeholder in its `<head>`; `ui_themed()`
+/// substitutes this in.
+///
+/// NOT folded into `UI_TOKENS_HTML` beside it, and the reason is the
+/// manuals: build.rs substitutes the tokens into all sixteen of them at
+/// build time (R10 / C9), and a manual has no controls to acknowledge -
+/// it would be carrying an audio engine sixteen times over for nothing.
+/// The tokens reach every page nzbfast serves; this reaches every page
+/// that has something to press.
+#[cfg(feature = "dashboard")]
+pub(super) const UI_SOUND_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../web/ui-sound.html"
+));
+
+/// Inline the shared design tokens and sound engine into a page.
 ///
 /// Only the two shell pages come through here now: the manuals carry the
-/// same substitution, but build.rs folds it in for them (R10 / C9), so
-/// nothing re-does it per request.
+/// tokens substitution, but build.rs folds it in for them (R10 / C9), so
+/// nothing re-does it per request - and they carry no sound placeholder
+/// at all, which is why that half is only here.
+#[cfg(feature = "dashboard")]
 pub(super) fn ui_themed(page: &str) -> String {
     page.replace("__NZBFAST_UI_TOKENS__", UI_TOKENS_HTML)
+        .replace("__NZBFAST_UI_SOUND__", UI_SOUND_HTML)
 }
 
 #[cfg(feature = "indexer")]
 pub(super) const WALL_HTML: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/wall.html"));
 
-#[cfg(test)]
+#[cfg(all(test, feature = "dashboard"))]
 mod tests {
     use super::{DASHBOARD_HTML, USER_CSS_FILE, user_css, web_icon};
 

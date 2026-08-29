@@ -553,6 +553,17 @@ entrada, y trae consigo todos los indexadores que hay detrás.</p>
 que respondió, lo que valida la dirección y la clave en un clic. Una clave guardada no
 se vuelve a mostrar: la casilla lo dice, y dejarla en blanco conserva la que ya
 tiene.</p>
+<p><b>nzbindex, sin necesidad de cuenta.</b> Ajustes → Buscar en indexadores →
+<b>+ Añadir indexador</b>, y pon el primer campo de la fila en <code>nzbindex</code> en
+vez de nombrar una cuenta. Busca en nzbindex.com directamente a través de su propia API
+documentada, sin necesidad de clave, aunque nzbindex también acepta una, para un límite
+más alto de su lado. Indexa lo que realmente se publicó en vez de una lista de
+lanzamientos curada, así que encuentra cosas que las cuentas de arriba no tienen, al
+precio de que muchos de sus resultados llevan nombres revueltos. Las descargas igual se
+ponen en cola y se descomprimen como cualquier otro trabajo. <b>Solo completos</b>,
+activado por defecto, deja fuera las publicaciones a las que les faltan partes y que
+nunca podrán terminar; los campos de tamaño, antigüedad y grupo de noticias de al lado
+acotan aún más una búsqueda.</p>
 <p><b>Buscar.</b> Abre <b>🎬 el muro</b> en la cabecera y elige <b>Lanzamientos</b>.
 El desplegable junto al cuadro de búsqueda decide dónde mira una búsqueda: <b>Este
 índice</b>, es decir lo que esta máquina ha escaneado por su cuenta, <b>Indexadores</b> o
@@ -1121,7 +1132,8 @@ vigilada), <code>nzb.refeed</code> (el propio archivo NZB de una descarga termin
 seguimiento se completó y se eliminó la copia sustituida),
 <code>queue.idle</code>, <code>queue.paused</code> y <code>queue.resumed</code> (la cola se detuvo o volvió a arrancar, sea quien sea o lo que sea que lo hiciera), <code>queue.finished_action</code>
 (la acción de fin de cola se activó, se ejecutó o se canceló), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> y <code>update.available</code> (se encontró una versión más reciente de nzbfast). Cada uno lleva
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> y <code>server.block_spent</code> (una cuenta de bloque de prepago llega al último 15 % de los datos comprados, o los ha gastado todos) y <code>update.available</code> (se encontró una versión más reciente de nzbfast). Cada uno lleva
 <code>schema_version</code> (actualmente 1; pueden aparecer claves nuevas sin subirla -
 ignora lo que no conozcas), un <code>seq</code> monótono y una
 marca de tiempo <code>at</code> en milisegundos.</p>
@@ -1282,6 +1294,7 @@ cliente solapa trabajos entre sí.</li>
 <li><b>Solape entre trabajos</b>: mientras el tramo final de un trabajo terminado (verificación/extracción) se
 completa en disco, la descarga del siguiente trabajo ya es dueña de la línea.</li>
 </ul>
+<p><b>Con un solo proveedor configurado</b>, esto solo puede detectar un post completamente muerto - no llega absolutamente nada de él, ya sea porque cada artículo es rechazado o porque el proveedor simplemente deja de responder. Un trabajo que simplemente va lento pero sigue recibiendo algunos bytes se deja tal cual, porque no hay un segundo proveedor al que moverlo. Configure un segundo proveedor y nzbfast también podrá notar que un servidor ya no tiene un post y enrutarlo o aplazarlo en lugar de esperar a que el trabajo termine.</p>
 <h3 id="oracle">El oráculo de disponibilidad</h3>
 <p>Las retiradas son el motivo principal de que falle una descarga de Usenet, y son
 predecibles: la misma release desaparece de un backbone mientras otro todavía la tiene.
@@ -1469,6 +1482,7 @@ la <b>clave API</b> (control total) y la <b>clave NZB</b> (solo añadir:
 <tr><td>Diagnóstico</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (autenticación Basic: cualquier usuario, la clave API como contraseña)</td></tr>
 <tr><td>Vista previa / reproducción</td><td><code>/stream/&lt;nzo_id&gt;</code> (rangos HTTP; arrancar un trabajo de biblioteca aparcado necesita el token <code>?t=</code> o la clave), <code>/m3u/&lt;id&gt;</code> (necesita la clave o el token del propio trabajo; emite el token), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>Supervisión</td><td><code>/metrics</code> responde en el formato de exposición de texto Prometheus 0.0.4: velocidad de descarga, profundidad y bytes de la cola, conexiones por proveedor, caídas y recuentos de artículos, memoria por subsistema y tiempo en marcha. Unidades base en todo (bytes, segundos), de modo que el panel convierte y nada llega preredondeado. Solo GET, y de forma predeterminada necesita la clave API completa. Active <code>metrics_open</code> para servirlo sin clave, que es la disposición habitual con Prometheus: no lleva nombres de trabajos ni rutas, pero sí publica el nombre de host de cada proveedor configurado a cualquiera que alcance el puerto.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Archivos y ubicaciones</h2>

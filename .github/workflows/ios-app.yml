@@ -1,0 +1,470 @@
+# Compile the iOS app. Nothing in CI ever has.
+#
+# `packaging/ios` holds NINETEEN tracked Swift files - the SwiftUI
+# downloader, the ActivityKit widget extension and the throwaway A3
+# harness - and until this workflow landed no job in this repository
+# built a single line of any of them. Verified on origin/main 27 Aug
+# 2026:
+#
+#     grep -rn 'NzbfastMobile\|swiftc\|build-harness\|packaging/ios' \
+#          .github/workflows/          -> no hits
+#
+# `mobile-targets.yml`'s `ios-check` is NOT this. It is `cargo check -p
+# nzbfast-ffi --target aarch64-apple-ios` - the Rust staticlib the app
+# links, and its own header says so. Its only Xcode line is `xcodebuild
+# -version || true`, a version canary. So the engine half of the iOS app
+# has been compiled since 27 Aug and the SWIFT half had nobody looking.
+#
+# THAT IS macapp.yml's ARGUMENT ONE DIRECTORY OVER, and that file's
+# header is the design document this one follows: "NOTHING in CI had
+# ever compiled a line of Swift, so three lanes landed in
+# macapp/Sources/NzbFast/ inside one hour each relying on its author
+# having built by hand." Every gate in CLAUDE.md's numbered list is
+# about crates/, web/, docs/, website/, packaging/ or research/, and not
+# one of them can see a Swift type error, a bad selector, or a call to
+# an API the deployment target does not have. `packaging` IS in
+# PUBLIC_MANIFEST, so leak-check.sh reads these files - but only for
+# private vocabulary, never for whether they build.
+#
+# The gap is live rather than theoretical. `43678ad11` (27 Aug 2026)
+# changed FIVE Swift files and +679 lines across the app's lifecycle,
+# ActivityKit and playback paths, and the only two things that have ever
+# compiled it are that lane by hand and the runtime-QA lane that
+# verified it (research/IOS-LIFECYCLE-RUNTIME-QA-2026-08-27.md, "The gap
+# this lane found"). The Android half of that same batch was explicitly
+# tracked as compile-unverified until android-lint.yml answered it; the
+# iOS half was not tracked at all.
+#
+# THE BUILD IS GREEN TODAY, so this is a gate against a future
+# regression and not a fix for a red.
+#
+# ---------------------------------------------------------------------
+# WHY ITS OWN WORKFLOW
+#
+# Fourth time this question has been settled here and the answer has not
+# moved: macapp.yml 24 Aug 2026, android-lint.yml 25 Aug,
+# mobile-targets.yml 27 Aug. size-gate.yml's every-branch placement is
+# earned by being BUILD-FREE - its own header's words are "checkout plus
+# the script is the whole job" - and its `on: push: paths:` list is a
+# UNION covering `crates/**`, `**/*.py`, `**/*.sh` and `*.md`, so a job
+# added there would spin a macOS runner carrying an Xcode build on very
+# nearly every push in the repo. ci-private.yml is main-only and, on a
+# main taking a push every ~90 seconds, its verdicts are routinely
+# superseded - which is why tools/ci-verdict.py has to exist at all to
+# dig a real one out from under the cancellations. A build that takes
+# minutes should not have its result buried that way.
+#
+# One thing the dedicated file buys beyond runner minutes: a job added
+# to size-gate.yml COLLIDES with every other lane adding one, and a
+# union merge of that job slot emits two job headers over one body,
+# which is silently broken yaml. A new file merges clean.
+#
+# ---------------------------------------------------------------------
+# THE PATH FILTER, PRICED RATHER THAN GUESSED
+#
+# The naive input to this build is `crates/**`, because the "Build
+# nzbfast-ffi" phase compiles the engine. That is refused on a
+# measurement. Commits in the 30 days to 28 Aug 2026, `--no-merges`:
+#
+#   packaging/ios/**        21 commits   IN. The subject.
+#   crates/nzbfast-ffi/**   10 commits   IN, and this is the one worth
+#                                        explaining. It is the LINK
+#                                        SEAM: `nzbfast-Bridging-Header.h`
+#                                        is hand-written, so a change to
+#                                        the crate's `extern "C"`
+#                                        surface that the header does
+#                                        not follow is not a Rust error
+#                                        and not a Swift error - it is a
+#                                        missing symbol at link, and
+#                                        this job is the only thing that
+#                                        links the two together.
+#   crates/**            1,779 commits   OUT. 38% of the repo's 4,652
+#                                        commits over the same window,
+#                                        which at this leg's cost is a
+#                                        macOS Xcode build on more than
+#                                        a third of all pushes. And the
+#                                        question it would answer -
+#                                        "does the engine still compile
+#                                        for iOS" - is ALREADY answered,
+#                                        by mobile-targets.yml's
+#                                        ios-check, on exactly that
+#                                        filter. Widening here would buy
+#                                        one thing that job cannot see
+#                                        (the link seam above), and the
+#                                        narrow entry above buys it for
+#                                        10 commits a month instead of
+#                                        1,779.
+#
+# So the filter is about 31 commits a month, one a day, which is
+# macapp.yml's "handful of pushes a week" order of magnitude rather than
+# mobile-targets.yml's ~60 runs a day.
+#
+# THE SCHEDULE IS NOT A DUPLICATE OF THE PUSH TRIGGER, and here it
+# carries more weight than it does in mobile-targets.yml, which is where
+# the argument comes from. `paths:` can only express changes to THIS
+# repo, and this build has TWO external inputs that rotate with no
+# commit here: the runner image's Xcode and iOS SDK, and VLCKit, which
+# resolves over the network from github.com/tylerjonesio/vlckit-spm at
+# 3.6.0 with a pinned checksum. A nightly run is the floor that reports
+# either on its own rather than on whoever pushes next.
+#
+# ---------------------------------------------------------------------
+# WHAT IT BUILDS, AND WHY THAT DESTINATION
+#
+# `-scheme NzbfastMobile`, which is the app AND the widget: the
+# NzbfastWidgets target is both a target dependency and an "Embed
+# Foundation Extensions" build phase of the app, so the extension is in
+# scope for free rather than by a second scheme. That is asserted
+# mechanically below rather than believed - the artefact proof looks for
+# `NzbfastMobile.app/PlugIns/NzbfastWidgets.appex`, so a project edit
+# that unhooks the extension reddens this job instead of quietly
+# halving what it covers.
+#
+# `-destination 'generic/platform=iOS Simulator'`, NOT the named device
+# in packaging/ios/README.md. Same build products - measured, a build
+# with each destination in turn reuses the other's DerivedData outright
+# (2.74 s, nothing recompiled) - and the generic form needs no simulator
+# RUNTIME and no device of any particular name, so a runner image that
+# renames its devices cannot redden this job for a non-defect.
+#
+# `ARCHS=arm64 ONLY_ACTIVE_ARCH=NO` on top of it, and that pair is
+# load-bearing rather than tidy. A generic simulator destination
+# resolves to `ARCHS = arm64 x86_64` (measured), and Xcode exports ARCHS
+# into the "Build nzbfast-ffi" script phase, where build-ffi.sh maps
+# each slice onto its own Rust target - so the unpinned form builds the
+# engine RELEASE twice, once for aarch64-apple-ios-sim and once for
+# x86_64-apple-ios, and lipos them. What the second slice buys is
+# nothing this job can see: `grep -rn '#if arch\|targetEnvironment'` over
+# App/, Widget/ and Shared/ returns nothing, so there is no Swift error
+# an x86_64 pass can find that the arm64 pass cannot, and the engine's
+# own x86_64 codegen is a cargo question rather than an Xcode one. Same
+# trade, and the same wording, as macapp.yml's refusal of the universal
+# wrapper build. If an arch conditional is ever added under
+# packaging/ios, revisit this line.
+#
+# NOT a device build (`generic/platform=iOS`). It would be one arch too
+# and would need no simulator anything, but the project is
+# CODE_SIGN_STYLE=Automatic with no development team, so it takes a
+# signing-suppression incantation to get through - and, more to the
+# point, it would build a configuration NOBODY HERE BUILDS BY HAND. A
+# red that cannot be reproduced with the command in packaging/ios/README.md
+# is a red nobody can act on. The device triple is covered as a cargo
+# question by mobile-targets.yml's ios-check.
+#
+# NOT `build-harness.sh`. HarnessApp.swift is a declared throwaway (the
+# A3 spike, README's last section) and the harness script drives swiftc
+# by hand into a bundle no product ships.
+#
+# NOT a test suite: packaging/ios has none, and inventing them is a
+# different piece of work. NOT a formatter or a linter: this repo has no
+# Swift formatter, `cargo fmt` does not reach .swift, and adding one is
+# a new convention imposed on an existing tree, with its own argument to
+# make. It does not ride in on a build job.
+#
+# ---------------------------------------------------------------------
+# THE ENGINE IS THE COST, AND IT IS NOT NEGOTIABLE HERE
+#
+# The "Build nzbfast-ffi" phase runs packaging/ios/build-ffi.sh, which
+# builds the staticlib RELEASE whatever the app configuration is. That
+# is deliberate and the script says why: a debug build of yEnc and PAR2
+# is unusably slow and those are the product. So this leg pays for a
+# cold RELEASE build of the engine's whole dependency graph, which is
+# the single largest line in it - measured cold on the dev Mac, with no
+# target/ at all, the entire green build above is 137.78 s wall and the
+# cargo phase dominates it. On the runner, measured on the probe run
+# below: the `xcodebuild` step is 7m27s and cargo's own `Finished
+# release profile ... in 6m 37s` is 89% of it, leaving under a minute
+# for every line of Swift in the app, the widget and VLCKit together.
+#
+# Do NOT "fix" that by making the staticlib debug. The setting belongs
+# to the app, this job's business is whether the tree builds, and a
+# workflow that quietly builds a different engine than a developer does
+# is a workflow whose green means something else.
+#
+# ---------------------------------------------------------------------
+# NO CACHE, DELIBERATELY, FOR EITHER HALF
+#
+# The reflex is to cache `~/.cargo/registry` plus `target/`, and SPM's
+# cloned packages beside them. Do not add it here. ci-private.yml's
+# cache note records that this repo is at 11.85 GB against GitHub's
+# 10 GB per-repo cache limit WITH LRU EVICTION ALREADY ACTIVE, and
+# mobile-targets.yml refused the same reflex for the same reason: a
+# multi-GB archive holding a target tree nothing else shares would evict
+# what `check` and the four Windows jobs restore from, and the cost of
+# that lands on somebody else's push. A cold run here is minutes; an
+# evicted ci-private archive is a cold build of everything.
+#
+# The house cache key (tools/dep-cache-key.py) is unavailable to this
+# file in any case, for a second and independent reason: `.github` ships
+# to the public repo verbatim, `tools/` does not, and publish-public.sh
+# REFUSES an export whose files reach back into the private tree.
+# ci-private.yml is the one workflow that gets a rewrite on the way out.
+#
+# SPM IS ITS OWN STEP, and that is the one concession to the network
+# input. `xcodebuild build` would resolve VLCKit on its own, but then a
+# GitHub outage or a moved tag is a red inside a build log, indexed
+# under "the Swift did not compile". Resolving first makes the failure
+# say what it is.
+#
+# ---------------------------------------------------------------------
+# WARNINGS ARE NOT FAILURES HERE, ON PURPOSE
+#
+# The tree emits ONE Swift warning today, and it is the same shape as
+# the two macapp.yml tolerates:
+#
+#   App/Engine.swift:234:35: reference to captured var 'self' in
+#   concurrently-executing code; this is an error in the Swift 6
+#   language mode
+#
+# Whether the engine start path's capture should be reworked to satisfy
+# Swift 6 concurrency is a real question and a separate one; this job
+# must not pre-empt it, and macapp.yml deliberately does not pass
+# `-warnings-as-errors` for exactly this reason. `xcodebuild` exits
+# non-zero on an error and zero on a warning, and NOTHING here passes
+# that flag. Do not add it as a rider on some later edit - decide it on
+# its own, in the commit that also fixes what it would newly refuse.
+#
+# ---------------------------------------------------------------------
+# THE CANARIES
+#
+# A gate that cannot fail is a rubber stamp, and in this repo that
+# failure mode is silent by construction: web/i18n/nav-regen.py's picker
+# arm reported every picker current for months while matching nothing,
+# and web/i18n/site-crosslink.py printed OK on both arms at exit 0 with
+# its one regex broken. A clean `xcodebuild` line looks identical
+# whether it compiled the tree in front of it or found everything up to
+# date and did nothing at all.
+#
+# Two proofs, answering different questions. The ARTEFACT proof is free:
+# the .app has to exist, its binary has to be an arm64 iOS-SIMULATOR
+# Mach-O (which is what would notice a destination silently falling back
+# to the host), and the widget extension has to be inside it. The
+# COMPILE proof plants a type error guarded by `#if os(iOS)` and
+# requires the build to refuse it - guarded, rather than bare, so it
+# proves the compiler ran FOR iOS and not merely that it ran. It is an
+# incremental rebuild of one file, not a second cold build, and it
+# removes its own file on every path, then proves the tree is clean.
+#
+# THAT LAST CHECK IS A `git status --porcelain` OVER THE WHOLE TREE, and
+# it holds today only because nothing in this job writes into the
+# checkout except build-ffi.sh, whose `target/` is gitignored. The one
+# thing that could change that is an Xcode version bump rewriting the
+# committed `Package.resolved` during the resolve step; it does not on
+# 26.6 (the canary step passed on the probe run, which is the
+# measurement, not a hope). If it ever does, narrow this check to the
+# canary FILE and say in the same commit why - do not delete it, because
+# what it exists to catch is a canary that left the tree dirty for the
+# next thing to read this checkout.
+#
+# The planted error is a type mismatch inside a function BODY in a new
+# file under App/. Both of those matter: App/ is a
+# PBXFileSystemSynchronizedRootGroup, so a file dropped in is compiled
+# with no project edit, and a body-scoped error cannot be mistaken for
+# a top-level-code diagnostic.
+#
+# ---------------------------------------------------------------------
+# VERIFIED RED, THEN GREEN, ON A REAL RUNNER
+#
+# The method macapp.yml and mobile-targets.yml both used: a probe
+# branch, deleted after.
+#
+#   33177808943  the workflow as it   ios-app-build SUCCESS, 9m27s.
+#                stands              Per step: versions 25s (the rustup
+#                                    toolchain sync, 10 components),
+#                                    `rust target` ~1s, `resolve swift
+#                                    packages` 66s, `xcodebuild` 7m27s,
+#                                    the artefact proof 3s, the canary
+#                                    10s. Runner Xcode 26.6 (17F113),
+#                                    Swift 6.3.3, arm64-apple-macosx26.0.
+#                                    ONE warning, the Engine.swift one
+#                                    named above, tolerated.
+#   33178702268  a widget-only       ios-app-build FAILED at `xcodebuild`,
+#                field rename        naming `Widget/NzbfastWidgets.swift:37:
+#                                    value of type
+#                                    'DownloadActivityAttributes.ContentState'
+#                                    has no member 'progressFraction'`.
+#                                    Both later steps SKIPPED. Probe
+#                                    branches deleted after.
+#
+# READ THOSE TWO NUMBERS TOGETHER, because the difference is the useful
+# fact. The green run is 9m27s and the red one is 1m46s: the widget
+# extension is a target DEPENDENCY, so its Swift compiles BEFORE the app
+# target's cargo phase, and an ordinary Swift error therefore surfaces in
+# under two minutes rather than behind the 6m37s engine build. The cost
+# in the header above is what a PASSING run costs; a failing one is
+# cheap.
+#
+# That red probe was planted in the WIDGET on purpose rather than in the
+# app. It is the regression this job is really for - a field renamed in
+# Shared/ with a use left behind in the extension - and it proves
+# mechanically that the extension is compiled here, which no amount of
+# reading the project file could settle.
+name: ios-app
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'packaging/ios/**'
+      - 'crates/nzbfast-ffi/**'
+      - '.github/workflows/ios-app.yml'
+  pull_request:
+    paths:
+      - 'packaging/ios/**'
+      - 'crates/nzbfast-ffi/**'
+      - '.github/workflows/ios-app.yml'
+  schedule:
+    # 05:20 UTC, off the hour and off both nightly.yml's slots and
+    # mobile-targets.yml's 04:40. See "THE SCHEDULE IS NOT A DUPLICATE"
+    # in the header: this is the trigger that reports an Xcode image
+    # bump or a VLCKit resolution failure, neither of which any `paths:`
+    # filter can express.
+    - cron: '20 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Agent sessions build with this set (see CLAUDE.md); incremental
+  # state is per-edit-loop state a one-shot runner never reads back, and
+  # it roughly doubles what a build writes.
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ios-app-build:
+    # No `github.repository` guard. Same reasoning as macapp.yml,
+    # android-lint.yml and mobile-targets.yml: this needs no private
+    # tooling, `packaging` is in PUBLIC_MANIFEST wholesale, and an iOS
+    # app that will not compile is exactly as broken on the public repo,
+    # where standard runners are free.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    concurrency:
+      group: ios-app-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Recorded so a future failure can be read against a toolchain or
+      # image bump rather than against the diff - which is what the
+      # nightly schedule exists to surface.
+      - name: versions
+        run: |
+          xcodebuild -version
+          swift --version
+          rustc --version
+          cargo --version
+          xcrun --sdk iphonesimulator --show-sdk-path
+
+      # NOT added to rust-toolchain.toml's `targets` list, and that is a
+      # decision rather than an omission - mobile-targets.yml's,
+      # unchanged. That list is installed by rustup on the FIRST cargo
+      # invocation in any checkout of this repo, so adding a simulator
+      # target there would download another std set on every dev box and
+      # in every Rust job in CI, to serve one job in this file.
+      #
+      # `-sim` and not the device triple: build-ffi.sh maps
+      # PLATFORM_NAME/ARCHS onto a Rust target, and iphonesimulator +
+      # arm64 is aarch64-apple-ios-sim. The DEVICE triple is
+      # mobile-targets.yml's ios-check.
+      - name: rust target
+        run: rustup target add aarch64-apple-ios-sim
+
+      # Its own step so a network or upstream failure says what it is
+      # rather than arriving inside a build log. VLCKit resolves from
+      # github.com/tylerjonesio/vlckit-spm at 3.6.0 with a pinned
+      # checksum; `Package.resolved` is committed, so this is a fetch
+      # and never a version decision.
+      - name: resolve swift packages
+        run: |
+          cd packaging/ios
+          xcodebuild -project NzbfastMobile.xcodeproj \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" \
+            -resolvePackageDependencies
+
+      # See "WHAT IT BUILDS, AND WHY THAT DESTINATION". The
+      # derivedDataPath is pinned so the artefact proof below has a path
+      # it can name rather than one it has to go looking for.
+      - name: xcodebuild
+        run: |
+          cd packaging/ios
+          xcodebuild -project NzbfastMobile.xcodeproj \
+            -scheme NzbfastMobile \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            build
+
+      # PROOF ONE, and it is free. Three questions a green xcodebuild
+      # line does not answer: did it produce an app at all, is that app
+      # really an arm64 iOS SIMULATOR binary (a destination that fell
+      # back to the host would still exit 0 while duplicating nothing
+      # useful), and is the widget extension embedded - which is the
+      # only thing making "the widget is in scope for free" a fact
+      # rather than a claim about a project file somebody could change.
+      - name: the artefacts are an ios simulator app with its widget
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/NzbfastMobile.app"
+          [ -d "$APP" ] || {
+            echo "::error::no app at $APP - the build produced nothing"
+            ls -R "$RUNNER_TEMP/dd/Build/Products" || true
+            exit 1; }
+          [ -d "$APP/PlugIns/NzbfastWidgets.appex" ] || {
+            echo "::error::NzbfastWidgets.appex is not embedded - the widget extension is no longer in scope"
+            ls -R "$APP" || true
+            exit 1; }
+          file "$APP/NzbfastMobile"
+          lipo -info "$APP/NzbfastMobile"
+          vtool -show-build-version "$APP/NzbfastMobile" | tee "$RUNNER_TEMP/vtool.txt"
+          grep -q 'platform IOSSIMULATOR' "$RUNNER_TEMP/vtool.txt" || {
+            echo "::error::the app binary is not an iOS Simulator Mach-O - the destination did not take"
+            exit 1; }
+          lipo -info "$APP/NzbfastMobile" | grep -q 'arm64' || {
+            echo "::error::the app binary is not arm64"
+            exit 1; }
+          echo "app, widget extension, arm64 iOS Simulator: all present"
+
+      # PROOF TWO - see "THE CANARIES" in the header.
+      - name: prove the build step can actually fail
+        run: |
+          # GitHub runs every `run:` under `bash -e`, and `set -uo
+          # pipefail` does NOT turn that off - so a bare xcodebuild that
+          # is SUPPOSED to fail would abort the step before the next
+          # line is read. An `if` condition is the one place `-e` does
+          # not fire, which is the shape macapp.yml's canary uses and
+          # the shape mobile-targets.yml's first cut got wrong.
+          set -uo pipefail
+          cd packaging/ios
+          cat > App/build_canary.swift <<'SWIFT'
+          #if os(iOS)
+          private func nzbfastIosBuildCanary() { let _: Int = "not an int" }
+          #endif
+          SWIFT
+          if xcodebuild -project NzbfastMobile.xcodeproj \
+               -scheme NzbfastMobile \
+               -destination 'generic/platform=iOS Simulator' \
+               -derivedDataPath "$RUNNER_TEMP/dd" \
+               -clonedSourcePackagesDirPath "$RUNNER_TEMP/spm" \
+               ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+               build > "$RUNNER_TEMP/ios-canary.log" 2>&1; then
+            rm -f App/build_canary.swift
+            echo "::error::xcodebuild PASSED a planted type error - this job is not compiling anything"
+            exit 1
+          fi
+          rm -f App/build_canary.swift
+          grep -m1 'build_canary.swift.*error:' "$RUNNER_TEMP/ios-canary.log" || {
+            echo "::error::the build failed for some OTHER reason than the canary"
+            grep -m20 'error:' "$RUNNER_TEMP/ios-canary.log" || tail -40 "$RUNNER_TEMP/ios-canary.log"
+            exit 1; }
+          echo "canary refused as expected"
+          # The restore has to be provable, or the next thing to read
+          # this checkout inherits a tree the canary left dirty.
+          cd "$GITHUB_WORKSPACE"
+          [ -z "$(git status --porcelain)" ] || {
+            echo "::error::the canary did not clean up after itself"
+            git status --porcelain
+            exit 1; }

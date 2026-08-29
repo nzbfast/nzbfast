@@ -1,6 +1,112 @@
 use super::super::*;
 use super::ApiCtx;
 
+/// Is `k` one of the usage ledger's DATE buckets?
+///
+/// The store is keyed `"YYYY-MM-DD" -> host -> bytes`, plus three
+/// buckets that are not days and are never pruned: `"lifetime"`
+/// (billed in parallel, answers the total), `"reliability"` (article
+/// try counts, not bytes) and `"block_base"` (the §96.5 per-host
+/// lifetime offset stamped when the user pressed "Block refilled").
+///
+/// Naming the non-date buckets and skipping those is what this used to
+/// do, and it is the wrong way round: `"block_base"` was added after
+/// the skip list was written, and `"block_base" >= "2026-08-22"` is
+/// TRUE as a string comparison (`'b'` is 0x62, `'2'` is 0x32), so
+/// every byte of that host's stamped lifetime figure was billed into
+/// the WEEK column and stayed there forever. Asking what a key IS
+/// costs the same and is proof against the fifth bucket somebody adds.
+/// `crate::serve::history::usage_sums` and the dashboard's own usage
+/// table already classify this way.
+fn is_date_bucket(k: &str) -> bool {
+    let mut parts = k.split('-');
+    let (Some(y), Some(m), Some(d), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    y.len() == 4
+        && y.parse::<u32>().is_ok()
+        && m.parse::<u32>().is_ok_and(|m| (1..=12).contains(&m))
+        && d.parse::<u32>().is_ok_and(|d| (1..=31).contains(&d))
+}
+
+/// The `mode=server_stats` payload, off the usage ledger. `days` is the
+/// current UTC day number. Split out from the handler so the bucket
+/// classification above is testable without standing up a daemon.
+fn server_stats_json(u: &serde_json::Map<String, Value>, days: i64) -> Value {
+    // Shape SAB apps expect: total/month/week/day bytes,
+    // plus the same per server - fed from the usage ledger.
+    let (y, m, dd) = civil_from_days(days);
+    let today = format!("{y:04}-{m:02}-{dd:02}");
+    let month_prefix = format!("{y:04}-{m:02}");
+    let week_cut = {
+        let (wy, wm, wd) = civil_from_days(days - 6);
+        format!("{wy:04}-{wm:02}-{wd:02}")
+    };
+    let mut tot = (0u64, 0u64, 0u64, 0u64); // total, month, week, day
+    let mut servers = serde_json::Map::new();
+    for (day, hosts) in u {
+        let lifetime = day == "lifetime";
+        if !lifetime && !is_date_bucket(day) {
+            continue; // "reliability", "block_base", anything added next
+        }
+        let Some(hosts) = hosts.as_object() else {
+            continue;
+        };
+        for (host, b) in hosts {
+            let b = b.as_u64().unwrap_or(0);
+            let e = servers.entry(host.clone()).or_insert_with(|| {
+                json!({"total":0u64,"month":0u64,"week":0u64,"day":0u64,
+                                "daily":{}, "articles_tried":0,"articles_success":0})
+            });
+            let eo = e.as_object_mut().unwrap();
+            let bump = |eo: &mut serde_json::Map<String, Value>, k: &str, v: u64| {
+                let cur = eo.get(k).and_then(Value::as_u64).unwrap_or(0);
+                eo.insert(k.into(), json!(cur + v));
+            };
+            if lifetime {
+                bump(eo, "total", b);
+                tot.0 += b;
+            } else {
+                if day.starts_with(&month_prefix) {
+                    bump(eo, "month", b);
+                    tot.1 += b;
+                }
+                if day.as_str() >= week_cut.as_str() {
+                    bump(eo, "week", b);
+                    tot.2 += b;
+                }
+                if *day == today {
+                    bump(eo, "day", b);
+                    tot.3 += b;
+                }
+            }
+        }
+    }
+    // Reliability ledger → the SAB per-server article
+    // counters apps already display.
+    if let Some(rel) = u.get("reliability").and_then(Value::as_object) {
+        for (host, counts) in rel {
+            let g = |k| counts.get(k).and_then(Value::as_u64).unwrap_or(0);
+            let (tried, missing) = (g("tried"), g("missing"));
+            let e = servers.entry(host.clone()).or_insert_with(|| {
+                json!({"total":0u64,"month":0u64,"week":0u64,"day":0u64,
+                                "daily":{}, "articles_tried":0,"articles_success":0})
+            });
+            if let Some(eo) = e.as_object_mut() {
+                eo.insert("articles_tried".into(), json!(tried));
+                eo.insert(
+                    "articles_success".into(),
+                    json!(tried.saturating_sub(missing)),
+                );
+            }
+        }
+    }
+    json!({"total": tot.0, "month": tot.1, "week": tot.2, "day": tot.3,
+                    "servers": Value::Object(servers)})
+}
+
 fn m_server_stats(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -8,83 +114,12 @@ fn m_server_stats(
     _ctx: &ApiCtx<'_>,
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
-    Some({
-        // Shape SAB apps expect: total/month/week/day bytes,
-        // plus the same per server - fed from the usage ledger.
-        let u = d.usage.lock_ok().clone();
-        let days = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| (d.as_secs() / 86_400) as i64)
-            .unwrap_or(0);
-        let (y, m, dd) = civil_from_days(days);
-        let today = format!("{y:04}-{m:02}-{dd:02}");
-        let month_prefix = format!("{y:04}-{m:02}");
-        let week_cut = {
-            let (wy, wm, wd) = civil_from_days(days - 6);
-            format!("{wy:04}-{wm:02}-{wd:02}")
-        };
-        let mut tot = (0u64, 0u64, 0u64, 0u64); // total, month, week, day
-        let mut servers = serde_json::Map::new();
-        for (day, hosts) in &u {
-            if day == "reliability" {
-                continue; // article counters, not byte buckets
-            }
-            let Some(hosts) = hosts.as_object() else {
-                continue;
-            };
-            let lifetime = day == "lifetime";
-            for (host, b) in hosts {
-                let b = b.as_u64().unwrap_or(0);
-                let e = servers.entry(host.clone()).or_insert_with(|| {
-                    json!({"total":0u64,"month":0u64,"week":0u64,"day":0u64,
-                                    "daily":{}, "articles_tried":0,"articles_success":0})
-                });
-                let eo = e.as_object_mut().unwrap();
-                let bump = |eo: &mut serde_json::Map<String, Value>, k: &str, v: u64| {
-                    let cur = eo.get(k).and_then(Value::as_u64).unwrap_or(0);
-                    eo.insert(k.into(), json!(cur + v));
-                };
-                if lifetime {
-                    bump(eo, "total", b);
-                    tot.0 += b;
-                } else {
-                    if day.starts_with(&month_prefix) {
-                        bump(eo, "month", b);
-                        tot.1 += b;
-                    }
-                    if day.as_str() >= week_cut.as_str() {
-                        bump(eo, "week", b);
-                        tot.2 += b;
-                    }
-                    if *day == today {
-                        bump(eo, "day", b);
-                        tot.3 += b;
-                    }
-                }
-            }
-        }
-        // Reliability ledger → the SAB per-server article
-        // counters apps already display.
-        if let Some(rel) = u.get("reliability").and_then(Value::as_object) {
-            for (host, counts) in rel {
-                let g = |k| counts.get(k).and_then(Value::as_u64).unwrap_or(0);
-                let (tried, missing) = (g("tried"), g("missing"));
-                let e = servers.entry(host.clone()).or_insert_with(|| {
-                    json!({"total":0u64,"month":0u64,"week":0u64,"day":0u64,
-                                    "daily":{}, "articles_tried":0,"articles_success":0})
-                });
-                if let Some(eo) = e.as_object_mut() {
-                    eo.insert("articles_tried".into(), json!(tried));
-                    eo.insert(
-                        "articles_success".into(),
-                        json!(tried.saturating_sub(missing)),
-                    );
-                }
-            }
-        }
-        json!({"total": tot.0, "month": tot.1, "week": tot.2, "day": tot.3,
-                        "servers": Value::Object(servers)})
-    })
+    let u = d.usage.lock_ok().clone();
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 86_400) as i64)
+        .unwrap_or(0);
+    Some(server_stats_json(&u, days))
 }
 
 fn m_server_save(
@@ -878,6 +913,654 @@ fn m_pooltest(
     })
 }
 
+/// One rung of the carry probe: what was asked for, what the provider
+/// actually granted, and what came back.
+///
+/// `granted` and not `connections` is what the carry divides by, and
+/// the distinction is the whole reason this struct carries both. A
+/// provider that allows ten sockets and was asked for sixteen grants
+/// ten; dividing the achieved rate by sixteen invents a carry 1.6x too
+/// low and an implied fleet 1.6x too high, which is the direction §312
+/// names as the hazard. `nzbkit::sysbench::timed_fetch_multi` reports
+/// the PEAK held at once, so a provider that sheds a socket in the last
+/// second of the window is still credited with having granted it.
+struct CarryRung {
+    connections: usize,
+    granted: usize,
+    bps: u64,
+    bytes: u64,
+    /// The rung drained its article supply before the window closed, so
+    /// the connect ramp is inside the measured span and the rate reads
+    /// slightly LOW. Reported rather than hidden: a low carry is the
+    /// direction that over-states the implied fleet.
+    drained: bool,
+}
+
+impl CarryRung {
+    /// Bytes/s ONE socket carried, or `None` when the provider granted
+    /// none - which is a fact about the account, not a failed probe.
+    fn per_socket(&self) -> Option<u64> {
+        (self.granted > 0).then(|| self.bps / self.granted as u64)
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "connections": self.connections,
+            "granted": self.granted,
+            "bps": self.bps,
+            "bytes": self.bytes,
+            "drained": self.drained,
+            "per_socket_bps": self.per_socket(),
+        })
+    }
+}
+
+/// Measure one rung: `n` sockets against `srv` for `CARRY_RUNG_SECS`.
+///
+/// `ids` is rotated by the caller between rungs and never re-read
+/// within a run, which is not tidiness - a provider (or anything on the
+/// path) that cached the first rung's articles would serve the second
+/// rung from memory, and the second rung is the one this probe compares
+/// against the first. A warm re-read would show carry HOLDING at the
+/// higher socket count on a link where it does not.
+async fn carry_rung(srv: &nzbkit::config::ServerConfig, ids: Vec<String>, n: usize) -> CarryRung {
+    let cfg = nzbkit::pool::PoolConfig {
+        connections: n,
+        window: 4,
+        ..nzbkit::pool::PoolConfig::default()
+    };
+    let (gbps, per, granted, drained) = nzbkit::sysbench::timed_fetch_multi(
+        vec![(srv.clone(), cfg)],
+        ids,
+        CARRY_MAX_ARTICLES,
+        CARRY_RUNG_SECS,
+    )
+    .await;
+    CarryRung {
+        connections: n,
+        granted: granted.first().copied().unwrap_or(0),
+        // `timed_fetch_multi` answers in giga BITS; every rate this
+        // daemon stores and every rate `linecap` divides is BYTES/s.
+        bps: (gbps * 1e9 / 8.0).max(0.0) as u64,
+        bytes: per.first().copied().unwrap_or(0),
+        drained,
+    }
+}
+
+/// How long each rung runs for.
+///
+/// The same 6 s the fixed-rung ladder uses, and the floor is set by
+/// `timed_fetch_multi`'s own estimator rather than by patience: it
+/// measures first-completion to last-completion - excluding the
+/// connect, TLS and slow-start ramp, which is exactly the bias that
+/// would make a carry probe lie - but only once at least 8 articles
+/// have landed and the span is a second or more. Under that it falls
+/// back to the whole window WITH the ramp in it, and reads low.
+///
+/// Both rungs are sized to clear that bar in the regime this probe
+/// exists for: articles are 300 KB - 1.2 MB (`serve::probeids`), so a
+/// socket carrying GH #62's ~7 Mbit completes about one a second, and
+/// the smaller rung is at least two sockets.
+const CARRY_RUNG_SECS: u64 = 6;
+
+/// The most articles either rung will pull, whatever the link can do.
+///
+/// This is the probe's COST CONTROL and it is a count rather than a
+/// window because a window is not one: six seconds is 26 MB on the
+/// slow-per-socket link this probe exists for and 750 MB on a gigabit
+/// one, so a time bound alone lets a diagnostic button spend a
+/// gigabyte and a half to tell a user their sizing is fine. Measured
+/// against a loopback provider on 28 Aug 2026: uncapped, one rung moved
+/// 1.36 GB.
+///
+/// At `serve::probeids`' 300 KB - 1.2 MB band this is roughly 77 MB to
+/// 307 MB a rung. The number is chosen so the CAP AND THE ANSWER NEVER
+/// MEET, which is the property that makes capping safe here rather than
+/// merely cheap:
+///
+/// * A rung that drains its supply early is timed to its real transfer
+///   span, so it stays accurate - until that span falls under a second,
+///   below which `timed_fetch_multi` reverts to a whole-window figure
+///   with the connect ramp inside it and reads LOW. Draining this many
+///   articles inside a second needs about 2.3 Gbit/s.
+/// * Reading low over-states the implied fleet, which is the unsafe
+///   direction. But an over-statement only MATTERS where the carry is
+///   far under the plan, and that is a slow link by definition - one
+///   that cannot come close to this cap in six seconds.
+///
+/// So the regime where a capped rung could lie and the regime where the
+/// number is worth acting on do not overlap. `drained` is reported
+/// either way rather than left to be inferred.
+const CARRY_MAX_ARTICLES: usize = 256;
+
+/// The smallest article `serve::probeids` will put in a probe supply.
+///
+/// Used only to turn a rung's byte count back into an article count for
+/// the rotation, where over-stating is the safe direction.
+const MIN_PROBE_ARTICLE_BYTES: u64 = 300_000;
+
+/// The most sockets either rung will open, whatever the account allows.
+///
+/// A deliberate press is not a licence to put a provider's whole
+/// account on the wire: the ladder next door climbs to 100 because it
+/// is looking for a knee and has to find one, while this probe only has
+/// to divide a rate by a socket count and gets nothing extra from a
+/// bigger fleet.
+const CARRY_MAX_CONNS: usize = 24;
+
+/// Which regime the two rungs saw, as a TOKEN the dashboard
+/// translates: the whole reason the probe runs two of them.
+///
+/// `base` and `more` are the per-socket carry at the fleet share and at
+/// twice it. The ratio between them IS the answer, because the socket
+/// count doubled: a carry that HOLDS means the total doubled, so the
+/// route limits each CONNECTION and a bigger fleet buys proportionally
+/// more - GH #62's regime, and the one where the implied fleet is a
+/// real number. A carry that HALVES means the total did not move at
+/// all, so the line or the path was already full and more sockets buy
+/// nothing; the implied fleet is then arithmetic on a rate that cannot
+/// be had, and the panel must not read as advice to go and get it.
+///
+/// `unknown` whenever there is no comparison to make - one rung only
+/// because the account's ceiling was already reached, or no sockets
+/// granted at all. Never a guess: a verdict this panel asserts is one a
+/// user might act on.
+fn carry_scaling(base: Option<u64>, more: Option<u64>) -> &'static str {
+    match (base, more) {
+        (Some(a), Some(b)) if a > 0 => match (b as f64) / (a as f64) {
+            r if r >= 0.9 => "per_connection",
+            r if r >= 0.6 => "mixed",
+            _ => "line",
+        },
+        _ => "unknown",
+    }
+}
+
+/// The two socket counts to measure at: what a download would really
+/// dial on this server right now, and twice that.
+///
+/// `share` is this server's share of the fleet in force and `ceiling`
+/// is what the account and the global dial allow, already held to
+/// [`CARRY_MAX_CONNS`]. Two sockets is the floor because one is the
+/// rung most likely to miss `timed_fetch_multi`'s 8-completion bar and
+/// read ramp-biased low (see [`CARRY_RUNG_SECS`]), and low is the
+/// direction that OVER-states the implied fleet.
+///
+/// When doubling the share would run past the ceiling - a single-server
+/// install whose share IS the whole fleet, or any share over half the
+/// ceiling (two servers at the auto curve's 25..=50 rungs give shares
+/// of 13 to 23 against the 24 cap) - a true doubling cannot exist ABOVE
+/// the share, so the BASE rung drops to half the ceiling instead and
+/// the pair is still a genuine doubling (12 and 24 on the defaults).
+/// It has to be genuine: [`carry_scaling`]'s 0.9/0.6 bars and its own
+/// doc assume the socket count doubled, so a pair merely CLAMPED to the
+/// ceiling (23 and 24) reads a fully line-bound link as
+/// `per_connection` - the one verdict that tells the user more sockets
+/// would go faster, about a link where they would not. The trade is
+/// that the base rung stops being literally "what a download dials" in
+/// these shapes, which the single-server case already accepted. The
+/// probe never asks the account for a socket past the ceiling, which
+/// would measure the provider's refusals rather than this link's
+/// carry. Only a ceiling under 4 defeats the halving (half of it
+/// collides with the two-socket floor), and there the rungs stay
+/// equal, the caller runs one, and the panel says no comparison was
+/// possible rather than staying silent about it.
+fn carry_rungs_for(share: usize, ceiling: usize) -> (usize, usize) {
+    let hi = ceiling.max(2);
+    let mut now = share.clamp(2, hi);
+    if now * 2 > hi && hi >= 4 {
+        now = hi / 2;
+    }
+    (now, (now * 2).min(hi))
+}
+
+/// How many servers the next download will actually share the fleet
+/// between: the ENABLED rows only.
+///
+/// The carry probe divides a fleet by this number, so counting the raw
+/// editor list was wrong in the one direction that matters. An install
+/// with five rows and two switched off measured a five-way share while
+/// the next job opens a three-way one, so the panel reported a smaller
+/// per-server share than the download will use - and reported the wrong
+/// server count beside it. The job path drops disabled rows before it
+/// builds a pool and the Providers card (`api/queue/caps.rs`
+/// `planned_servers`) counts only enabled ones, so this is the third
+/// spelling of one question and it now agrees with the other two.
+///
+/// Spelled over the RAW editor values rather than over
+/// `nzbkit::config::Config::load`, because the caller resolves the row
+/// it is probing out of this SAME list by index: two lists could differ
+/// in length, and then the share would describe a set of rows that is
+/// not the one the index was resolved against. An ABSENT `enabled` key
+/// is enabled, matching `ServerConfig`'s own `default_true` - reading it
+/// as false would have counted a hand-written config's rows as switched
+/// off, since the key is only written when it is `false`.
+///
+/// COUNTS ONLY. Never filter the list itself: the row being probed is
+/// resolved by raw index, so a filtered list mis-resolves every row
+/// after a disabled one and would send the probe at the wrong host with
+/// the wrong stored password.
+fn enabled_server_count(servers: &[Value]) -> usize {
+    servers
+        .iter()
+        .filter(|s| s.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+        .count()
+}
+
+/// Why the carry probe may not run right now, or None when it may.
+///
+/// Split out of [`m_server_carry`] the way [`diversity_pool`] is split
+/// out of [`m_diversity`], and for the same reason: a policy buried in a
+/// request handler is one nothing ever exercises. Both answers are
+/// reached BEFORE the shared ladder permit is taken, so the permit's
+/// release assertion in `tests/daemon_carry` still means what it says -
+/// a refusal never takes a permit it then has to remember to drop.
+///
+/// # A download is running
+///
+/// The probe opens a FRESH pool of up to [`CARRY_MAX_CONNS`] sockets for
+/// two short rungs. Against an account already at its connection or IP
+/// cap that draws refusals, and the live job's own reconnects then fail
+/// - so the permit excluding another ladder or probe was never enough:
+/// the thing most likely to be using this account is the download.
+///
+/// `downloading` must come from `index_jobs_active`, which is this
+/// tree's "a download is running" signal in `index_maintenance_ok` and
+/// `db_maintenance_ok`, and NOT from `active_stream`. That slot
+/// deliberately outlives its job so playback keeps working after a
+/// download completes (`serve/whyslow.rs` says the same at its own site
+/// and filters by job state before reading it), so a probe gated on it
+/// would refuse for ever after the first download.
+///
+/// The counter is held by the post-processing ticket as well as by the
+/// runner, so this refusal is WIDER than "on the wire" - it also covers
+/// unpack and repair. That is deliberate, the point being not to
+/// compete for the account, and the text says so: a user watching an
+/// idle-looking network graph would otherwise read the refusal as a
+/// bug.
+///
+/// # A switched-off server
+///
+/// Everywhere else in the tree the switch means "do not touch this
+/// account" - the discipline a whole incident was spent establishing on
+/// 23 Aug 2026, when a machine was found holding live sockets to a
+/// provider marked `"enabled": false` while another machine was using
+/// that same shared account. So this door reads it the way every other
+/// one does, and offers [`m_diversity`]'s opt-in for the same reason it
+/// does: "should I turn this account back on?" is a real question and
+/// filtering alone kills it. `server_off` rides back on the refusal so
+/// the panel can name the row and offer the opt-in rather than showing
+/// red text with no next step.
+fn carry_refusal(
+    host: &str,
+    downloading: bool,
+    server_off: bool,
+    include_off: bool,
+) -> Option<Value> {
+    if downloading {
+        // Not escapable, unlike the switch below: an opt-in here would
+        // be an opt-in to making the running job slower.
+        let why = "a download is running - this test opens its own \
+                   connections, so running it now would take capacity from \
+                   the job and can make its own reconnects fail. Unpacking \
+                   and repair count as running too. Wait until nothing is \
+                   in the queue, then try again";
+        return Some(json!({"status": false, "downloading": true, "error": why}));
+    }
+    if server_off && !include_off {
+        // Built above the macro rather than inside it, so the sentence
+        // stays one readable block: rustfmt re-indents a multi-line
+        // `format!` inside a `json!` body against the macro's own
+        // bracket depth and the wrapped string ends up unreadable.
+        let why = format!(
+            "{host} is switched off, so it is not in the download pool and a \
+             job would never dial it. Switch it on to measure it, or ask \
+             again with \"include switched off\" to answer \"is this account \
+             worth turning back on?\""
+        );
+        return Some(json!({"status": false, "server_off": true,
+            "host": host, "error": why}));
+    }
+    None
+}
+
+/// TODO 312 item 2: what one socket to this provider actually carries,
+/// and what fleet that carry implies for this line.
+///
+/// **This measures and reports. It persists nothing and changes no
+/// arithmetic** - not the fleet, not the cap, not the knee, not the
+/// per-server connection count. The representation a MEASURED carry
+/// gets when it is eventually allowed to change what the pool spends is
+/// TODO 275 item 1 parts 1+2, and the ceiling question is part 3 - a
+/// judgement about what every install spends; a second spelling landed
+/// here first would be the one nobody holds to the rule.
+///
+/// **Why two rungs.** One number cannot tell the two regimes apart, and
+/// they want opposite advice. A route that limits each CONNECTION (GH
+/// #62: ~6.4-7.6 Mbit a socket against AU-routed providers, on a line
+/// that reads 1 Gbit) carries the same per socket however many are
+/// open, so more sockets buy proportionally more and the implied fleet
+/// is real. A line or path that is already full carries less per socket
+/// as sockets are added, the total does not move, and the implied fleet
+/// is a fiction. So the probe measures the fleet share this install
+/// actually dials here, then twice that, and reports which happened.
+///
+/// **Why it starts at the fleet share and not at one socket.** The
+/// number `linecap` divides is a whole pool's rate over its dialling
+/// sockets, so a carry measured in a fleet is the like-for-like one. A
+/// single socket alone is also the rung most likely to miss
+/// `timed_fetch_multi`'s 8-completion bar and read ramp-biased low (see
+/// `CARRY_RUNG_SECS`), and low is the unsafe direction here.
+///
+/// **When it refuses.** Two states are refused before anything is
+/// dialled and before the shared permit is taken - a download in flight,
+/// and a switched-off row. Both, and why the obvious spellings of each
+/// are wrong, are in [`carry_refusal`]. The permit itself excludes only
+/// another ladder or probe, which was never the thing most likely to be
+/// using the account.
+fn m_server_carry(
+    d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    _params: &std::collections::HashMap<String, String>,
+    ctx: &ApiCtx<'_>,
+    api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    Some({
+        // The editor's current values merged over the saved row, the
+        // same way `server_test` does it - so a blank password borrows
+        // the stored one and the probe can be run before a save.
+        let raw = api_body.take().unwrap_or_default();
+        let body: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
+        let idx = body.get("index").and_then(Value::as_i64).unwrap_or(-1);
+        // The opt-in for a switched-off row, and it rides in the BODY
+        // rather than as `value=1` the way `m_diversity`'s does. Not a
+        // second spelling by choice: the dashboard reaches this mode
+        // through `apiPost`, which builds `/api?mode=<mode>` and has no
+        // query string to add a flag to, so the body is the only
+        // transport this door has. Same meaning, same default (off),
+        // and `included_off` is echoed on the reading below exactly as
+        // the diversity report echoes it.
+        let include_off = body
+            .get("include_off")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let servers = current_servers(ctx.cfg_path);
+        // ENABLED rows only - see `enabled_server_count`, which is also
+        // why the list itself is NOT filtered. `.max(1)` keeps the share
+        // arithmetic below from dividing by zero on an all-off config,
+        // which is only reachable at all on an opt-in run (the refusal
+        // further down turns the ordinary one away).
+        let n_servers = enabled_server_count(&servers).max(1);
+        let existing = usize::try_from(idx)
+            .ok()
+            .and_then(|i| servers.get(i))
+            .cloned();
+        let sc = normalized_server(
+            existing.as_ref(),
+            body.get("server").unwrap_or(&Value::Null),
+        )
+        .and_then(|m| {
+            serde_json::from_value::<nzbkit::config::ServerConfig>(m).map_err(|e| e.to_string())
+        });
+        let srv = match sc {
+            Err(e) => return Some(json!({"status": false, "error": e})),
+            Ok(sc) => sc,
+        };
+        // The anchor the FLEET BUILD reads, spelled exactly as
+        // `serve/tasks/runner.rs` stamps it on the hub. Any other
+        // reading here - the raw setting, whyslow's LAN-capped one -
+        // would report an implied fleet against a line the arithmetic
+        // does not use, which is the one way this panel could mislead
+        // while every number in it was individually true.
+        let (anchor_bps, anchor_src) = d.link_peak.effective(d.line_speed.load(Ordering::Relaxed));
+        // The fleet the NEXT job will actually open, which since TODO
+        // 275 item 1 part 2 means the curve AND the carry a previous job
+        // banked (`serve/linecarry.rs`, stamped on the hub by
+        // `serve/tasks/runner.rs` at job start). Passing 0 here would
+        // report a smaller fleet than the job opens - the defect
+        // `conntune::line_cap_fleet` closes by having no carry-free
+        // spelling at all - and this panel's whole business is putting
+        // that number beside the one it measured.
+        //
+        // READ, never written: this probe does NOT bank its own reading
+        // into `d.line_carry`. That slot is a whole POOL's carry as a
+        // job actually ran it, and this is one server measured on its
+        // own for a few seconds; seeding one from the other is a
+        // judgement about what every install SPENDS, which is TODO 275
+        // item 1 part 3 and is deliberately left open.
+        //
+        // Hoisted to a local because it is published as well as used:
+        // `live_carry_bps` on the reading below is the same number, and
+        // reading the slot twice in one handler would let the sentence
+        // the panel prints and the fleet it prints it beside come from
+        // two different observations of a moving value.
+        let live_carry_bps = d.line_carry.carry_bps();
+        let fleet_now = crate::conntune::line_cap_fleet(ctx.cfg_path, anchor_bps, live_carry_bps);
+        // What a real download would open on THIS server right now:
+        // its share of the fleet in force, never past what the account
+        // and the global dial allow.
+        let ceiling = crate::conntune::effective_limit(
+            d.connections.load(Ordering::Relaxed),
+            srv.connections,
+        )
+        .min(CARRY_MAX_CONNS);
+        let share = match nzbkit::pool::linecap::fleet_cap(fleet_now) {
+            // The rule is off, so there is no share to speak of and the
+            // server's own number is what a job would dial.
+            None => ceiling,
+            Some(f) => nzbkit::pool::linecap::server_share(f, n_servers),
+        };
+        let (rung_now, rung_more) = carry_rungs_for(share, ceiling);
+        // Both refusals stand BEFORE the permit is taken: a handler
+        // that claims the shared permit and then turns the caller away
+        // has to remember to drop it on every path, which is the leak
+        // `tests/daemon_carry` exists to catch. Nothing here has
+        // dialled anything yet either.
+        //
+        // `srv.enabled` is the SAVED state of the row - `normalized_server`
+        // deliberately does not merge an `enabled` field, so the editor's
+        // unsaved tick cannot talk this door into dialling an account the
+        // config says to leave alone.
+        if let Some(no) = carry_refusal(
+            &srv.host,
+            d.index_jobs_active.load(Ordering::Acquire) > 0,
+            !srv.enabled,
+            include_off,
+        ) {
+            return Some(no);
+        }
+        // One throughput probe at a time, and it shares the ladder's
+        // permit rather than taking one of its own: two of them are
+        // each other's contention, so a second run does not merely race
+        // to report - it makes BOTH readings wrong, on probes whose
+        // entire job is dividing a rate by a socket count.
+        let Some(_permit) = crate::serve::daemon::LadderPermit::try_take(d) else {
+            return Some(json!({"status": false,
+                "error": "a connection test is already running - wait for it \
+                          to finish, then try again"}));
+        };
+        tokio::runtime::Handle::current().block_on(async {
+            // Real articles from this install's own downloads,
+            // STAT-verified on THIS provider (`serve::probeids`): the
+            // synthetic probe group under-measured a provider 17x, in
+            // the false-low direction no guard can catch - and a carry
+            // probe that reads low is one that over-states the fleet
+            // its own line wants. No usable supply is said plainly and
+            // is never a silent fallback.
+            let ids = match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                crate::serve::probeids::real_ladder_ids(d, &srv),
+            )
+            .await
+            {
+                Err(_) | Ok(None) => {
+                    return json!({"status": false, "no_real_articles": true,
+                    "error": format!(
+                        "{}: no articles from your own recent downloads could be \
+                         verified on this server, so there is nothing \
+                         representative to measure with. Complete a download \
+                         first, then test again",
+                        srv.host
+                    )});
+                }
+                Ok(Some(ids)) => ids,
+            };
+            // The same bounded `block_on` plus hard-timeout shape the
+            // rest of this module uses: a black-holed host must not
+            // wedge the API thread. Generous against two 6 s rungs on
+            // purpose - a provider slow enough to overrun this is one
+            // whose carry the user most wants to know - and
+            // `timed_fetch_multi` stops its own pool politely at each
+            // rung's deadline, so overrunning here cannot leak workers
+            // that keep pulling articles against the account.
+            let measured = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                let mut ids = ids;
+                let mut rungs: Vec<CarryRung> = Vec::new();
+                let mut interrupted = false;
+                for n in [rung_now, rung_more] {
+                    if rungs.iter().any(|r: &CarryRung| r.connections == n) {
+                        // The account's ceiling is already reached,
+                        // so there is no second rung to run and no
+                        // scaling verdict to draw.
+                        continue;
+                    }
+                    // The entry refusal is check-once and nothing on
+                    // the download side waits on the permit (a download
+                    // must never block on a diagnostic), so a job that
+                    // started while the STAT gate held the wire - or
+                    // during the first rung's 6 s - would share the
+                    // line with this rung's fresh fleet: the exact
+                    // interference the refusal names, and a reading
+                    // that measures the job. Re-ask before each fleet
+                    // goes on the wire; a break rather than a return so
+                    // the rung that DID run is still billed below.
+                    if d.index_jobs_active.load(Ordering::Acquire) > 0 {
+                        interrupted = true;
+                        break;
+                    }
+                    let r = carry_rung(&srv, ids.clone(), n).await;
+                    // Skip past everything that rung read, so the
+                    // next one is COLD - see `carry_rung`. Derived
+                    // from the bytes it actually moved rather than
+                    // from a guess: dividing by the SMALLEST article
+                    // the supply admits over-states the count, so
+                    // the skip is never short.
+                    let read = (r.bytes / MIN_PROBE_ARTICLE_BYTES) as usize;
+                    let rot = read.min(ids.len().saturating_sub(1));
+                    ids.rotate_left(rot);
+                    rungs.push(r);
+                }
+                (rungs, interrupted)
+            })
+            .await;
+            let (rungs, interrupted) = match measured {
+                Err(_) => {
+                    return json!({"status": false,
+                        "error": format!("{}: the carry probe timed out", srv.host)});
+                }
+                Ok(r) => r,
+            };
+            // Probe traffic is real provider traffic - bill it, the
+            // same as the ladder next door. It is what keeps a prepaid
+            // block's remaining-bytes figure true, and this is the one
+            // side effect the probe deliberately does have. Billed
+            // BEFORE the interrupted refusal below: a rung that ran
+            // moved real bytes whatever the probe then concluded.
+            d.add_usage(&[(srv.host.clone(), rungs.iter().map(|r| r.bytes).sum::<u64>())]);
+            if interrupted {
+                return json!({"status": false,
+                    "error": "a download started while the test was running, and \
+                              the reading would have measured it - try again \
+                              when the queue is idle"});
+            }
+            let base = rungs.first();
+            let carry_bps = base.and_then(CarryRung::per_socket).unwrap_or(0);
+            // A provider that granted no sockets is a legitimate
+            // outcome to REPORT - the 481 case, an account already full
+            // from another machine - and not a failed probe. The pool
+            // already tells a capacity refusal from a rejected
+            // credential; what the user needs here is the number of
+            // sockets they really have, which is the same evidence.
+            let granted_none = base.is_some_and(|r| r.granted == 0);
+            let scaling = carry_scaling(
+                rungs.first().and_then(CarryRung::per_socket),
+                rungs.get(1).and_then(CarryRung::per_socket),
+            );
+            json!({
+                "status": true,
+                "host": srv.host,
+                "carry_bps": carry_bps,
+                "rungs": rungs.iter().map(CarryRung::to_json).collect::<Vec<_>>(),
+                "granted_none": granted_none,
+                "scaling": scaling,
+                "bytes": rungs.iter().map(|r| r.bytes).sum::<u64>(),
+                // The line this carry is being divided into, and where
+                // that reading came from ("measured" from a completed
+                // download, "line" from the setting, "" from nothing at
+                // all). A reader cannot judge the implied fleet without
+                // it: over a typed line it is arithmetic on a claim.
+                "anchor_bps": anchor_bps,
+                "anchor_src": anchor_src,
+                // REPORT ONLY. `implied_fleet` is unclamped on purpose -
+                // seeing it stand above `fleet_max` is the point - and
+                // `fleet_now` is what is actually in force, which is the
+                // only one of the three that is spending anything.
+                "fleet_now": fleet_now,
+                "fleet_max": nzbkit::pool::linecap::LINE_CAP_MAX_FLEET,
+                "implied_fleet":
+                    nzbkit::pool::linecap::fleet_implied_by_carry(anchor_bps, carry_bps),
+                // TODO 312 item 6(e): the OTHER reading of this same
+                // quantity, so the panel can put the two side by side
+                // instead of leaving the user to hold one of them in
+                // their head across two screens. `carry_bps` above is
+                // one server measured deliberately for a few seconds;
+                // this is what a socket carried during the last real
+                // download, `now_bps / dialling` maxed over that run
+                // (`pool::linecap`'s `line_cap_tick`, banked by
+                // `serve/linecarry.rs`). Same arithmetic, same divisor,
+                // so the two are directly comparable - and this is the
+                // PERSISTED form of whyslow's own `fleet_carry_bps`,
+                // which is that division at one tick.
+                //
+                // Persisted is what makes the pairing possible at all:
+                // the probe REFUSES while a download runs, so whyslow's
+                // live figure is never on screen at the moment this
+                // reading exists, and the banked one is the only
+                // spelling of "what your downloads actually get" that
+                // outlives the job. 0 = an install that has never
+                // finished a download, which the panel says nothing
+                // about rather than printing a zero.
+                //
+                // It is a LINE-wide number over every dialling socket
+                // and `carry_bps` is one host's, so the panel must name
+                // the host it tested; on a multi-server install the two
+                // are not the same quantity. No `live_implied` beside
+                // it: that is whyslow's own sentence, it is what the
+                // download panel already prints, and a second implied
+                // fleet here would read as a rival recommendation.
+                "live_carry_bps": live_carry_bps,
+                // The number this carry was divided between, and what
+                // it is a count OF. It is the SAVED ENABLED set, which
+                // is the set the next download opens - not the editor's
+                // raw list, and not the set minus whatever hosts a
+                // running job has excluded, which changes between jobs
+                // and would make the panel's arithmetic unreproducible.
+                // The panel owes the reader that sentence; `servers_basis`
+                // is what lets it say so rather than printing a bare
+                // count the reader has to guess the provenance of.
+                "servers": n_servers,
+                "servers_basis": "saved_enabled",
+                // Whether this reading was taken against a row that is
+                // switched off, echoed the way `m_diversity` echoes it:
+                // a carry measured on an account no job dials has to be
+                // labelled, or it reads as a provider in use.
+                "included_off": include_off,
+                "metered": !srv.may_spend_on_measurement(),
+            })
+        })
+    })
+}
+
 fn m_connladder(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -1376,6 +2059,18 @@ pub(in crate::serve) fn dispatch(
         "server_reorder" => return m_server_reorder(d, req, params, ctx, api_body),
         "server_delete" => return m_server_delete(d, req, params, ctx, api_body),
         "server_test" => return m_server_test(d, req, params, ctx, api_body),
+        // TODO 312 item 2: what one socket to this server actually
+        // CARRIES, and what fleet that carry implies for this line.
+        // Test connection's throughput sibling, and a separate mode
+        // rather than a flag on it for two reasons: `testAllServers`
+        // fires `server_test` at every server at once, and this one
+        // spends real bandwidth and real provider connections, so it
+        // must only ever run when a person pressed this button.
+        //
+        // POST like `server_test`, and for the same reason: the body
+        // carries the editor's current server, password included, so
+        // the probe works before a save.
+        "server_carry" => return m_server_carry(d, req, params, ctx, api_body),
         // §96.5: the user bought a new prepaid block - restart the
         // host's used-counter at zero (value=host).
         "server_block_refilled" => {
@@ -1674,5 +2369,334 @@ mod tests {
         let g = group_suggestion(&cfg, "news.usenetserver.com", -1).expect("listed");
         assert_eq!(g.suggest, "highwinds");
         assert_eq!(g.same_as, None);
+    }
+
+    /// TODO 312 item 2: a provider that granted NO sockets must not
+    /// divide by zero, and its carry is reported as "none granted"
+    /// rather than as a rate of nothing.
+    ///
+    /// This is the 481 case and it is a legitimate outcome of the probe:
+    /// an account already full from another machine, or a plan whose
+    /// connection limit is lower than the row claims. The user pressed
+    /// the button to find out how many sockets they really have, and
+    /// that IS the finding.
+    #[test]
+    fn a_provider_that_granted_nothing_reports_it_instead_of_dividing_by_zero() {
+        let refused = CarryRung {
+            connections: 5,
+            granted: 0,
+            bps: 0,
+            bytes: 0,
+            drained: false,
+        };
+        assert_eq!(refused.per_socket(), None);
+        assert_eq!(carry_scaling(refused.per_socket(), None), "unknown");
+        // And nothing is implied from it, at either end of the
+        // arithmetic - a fleet sized off a refusal would be the exact
+        // false-low direction TODO 312 names as the hazard.
+        assert_eq!(
+            nzbkit::pool::linecap::fleet_implied_by_carry(
+                1_000_000_000,
+                refused.per_socket().unwrap_or(0)
+            ),
+            0
+        );
+    }
+
+    /// The two rungs are what tell a per-CONNECTION limit from a full
+    /// line, and they want opposite advice - so the verdict is read off
+    /// the ratio and never off either rate alone.
+    #[test]
+    fn doubling_the_sockets_is_what_names_the_regime() {
+        let carry = 1_000_000u64;
+        // GH #62: each connection is limited, so per-socket carry holds
+        // and the total doubled. A bigger fleet buys proportionally.
+        assert_eq!(
+            carry_scaling(Some(carry), Some(carry)),
+            "per_connection",
+            "carry that holds means the sockets, not the line, are short"
+        );
+        // The line (or the path) was already full: the total did not
+        // move, so the extra sockets bought nothing at all.
+        assert_eq!(carry_scaling(Some(carry), Some(carry / 2)), "line");
+        assert_eq!(carry_scaling(Some(carry), Some(carry * 3 / 4)), "mixed");
+        // No second rung, so no comparison and no claim.
+        assert_eq!(carry_scaling(Some(carry), None), "unknown");
+        assert_eq!(carry_scaling(None, Some(carry)), "unknown");
+    }
+
+    /// The probe measures where a download really runs - this server's
+    /// share of the fleet in force - and then twice that, held to what
+    /// the account allows.
+    #[test]
+    fn the_rungs_straddle_the_fleet_share_without_passing_the_account() {
+        // GH #62's shape: a fleet of 25 over five servers is 5 each.
+        assert_eq!(carry_rungs_for(5, 24), (5, 10));
+        // One server takes the whole fleet, and CARRY_MAX_CONNS is what
+        // stops a deliberate press putting a whole account on the wire.
+        // The share fills the ceiling, so the BASE rung drops to half
+        // of it and the pair is still a real doubling: the second rung
+        // is what a download here actually dials, the first is the
+        // comparison point. A DECISION, not an accident - this is the
+        // commonest install shape, and (24, 24) was the defect that
+        // left it with no scaling verdict at all.
+        assert_eq!(carry_rungs_for(25, CARRY_MAX_CONNS), (12, 24));
+        // Same rule off the constant: any share at an even ceiling.
+        assert_eq!(carry_rungs_for(16, 16), (8, 16));
+        // An ODD ceiling halves down and doubles back UNDER it, never
+        // to it: (11, 22) is a genuine 2x where (11, 23) is not, and
+        // the verdict thresholds assume the socket count doubled.
+        assert_eq!(carry_rungs_for(23, 23), (11, 22));
+        // A small account: never a rung above what it allows, which
+        // would measure the provider's refusals and not this link.
+        // Under a ceiling of 4 the half-rung would collide with the
+        // two-socket floor, so the rungs stay equal, one runs, and the
+        // panel says no comparison was possible.
+        assert_eq!(carry_rungs_for(5, 3), (3, 3));
+        assert_eq!(carry_rungs_for(2, 2), (2, 2));
+        assert_eq!(carry_rungs_for(2, 4), (2, 4));
+        // ...and at exactly 4 the halving still yields a real pair.
+        assert_eq!(carry_rungs_for(4, 4), (2, 4));
+        // ...and never one socket, whatever the share says: that is the
+        // rung most likely to read ramp-biased low, and low over-states
+        // the fleet the line is then said to want.
+        assert_eq!(carry_rungs_for(1, 8), (2, 4));
+        assert_eq!(carry_rungs_for(0, 1), (2, 2));
+        // A share OVER half the ceiling halves down too. Clamping the
+        // second rung instead - (23, 24), (17, 24), (13, 16) - hands
+        // `carry_scaling`'s doubled-socket thresholds a pair that never
+        // doubled, and a fully line-bound link then reads 23/24 = 0.958
+        // as `per_connection`: the one verdict that tells the user more
+        // sockets would go faster, about a link where they would not.
+        // These are the auto curve's own shapes (two servers on the
+        // 25..=50 rungs share 13 to 23 against the 24 cap).
+        assert_eq!(carry_rungs_for(23, 24), (12, 24));
+        assert_eq!(carry_rungs_for(17, 24), (12, 24));
+        assert_eq!(carry_rungs_for(13, 16), (8, 16));
+    }
+
+    /// The defect: the probe sized its rungs from the RAW editor list,
+    /// so an install with five rows and two switched off measured a
+    /// five-way share while the next download opens a three-way one -
+    /// and the panel printed 5 as the server count beside a carry it
+    /// had divided the wrong way.
+    ///
+    /// The default is the half a reader has to get right: `enabled` is
+    /// only ever WRITTEN when it is false, so an absent key is enabled
+    /// (`ServerConfig`'s `default_true`), and a hand-written config that
+    /// names no such key has every row in the pool. Reading absence as
+    /// "off" would have counted the commonest config in existence as
+    /// entirely switched off.
+    #[test]
+    fn the_share_is_divided_between_the_enabled_rows_only() {
+        let rows = vec![
+            json!({"host": "a.example"}),
+            json!({"host": "b.example", "enabled": false}),
+            json!({"host": "c.example", "enabled": true}),
+            json!({"host": "d.example", "enabled": false}),
+            json!({"host": "e.example"}),
+        ];
+        // The number the old spelling produced, kept here as the
+        // arithmetic this test is about: `servers.len()` is 5, and 5 is
+        // what the panel divided by and printed.
+        assert_eq!(rows.len(), 5);
+        assert_eq!(
+            enabled_server_count(&rows),
+            3,
+            "two rows are switched off, so the next job is a three-way share"
+        );
+        // An absent key is a server in the pool, not one out of it.
+        assert_eq!(enabled_server_count(&[json!({"host": "a.example"})]), 1);
+        // ...and a non-boolean `enabled` is not a switch-off either: the
+        // config loader would take the serde default, so reading it as
+        // false here would put the panel and the pool at odds.
+        assert_eq!(
+            enabled_server_count(&[json!({"host": "a.example", "enabled": "yes"})]),
+            1
+        );
+        assert_eq!(enabled_server_count(&[]), 0);
+        assert_eq!(
+            enabled_server_count(&[json!({"host": "a.example", "enabled": false})]),
+            0
+        );
+    }
+
+    /// The probe must not run beside a download, and must not dial a row
+    /// the user switched off. Both were reachable: the shared permit
+    /// excludes only another ladder or probe, and a probe opens a fresh
+    /// pool of up to `CARRY_MAX_CONNS` sockets, so against an account
+    /// already at its connection or IP cap it draws refusals and the
+    /// live job's own reconnects then fail.
+    #[test]
+    fn the_probe_refuses_a_running_download_and_a_switched_off_row() {
+        // Idle daemon, enabled row: the door is open, which is the state
+        // `tests/daemon_carry` runs in and must keep reaching.
+        assert!(carry_refusal("a.example", false, false, false).is_none());
+
+        // A download in flight. Refused whether the row is on or off,
+        // and NOT escapable by the opt-in: opting in there would be
+        // opting in to making the running job slower.
+        for off in [false, true] {
+            for opt in [false, true] {
+                let r = carry_refusal("a.example", true, off, opt)
+                    .expect("a download is running, so the probe must not");
+                assert_eq!(r["status"], json!(false));
+                assert_eq!(r["downloading"], json!(true));
+                let e = r["error"].as_str().unwrap_or_default();
+                assert!(
+                    e.contains("a download is running"),
+                    "the refusal must use the tree's own words for it: {e}"
+                );
+                // The counter is raised by the post-processing ticket as
+                // well as by the runner, so the refusal is wider than
+                // "on the wire" and has to say so - or a user watching
+                // an idle network graph reads it as a bug.
+                assert!(
+                    e.contains("Unpacking and repair"),
+                    "the refusal does not say it covers the tail: {e}"
+                );
+            }
+        }
+
+        // A switched-off row on an idle daemon: refused, named, and the
+        // page is handed the flag it needs to offer the opt-in rather
+        // than red text with no next step.
+        let r = carry_refusal("b.example", false, true, false).expect("switched off");
+        assert_eq!(r["status"], json!(false));
+        assert_eq!(r["server_off"], json!(true));
+        assert_eq!(r["host"], json!("b.example"));
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("b.example is switched off"),
+            "the refusal names no server: {r}"
+        );
+
+        // ...and the opt-in is the whole point of the flag: "should I
+        // turn this account back on?" stays answerable, the same way
+        // `m_diversity`'s `value=1` keeps it answerable one card over.
+        assert!(carry_refusal("b.example", false, true, true).is_none());
+    }
+
+    // -- server_stats bucket classification ---------------------------
+
+    /// A day number for a fixed, boring date, so the windows below are
+    /// arithmetic rather than "whatever today happens to be".
+    fn day_num(y: i64, m: u32, d: u32) -> i64 {
+        days_from_civil(y, m, d)
+    }
+
+    /// The defect: `"block_base"` is a per-host BYTE count - the
+    /// lifetime figure stamped when the user pressed "Block refilled" -
+    /// and `"block_base" >= "2026-08-22"` is TRUE as a string
+    /// comparison, so the whole of it was billed into `week` and stayed
+    /// there for the life of the install. `month` and `day` never saw it
+    /// (`starts_with("2026-08")` and `== today` both reject the name),
+    /// which is exactly why it could sit there unnoticed: only one of
+    /// the four figures was wrong.
+    #[test]
+    fn a_refilled_block_never_moves_the_week_figure() {
+        let today = day_num(2026, 8, 28);
+        let mut u = serde_json::Map::new();
+        u.insert("2026-08-28".into(), json!({"blk.example": 100u64}));
+        u.insert("lifetime".into(), json!({"blk.example": 900u64}));
+        let before = server_stats_json(&u, today);
+
+        // The user presses "Block refilled": the store gains a
+        // never-pruned bucket holding this host's lifetime spend.
+        u.insert("block_base".into(), json!({"blk.example": 900u64}));
+        let after = server_stats_json(&u, today);
+
+        assert_eq!(after, before, "a refill is not a week of downloading");
+        assert_eq!(after["week"], json!(100u64));
+        assert_eq!(after["servers"]["blk.example"]["week"], json!(100u64));
+        assert_eq!(
+            after["total"],
+            json!(900u64),
+            "lifetime still answers total"
+        );
+    }
+
+    /// The same question asked of the bucket that was already skipped by
+    /// name, plus one nobody has added yet - the point of classifying by
+    /// what a key IS rather than listing what it is not.
+    #[test]
+    fn no_non_date_bucket_is_ever_billed_to_a_window() {
+        let today = day_num(2026, 8, 28);
+        let mut u = serde_json::Map::new();
+        u.insert("2026-08-28".into(), json!({"h": 5u64}));
+        let base = server_stats_json(&u, today);
+        for k in [
+            "reliability",
+            "block_base",
+            "quota_base",
+            "zzz_future_bucket",
+        ] {
+            let mut u = u.clone();
+            u.insert(k.into(), json!({"h": 1_000_000u64}));
+            let got = server_stats_json(&u, today);
+            assert_eq!(
+                (&got["total"], &got["month"], &got["week"], &got["day"]),
+                (&base["total"], &base["month"], &base["week"], &base["day"]),
+                "{k} is not a day"
+            );
+        }
+    }
+
+    /// ...and the windows themselves still work, or the fix above could
+    /// be "skip everything" and pass.
+    #[test]
+    fn the_date_buckets_still_land_in_their_windows() {
+        let today = day_num(2026, 8, 28);
+        let mut u = serde_json::Map::new();
+        u.insert("2026-08-28".into(), json!({"h": 1u64})); // today
+        u.insert("2026-08-23".into(), json!({"h": 2u64})); // in the 7-day window
+        u.insert("2026-08-21".into(), json!({"h": 4u64})); // this month, not the week
+        u.insert("2026-07-30".into(), json!({"h": 8u64})); // neither
+        u.insert("lifetime".into(), json!({"h": 15u64}));
+        let s = server_stats_json(&u, today);
+        assert_eq!(s["day"], json!(1u64));
+        assert_eq!(s["week"], json!(3u64));
+        assert_eq!(s["month"], json!(7u64));
+        assert_eq!(s["total"], json!(15u64));
+        assert_eq!(s["servers"]["h"]["week"], json!(3u64));
+    }
+
+    /// `reliability` holds try counts rather than bytes, and is read a
+    /// second time on purpose - being skipped as a byte bucket must not
+    /// stop it answering the article counters.
+    #[test]
+    fn reliability_still_fills_the_article_counters() {
+        let mut u = serde_json::Map::new();
+        u.insert(
+            "reliability".into(),
+            json!({"h": {"tried": 100u64, "missing": 3u64}}),
+        );
+        let s = server_stats_json(&u, day_num(2026, 8, 28));
+        assert_eq!(s["servers"]["h"]["articles_tried"], json!(100u64));
+        assert_eq!(s["servers"]["h"]["articles_success"], json!(97u64));
+        assert_eq!(s["week"], json!(0u64), "tries are not bytes");
+    }
+
+    #[test]
+    fn is_date_bucket_takes_dates_and_nothing_else() {
+        for k in ["2026-08-28", "1999-01-01", "2026-12-31"] {
+            assert!(is_date_bucket(k), "{k}");
+        }
+        for k in [
+            "lifetime",
+            "reliability",
+            "block_base",
+            "2026-08",
+            "2026-08-28-1",
+            "26-08-28",
+            "2026-13-01",
+            "2026-08-32",
+            "2026-aa-28",
+            "",
+        ] {
+            assert!(!is_date_bucket(k), "{k}");
+        }
     }
 }

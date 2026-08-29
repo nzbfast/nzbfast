@@ -101,6 +101,9 @@ pub(crate) async fn get_cmd(
         // §293: donor directories are a daemon switch-job concern; a
         // CLI get has no predecessor to donate from.
         Vec::new(),
+        // PLAN M31: and no held spare either - a CLI get is one NZB,
+        // with no queue behind it holding duplicate postings of it.
+        Vec::new(),
         None,
         None,
         "",

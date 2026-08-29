@@ -547,6 +547,16 @@ hesap sayfandan aldığın API anahtarını gir, sonra <b>Indexer'ları uygula</
 <b>Sına</b> siteye neyi desteklediğini sorar ve dönen yanıtı gösterir; adresi ve anahtarı
 tek tıkla kanıtlar. Kaydedilmiş bir anahtar bir daha gösterilmez: kutu bunu söyler ve boş
 bırakmak hâlihazırdaki anahtarı korur.</p>
+<p><b>nzbindex, hiçbir hesap gerekmeden.</b> Ayarlar → Indexer'larda ara →
+<b>+ Indexer ekle</b>, sonra satırın ilk alanını bir hesap adlandırmak yerine
+<code>nzbindex</code> yap. nzbindex.com'da doğrudan kendi belgelenmiş API'si üzerinden
+arar, anahtar gerekmez, gerçi nzbindex kendi tarafında daha yüksek bir sınır için bir
+anahtarı da kabul eder. Seçilmiş bir sürüm listesi yerine gerçekte gönderilenleri
+indeksler, yani yukarıdaki hesapların bulamadığı şeyleri bulur, bunun bedeli olarak
+sonuçlarının çoğu karışık adlar taşır. İndirmeler yine de kuyruğa girer ve her iş gibi
+açılır. <b>Yalnızca tam olanlar</b>, varsayılan olarak açık, parçaları eksik olan ve
+asla tamamlanamayacak gönderileri dışarıda tutar; yanındaki boyut, yaş ve haber grubu
+alanları bir aramayı daha da daraltır.</p>
 <p><b>Arama.</b> Üst çubuktan <b>🎬 duvar</b>'ı aç ve <b>Sürümler</b>'i seç. Arama
 kutusunun yanındaki açılır menü aramanın nereye bakacağını belirler: <b>Bu dizin</b>,
 yani bu makinenin kendi taradığı şey, <b>Indexer'lar</b> ya da <b>İkisi de</b>. Seçimin
@@ -1100,7 +1110,8 @@ kaldıramadı), artı <code>watch.picked</code> (izlenen klasörden bir .nzb al�
 bıraktığı kopya kaldırıldı),
 <code>queue.idle</code>, <code>queue.paused</code> ve <code>queue.resumed</code> (kuyruk durdu ya da yeniden başladı, bunu kim veya ne yaptıysa), <code>queue.finished_action</code>
 (kuyruk bitince çalışacak eylem kuruldu, çalıştı ya da iptal edildi), <code>giveup.tripped</code>, <code>disk.low</code>,
-<code>storage.slow</code>, <code>quota.reached</code> ve <code>update.available</code> (daha yeni bir nzbfast sürümü bulundu). Her biri bir
+<code>storage.slow</code>, <code>quota.reached</code>,
+<code>server.block_low</code> ve <code>server.block_spent</code> (ön ödemeli blok hesabı satın aldığın verinin son %15'ine geldi ya da tamamını kullandı) ve <code>update.available</code> (daha yeni bir nzbfast sürümü bulundu). Her biri bir
 <code>schema_version</code> (şu an 1; yeni anahtarlar sürüm artmadan gelebilir -
 bilmediğini yok say), tekdüze artan bir <code>seq</code> ve milisaniye cinsinden
 bir <code>at</code> zaman damgası taşır.</p>
@@ -1261,6 +1272,7 @@ istemci işler arası örtüşme yapmaz.</li>
 <li><b>İşler arası ıslatma</b>: biten bir işin kuyruğu (doğrulama/çıkarma) diskte
 tamamlanırken, bir sonraki işin indirmesi zaten hatta sahiptir.</li>
 </ul>
+<p><b>Yalnızca tek bir sağlayıcı yapılandırıldığında</b>, bu yalnızca tamamen ölmüş bir gönderiyi yakalayabilir - ister her makale reddedilsin ister sağlayıcı yanıt vermeyi tamamen kesmiş olsun, ondan kesinlikle hiçbir şey gelmez. Yalnızca yavaş olan ama hâlâ birkaç bayt alan bir iş olduğu gibi bırakılır, çünkü taşınacak ikinci bir sağlayıcı yoktur. İkinci bir sağlayıcı yapılandırın; nzbfast, bir sunucunun artık taşımadığı bir gönderiyi de fark edebilir ve işi bekletmek yerine onu yönlendirebilir veya erteleyebilir.</p>
 <h3 id="oracle">Erişilebilirlik kâhini</h3>
 <p>Bir Usenet indirmesinin başarısız olmasının başlıca nedeni kaldırmalardır ve bunlar
 öngörülebilir: aynı sürüm bir omurgada kaybolurken bir başkasında hâlâ durur. nzbfast
@@ -1441,6 +1453,7 @@ SABnzbd uyumlu, bu yüzden mevcut SAB tümleştirmeleri değişmeden çalışır
 <tr><td>Tanılama</td><td><code>sysbench</code>, <code>bench_history</code>, <code>connladder</code>, <code>pooltest</code>, <code>diversity</code>, <code>update_check</code></td></tr>
 <tr><td>NZBGet JSON-RPC</td><td><code>/jsonrpc</code> - status, listgroups, history, append, editqueue, rate, pause, log (Basic auth: herhangi bir kullanıcı, parola olarak API anahtarı)</td></tr>
 <tr><td>Önizleme / oynatma</td><td><code>/stream/&lt;nzo_id&gt;</code> (HTTP aralıkları; park edilmiş bir kitaplık işini başlatmak <code>?t=</code> belirteci ya da anahtar gerektirir), <code>/m3u/&lt;id&gt;</code> (anahtar veya işin kendi belirtecini gerektirir; belirteci üretir), <code>/wall</code>, <code>/art/…</code></td></tr>
+<tr><td>İzleme</td><td><code>/metrics</code> Prometheus metin biçimi 0.0.4 ile yanıt verir: indirme hızı, kuyruk derinliği ve baytlar, sağlayıcı başına bağlantılar, kesintiler ve makale sayıları, alt sistem başına bellek ve çalışma süresi. Baştan sona temel birimler (bayt, saniye), böylece dönüştürmeyi pano yapar ve hiçbir şey önceden yuvarlanmış gelmez. Yalnızca GET ve varsayılan olarak tam API anahtarı gerekir. Anahtarsız sunmak için <code>metrics_open</code> ayarını açın; bu, Prometheus'ta olağan düzendir: iş adı ve yol taşımaz, ancak yapılandırılmış her sağlayıcının ana makine adını porta erişebilen herkese yayımlar.</td></tr>
 </table></div>
 
 <h2 id="files">17 · Dosyalar &amp; konumlar</h2>

@@ -33,10 +33,14 @@ use nzbkit::fail::FailCode;
 /// already had, and a disk-full run was both auto-retried onto the same
 /// full disk AND reported to the indexer as a dead post.
 ///
-/// Derived from `fail_message` rather than stored on the job: the
-/// terminal failure arrives here as an `anyhow` message from the download
-/// pipeline, so a field would be this same match written one layer
-/// earlier plus a second thing to keep in step with the sentence.
+/// Re-derivable from `fail_message`, and since TODO 307 item 1's
+/// job-level carry also STATED by the producer and stored on the job as
+/// [`Job::fail_code`](crate::serve::job::Job) - see [`job_kind`] for
+/// which of the two answers, and why the older reading of this paragraph
+/// ("a field would be this same match written one layer earlier plus a
+/// second thing to keep in step with the sentence") was half right: it
+/// IS a second thing to keep in step, and what keeps it in step is a
+/// test that drives both off one producer call rather than a hope.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum FailKind {
     /// Articles were missing from every server that has the post.
@@ -133,6 +137,33 @@ pub(crate) fn fail_kind_token(k: FailKind) -> &'static str {
         FailKind::PreflightImpossible => "preflight",
         FailKind::Gone => "gone",
         FailKind::Local => "local",
+    }
+}
+
+/// [`fail_kind_token`] read back, for the persisted job record.
+///
+/// TODO 307 item 1's job-level carry needs a wire spelling for
+/// [`Job::fail_code`](crate::serve::job::Job), and this reuses the one
+/// `history_json` has already published for years rather than minting a
+/// second vocabulary for the same six values - two spellings of one enum
+/// is a table that goes stale the first time a kind is added.
+///
+/// `None` for anything this build does not recognise, which is the same
+/// answer an ABSENT key gets and is deliberately not an error: a token
+/// written by a NEWER build naming a kind that did not exist here is
+/// exactly the case where falling back to the sentence is the honest
+/// answer, and `job_wire`'s schema rule says an additive key must never
+/// refuse a record. Round-tripped against `fail_kind_token` by test, so
+/// the pair cannot drift.
+pub(crate) fn kind_from_token(tok: &str) -> Option<FailKind> {
+    match tok {
+        "missing" => Some(FailKind::MissingArticles),
+        "transport" => Some(FailKind::Transport),
+        "unrepairable" => Some(FailKind::Unrepairable),
+        "preflight" => Some(FailKind::PreflightImpossible),
+        "gone" => Some(FailKind::Gone),
+        "local" => Some(FailKind::Local),
+        _ => None,
     }
 }
 
@@ -290,22 +321,111 @@ pub(crate) fn kind_of_code(code: FailCode) -> FailKind {
 /// there is a code, it decides, and the sentence is not consulted at
 /// all.
 ///
-/// WHAT STILL ARRIVES WITH `None`, stated rather than left to be found,
-/// because it is nearly everything today. A job's terminal failure
-/// reaches the daemon as an `anyhow` message and nothing else - `Job`
-/// has no code field, and giving it one means persisting it in
-/// `job_wire`, which is a durable wire change TODO 307 item 1 explicitly
-/// stops short of. So the pool's code is typed at the pool boundary and
-/// consumed there (see `get::workers`), and the JOB-level carry is the
-/// next claim rather than this one. Every production caller is on the
-/// string path meanwhile, which is why
-/// `failkind::tests::producers` is the load-bearing half of the test
-/// module: the fallback is not a legacy arm, it is the arm in use.
+/// WHAT STILL ARRIVES WITH `None`: everything that is not one article's
+/// fetch. This is the POOL's code and it is consumed at the pool
+/// boundary (see `get::workers`). A JOB's terminal failure travels its
+/// own way and carries [`FailKind`] itself - see [`job_kind`] and the
+/// judgement written out there about why the pool's code could never
+/// have served for it.
 pub(crate) fn fail_kind_of(code: Option<FailCode>, msg: &str) -> FailKind {
     match code {
         Some(c) => kind_of_code(c),
         None => fail_kind(msg),
     }
+}
+
+/// [`fail_kind`], with the JOB's own stored code consulted FIRST.
+///
+/// TODO 307 item 1's second half, and the whole of what it buys: a
+/// terminal failure used to reach the daemon as an `anyhow` message and
+/// nothing else, so every job-terminal caller - the auto-retry gate, the
+/// dead-post report, the hunt gates, the drawer's button, the *arr
+/// status - rebuilt its answer by `starts_with` over a sentence
+/// assembled several files away. A rewording anywhere in that chain
+/// moved all of them at once with nothing going red. Now the producer
+/// STATES the classification at the moment it decides it, and the
+/// sentence is not consulted where it did.
+///
+/// **THE DESIGN JUDGEMENT, stated rather than smuggled in.** The pool's
+/// [`FailCode`] could not serve here and never will: `nzbkit::fail`'s
+/// own header forbids that type growing into an application
+/// classification, and [`kind_of_code`] records the measurement behind
+/// it - all four of its variants map to [`FailKind::Transport`], because
+/// `FetchOutcome::Failed` is one article's fetch ending without a body
+/// and NOT ONE of its causes is evidence about the post. A job's
+/// terminal classification needs the four post-evidence kinds
+/// ([`FailKind::MissingArticles`], [`FailKind::Unrepairable`],
+/// [`FailKind::PreflightImpossible`], [`FailKind::Gone`]), and that
+/// evidence exists only in `nzbfast` - the segment census in
+/// `diag::incomplete_verdict`, the repair ladder's arithmetic, the
+/// pre-flight sample, `health`'s give-up quorum. So the job's code is
+/// `FailKind` itself: the value the string classifier exists to
+/// reconstruct, recorded where it was decided instead of re-derived from
+/// the prose it produced. It is deliberately NOT a new enum beside
+/// `FailKind` - a second vocabulary for one classification is a table
+/// that goes stale the first time a kind is added, and this one is
+/// already published as a wire token by `history_json`.
+///
+/// **`None` is not a legacy arm and the string path is not dead code.**
+/// It is the answer for every record persisted before the field existed,
+/// for every failure whose producer has nothing better to say than the
+/// error it caught (`e.to_string()` off an arbitrary `io::Error` is
+/// `Local` by fallback and correctly so), and for the two surfaces that
+/// hold a message without a job (`hunt::age_gate_open`,
+/// `tasks::watch_fail_kind`). `failkind::tests::producers` stays the
+/// load-bearing half of the test module for exactly that reason, and it
+/// now also asserts, on every row, that the declared code and the
+/// sentence agree - so the two cannot part company in silence.
+pub(crate) fn job_kind(code: Option<FailKind>, msg: &str) -> FailKind {
+    code.unwrap_or_else(|| fail_kind(msg))
+}
+
+/// A terminal job failure whose PRODUCER classified it, carried up the
+/// `anyhow` chain so the daemon does not have to re-read the sentence.
+///
+/// The download pipeline hands its verdict to `serve::postproc` as an
+/// `anyhow::Error` and the daemon stamps `e.to_string()` onto the job.
+/// That is the string boundary this whole module sits on, and it is the
+/// one place a code has to survive if `Job::fail_code` is to be anything
+/// but empty. So the error IS the pairing: [`Display`](std::fmt::Display)
+/// is the message verbatim - byte for byte what `anyhow::bail!(msg)`
+/// produced before, including the `with_build` tag - and the kind rides
+/// beside it where only [`code_of_error`] looks.
+///
+/// Nothing about the log, the SAB-compat surface or `fail_message`
+/// changes. That is the point: this is additive at the string boundary
+/// exactly as `fail_code` is additive on the wire.
+#[derive(Debug)]
+pub(crate) struct Classified {
+    kind: FailKind,
+    message: String,
+}
+
+impl Classified {
+    pub(crate) fn new(kind: FailKind, message: String) -> Self {
+        Classified { kind, message }
+    }
+}
+
+impl std::fmt::Display for Classified {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Classified {}
+
+/// The kind a terminal error's producer declared, if it declared one.
+///
+/// Walks the whole `anyhow` chain rather than testing the head, because
+/// a `.context(..)` anywhere between the producer and the daemon
+/// replaces the Display without replacing the evidence - and that is the
+/// case where the code is worth MORE than the sentence, not less, since
+/// the sentence the classifier would have read is by then the context's.
+pub(crate) fn code_of_error(e: &anyhow::Error) -> Option<FailKind> {
+    e.chain()
+        .find_map(|c| c.downcast_ref::<Classified>())
+        .map(|c| c.kind)
 }
 
 pub(crate) fn fail_kind(msg: &str) -> FailKind {

@@ -137,6 +137,43 @@ pub(super) fn take_census(
                 }
                 format!(" [{}]", parts.join(", "))
             };
+            // 430/423 evidence quality, printed only when the server
+            // refused anything: "N missing" alone never said whether the
+            // refusals carried an echoed message-id (proven - the server
+            // really answered about THAT article) or were bare
+            // (positional - on a desynced socket the refusal can belong
+            // to the article behind, §129 3g). The 28 Aug 2026 g25L leg
+            // is why: 952 unanimous-430 losses on a run that also died
+            // 89 times on protocol desync, and the log could not say
+            // which kind of refusal the verdicts rested on
+            // (research/SLOW-SOCKET-430-CAUSAL-READ-2026-08-28.md).
+            //
+            // The fence STATE rides the same clause because it decides
+            // how the two numbers read: with the fence up a non-echoing
+            // provider spends one bare answer per absent article and
+            // every one after it arrives fenced and proven, and with it
+            // retired every terminal verdict rests on bare refusals
+            // instead. How many PROVEN answers an absent article costs
+            // is not a constant - TODO 315's late re-ask adds one
+            // against the last live backbone - so read the two columns
+            // against each other and not against an absolute.
+            // Nothing else says so on a CLI leg - the retirement's only
+            // other sign is a dashboard event ring this path never
+            // reads - so its silence used to be indistinguishable from
+            // a fence that held.
+            let refusals = if st.miss_proven + st.miss_bare == 0 {
+                String::new()
+            } else {
+                format!(
+                    " · 430s: {} id-proven, {} bare{}",
+                    st.miss_proven,
+                    st.miss_bare,
+                    match st.fence_retired {
+                        true => ", alignment fence RETIRED",
+                        false => "",
+                    }
+                )
+            };
             // Write-side wait: time this server's workers spent parked
             // because decode/verify/disk could not keep up. Printed when
             // it is a visible slice of the run, because it is what tells
@@ -152,12 +189,13 @@ pub(super) fn take_census(
             };
             info!(
                 target: "get",
-                "{:<28} {:>8.1} MB · {} conns, {} reconnects{}{}",
+                "{:<28} {:>8.1} MB · {} conns, {} reconnects{}{}{}",
                 s.host,
                 st.bytes as f64 / 1e6,
                 st.connects,
                 st.reconnects,
                 why,
+                refusals,
                 blocked
             );
             if st.left_mid_run {
@@ -256,12 +294,20 @@ pub(super) fn take_census(
     // this run's interval map is not the whole story about their bytes
     // (Codex sweep 2, 3 Aug M2 - see the census itself for why each
     // one is here).
-    let set_names: Option<std::collections::HashSet<String>> = verifier.set().map(|set| {
-        set.files
-            .iter()
-            .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
-            .collect()
-    });
+    // The UNION over every adopted recovery set (TODO 311): a post may
+    // ship one set per file, and a name any of them covers is covered.
+    // `None` still means "this post carries no set at all", which is a
+    // different statement from "no set names this file" and is what the
+    // census below branches on.
+    let set_names: Option<std::collections::HashSet<String>> = {
+        let sets = verifier.sets();
+        (!sets.is_empty()).then(|| {
+            sets.iter()
+                .flat_map(|set| set.files.iter())
+                .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
+                .collect()
+        })
+    };
     let reconciled: std::collections::HashSet<usize> =
         sniff.state.lock_ok().reconciled.iter().copied().collect();
     // Slots that arrived complete by every counter and STILL do not
@@ -573,6 +619,9 @@ mod tests {
             ever_connected,
             left_mid_run: false,
             ends: Default::default(),
+            miss_proven: 0,
+            miss_bare: 0,
+            fence_retired: false,
             blocked_ms: 0,
         }
     }
@@ -595,6 +644,8 @@ mod tests {
     ) -> Arc<FileSlot> {
         Arc::new(FileSlot {
             hint: hint.into(),
+            hint_is_posted_name: nzbkit::release::stem_is_a_name(hint),
+            name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main,
             sample_skipped: false,
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),

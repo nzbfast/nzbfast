@@ -1,7 +1,17 @@
 // Test-preview player. VLCKit carries playback because most real
 // posts are Matroska and AVPlayer refuses the container.
+//
+// SINCE TODO 281 IO2b IT ALSO KEEPS THE DOWNLOAD RUNNING. Playback and
+// the engine are one process, so an audio session held by real audio is
+// what lets iOS keep this app scheduled with the screen off - and the
+// engine's sockets stay open with it. `PlaybackSession` owns that side
+// (the category, the lock-screen transport, route changes and
+// interruptions); this file's job is to tell it the truth about whether
+// anything is actually playing, which is the whole of what makes the
+// entitlement legitimate.
 import SwiftUI
 import UIKit
+import AVFoundation
 #if canImport(VLCKit)
 import VLCKit
 #elseif canImport(MobileVLCKit)
@@ -24,6 +34,14 @@ struct PlayerView: View {
     /// cumulative since daemon start, so the overlay reports movement
     /// since the player opened.
     @State private var telemetryBaseline: StreamTelemetry?
+
+    /// What the lock screen calls this. The job's own name, and
+    /// nothing fetched from anywhere - see `refreshNowPlaying`.
+    private var title: String {
+        let job = (state.snapshot.map { $0.queue + $0.history } ?? [])
+            .first { $0.nzoId == target.jobId }
+        return job?.playback?.file ?? job?.displayName ?? "Playing"
+    }
 
     /// Seek discipline: a live job whose tail has not landed answers
     /// playback.seekable=false - scrubbing into unfetched bytes stalls
@@ -55,17 +73,38 @@ struct PlayerView: View {
         }
         .statusBarHidden(true)
         .onAppear {
-            UIApplication.shared.isIdleTimerDisabled = true
+            // Through the arbiter. Writing `isIdleTimerDisabled`
+            // directly is what this used to do, and the unconditional
+            // `false` on the way out turned the keep-awake setting off
+            // over a working queue - see ScreenAwake.
+            ScreenAwake.hold(.playing)
+            // Baseline BEFORE playback starts, not on the first counter
+            // change: capturing in a change handler stores the
+            // already-incremented snapshot, so the first wait subtracts
+            // from itself and reads zero - and a change that only moves
+            // zeroFilledBytes never captures at all, hiding every gap
+            // byte. No snapshot yet (remote daemon between polls)
+            // baselines at zero rather than hiding whatever arrives.
+            telemetryBaseline = state.snapshot?.stream
+                ?? StreamTelemetry(readers: nil, blockedReads: 0,
+                                   zeroFilledBytes: 0, runwayMb: nil,
+                                   runwayWaitMs: nil)
+            vm.bind(state: state, title: title, seekable: seekAllowed)
             vm.load(url: target.url)
         }
         .onDisappear {
-            UIApplication.shared.isIdleTimerDisabled = false
+            ScreenAwake.release(.playing)
             vm.stop()
         }
-        .onChange(of: state.snapshot?.stream?.blockedReads) { _ in
-            if telemetryBaseline == nil {
-                telemetryBaseline = state.snapshot?.stream
-            }
+        .onChange(of: seekAllowed) { allowed in
+            // A live job's tail lands WHILE the player is open, so
+            // "seekable" is not a fact settled at launch: the lock
+            // screen's scrubber has to become enabled at the same moment
+            // the on-screen slider does. Watched directly - blockedReads
+            // is a global telemetry counter that can sit still across
+            // the flip, which left the remote controls disabled while
+            // the on-screen ones enabled.
+            vm.setSeekable(allowed)
         }
     }
 
@@ -176,17 +215,49 @@ final class PlayerModel: NSObject, ObservableObject {
 
     let player = VLCMediaPlayer()
     private var scrubbing = false
+    private weak var state: AppState?
+    private var title = "Playing"
+    private var seekable = true
+    /// The view VLC draws into, kept so it can be handed BACK after a
+    /// spell in the background - see `detachForBackground`.
+    private weak var surface: UIView?
+    private var lifecycleObservers: [NSObjectProtocol] = []
+
+    /// Tell the model who to report playback state to, and what the
+    /// lock screen should call this.
+    func bind(state: AppState, title: String, seekable: Bool) {
+        self.state = state
+        self.title = title
+        self.seekable = seekable
+    }
+
+    func setSeekable(_ on: Bool) {
+        guard on != seekable else { return }
+        seekable = on
+        PlaybackSession.shared.refreshNowPlaying(title: title)
+    }
 
     func load(url: URL) {
         player.delegate = self
         player.media = VLCMedia(url: url)
+        observeLifecycle()
         player.play()
         isPlaying = true
+        // The session and the process hold are NOT taken here:
+        // ownership follows VLC's confirmed `.playing` transition in
+        // `syncFromPlayer`, so a load that never reaches playing never
+        // claims background audio over silence (C20).
     }
 
     func stop() {
         player.stop()
         isPlaying = false
+        // EVERY exit from playback releases the session, which is the
+        // rule the audio entitlement rests on: the session's lifetime is
+        // the audio's lifetime, never the download's.
+        PlaybackSession.shared.release()
+        for o in lifecycleObservers { NotificationCenter.default.removeObserver(o) }
+        lifecycleObservers = []
     }
 
     func togglePlay() {
@@ -197,6 +268,7 @@ final class PlayerModel: NSObject, ObservableObject {
             player.play()
             isPlaying = true
         }
+        PlaybackSession.shared.refreshNowPlaying(title: title)
     }
 
     func skip(by seconds: Int) {
@@ -205,6 +277,7 @@ final class PlayerModel: NSObject, ObservableObject {
         } else {
             player.jumpBackward(Int32(-seconds))
         }
+        PlaybackSession.shared.refreshNowPlaying(title: title)
     }
 
     func scrub(editing: Bool) {
@@ -212,6 +285,48 @@ final class PlayerModel: NSObject, ObservableObject {
         if !editing {
             player.position = Float(sliderPosition)
         }
+    }
+
+    /// Keep a note of the view VLC is drawing into.
+    func attach(surface: UIView) {
+        self.surface = surface
+        player.drawable = surface
+    }
+
+    /// GIVE THE DRAWABLE BACK WHEN THE APP GOES AWAY, and take it again
+    /// on the way in.
+    ///
+    /// This is the one thing background audio needs from the VIDEO side
+    /// and it is not optional: iOS terminates an app that touches the
+    /// GPU while backgrounded, so a video layer still being rendered
+    /// into is not a glitch, it is the app being killed - and killed
+    /// silently, since the report arrives as a crash log rather than as
+    /// anything the app can catch. With no drawable, VLC keeps decoding
+    /// audio and stops rendering frames, which is exactly the behaviour
+    /// wanted: the sound continues, the process stays scheduled, and the
+    /// engine keeps downloading.
+    ///
+    /// PiP would be the case where the video legitimately DOES keep
+    /// rendering in the background, and MobileVLCKit 3.6 cannot do it -
+    /// `drawable` takes a view or a layer and there is no
+    /// sample-buffer output to feed an `AVPictureInPictureController`.
+    /// See TODO 281 IO2b for the measurement and the route.
+    private func observeLifecycle() {
+        guard lifecycleObservers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        lifecycleObservers.append(nc.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.player.drawable = nil }
+            })
+        lifecycleObservers.append(nc.addObserver(
+            forName: UIApplication.willEnterForegroundNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let surface = self.surface else { return }
+                    self.player.drawable = surface
+                }
+            })
     }
 
     fileprivate func syncFromPlayer() {
@@ -228,12 +343,38 @@ final class PlayerModel: NSObject, ObservableObject {
             statusNote = "Buffering"
         case .error:
             statusNote = "Playback failed. The file may not be ready yet."
+            // A player that has failed is not playing, so the process
+            // hold has to go with it. Left standing, the app would be
+            // claiming an audio session over silence - the one thing
+            // this feature must never do.
+            PlaybackSession.shared.release()
         case .ended:
             statusNote = "Finished"
             isPlaying = false
+            PlaybackSession.shared.release()
+        case .playing:
+            statusNote = nil
+            // Ownership follows the CONFIRMED state, not the play
+            // intent: this is what reacquires the session and the
+            // process hold after a pause, after an interruption the
+            // system did not auto-resume, and after a replay once
+            // `.ended` released everything (C20).
+            if let state {
+                PlaybackSession.shared.syncPlaying(true, transport: self, state: state)
+            }
+        case .paused, .stopped:
+            statusNote = nil
+            // A real pause: the hold and the session go with it, the
+            // transport and the lock-screen commands stay bound. This
+            // is the arm that lets `Lifecycle` wind the queue down
+            // over a paused preview instead of trusting a stale hold.
+            if let state {
+                PlaybackSession.shared.syncPlaying(false, transport: self, state: state)
+            }
         default:
             statusNote = nil
         }
+        PlaybackSession.shared.refreshNowPlaying(title: title)
     }
 
     private static func format(ms: Int32) -> String {
@@ -254,13 +395,56 @@ extension PlayerModel: VLCMediaPlayerDelegate {
     }
 }
 
+/// The transport the lock screen and Control Centre drive.
+///
+/// A protocol rather than the model being reached for directly, so
+/// `PlaybackSession` names no playback library: the choice between
+/// VLCKit and AVFoundation is this file's business and does not belong
+/// on the lock screen's side of the wall.
+extension PlayerModel: PlaybackTransport {
+    func transportPlay() {
+        guard !player.isPlaying else { return }
+        player.play()
+        isPlaying = true
+    }
+
+    func transportPause() {
+        guard player.isPlaying else { return }
+        player.pause()
+        isPlaying = false
+    }
+
+    func transportSkip(by seconds: Int) { skip(by: seconds) }
+
+    func transportSeek(to seconds: Double) {
+        guard seekable, seconds >= 0 else { return }
+        let total = transportDurationSeconds
+        guard total > 0 else { return }
+        player.position = Float(min(seconds / total, 1))
+    }
+
+    var transportIsPlaying: Bool { player.isPlaying }
+
+    var transportPositionSeconds: Double { Double(player.time.intValue) / 1000 }
+
+    var transportDurationSeconds: Double {
+        Double(player.media?.length.intValue ?? 0) / 1000
+    }
+
+    var transportSeekable: Bool { seekable }
+}
+
 struct VLCVideoSurface: UIViewRepresentable {
     let model: PlayerModel
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
         view.backgroundColor = .black
-        model.player.drawable = view
+        // Through `attach` rather than straight at `player.drawable`:
+        // the model has to keep a reference so it can give the drawable
+        // back after a spell in the background - see
+        // `observeLifecycle`.
+        model.attach(surface: view)
         return view
     }
 

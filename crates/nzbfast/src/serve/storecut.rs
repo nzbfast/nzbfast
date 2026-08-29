@@ -183,6 +183,21 @@ pub(in crate::serve) fn activate_gap(d: &Daemon) {
 /// that delete itself, right there, rather than hoping a background
 /// thread lands inside a few microseconds - the same argument
 /// [`on_park_gap`] makes.
+///
+/// `cfg(feature = "indexer")` unlike its three siblings, and only
+/// because of who ARMS it: the one caller is
+/// `a_history_delete_inside_the_park_drops_the_spare_instead_of_starting_it`
+/// in `serve/daemon_tests/spare_tests.rs`, which is a §282 spare test
+/// and gated on `indexer`. The seam itself is not indexer-specific and
+/// the cfg comes off the day a slim test arms it. Its emit side,
+/// [`promote_gap`], stays ungated: `park_gen` calls it from a
+/// `#[cfg(test)]` line in EVERY test build, slim included, which is why
+/// that half never warned.
+///
+/// Not `#[expect(dead_code)]`: that lint is rustc's and is judged in
+/// every configuration, so an expectation fulfilled slim goes
+/// unfulfilled in the default build.
+#[cfg(feature = "indexer")]
 pub(in crate::serve) fn on_promote_gap(f: impl FnOnce(&Daemon) + 'static) {
     PROMOTE_GAP.with(|g| *g.borrow_mut() = Some(Box::new(f)));
 }

@@ -26,7 +26,7 @@
 use libfuzzer_sys::fuzz_target;
 use std::io;
 
-use nzbkit::tar::{Reader, SNIFF_MIN, looks_like_tar};
+use nzbkit::tar::{looks_like_tar, Reader, SNIFF_MIN};
 
 fuzz_target!(|data: &[u8]| {
     // Cheap reject: below the sniff's own weak threshold there is no

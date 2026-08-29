@@ -91,8 +91,16 @@ pub(super) fn planned_servers(d: &Daemon, cfg_path: &std::path::Path) -> Vec<Val
     // job start, or this card would promise a fleet the next job would
     // not open on a line fast enough to grow it.
     let (anchor_bps, _) = d.link_peak.effective(d.line_speed.load(Ordering::Relaxed));
-    let line_share =
-        crate::conntune::line_cap_share(c.servers.iter().filter(|s| s.enabled).count(), anchor_bps);
+    // TODO 275 item 1 part 2: and the same measured per-socket carry
+    // the seed folds in, for the reason the paragraph above gives about
+    // the anchor - this card would otherwise promise a fleet smaller
+    // than the one the next job opens on a slow-carry link.
+    let line_share = crate::conntune::line_cap_share(
+        cfg_path,
+        c.servers.iter().filter(|s| s.enabled).count(),
+        anchor_bps,
+        d.line_carry.carry_bps(),
+    );
     c.servers
         .iter()
         .filter(|s| s.enabled)

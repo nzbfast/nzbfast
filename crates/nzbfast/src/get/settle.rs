@@ -10,6 +10,22 @@ use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use tracing::{info, warn};
 
+/// GH #63: may this FileDesc name replace the name the slot's file
+/// already carries?
+///
+/// "The PAR2 FileDesc name is the real one" is true of an obfuscated
+/// post whose set was built BEFORE the rename - #43, #47 and the whole
+/// deobfuscation line - and false of one built AFTER it, where the set
+/// lists the hashes back and the NZB subject is the truthful record.
+/// `nzbfast-par2-name-recovery` measured that the second is the common
+/// order; #63 is a post where every file ships its own set in it.
+///
+/// Refuses ONLY the losing direction, so a slot whose subject said
+/// nothing keeps taking its FileDesc name exactly as before.
+fn filedesc_name_is_better(slot: &crate::unpack::FileSlot, pname: &str) -> bool {
+    !slot.hint_beats(pname)
+}
+
 /// What the extraction tail and the failure summary need to know about
 /// how verification and repair ended. Field names match the local
 /// bindings the inline code used; the orchestrator destructures them
@@ -113,6 +129,13 @@ pub(super) async fn settle_verify_repair(
     // from - the failed predecessor's output. Threaded the same way
     // `cancel` is; empty on the CLI and on every non-switch job.
     donor_dirs: &[PathBuf],
+    // PLAN M31: duplicate postings of this release whose live articles
+    // may fill a bad block the wire could not serve - see
+    // `super::dupefill`. Threaded exactly as `donor_dirs` is, and
+    // deliberately separate from it: that one is a failed
+    // predecessor's BYTES on disk (§293, block adoption, shipped),
+    // this one is a duplicate posting's ARTICLES.
+    donor_nzbs: &[PathBuf],
 ) -> Result<SettleVerdict> {
     // Phase marker: the network phase is over, the checks begin. On the
     // chart this is where throughput sits at zero on purpose - without
@@ -138,10 +161,11 @@ pub(super) async fn settle_verify_repair(
     )
     .await?;
 
-    match verifier.set() {
-        Some(set) => {
+    let sets = verifier.sets();
+    match sets.is_empty() {
+        false => {
             settle_with_set(
-                set,
+                sets,
                 verifier,
                 extractor,
                 journal,
@@ -164,10 +188,11 @@ pub(super) async fn settle_verify_repair(
                 note_activity,
                 cancel,
                 donor_dirs,
+                donor_nzbs,
             )
             .await
         }
-        None => {
+        true => {
             settle_without_set(
                 extractor,
                 slots,
@@ -256,10 +281,7 @@ fn settle_slots(
         let results: std::sync::Mutex<Vec<(usize, Option<nzbkit::live::SlotReport>)>> =
             std::sync::Mutex::new(Vec::new());
         std::thread::scope(|scope| {
-            for _ in 0..std::thread::available_parallelism()
-                .map_or(4, |n| n.get())
-                .min(12)
-            {
+            for _ in 0..nzbkit::mem::cpu_workers().min(12) {
                 scope.spawn(|| {
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
@@ -314,8 +336,12 @@ fn settle_slots(
                     damage_in_mapped = true;
                 }
             }
-            // Deobfuscation: the PAR2 FileDesc name is the real one.
-            if let Some(pname) = &r.par2_name {
+            // Deobfuscation: the PAR2 FileDesc name is the real one -
+            // unless it is a hash and the subject already named this
+            // file, which is GH #63. See `filedesc_name_is_better`.
+            if let Some(pname) = &r.par2_name
+                && filedesc_name_is_better(slot, pname)
+            {
                 extractor.rename(sidx, pname);
                 // A CHASED slot is excluded from the on-disk half
                 // for the same reason a mapped one is: it has no
@@ -350,9 +376,285 @@ fn settle_slots(
     (reports, damage_in_mapped, deferred_renames, published_names)
 }
 
+/// PLAN M31 observability: what the duplicate-donor pass did, in the
+/// one place that knows both what it healed and what it refused.
+///
+/// A pass that healed nothing is SILENT unless it also refused
+/// something. Every switch job runs this over every damaged file, and
+/// "looked and found nothing" on each one is the log line that gets a
+/// whole target switched off; a REFUSAL is different - donor bytes
+/// arrived and failed the target's own checksums, which is a fact
+/// about the donor worth saying out loud.
+fn note_dupefill(f: &super::dupefill::FillReport) {
+    if f.healed > 0 {
+        info!(
+            target: "repair",
+            "🤝 recovered {} block(s) from a duplicate posting ({} off the \
+             predecessor's own files, {} article(s) fetched, {:.1} MB) - no PAR2 \
+             recovery block spent on them",
+            f.healed,
+            f.local,
+            f.bodies,
+            f.bytes as f64 / 1e6
+        );
+    }
+    if f.stitched > 0 {
+        info!(
+            target: "repair",
+            "   ...of which {} needed this download's own surviving bytes as \
+             well: the set's block is wider than an article, so neither \
+             posting held one whole",
+            f.stitched
+        );
+    }
+    if f.rejected > 0 {
+        warn!(
+            target: "repair",
+            "{} block(s) offered by a duplicate posting failed this set's own \
+             checksums and were discarded - repair covers them instead",
+            f.rejected
+        );
+    }
+    // Said apart from the line above, and worded apart: a stitched
+    // block is the donor's bytes AND ours, so a refusal here is not a
+    // fact about the posting the way `rejected` is.
+    if f.stitch_refused > 0 {
+        warn!(
+            target: "repair",
+            "{} block(s) made up from a duplicate posting's bytes plus this \
+             download's own failed this set's checksums - repair covers them",
+            f.stitch_refused
+        );
+    }
+}
+
+/// PLAN M31 stage 1: fill what a duplicate posting can fill, ONE PASS
+/// PER RECOVERY SET, and return `incomplete` less whatever the pass
+/// proved whole off disk.
+///
+/// It belongs exactly where the caller puts it: after the read-back
+/// has said which blocks are bad, and before anything is allowed to
+/// spend a recovery block rebuilding one. A block borrowed from a
+/// duplicate posting costs payload bytes and no parity; the same block
+/// rebuilt costs a recovery slice that a later hole then cannot have.
+///
+/// It never pre-empts the whole-release machinery above it either: a
+/// dupe promotion or a §284 switch is a decision about which POST to
+/// download and was taken by the daemon long before this. This only
+/// ever patches the post already on disk, only for blocks it could
+/// not get, and only when the two postings' recovery sets agree
+/// digest-for-digest that a file is the same bytes.
+///
+/// What the pass claims is not taken on trust and is not re-derived
+/// by hashing either: `apply_to` subtracts exactly the blocks whose
+/// rebuilt bytes matched THIS set's own MD5 and CRC32 and were then
+/// written and synced. Re-running `settle_slots` would reach the
+/// same answer and is the wrong instrument - it renames slots and
+/// publishes verified names as it goes, so it is not a read-only
+/// act to repeat. `damage_in_mapped` needs no revision for the same
+/// reason the pass is safe: it never touches a mapped or chased
+/// slot. The SECOND entry point (M31 item 4,
+/// [`fill_from_duplicates_off_materialized_volumes`]) does reach
+/// those slots, and needs no revision either - it runs after the
+/// materialize loop has already set that flag for every one of
+/// them.
+///
+/// PER SET, for TODO 311's own reason one door along: a borrowed
+/// block is PROVED against a `BlockCheck`, and those live in the set
+/// that describes the file - `block_size` and the IFSC table are per
+/// set. A post shipping one set per file therefore gets one pass per
+/// set, and each pass must see only the reports whose SLOT that set
+/// claimed.
+///
+/// Which is why the loop index goes in with the set. `wanted_files`
+/// pairs a report to a set member BY NAME, and two sets of one post
+/// routinely name the same file - so name resolution alone let a
+/// leftover report from set A be opened under set B's block size,
+/// proved against B's checksums, written, and then struck off A's
+/// bad-block list by `apply_to`, which keys on slot index alone. A's
+/// hole then went unrepaired and unreported. The index is what lets
+/// that pass ask `verifier.slot_set`, the SAME predicate the caller's
+/// damage census charges bad blocks with, so the two cannot drift.
+///
+/// A free function rather than a block inside [`settle_with_set`]:
+/// that function sits at the size gate's 500-line ceiling and this is
+/// one subject. Nothing about the ordering moved - the caller still
+/// invokes it between the read-back and the damage census.
+#[expect(clippy::too_many_arguments)]
+async fn fill_from_duplicates(
+    sets: &[Arc<nzbkit::par2::Par2Set>],
+    verifier: &Arc<nzbkit::live::LiveVerifier>,
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    slots: &[Arc<FileSlot>],
+    servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
+    out_dir: &Path,
+    donor_nzbs: &[PathBuf],
+    // §293's donor directories, threaded in beside the NZBs they are
+    // populated from. Both come off the SAME `alt_from`, so on a switch
+    // job the predecessor's own files usually already hold the blocks
+    // the donor posting would be asked for - `dupefill` reads them
+    // first and opens a socket only for what the disk cannot prove.
+    donor_dirs: &[PathBuf],
+    cancel: Option<&crate::repair::SideCancel>,
+    reports: &mut [(usize, nzbkit::live::SlotReport)],
+    incomplete: usize,
+) -> usize {
+    if donor_nzbs.is_empty() {
+        return incomplete;
+    }
+    let mut incomplete = incomplete;
+    let plain: Vec<ServerConfig> = servers.iter().map(|(c, _)| c.clone()).collect();
+    let mut filled = super::dupefill::FillReport::default();
+    for (si, set) in sets.iter().enumerate() {
+        let one = super::dupefill::fill_from_duplicate_postings(
+            &plain, set, si, verifier, reports, extractor, slots, out_dir, donor_nzbs, donor_dirs,
+            cancel,
+        )
+        .await;
+        one.apply_to(reports);
+        filled.absorb(one);
+    }
+    // A file this pass closed the last hole in has been read back
+    // WHOLE and matched the set's own MD5, which is what
+    // `incomplete` is a proxy for - see `whole_files_proved` for
+    // why that subtraction is sound and where its limit is. Without
+    // it the pass can heal every byte of a job and the job still
+    // fails on an article count, which is the one outcome that
+    // would make borrowing pointless in the case M31 exists for.
+    incomplete = incomplete.saturating_sub(filled.whole_files_proved(slots));
+    note_dupefill(&filled);
+    incomplete
+}
+
+/// One recovery set that took damage, and what repairing it needs.
+///
+/// TODO 311: a post may ship one set per file, and each set's parity
+/// speaks only for its own files. So the fetch arithmetic is per set -
+/// `needed` is that set's own damage less its own slices already on
+/// disk - and `missing` is the subset of the job's unclaimed FileDesc
+/// names that THIS set is the one able to recreate.
+struct SetPlan {
+    set: Arc<nzbkit::par2::Par2Set>,
+    /// Which of the job's adopted sets this is, indexed the way
+    /// [`nzbkit::live::LiveVerifier::sets`] is. Carried because
+    /// `dupefill::wanted_files` may not be handed a set without also
+    /// being told which one it is - see the second entry point in
+    /// [`run_set_repair`], and `fill_from_duplicates` for the defect
+    /// that rule closes.
+    index: usize,
+    needed: usize,
+    missing: Vec<String>,
+}
+
+/// Every adopted set's FileDesc names, sanitized and lowercased - the
+/// key every coverage test in this file uses.
+///
+/// A UNION, and that is the point: "does the recovery set cover this
+/// file" is a question about the post, not about one of its sets, so a
+/// per-file-set post must not fail a file as out-of-set because the
+/// LARGEST set happens not to name it (TODO 311).
+fn union_set_names(sets: &[Arc<nzbkit::par2::Par2Set>]) -> std::collections::HashSet<String> {
+    sets.iter()
+        .flat_map(|s| s.files.iter())
+        .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
+        .collect()
+}
+
+/// TODO 311: EVERY recovery set the post carries, not the largest one.
+///
+/// What is per JOB and what is per SET is the whole shape of this
+/// function. Verification, the coverage census, the spare rules and the
+/// re-extract are per job and read the UNION of the sets' FileDesc
+/// tables. Repair is per set and can only ever be: a recovery slice
+/// belongs to its own set's Reed-Solomon geometry, `block_size` and
+/// `recovery_set_id` are per set, and `par2repair::recovery_slice_locators`
+/// filters slices BY set id. So damage is charged to the set whose parity
+/// can heal it, and `run_set_repair` is handed one [`SetPlan`] per set.
+/// Which adopted sets a slot of this job actually claimed a file of,
+/// indexed the way `verifier.sets()` is.
+///
+/// A report exists only for a slot some set claimed, so this is exactly
+/// "did anything in the post turn out to belong to set N". Its use is
+/// the stray-release guard in [`settle_with_set`]; see there for why a
+/// SIBLING with claims is the whole discriminator.
+fn sets_with_claims(
+    verifier: &Arc<nzbkit::live::LiveVerifier>,
+    reports: &[(usize, nzbkit::live::SlotReport)],
+    n: usize,
+) -> Vec<bool> {
+    (0..n)
+        .map(|si| {
+            reports
+                .iter()
+                .any(|(sidx, _)| verifier.slot_set(*sidx) == Some(si))
+        })
+        .collect()
+}
+
+/// Which adopted sets name a file THIS POST OFFERS, indexed the way
+/// `verifier.sets()` is.
+///
+/// The stray-release guard in [`settle_with_set`] reads a set with no
+/// claims and a claimed sibling as a different release's, and that is
+/// right for a `.par2` the poster left in the NZB. It is wrong for the
+/// MIXTURE - a per-file-set post where ONE file's every article was
+/// taken down. From the packets the two are identical (no slot claimed
+/// a file of mine, and a sibling set has claims), so the discriminator
+/// has to come from outside them, and the NZB is what carries it: a
+/// file the post OFFERED and never delivered is not a file the post
+/// never mentioned.
+///
+/// Per FILE, not per set. This answered per SET for a day (any one
+/// offered file marked the whole set offered) and that reading hands a
+/// STRAY a way past the guard: scene and disc releases share generic
+/// names (`01.rar`), so one name collision between a stray's set and a
+/// file this post really offers marked the stray's ENTIRE contents as
+/// this post's, and its never-posted files were then charged to damage
+/// - the exact failure the guard exists to prevent, reintroduced by the
+/// census that widened it. Per file, the mixture case still works (the
+/// offered-and-lost file is itself the name being tested), and a
+/// stray's other files go back to being skipped, collision or not. The
+/// trade, stated: a mixture set naming a file the poster omitted from
+/// the NZB entirely is no longer charged - and that file is one the
+/// post never offered, which is the guard's own definition of not this
+/// post's business.
+///
+/// Matched on the sanitized lowercase name, the same key
+/// [`union_set_names`] and the coverage census either side of the guard
+/// already use.
+///
+/// MEASURED 29 Aug 2026 on the three-track rig, one set per track, with
+/// track 3's every payload article answered 430 and its own recovery
+/// data untouched in the NZB. At 100% redundancy the guard alone exits
+/// 1 with `track03.bin` at 0 bytes of 400000 and the log saying it is
+/// `a different release's set` - about the post's OWN track; with this
+/// census it is rebuilt byte-exact and the job passes. At the ordinary
+/// 20% the file is unrepairable either way and what changes is only the
+/// sentence: `2000 blocks needed, only 400 recovery blocks in the NZB`
+/// instead of a wrong diagnosis.
+///
+/// STATED LIMIT, and it is why this is ADDITIVE rather than a rewrite of
+/// the guard: an OBFUSCATED post names nothing usefully, so a
+/// hash-subject slot answers `false` here and its set is skipped exactly
+/// as before. Size-banding an unclaimed slot against a FileDesc length -
+/// the trick [`reconcile_obfuscated_aliases`] uses for the same "which
+/// file was this really" question - was considered and left out on
+/// purpose. There the descriptor being paired against is one a repair
+/// has already PROVED, and the pairing only ever SPARES a slot; here
+/// there is nothing proving it and the answer CHARGES a whole set's
+/// content to damage, so a coincidence of size would send a repair
+/// shopping for a stray release's parity - the exact failure the guard
+/// exists to prevent, reintroduced by the fix for it.
+fn names_offered_by_the_post(slots: &[Arc<FileSlot>]) -> std::collections::HashSet<String> {
+    slots
+        .iter()
+        .map(|s| nzbkit::disk::sanitize_filename(&s.hint).to_lowercase())
+        .collect()
+}
+
 #[expect(clippy::too_many_arguments)]
 async fn settle_with_set(
-    set: Arc<nzbkit::par2::Par2Set>,
+    sets: Vec<Arc<nzbkit::par2::Par2Set>>,
     verifier: &Arc<nzbkit::live::LiveVerifier>,
     extractor: &Arc<nzbkit::extract::Extractor>,
     journal: &Arc<nzbkit::journal::Journal>,
@@ -369,7 +671,7 @@ async fn settle_with_set(
     prefetched: &Arc<std::sync::Mutex<Vec<(usize, Vec<PathBuf>)>>>,
     fast_verify: bool,
     password: Option<&str>,
-    incomplete: usize,
+    mut incomplete: usize,
     derrs: u64,
     sparse_slots: &[String],
     note_activity: &(dyn Fn(&'static str) + Sync),
@@ -381,6 +683,9 @@ async fn settle_with_set(
     cancel: Option<&crate::repair::SideCancel>,
     // §293: donor directories for the disk repair's adoption scan.
     donor_dirs: &[PathBuf],
+    // PLAN M31: duplicate postings whose live articles may fill a bad
+    // block before repair is asked to rebuild it (`super::dupefill`).
+    donor_nzbs: &[PathBuf],
 ) -> Result<SettleVerdict> {
     // --- settle verification (in-stream results; read-back only for gaps) ---
     let all_good;
@@ -405,8 +710,28 @@ async fn settle_with_set(
     // nothing about the rest of the job.
     let mut unhealed_slots: Option<Vec<usize>> = None;
     let vt0 = Instant::now();
-    let (reports, damage_in_mapped, deferred_renames, published_names) =
+    let (mut reports, damage_in_mapped, deferred_renames, published_names) =
         settle_slots(slots, verifier, extractor, out_dir);
+    // PLAN M31 stage 1 - borrow what a duplicate posting can serve
+    // before repair spends a recovery block. It belongs exactly HERE:
+    // after the read-back has said which blocks are bad, and before
+    // anything below may rebuild one. Out of line in
+    // [`fill_from_duplicates`], which carries the whole argument -
+    // this function is at the size gate's 500-line ceiling.
+    incomplete = fill_from_duplicates(
+        &sets,
+        verifier,
+        extractor,
+        slots,
+        servers,
+        out_dir,
+        donor_nzbs,
+        donor_dirs,
+        cancel,
+        &mut reports,
+        incomplete,
+    )
+    .await;
     let live: u64 = reports.iter().map(|(_, r)| r.live_blocks).sum();
     let readback: u64 = reports.iter().map(|(_, r)| r.readback_blocks).sum();
     let bad: usize = reports.iter().map(|(_, r)| r.bad_blocks.len()).sum();
@@ -450,13 +775,79 @@ async fn settle_with_set(
     // slices covered the damage count - silent corruption with
     // exit 0 (latent for bootstrap sets, wide open once M2c.5
     // prefetched volumes mid-download).
-    let mut damage = bad;
+    // Per SET, because repair is per set: a block of damage in a file
+    // set 3 covers is healed by set 3's parity and by nothing else, and
+    // charging it to a job-wide total would send the wrong set shopping
+    // for volumes (TODO 311).
+    let mut damage_by_set = vec![0usize; sets.len()];
+    for (sidx, r) in &reports {
+        if let Some(si) = verifier.slot_set(*sidx) {
+            damage_by_set[si] += r.bad_blocks.len();
+        }
+    }
+    // A set NO slot claimed a single file of is one of two things, and
+    // its own packets cannot tell them apart: the par-only shape (every
+    // payload article lost, and parity is exactly what rebuilds it -
+    // bench leg a2-par-only, 2 Aug), or a recovery set for a DIFFERENT
+    // RELEASE that the poster left in the NZB. A SIBLING set WITH claims
+    // settles it: this post is evidently the sibling's, so charging the
+    // stray's whole content here sends the repair shopping for parity
+    // that was never posted and fails a job whose own payload is
+    // perfect.
+    //
+    // Measured on the tree that landed TODO 311: one clean 400 KB file
+    // beside another release's two sets exits 1 with `1954 recovery
+    // block(s) needed but the NZB only carries 391`, having just
+    // reported `verified 1 file(s) ... 0 bad`. Adopting every set is
+    // what makes it deterministic - the single-set rule hit it only when
+    // its arbitrary tie-break happened to land on a stray - so the guard
+    // belongs with the adoption.
+    //
+    // Scoped so it CANNOT fire on a post carrying one set: with no
+    // sibling there is nothing to contradict the par-only reading, and
+    // that reading has always been the right one.
+    //
+    // ...and a FILE the post itself offers is not a stray's however
+    // little of it arrived: an NZB entry for it is the evidence the
+    // packets cannot carry, and it is what tells the MIXTURE (a
+    // per-file-set post with one file taken down whole) from the stray.
+    // Per file and not per set - `names_offered_by_the_post` carries
+    // that argument and its stated limits.
+    let set_has_claims = sets_with_claims(verifier, &reports, sets.len());
+    let some_set_claimed = set_has_claims.iter().any(|&c| c);
+    let offered_names = names_offered_by_the_post(slots);
     for name in &missing_files {
-        if let Some(f) = set.files.iter().find(|f| f.name == *name) {
-            damage += f.length.div_ceil(set.block_size.max(1)) as usize;
+        // First set naming it owns it. A name in two sets is a duplicate
+        // posting, and `unclaimed_files` already withholds one some slot
+        // claimed - what is left here really is absent, and one set
+        // rebuilding it is enough.
+        if let Some((si, f)) = sets
+            .iter()
+            .enumerate()
+            .find_map(|(si, set)| set.files.iter().find(|f| f.name == *name).map(|f| (si, f)))
+        {
+            if some_set_claimed
+                && !set_has_claims[si]
+                && !offered_names.contains(&nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
+            {
+                info!(
+                    target: "verify",
+                    "{} is named by a recovery set that matched nothing in this post, \
+                     this NZB does not list it, and another set did match - treating \
+                     it as a different release's file rather than one to rebuild",
+                    f.name
+                );
+                continue;
+            }
+            damage_by_set[si] += f.length.div_ceil(sets[si].block_size.max(1)) as usize;
             warn!(target: "verify", "✘ {} - file missing entirely", f.name);
         }
     }
+    let damage: usize = damage_by_set.iter().sum();
+    // Every report belongs to a slot some set CLAIMED - that is what
+    // makes a report exist - so no bad block may fall outside the
+    // per-set charge above and go unrepaired.
+    debug_assert!(damage >= bad, "every bad block belongs to some set's file");
     // Slices already on hand: seen while building the set (the
     // bootstrap volume) + M2c.5 prefetched volumes on disk -
     // counted from the files themselves (exact, so a partial
@@ -471,17 +862,30 @@ async fn settle_with_set(
     // capture is the only one carrying recovery slices (demoted
     // captures are dropped), so this REPLACES recovery_blocks_seen
     // rather than adding to it.
-    let mut on_hand = match sniff_bootstrap.and_then(|s| extractor.slot_path(s)) {
-        Some(p) => std::fs::read(&p)
-            .map(|bytes| {
-                nzbkit::par2repair::recovery_slice_locators(&bytes, &set.recovery_set_id)
-                    .into_iter()
-                    .filter(|(_, _, len)| *len == set.block_size as usize)
-                    .count()
-            })
-            .unwrap_or(set.recovery_blocks_seen),
-        None => set.recovery_blocks_seen,
+    //
+    // Counted per SET. A slice carries its own set id, so the same bytes
+    // answer every set's question and at most one of them says yes - and
+    // the bootstrap REPLACEMENT above is applied only to the set the
+    // bootstrap file actually belongs to, read off its first packet. On
+    // a per-file-set post that one file is one set's bootstrap and says
+    // nothing about the other seventeen, so replacing every set's count
+    // from it would zero out parity that is sitting right there
+    // (TODO 311).
+    let slices_of = |bytes: &[u8], set: &nzbkit::par2::Par2Set| {
+        nzbkit::par2repair::recovery_slice_locators(bytes, &set.recovery_set_id)
+            .into_iter()
+            .filter(|(_, _, len)| *len == set.block_size as usize)
+            .count()
     };
+    let mut on_hand: Vec<usize> = sets.iter().map(|s| s.recovery_blocks_seen).collect();
+    if let Some(bytes) = sniff_bootstrap
+        .and_then(|s| extractor.slot_path(s))
+        .and_then(|p| std::fs::read(&p).ok())
+        && let Some(id) = nzbkit::par2::Par2Set::set_id_of(&bytes)
+        && let Some(si) = sets.iter().position(|s| s.recovery_set_id == id)
+    {
+        on_hand[si] = slices_of(&bytes, &sets[si]);
+    }
     let mut already: Vec<usize> = bootstrap_vol.into_iter().collect();
     // The sniffed in-stream bootstrap (issue #14) is on hand the
     // same way a static bootstrap volume is: its slices were
@@ -497,14 +901,9 @@ async fn settle_with_set(
     // packet magic regardless - this only keeps the fetch
     // arithmetic honest.
     for (&s, pth) in resume_vols.iter() {
-        let counted = std::fs::read(pth)
-            .map(|bytes| {
-                nzbkit::par2repair::recovery_slice_locators(&bytes, &set.recovery_set_id)
-                    .into_iter()
-                    .filter(|(_, _, len)| *len == set.block_size as usize)
-                    .count()
-            })
-            .unwrap_or(0);
+        let bytes = std::fs::read(pth).unwrap_or_default();
+        let per_set: Vec<usize> = sets.iter().map(|set| slices_of(&bytes, set)).collect();
+        let counted: usize = per_set.iter().sum();
         // A PARTIALLY restored volume must stay on the fetch list:
         // striking its index while crediting only the slices that
         // landed leaves its missing slices unreachable by both the
@@ -528,22 +927,40 @@ async fn settle_with_set(
             continue;
         }
         already.push(slot_file[s]);
-        on_hand += counted;
+        for (h, c) in on_hand.iter_mut().zip(per_set) {
+            *h += c;
+        }
     }
     let sniffed_vols: Vec<usize> = sniff.deferred_files();
     for (fi, paths) in prefetched.lock_ok().iter() {
         already.push(*fi);
         for pth in paths {
             if let Ok(bytes) = std::fs::read(pth) {
-                on_hand +=
-                    nzbkit::par2repair::recovery_slice_locators(&bytes, &set.recovery_set_id)
-                        .into_iter()
-                        .filter(|(_, _, len)| *len == set.block_size as usize)
-                        .count();
+                for (h, set) in on_hand.iter_mut().zip(sets.iter()) {
+                    *h += slices_of(&bytes, set);
+                }
             }
         }
     }
-    let needed = damage.saturating_sub(on_hand);
+    // One plan per set that took damage. A set with none is not
+    // repaired and not fetched for - which is the ordinary case on a
+    // per-file-set post, where one damaged track leaves seventeen sets
+    // with nothing to do.
+    let plans: Vec<SetPlan> = sets
+        .iter()
+        .enumerate()
+        .filter(|(si, _)| damage_by_set[*si] > 0)
+        .map(|(si, set)| SetPlan {
+            set: set.clone(),
+            index: si,
+            needed: damage_by_set[si].saturating_sub(on_hand[si]),
+            missing: missing_files
+                .iter()
+                .filter(|n| set.files.iter().any(|f| &f.name == *n))
+                .cloned()
+                .collect(),
+        })
+        .collect();
     // Slots the recovery set does NOT cover. A PAR2 repair proves the
     // files in its own set and says nothing whatever about the rest,
     // but the repair branches below set `all_good` from the repair
@@ -579,11 +996,7 @@ async fn settle_with_set(
     // only the NZB file behind it knows.
     let (in_set_pairs, uncovered_pairs): (Vec<(usize, &str)>, Vec<(usize, &str)>) = {
         let covered: std::collections::HashSet<usize> = reports.iter().map(|(s, _)| *s).collect();
-        let set_names: std::collections::HashSet<String> = set
-            .files
-            .iter()
-            .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
-            .collect();
+        let set_names = union_set_names(&sets);
         slots
             .iter()
             .enumerate()
@@ -625,7 +1038,8 @@ async fn settle_with_set(
     );
     if damage > 0 {
         let o = run_set_repair(
-            &set,
+            &plans,
+            verifier,
             extractor,
             journal,
             slots,
@@ -641,14 +1055,13 @@ async fn settle_with_set(
             note_activity,
             cancel,
             damage_in_mapped,
-            needed,
             &already,
             &sniffed_vols,
             &reports,
-            &missing_files,
             in_set_bad,
             uncovered_pairs,
             donor_dirs,
+            donor_nzbs,
         )
         .await?;
         all_good = o.all_good;
@@ -671,11 +1084,7 @@ async fn settle_with_set(
         // applied: furniture the set does not cover is optional on
         // every path, not only on the one that happened to run a
         // repair.
-        let set_names: std::collections::HashSet<String> = set
-            .files
-            .iter()
-            .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
-            .collect();
+        let set_names = union_set_names(&sets);
         let spared = spared_metadata_errors(slots, &set_names);
         if spared > 0 {
             warn!(
@@ -711,12 +1120,7 @@ async fn settle_with_set(
     // extractor.finish()) needs the set's FileDesc names to spare
     // payload that is ITSELF par2 - record them while the set is
     // in scope.
-    let sniff_covered = Some(
-        set.files
-            .iter()
-            .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
-            .collect(),
-    );
+    let sniff_covered = Some(union_set_names(&sets));
     Ok(SettleVerdict {
         all_good,
         reextract_failed,
@@ -768,9 +1172,373 @@ fn spared_metadata_errors(
         .sum()
 }
 
+/// The disk-side PAR2 repair, once per set the mapped route DECLINED.
+///
+/// Split out of [`run_set_repair`] for the size gate; the body is a
+/// verbatim move. Returns whether every declined set was repaired -
+/// anything less and the job has damage no parity healed - and extends
+/// `proven` with the FileDesc names each successful pass vouched for
+/// (a disk repair re-reads its whole set off disk, so it speaks for
+/// every file that set names).
+#[expect(clippy::too_many_arguments)]
+async fn disk_repair_declined_sets(
+    declined: &[&SetPlan],
+    proven: &mut Vec<String>,
+    servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
+    nzb: &Nzb,
+    out_dir: &Path,
+    slots: &[Arc<FileSlot>],
+    already: &[usize],
+    sniffed_vols: &[usize],
+    sniff_bootstrap: Option<usize>,
+    mapped_fetched: Vec<usize>,
+    mapped_yield: Option<crate::repair::VolumeYield>,
+    buf_pool: &Arc<nzbkit::pool::BufPool>,
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    repair_shortfall: &mut Option<crate::repair::RepairShortfall>,
+    cancel: Option<&crate::repair::SideCancel>,
+    cpu: &mut crate::lanegate::HeavyCpu,
+    donor_dirs: &[PathBuf],
+) -> Result<bool> {
+    // The main index BELONGING TO THIS SET (TODO 311). A per-file-set
+    // post has one `.par2` index per set, and handing par2cmdline
+    // another set's index would have it verify, and try to repair,
+    // files this pass is not about. Which set a downloaded index
+    // belongs to is read off its own packets rather than guessed
+    // from its name - an obfuscated post's index is named a hash.
+    // The sniffed bootstrap is the fallback it always was, and is
+    // only offered to the set whose id its bytes carry.
+    let main_par2_for = |set: &nzbkit::par2::Par2Set| -> Option<PathBuf> {
+        let owns = |path: &Path| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|b| nzbkit::par2::Par2Set::set_id_of(&b))
+                .is_some_and(|id| id == set.recovery_set_id)
+        };
+        for (sidx, slot) in slots.iter().enumerate() {
+            if slot.is_par2_main
+                && let Some(path) = extractor.slot_path(sidx)
+                && owns(&path)
+            {
+                return Some(path);
+            }
+        }
+        sniff_bootstrap
+            .and_then(|s| extractor.slot_path(s))
+            .filter(|p| owns(p))
+    };
+    // Only the sets the mapped route did NOT carry. `mapped_yield`
+    // and `mapped_fetched` describe the LAST mapped attempt's own
+    // fetch, so they are handed to the first disk pass and not
+    // re-offered: a second set's planner must not credit itself with
+    // volumes bought for another set's damage.
+    let mut mapped_fetched = mapped_fetched;
+    let mut mapped_yield = mapped_yield;
+    let mut repaired = true;
+    for plan in declined {
+        let set = plan.set.as_ref();
+        let one = fetch_and_repair(
+            servers,
+            nzb,
+            out_dir,
+            set,
+            plan.needed,
+            main_par2_for(set),
+            already,
+            sniffed_vols,
+            &std::mem::take(&mut mapped_fetched),
+            mapped_yield.take(),
+            buf_pool.clone(),
+            extractor,
+            repair_shortfall,
+            cancel,
+            cpu,
+            donor_dirs,
+        )
+        .await?;
+        // A successful disk repair re-read the WHOLE set off
+        // disk, so it speaks for every file the set names.
+        if one {
+            proven.extend(set.files.iter().map(|f| f.name.clone()));
+        }
+        repaired &= one;
+    }
+    Ok(repaired)
+}
+
+/// The mapped (in-place, no volume files) repair attempt, once PER SET.
+///
+/// Split out of [`run_set_repair`] for the size gate; the body is a
+/// verbatim move. `declined` collects the sets the route did not carry,
+/// which is what [`disk_repair_declined_sets`] reruns - repeating a set
+/// the mapped route already healed would re-fetch its volumes for damage
+/// that no longer exists. The return is the CONJUNCTION: the materialize path is
+/// skippable only if every damaged set came through here, because it is
+/// the only other way a set gets repaired at all.
+#[expect(clippy::too_many_arguments)]
+async fn mapped_repair_every_set<'p>(
+    plans: &'p [SetPlan],
+    declined: &mut Vec<&'p SetPlan>,
+    servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
+    nzb: &Nzb,
+    out_dir: &Path,
+    already: &[usize],
+    sniffed_vols: &[usize],
+    buf_pool: &Arc<nzbkit::pool::BufPool>,
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    reports: &[(usize, nzbkit::live::SlotReport)],
+    recreated_names: &mut Vec<String>,
+    mapped_fetched: &mut Vec<usize>,
+    mapped_yield: &mut Option<crate::repair::VolumeYield>,
+    fast_verify: bool,
+    cancel: Option<&crate::repair::SideCancel>,
+    cpu: &mut crate::lanegate::HeavyCpu,
+) -> Result<bool> {
+    if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_some() {
+        declined.extend(plans);
+        return Ok(false);
+    }
+    let mut every = true;
+    for plan in plans {
+        let ok = try_mapped_repair(
+            servers,
+            nzb,
+            out_dir,
+            &plan.set,
+            plan.needed,
+            already,
+            sniffed_vols,
+            buf_pool.clone(),
+            extractor,
+            reports,
+            &plan.missing,
+            recreated_names,
+            mapped_fetched,
+            mapped_yield,
+            // Fast verify is the default and CRC32 is what the
+            // in-stream path trusts too; an operator who turned
+            // it off is asking for MD5 everywhere, including
+            // here.
+            !fast_verify,
+            cancel,
+            cpu,
+        )
+        .await?;
+        if !ok {
+            declined.push(plan);
+            every = false;
+        }
+    }
+    Ok(every)
+}
+
+/// Pair a slot that never claimed a FileDesc against a set member this
+/// repair rebuilt whole - issue #9's obfuscated post.
+///
+/// An obfuscated post names its files nothing like the PAR2 set does -
+/// issue #9's shape is par2 created FIRST and every file renamed after -
+/// so a file the set covers and parity just rebuilt still lands in
+/// `uncovered_pairs`, purely because its posted subject is a hash. Left
+/// alone that fails a job whose output is complete and MD5-proved.
+///
+/// Reconcile those against set files that no slot claimed and THIS
+/// repair rebuilt whole and proved: one FileDesc per slot, only for a
+/// slot the matcher never gave a verdict on (see the two shapes at the
+/// `retain` below - arrived nothing, or an incomplete head that left the
+/// md5-16k tier nothing to hash), and only when the declared sizes
+/// agree. Whatever stays unpaired still fails the job, so a genuine
+/// out-of-set loss is untouched.
+///
+/// A free function rather than a block inside [`run_set_repair`]:
+/// that function sits at the size gate's 500-line ceiling, and this
+/// band is one subject with one rule. It is per JOB and not per set -
+/// the spare list is the union of every plan's unclaimed-and-proven
+/// members - so it must stay OUTSIDE the per-set repair loop.
+fn reconcile_obfuscated_aliases(
+    plans: &[SetPlan],
+    verifier: &Arc<nzbkit::live::LiveVerifier>,
+    slots: &[Arc<FileSlot>],
+    slot_file: &[usize],
+    nzb: &Arc<Nzb>,
+    set_files_proven: &[String],
+    uncovered_pairs: &mut Vec<(usize, &str)>,
+) {
+    if uncovered_pairs.is_empty() {
+        return;
+    }
+    let mut spare: Vec<_> = plans
+        .iter()
+        .flat_map(|plan| plan.set.files.iter().map(move |f| (plan, f)))
+        .filter(|(plan, f)| {
+            plan.missing.iter().any(|m| m == &f.name)
+                && set_files_proven.iter().any(|p| p == &f.name)
+        })
+        .map(|(_, f)| f)
+        .collect();
+    uncovered_pairs.retain(|(i, _)| {
+        // Two shapes may be an alias, and the second one is here
+        // because the first sentence of this comment used to be the
+        // whole rule and gave a FALSE reason for refusing the rest.
+        //
+        // (a) THE SLOT ARRIVED NOTHING. No yEnc name ever reached
+        //     the matcher, so it had nothing to claim its FileDesc
+        //     with. This is issue #9's own shape and the one the
+        //     e2e fixture drives.
+        //
+        // (b) THE MATCHER NEVER REACHED A VERDICT. The old rule
+        //     refused every slot that wrote bytes, reasoning that
+        //     such a slot "had a yEnc name to claim its FileDesc
+        //     with, and did not". That is only true where the
+        //     matcher got to DECIDE. `head_want()` is min(16 KiB,
+        //     declared length), so losing ANY article covering the
+        //     first 16k leaves the head incomplete, the md5-16k
+        //     tier with nothing to hash and `unmatchable` unset -
+        //     the slot claims nothing, produces no report, and had
+        //     no opinion offered about it either way. A slot that
+        //     DID reach a verdict is still refused, on the original
+        //     reasoning, which now holds: it either claimed (and so
+        //     is not here at all) or was latched unmatchable by a
+        //     completed head that matched no FileDesc.
+        //
+        // `slot_undecided` is the verifier's own answer to (b) - the
+        // latch and the claim are its state, not something to
+        // re-derive off article counters out here.
+        let s = &slots[*i];
+        if s.missing.load(Ordering::Relaxed) != s.total_segments && !verifier.slot_undecided(*i) {
+            return true;
+        }
+        let posted = nzb.files[slot_file[*i]].bytes();
+        // NZB byte counts are yEnc-ENCODED and explicitly
+        // approximate, so this is a sanity band and not an
+        // equality - it is here to stop an unrelated extra
+        // file pairing off against a set file of a quite
+        // different size. A sizeless NZB pairs nothing.
+        //
+        // AND IT STAYS THAT WAY. The sizeless half is deliberately
+        // NOT relaxed alongside (b) above: with no posted size there
+        // is nothing to sanity-check against, and the spare list is
+        // "set members parity rebuilt whole", so dropping the size
+        // requirement would let any unrelated short file in this post
+        // pair off against a rebuilt descriptor and excuse its own
+        // hole. Everything else in this band is what keeps (b) tight
+        // - one spare per slot, and the spare must be BOTH unclaimed
+        // by any slot (`plan.missing`) and proven by this repair.
+        let Some(k) = spare.iter().position(|f| {
+            posted > 0
+                && f.length > 0
+                && posted.saturating_mul(100) >= f.length.saturating_mul(90)
+                && posted.saturating_mul(100) <= f.length.saturating_mul(120)
+        }) else {
+            return true;
+        };
+        let f = spare.remove(k);
+        info!(
+            target: "repair",
+            "✔ {} never arrived under its posted name, and the set rebuilt \
+             it as {} ({} bytes, MD5-proved)",
+            s.hint, f.name, f.length
+        );
+        false
+    });
+}
+
+/// PLAN M31 item 4 - the SECOND entry point for the duplicate-posting
+/// fill, on the volumes the repair has just materialized.
+///
+/// # The limit this exists to lift
+///
+/// `dupefill::wanted_files` refuses a slot where
+/// [`nzbkit::extract::Extractor::is_mapped`] or `is_chased` holds - a
+/// mapped RAR volume and a chased archive keep their bytes in the
+/// extractor rather than in a file, so there is nothing to read back or
+/// to patch in place. That is most real releases, and it made the whole
+/// pass - its wire half and its disk half alike - INERT on them. Pinned
+/// from the other side by
+/// `daemon_donor::a_store_rar_release_is_reached_by_the_article_fill_once_its_volume_is_a_file`,
+/// whose own note measured the two independent gates.
+///
+/// # Why HERE and not by teaching the pass to feed the extractor
+///
+/// Both were on the table (M31 handoff item 4 states them as the
+/// choice). The materialize loop above has just demoted every mapped
+/// and chased slot of a declined set to `SlotMode::RarFallback` with a
+/// writer behind it, so at THIS point `is_mapped` and `is_chased` are
+/// both false and `Extractor::slot_path` answers - which means the pass
+/// runs here with no change to a single one of its gates, and the file
+/// half of it (`write_healed`, the whole-file read-back) works on an
+/// ordinary file. Feeding the extractor instead would put borrowed
+/// bytes through `patch_volume_span` and take on the demote and
+/// chase-conflict post-check protocol `crate::repair` carries a hundred
+/// lines of commentary about, to save a materialize on jobs that -
+/// having got this far - are already being materialized.
+///
+/// # What it gives up, stated rather than implied
+///
+/// The first entry point runs before ANY parity is spent. This one does
+/// not: the mapped repair above may already have fetched recovery
+/// volumes before declining. What it still precedes is every recovery
+/// block the DISK route SPENDS - `disk_repair_declined_sets` is the
+/// next statement - which is the property that matters, since a fetched
+/// slice that is never consumed costs traffic and a consumed one costs
+/// the set's ability to rebuild anything else.
+///
+/// It is also strictly narrower than the first pass rather than a
+/// replacement for it: it runs only for sets the mapped route DECLINED,
+/// because a set that route carried has no damage left to borrow for.
+///
+/// # Why the reports are not rewritten
+///
+/// The first entry point subtracts what it proved from the settle
+/// reports (`FillReport::apply_to`) because everything after it reads
+/// them. This one does not need to: the disk repair below runs its own
+/// verify off disk, so a block healed here is simply a block that pass
+/// finds good. The one later reader of `bad_blocks` is
+/// `rarfix::DamageHint::from_reports`, and a hint says which ranges may
+/// be SKIPPED - so a stale one costs work and never correctness, which
+/// is what its own comment at that site already says.
+#[expect(clippy::too_many_arguments)]
+async fn fill_from_duplicates_off_materialized_volumes(
+    declined: &[&SetPlan],
+    verifier: &Arc<nzbkit::live::LiveVerifier>,
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    slots: &[Arc<FileSlot>],
+    servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
+    out_dir: &Path,
+    donor_nzbs: &[PathBuf],
+    donor_dirs: &[PathBuf],
+    cancel: Option<&crate::repair::SideCancel>,
+    reports: &[(usize, nzbkit::live::SlotReport)],
+) {
+    if donor_nzbs.is_empty() || declined.is_empty() {
+        return;
+    }
+    let plain: Vec<ServerConfig> = servers.iter().map(|(c, _)| c.clone()).collect();
+    let mut filled = super::dupefill::FillReport::default();
+    for plan in declined {
+        filled.absorb(
+            super::dupefill::fill_from_duplicate_postings(
+                &plain, &plan.set, plan.index, verifier, reports, extractor, slots, out_dir,
+                donor_nzbs, donor_dirs, cancel,
+            )
+            .await,
+        );
+    }
+    note_dupefill(&filled);
+}
+
+/// TODO 311: repair EVERY damaged set, then judge the job once.
+///
+/// The division is what makes this tractable and is worth stating: the
+/// repairs are per set (each has its own parity, block size and set id),
+/// and everything after them - the re-extract, the RAR recovery-record
+/// fallback, the obfuscated-alias reconciliation and the three ✘ checks -
+/// is per JOB and runs once over the union of what the repairs proved.
+/// Running the whole of this function per set would re-extract the output
+/// directory N times and judge the job on one set's evidence.
 #[expect(clippy::too_many_arguments)]
 async fn run_set_repair(
-    set: &nzbkit::par2::Par2Set,
+    plans: &[SetPlan],
+    verifier: &Arc<nzbkit::live::LiveVerifier>,
     extractor: &Arc<nzbkit::extract::Extractor>,
     journal: &Arc<nzbkit::journal::Journal>,
     slots: &[Arc<FileSlot>],
@@ -791,16 +1559,19 @@ async fn run_set_repair(
     // to stop them. `crate::repair::SideCancel`; None on the CLI.
     cancel: Option<&crate::repair::SideCancel>,
     mut damage_in_mapped: bool,
-    needed: usize,
     already: &[usize],
     sniffed_vols: &[usize],
     reports: &[(usize, nzbkit::live::SlotReport)],
-    missing_files: &[String],
     in_set_bad: Vec<&str>,
     mut uncovered_pairs: Vec<(usize, &str)>,
     // §293: donor directories for the adoption scan - see
     // `fetch_and_repair`, which is the only reader.
     donor_dirs: &[PathBuf],
+    // PLAN M31 item 4: the same duplicate postings `settle_with_set`
+    // already ran the fill against BEFORE this function, for the
+    // second entry point below - the one that reaches the slots the
+    // first pass had to refuse.
+    donor_nzbs: &[PathBuf],
 ) -> Result<RepairOutcome> {
     let mut all_good;
     let mut reextract_failed: Option<String> = None;
@@ -833,34 +1604,33 @@ async fn run_set_repair(
     // this provider for and what came back. A decline hands it to
     // `fetch_and_repair` so the same refusal is not bought twice.
     let mut mapped_yield: Option<crate::repair::VolumeYield> = None;
-    let mapped_ok = if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_none() {
-        try_mapped_repair(
-            servers,
-            nzb,
-            out_dir,
-            set,
-            needed,
-            already,
-            sniffed_vols,
-            buf_pool.clone(),
-            extractor,
-            reports,
-            missing_files,
-            &mut recreated_names,
-            &mut mapped_fetched,
-            &mut mapped_yield,
-            // Fast verify is the default and CRC32 is what the
-            // in-stream path trusts too; an operator who turned
-            // it off is asking for MD5 everywhere, including
-            // here.
-            !fast_verify,
-            cancel,
-            &mut cpu,
-        )
-        .await?
-    } else {
-        false
-    };
+    // TODO 311: one attempt PER SET. `mapped_ok` is the conjunction -
+    // the mapped route has to have carried every damaged set for the
+    // materialize path below to be skippable, because that path is the
+    // only other way a set gets repaired at all. A set that declines
+    // is remembered so the disk pass reruns only what is still owed:
+    // repeating a set the mapped route already healed would re-fetch
+    // its volumes for damage that no longer exists.
+    let mut declined: Vec<&SetPlan> = Vec::new();
+    let mapped_ok = mapped_repair_every_set(
+        plans,
+        &mut declined,
+        servers,
+        nzb,
+        out_dir,
+        already,
+        sniffed_vols,
+        buf_pool,
+        extractor,
+        reports,
+        &mut recreated_names,
+        &mut mapped_fetched,
+        &mut mapped_yield,
+        fast_verify,
+        cancel,
+        &mut cpu,
+    )
+    .await?;
     // Mapped repair writes corrected plaintext through the
     // crypto shim, which refreshes chain checkpoints and
     // final-block padding. Persist those facts before any
@@ -880,9 +1650,15 @@ async fn run_set_repair(
     // before returning - the same standard, so those names count
     // (`recreated_names`). A file it merely left alone still
     // does not.
-    let mut set_files_proven: Vec<String> = Vec::new();
+    //
+    // Seeded from `recreated_names` on BOTH branches since TODO 311,
+    // because `mapped_ok` is now a conjunction over several sets and can
+    // be false while one set's mapped repair recreated files and proved
+    // them. Discarding those on the strength of ANOTHER set's decline
+    // would fail the job on `unproven_bad` for a file parity had rebuilt
+    // and whole-file-MD5'd.
+    let mut set_files_proven: Vec<String> = std::mem::take(&mut recreated_names);
     if mapped_ok {
-        set_files_proven = std::mem::take(&mut recreated_names);
         // §94 B / row 27: the repair's self-prove (below) vouches for
         // every block of the set, including the ones it just rebuilt,
         // but the verifier's block states were taken before it and
@@ -943,7 +1719,12 @@ async fn run_set_repair(
             damage_in_mapped |= any_mapped || any_rar_chased;
             for (sidx, r) in reports {
                 if extractor.is_mapped(*sidx) || extractor.is_chased(*sidx) {
-                    if let Some(pname) = &r.par2_name {
+                    // Same GH #63 guard as the settle loop above: a
+                    // materialized volume must not be renamed back to a
+                    // hash either.
+                    if let Some(pname) = &r.par2_name
+                        && filedesc_name_is_better(&slots[*sidx], pname)
+                    {
                         extractor.rename(*sidx, pname);
                     }
                     if let Err(e) = extractor.materialize(*sidx) {
@@ -959,35 +1740,28 @@ async fn run_set_repair(
                 extractor, slot_file, servers, nzb, out_dir, buf_pool, cancel,
             )
             .await?;
+            // PLAN M31 item 4: those volumes are FILES now, so the
+            // duplicate-posting fill can reach them - see
+            // [`fill_from_duplicates_off_materialized_volumes`].
+            fill_from_duplicates_off_materialized_volumes(
+                &declined, verifier, extractor, slots, servers, out_dir, donor_nzbs, donor_dirs,
+                cancel, reports,
+            )
+            .await;
         }
-        let main_par2 = {
-            let mut p = None;
-            for (sidx, slot) in slots.iter().enumerate() {
-                if slot.is_par2_main
-                    && let Some(path) = extractor.slot_path(sidx)
-                {
-                    p = Some(path);
-                    break;
-                }
-            }
-            // Obfuscated post: the sniffed bootstrap's on-disk
-            // file carries the same critical packets a named
-            // main would - good enough for the par2cmdline
-            // fallback's set argument.
-            p.or_else(|| sniff_bootstrap.and_then(|s| extractor.slot_path(s)))
-        };
-        let repaired = fetch_and_repair(
+        let repaired = disk_repair_declined_sets(
+            &declined,
+            &mut set_files_proven,
             servers,
             nzb,
             out_dir,
-            set,
-            needed,
-            main_par2,
+            slots,
             already,
             sniffed_vols,
-            &mapped_fetched,
+            sniff_bootstrap,
+            mapped_fetched,
             mapped_yield,
-            buf_pool.clone(),
+            buf_pool,
             extractor,
             &mut repair_shortfall,
             cancel,
@@ -995,11 +1769,6 @@ async fn run_set_repair(
             donor_dirs,
         )
         .await?;
-        // A successful disk repair re-read the WHOLE set off
-        // disk, so it speaks for every file the set names.
-        if repaired {
-            set_files_proven = set.files.iter().map(|f| f.name.clone()).collect();
-        }
         // Repaired volume files on disk → re-extract them cleanly.
         // rc=0 requires the END state to be usable output, not
         // just a successful repair.
@@ -1019,7 +1788,7 @@ async fn run_set_repair(
         // was recreated and greened the mixed job still packed
         // (Codex H2, 2 Aug). A recreated bare payload passes
         // through the re-extract untouched (no volumes → success).
-        let recreated_set = !missing_files.is_empty();
+        let recreated_set = plans.iter().any(|p| !p.missing.is_empty());
         if repaired && (damage_in_mapped || recreated_set) {
             // The ladder's own reason where it has one - a bomb
             // verdict names the DISK, and this sentence names the
@@ -1048,7 +1817,15 @@ async fn run_set_repair(
                 // the RR pass can leave it unopened. Slots the set never
                 // claimed are absent from `reports` and get the full
                 // pass.
-                let hint = crate::rarfix::DamageHint::from_reports(reports, set.block_size);
+                // The RAR recovery-record rung is per JOB - it opens the
+                // volumes in `out_dir`, which no set owns - so the hint
+                // takes ONE block size, the largest set's. A hint is a
+                // hint: it says which byte RANGES of a volume the
+                // verifier proved clean so the pass can skip them, and a
+                // range derived from another set's block size is at worst
+                // a range not skipped.
+                let hint_bs = plans.first().map_or(0, |p| p.set.block_size);
+                let hint = crate::rarfix::DamageHint::from_reports(reports, hint_bs);
                 // The rung's own reason where it has one, on the same
                 // terms as the re-extract arm above: a bomb verdict
                 // names the DISK and must be quoted, and an ordinary
@@ -1070,59 +1847,22 @@ async fn run_set_repair(
             }
         }
     } // mapped_ok else
-    // An obfuscated post names its files nothing like the PAR2
-    // set does - issue #9's shape is par2 created FIRST and
-    // every file renamed after - so a file the set covers and
-    // parity just rebuilt still lands in `uncovered_pairs`,
-    // purely because its posted subject is a hash. Left alone
-    // that fails a job whose output is complete and MD5-proved.
-    //
-    // Reconcile those against set files that no slot claimed
-    // and THIS repair rebuilt whole and proved: one FileDesc
-    // per slot, only for a slot that arrived nothing at all,
-    // and only when the declared sizes agree. Whatever stays
-    // unpaired still fails the job, so a genuine out-of-set
-    // loss is untouched.
-    if all_good && !uncovered_pairs.is_empty() {
-        let mut spare: Vec<_> = set
-            .files
-            .iter()
-            .filter(|f| {
-                missing_files.iter().any(|m| m == &f.name)
-                    && set_files_proven.iter().any(|p| p == &f.name)
-            })
-            .collect();
-        uncovered_pairs.retain(|(i, _)| {
-            // Only a slot that arrived NOTHING can be an alias:
-            // one that wrote bytes had a yEnc name to claim its
-            // FileDesc with, and did not.
-            let s = &slots[*i];
-            if s.missing.load(Ordering::Relaxed) != s.total_segments {
-                return true;
-            }
-            let posted = nzb.files[slot_file[*i]].bytes();
-            // NZB byte counts are yEnc-ENCODED and explicitly
-            // approximate, so this is a sanity band and not an
-            // equality - it is here to stop an unrelated extra
-            // file pairing off against a set file of a quite
-            // different size. A sizeless NZB pairs nothing.
-            let Some(k) = spare.iter().position(|f| {
-                posted > 0
-                    && f.length > 0
-                    && posted.saturating_mul(100) >= f.length.saturating_mul(90)
-                    && posted.saturating_mul(100) <= f.length.saturating_mul(120)
-            }) else {
-                return true;
-            };
-            let f = spare.remove(k);
-            info!(
-                target: "repair",
-                "✔ {} never arrived under its posted name, and the set rebuilt \
-                 it as {} ({} bytes, MD5-proved)",
-                s.hint, f.name, f.length
-            );
-            false
-        });
+    // §9's obfuscated-alias reconciliation, hoisted whole - see
+    // [`reconcile_obfuscated_aliases`] for the rule and for the two slot
+    // shapes it admits. Out of line because this function is at the size
+    // gate's 500-line function ceiling and the band is a self-contained
+    // subject; nothing about the ordering changed - it still runs after
+    // every set's repair and before the three ✘ checks below.
+    if all_good {
+        reconcile_obfuscated_aliases(
+            plans,
+            verifier,
+            slots,
+            slot_file,
+            nzb,
+            &set_files_proven,
+            &mut uncovered_pairs,
+        );
     }
     // TODO 159 item 1: WHETHER the repair worked is what licenses a
     // per-file quarantine, so latch it before the three checks below
@@ -1363,10 +2103,15 @@ async fn disk_par2_fallback(
                 consumed.extend(rep.consumed_sources);
                 healed.extend(r.names);
             }
-            Ok(RepairStatus::Unrepairable { needed, have }) => {
+            Ok(RepairStatus::Unrepairable {
+                needed,
+                have,
+                adopted,
+            }) => {
                 warn!(
                     target: "par2",
-                    "UNREPAIRABLE - need {needed} recovery block(s), have {have}"
+                    "UNREPAIRABLE - need {needed} recovery block(s), have {have}{}",
+                    crate::repair::adopted_clause(adopted)
                 );
                 repair_shortfall = Some(crate::repair::RepairShortfall::Blocks { needed, have });
                 every_set_ok = false;
@@ -1824,7 +2569,10 @@ pub(super) async fn fetch_matched_deferred(
     extractor: &Arc<nzbkit::extract::Extractor>,
     cancel: Option<&crate::repair::SideCancel>,
 ) {
-    if let Some(set) = verifier.set() {
+    // Every adopted set (TODO 311): a deferred slot is payload if ANY
+    // of them names it. `matched_deferred` marks what it matched, so a
+    // slot cannot be reconciled twice across the loop.
+    for set in verifier.sets() {
         for (sidx, file_size) in sniff.matched_deferred(&set) {
             info!(
                 target: "par2",
@@ -1898,12 +2646,44 @@ pub(super) async fn fetch_matched_deferred(
 #[cfg(test)]
 mod spare_contract_tests {
     use super::*;
+
+    /// GH #63: the FileDesc rename is guarded, and guarded only in the
+    /// losing direction.
+    ///
+    /// Both `extractor.rename` sites in this file go through
+    /// `filedesc_name_is_better`, so a recovery set generated AFTER the
+    /// obfuscating rename - which lists the hashes back, and which
+    /// `nzbfast-par2-name-recovery` measured to be the common order -
+    /// cannot rename a correctly-named file to a hash. Fixing the write
+    /// side alone would not have been enough on #63's post: it ships a
+    /// set PER FILE, so every track's own set would have renamed it
+    /// straight back.
+    #[test]
+    fn a_hash_filedesc_does_not_rename_a_named_file_back() {
+        // #63: the subject named it, the set does not.
+        let named = slot("01-duo_something_bi-noir.mp3", false, 0);
+        assert!(!filedesc_name_is_better(
+            &named,
+            "c238183c9ea852006dbc09ffa6a26e987f76060474363d"
+        ));
+
+        // #43/#47: the subject is a hash, the FileDesc is the recovery.
+        // This is the whole deobfuscation line and it must keep working.
+        let obf = slot("2137d880a074c9f1e0b3a5d6c7e8f901", false, 0);
+        assert!(filedesc_name_is_better(&obf, "Some.Film.2026-GRP.mkv"));
+
+        // A real FileDesc over a real subject name still wins: the set
+        // is MD5-proven and nothing is being given up.
+        assert!(filedesc_name_is_better(&named, "Track 01 - Real Title.mp3"));
+    }
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn slot(hint: &str, par2: bool, errors: usize) -> Arc<FileSlot> {
         Arc::new(FileSlot {
             hint: hint.into(),
+            hint_is_posted_name: nzbkit::release::stem_is_a_name(hint),
+            name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main: par2,
             sample_skipped: false,
             par2_sniffed: AtomicBool::new(false),
@@ -1959,5 +2739,53 @@ mod spare_contract_tests {
             spared_metadata_errors(&[slot("extra.part02.rar", false, 2)], &HashSet::new()),
             0
         );
+    }
+
+    /// The MIXTURE discriminator, at the census rather than through a
+    /// whole download: which key it matches on, and what it refuses to
+    /// answer.
+    ///
+    /// The e2e leg
+    /// `a_set_whose_file_the_post_offered_and_lost_whole_is_still_rebuilt`
+    /// pins the BEHAVIOUR; this pins the two decisions inside it that a
+    /// tidy-up would quietly undo. The obfuscated case is here so the
+    /// stated limit is a test and not only a comment: a hash-subject
+    /// post answers `false`, its set stays skipped, and nothing about
+    /// this census pretends otherwise.
+    #[test]
+    fn the_offered_census_reads_names_and_says_nothing_about_hashes() {
+        // The mixture and the stray, side by side and told apart: the
+        // post offers track03 and has never heard of the other release.
+        let post = [slot("track01.bin", false, 0), slot("track03.bin", false, 0)];
+        let offered = names_offered_by_the_post(&post);
+        assert!(offered.contains("track03.bin"));
+        assert!(!offered.contains("elsewhere-a.bin"));
+
+        // Per FILE, not per set. The census answered per set for a day,
+        // and one generic name shared with a stray (`01.rar` twice on
+        // one wire) then marked the stray's ENTIRE contents as this
+        // post's - its never-posted files were charged to damage, which
+        // is the exact failure the guard exists to prevent. A set
+        // pairing `never-posted.bin` with `track03.bin` gets the
+        // offered answer for track03 alone.
+        assert!(!offered.contains("never-posted.bin"));
+
+        // Sanitized and lowercased, the key `union_set_names` and the
+        // coverage census either side of the guard already use. A
+        // matcher narrowed to a byte compare passes every case above
+        // and fails this one.
+        let shouty = names_offered_by_the_post(&[slot("TRACK03.BIN", false, 0)]);
+        assert!(shouty.contains("track03.bin"));
+
+        // THE STATED LIMIT, as a test. An obfuscated post names nothing
+        // the FileDesc can be matched against, so the census declines
+        // and the set falls back to being skipped exactly as it was
+        // before this existed. Size-banding it against the FileDesc
+        // length is what `reconcile_obfuscated_aliases` does for the
+        // same question, and is rejected here for the reason at
+        // `names_offered_by_the_post`: that pairing only ever SPARES a
+        // slot, and this answer CHARGES a file to a set's damage.
+        let obf = names_offered_by_the_post(&[slot("2137d880a074c9f1e0b3a5d6c7e8f901", false, 0)]);
+        assert!(!obf.contains("track03.bin"));
     }
 }

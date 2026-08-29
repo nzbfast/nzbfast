@@ -162,11 +162,16 @@ impl Shared {
     /// (`0.25 x fleet`) would stop rotating degraded sessions.
     ///
     /// Every OTHER reader of `alive` is a presence test (`> 0`) and is
-    /// right as it stands, with one that is worth naming because it
-    /// looks like a count: `want_handoff`'s `alive > 1`, which keeps
-    /// one worker on the server for a requeue. A parked worker satisfies
-    /// that honestly - it takes the admission the handing-off worker
-    /// released and dials - so it belongs in that count and not here.
+    /// right as it stands. The hand-over room check used to be the
+    /// exception - `alive > 1`, keeping "one worker" for a requeue, on
+    /// the argument that a parked body takes the admission the leaver
+    /// releases and dials. That argument was the flaw (27 Aug sweep
+    /// finding 7): the released admission wakes the parker, but it
+    /// still races the SUCCESSOR job's workers for the host lease, so
+    /// the kept body can sit in `acquire` with no permit and no socket
+    /// while `live_mask` still counts the server. `want_handoff` /
+    /// `claim_handoff` therefore bound on THIS count now - a leftover
+    /// must be socket-capable, and a parked body is not one.
     pub(super) fn workers_dialling_on(&self, si: usize) -> Option<usize> {
         let alive = self.alive.get(si)?.load(Ordering::Relaxed);
         Some(alive.saturating_sub(self.parked.get(si)?.load(Ordering::Relaxed)))

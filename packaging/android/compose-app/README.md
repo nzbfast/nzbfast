@@ -1,6 +1,6 @@
 # nzbfast for Android (Jetpack Compose)
 
-The native Android app: Material 3, dark-first, playback-first. One
+The native Android app: Material 3, dark-first, DOWNLOADER-first. One
 UI, two sources - "this device" runs the bundled slim engine on the
 phone (exec'd from nativeLibraryDir, same mechanism as the test APK in
 `../app`); "my server" points the same screens at an nzbfast daemon
@@ -8,11 +8,61 @@ you already run. The player is Media3 ExoPlayer on the daemon's
 /stream endpoint, so Matroska plays with hardware decode and range
 seeks.
 
-Screens: Connect (mode picker + first-run news-server form), Home
-(active jobs with live progress, a "Play test preview" button the
-moment the daemon says the file is readable, then history; swipe to
-pause/resume/delete), Add (document picker, nzblnk paste, and
-share-target for .nzb files and nzblnk links).
+Screens: Connect (mode picker + first-run news-server form), Home (the
+queue: aggregate speed and progress, per-job progress, ETA and phase,
+pause/resume/cancel buttons, then history with the daemon's own failure
+reasons; Play appears on any row the contract says is readable), Add
+(document picker, nzblnk paste, and share-target for .nzb files and
+nzblnk links), Settings (export folder, hold-on-mobile-data, and a
+readout of the phone-shaped defaults below).
+
+## TODO 281 AN1-AN4, 26 Aug 2026
+
+**AN1, downloader-first Home.** The queue is the headline and Play is a
+row affordance. Delete moved off the swipe and onto a button with a
+confirmation - a left swipe deleting a download irreversibly is a
+gesture a pocket can perform - and that confirmation asks the question
+that matters on a phone: whether the bytes go too, defaulting ON for a
+queue row (partials are worth nothing) and OFF for a finished one.
+
+**AN2, `EngineService` is a real dataSync foreground service.** It polls
+the daemon itself at 5 s, because the notification is the only surface a
+user who has left the app can see and the poll behind it therefore
+cannot live in an activity; it shows aggregate progress weighted by
+BYTES (averaging per-job percentages says a 40 GB job at 10% beside a
+200 MB job at 90% is halfway done); it holds a PARTIAL_WAKE_LOCK while
+the queue has work, because a foreground service is exempt from being
+killed and NOT from the device suspending; and it stops when the queue
+drains and the app is off screen. The stop signal is the daemon's own
+`queue_idle` (contract addition - see CONTRACT.md), never an empty queue
+list: a job in its tail is in neither list. Pause-on-metered is a
+setting, driven by a ConnectivityManager callback, and it undoes only
+the pause it applied - which takes two halves, not one. Until 28 Aug
+2026 only the second half was there: the latch said which pauses to give
+back and nothing said which it was allowed to TAKE, so a queue the USER
+had paused was adopted by the next step onto cellular and resumed by the
+next step off it, or by turning the setting off while still on cellular,
+which is a user-paused download running over metered data. Both edges
+now go through one rule in `MeteredPolicy.kt`, tested there.
+
+**AN3, storage.** Downloads land in app-private storage and are
+EXPORTED, rather than written straight into a SAF tree: a document URI
+has no `pwrite` and no preallocation, so aiming the one-pass writer at
+one would cost preallocation, range writes and the resume journal in a
+single move. Pick a folder with `ACTION_OPEN_DOCUMENT_TREE` and finished
+jobs are copied there by the service (so it works with the app closed),
+or per job from a history row. Free space is on the Add screen, and the
+picked NZB's own declared size is checked against it before the add.
+
+**AN4, phone-shaped defaults** (`DeviceProfile`): `--mem-limit` from
+total RAM / 16 clamped 192-512 MB rather than the engine's desktop
+RAM/4; `NZBFAST_CPU_WORKERS` from the count of cores in the fastest
+frequency tier, read out of `cpuinfo_max_freq`, because
+`available_parallelism` counts little cores as big ones and these pools
+share one thermal envelope; and the news server's connection count
+derived from `linkDownstreamBandwidthKbps` rather than a desktop's
+fixed number. All three are shown back on the Settings screen, read
+from the same functions that produced them.
 
 The endpoints the app uses are inventoried in `CONTRACT.md`. The API
 client is hand-rolled (HttpURLConnection + the platform org.json);
@@ -34,7 +84,17 @@ ANDROID_HOME=... ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Tests: `./gradlew :app:testDebugUnitTest`.
+Tests: `./gradlew :app:testDebugUnitTest` - 32 JUnit tests, ~25 s, no
+device and no engine binary. They are the only thing holding this app
+to the frozen contract in `CONTRACT.md`: each parses a response
+snapshot recorded from a real daemon, so a daemon-side shape drift
+lands here as a red test.
+
+Both this and `:app:lintDebug` run in CI on every push that touches
+`packaging/android/compose-app/**`, as two separate steps of the one
+job in `.github/workflows/android-lint.yml` (tests wired 27 Aug 2026;
+that file's header argues the step-not-task-not-job shape and the
+`if:` that stops a red test hiding a red lint).
 
 ### Toolchain from nothing (macOS)
 
@@ -74,8 +134,15 @@ for by name:
 ./gradlew :app:lintDebug
 ```
 
-It is green as of 23 Aug 2026 (0 errors, 14 warnings; the warnings are
-dependency-freshness and manifest notes, not this app's code). It was
+It is green: 0 errors and 17 warnings as of 27 Aug 2026, read off the
+CI runner's own `lint-results-debug.xml` rather than a local run - `8x
+UseKtx`, `4x GradleDependency`, `2x NewerVersionAvailable`, `1x
+AndroidGradlePluginVersion`, `1x OldTargetApi`, `1x
+MissingApplicationIcon`. Two of those are worth knowing about: the
+`OldTargetApi` hold is explained in the workflow header (targeting 35
+caps dataSync foreground services, which `EngineService` would hit),
+and `MissingApplicationIcon` is real - no `android:icon` and no `res/`
+directory, so the launcher draws the generic default. It was
 red from 6 Aug with 6 errors, all from `0324c3c3` (PiP and player),
 and both fixes are worth knowing before you touch either file:
 

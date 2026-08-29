@@ -1483,7 +1483,11 @@ pub fn verify_rev5_payload(
     let mut buf = vec![0u8; 256 * 1024];
     let mut position = volume.payload.start;
     while position < volume.payload.end {
-        let take = buf.len().min((volume.payload.end - position) as usize);
+        // Clamp in u64 BEFORE narrowing: on a 32-bit target a remaining span
+        // that is a multiple of 4 GiB casts to 0 and the loop never advances.
+        // (nzbfast-local change, 27 Aug 2026 - re-apply on the next rars
+        // re-sync, see vendor/rars/VENDORING.md.)
+        let take = (volume.payload.end - position).min(buf.len() as u64) as usize;
         src.read_at(position, &mut buf[..take])?;
         crc.update(&buf[..take]);
         position += take as u64;

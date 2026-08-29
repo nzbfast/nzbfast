@@ -332,9 +332,7 @@ fn scan_packets_parallel<'a, F: FnMut(RawPacket<'a>)>(
     // The serial scan's hash budget exists to stop crafted overlapping-magic
     // quadratics; this walk hashes each span exactly once and never overlaps,
     // so total hashing is already bounded by the input length.
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .min(spans.len());
+    let threads = crate::mem::cpu_workers().min(spans.len());
     let ok = std::sync::atomic::AtomicBool::new(true);
     let next = std::sync::atomic::AtomicUsize::new(0);
     // Bytes actually digested, for the caller's running total. Spans never
@@ -539,6 +537,32 @@ impl Par2Set {
             files,
             recovery_blocks_seen: recovery_blocks,
         })
+    }
+
+    /// The recovery-set id of the FIRST structurally valid packet in
+    /// `input`, or `None` if the buffer holds no valid packet at all.
+    ///
+    /// Every packet of a `.par2` file - main index and `.volNN+MM`
+    /// volume alike - carries its set id in the header, so this
+    /// identifies which set a downloaded file belongs to WITHOUT
+    /// needing a Main packet in it. That is what makes it the right key
+    /// for [`crate::live::pick_sets`]: a recovery volume must be parsed
+    /// TOGETHER with its own set's index (its slices are what
+    /// `recovery_blocks_seen` counts), and parsing each input alone -
+    /// what the single-set fallback used to do - both loses those
+    /// slices and cannot tell a volume from a second release.
+    ///
+    /// Stops at the first packet rather than scanning the whole file:
+    /// a mixed-set BUFFER does not occur (one file is one set), and the
+    /// caller's `Par2Set::parse` refuses one anyway.
+    pub fn set_id_of(input: &[u8]) -> Option<[u8; 16]> {
+        let mut id = None;
+        scan_packets(input, |pkt| {
+            if id.is_none() {
+                id = Some(pkt.set_id);
+            }
+        });
+        id
     }
 
     /// The set's member files as `(hash16k hex, member name)`.

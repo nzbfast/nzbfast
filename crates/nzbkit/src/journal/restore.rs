@@ -527,6 +527,12 @@ pub fn restore_for(
         } in &rec.articles
         {
             if *crypto && crypto_verdict.get(&(slot, id.as_str())) != Some(&true) {
+                // TODO 309(b): counted, not logged here - `nzbkit` is
+                // the library and the resume banner lives in the
+                // daemon's plan. Its own counter, because "we could not
+                // re-encrypt this" and "your partial output moved" are
+                // different facts about a user's disk.
+                out.dropped_crypto += 1;
                 continue;
             }
             let mut all_ok = true;
@@ -634,6 +640,18 @@ pub fn restore_for(
                     sources.append(&mut art_src);
                 }
                 restored_here = true;
+            } else {
+                // TODO 309(b): the article had a placement record and
+                // this restore refused it, so its bytes go back on the
+                // wire. Every `break` above lands here, and all of them
+                // are the same fact from the reader's side - the file
+                // the bytes were written into does not open, or is no
+                // longer long enough to hold the span. Counted whole:
+                // an article is admitted only when EVERY fragment is,
+                // so a half-readable article refetches entire and the
+                // honest figure is all of its fragments.
+                out.dropped_source.0 += 1;
+                out.dropped_source.1 += frags.iter().map(|f| f.len).sum::<u64>();
             }
         }
         if restored_here {

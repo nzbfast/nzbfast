@@ -52,7 +52,8 @@ essentially never guesses a yEnc header:
 The corpus is gitignored. Seed it from the in-tree fixtures so the fuzzer
 starts from valid inputs and reaches the decode paths fast:
 
-    mkdir -p corpus/rar_extract corpus/par2_parse corpus/rar_recovery_scan
+    mkdir -p corpus/rar_extract corpus/par2_parse corpus/rar_recovery_scan \
+             corpus/nzb_parse corpus/yenc_decode
     # EVERY .rar in the fixture tree, at any depth, under a
     # path-qualified name. Both halves of that matter and the recipe
     # here got both wrong until 23 Aug 2026: a `rar*/*.rar` glob is ONE
@@ -64,6 +65,16 @@ starts from valid inputs and reaches the decode paths fast:
         cp "$f" "corpus/rar_extract/$(printf '%s' "${f##*fixtures/}" | tr / _)"
       done
     cp ../tests/fixtures/par2/*.par2                  corpus/par2_parse/
+    # nzb_parse had no seeding recipe at all until 27 Aug 2026, despite
+    # three real fixtures sitting right there: a truncated body, a
+    # garbled element and a GitHub nzbget#699 undefined-entity repro.
+    cp ../testdata/nzb/*.nzb                          corpus/nzb_parse/
+    # yenc_decode's corpus is COMMITTED (seeds/yenc_decode/, 11 files /
+    # 44 KB, added 27 Aug 2026) for the reason the 25 Jul entry below
+    # describes: corpus/ is gitignored, so "seed it before you fuzz"
+    # was machine-local advice that a fresh clone or a 60s CI burst
+    # never sees - see seeds/README.md.
+    cp seeds/yenc_decode/*                             corpus/yenc_decode/
     # mediaprobe's fixtures are generated, not committed - the test
     # suite writes them out on request:
     NZBFAST_WRITE_FUZZ_SEEDS=$PWD/corpus/mediaprobe \
@@ -133,3 +144,56 @@ than reading it:
   but through a one-level `rar*/*.rar` glob that cannot see
   `rar15_40/rar300/`, which is where all three legacy RR fixtures live -
   so CI reached the leg added in `507eef5ed` only by mutation.
+
+27 Aug 2026 - post-v1.2.4 overnight campaign (`fuzz-campaign-post-v124`),
+triggered by the release's parser churn: §296 changed settle ordering on
+the extract path, §297 added nzbindex as a new NZB ingestion source, and
+the 22-23 Aug disk-unpack round touched the RAR/7z container readers.
+`vendor/rars` had also been re-synced since the last campaign (23 Jul),
+which alone would have called for a re-fuzz of every RAR target.
+
+Ten targets, 4h each (`-max_total_time=14400`), all ten run in PARALLEL
+(one core apiece, on a 32-core box already carrying other lanes - kept
+to 10 concurrent jobs deliberately, per the "leave room" instruction):
+`yenc_decode`, `nzb_parse`, `par2_parse`, `par2_verify_diff`,
+`rar_extract`, `rar_map`, `rar_name_probe`, `rar_recovery_scan`,
+`sevenz_name_probe`, `sevenz_disk_gate` (the last two with
+`-malloc_limit_mb=128` per this file's own guidance above). Corpora
+seeded from every in-tree fixture and committed `seeds/` corpus this
+file and `seeds/README.md` name; `yenc_decode` additionally seeded from
+a hand-built 11-file corpus committed this same night (see
+`seeds/README.md`), closing the cold-start gap the 25 Jul entry above
+left open (the fix that day was to a gitignored `corpus/`, so it never
+survived past that one machine).
+
+**352,444,582 executions total, ZERO crashes, OOMs, timeouts or leaks,
+across all ten targets:**
+
+| target | executions | exec/s (avg) | final corpus |
+|---|---|---|---|
+| `yenc_decode` | 44,520,321 | 3,091 | 1,779 files / 6.9 MB |
+| `nzb_parse` | 3,794,579 | 263 | 1,983 files / 136 MB |
+| `par2_parse` | 64,107,746 | 4,452 | 180 files / 996 KB |
+| `par2_verify_diff` | 8,559,854 | 594 | 329 files / 1.3 MB |
+| `rar_extract` | 520,560 | 36 | 2,158 files / 295 MB |
+| `rar_map` | 45,473,993 | 3,158 | 1,029 files / 9.2 MB |
+| `rar_name_probe` | 73,992,172 | 5,138 | 197 files / 788 KB |
+| `rar_recovery_scan` | 16,091,634 | 1,117 | 2,970 files / 27 MB |
+| `sevenz_name_probe` | 24,480,219 | 1,700 | 2,829 files / 11 MB |
+| `sevenz_disk_gate` | 70,903,504 | 4,924 | 807 files / 3.2 MB |
+
+`rar_extract`'s low exec/s is corpus-driven, not a stall: it holds the
+largest average input of any target here (its corpus is dominated by
+real multi-hundred-KB archives) and the decompressor genuinely does
+that much work per input. `nzb_parse` similarly - a 1 MiB `-max_len`
+XML body is expensive to parse and its corpus grew to 136 MB of
+fuzzer-discovered structure. `-print_final_stats=1` output (peak RSS,
+new-units-added) landed for only 2 of the 10 logs; the other 8 lost it
+to a buffering/flush race between the `-max_total_time` watchdog firing
+and process exit - a harness artifact, not a target property. No
+process approached the 4096 MB `-rss_limit_mb` ceiling on the two
+observed (peak 1046 MB and 1106 MB).
+
+Corroborated by the two 7z targets' own final-stats block:
+`sevenz_name_probe` added 15,513 new corpus units over the run (cov
+still climbing at the 4h mark), `sevenz_disk_gate` added 4,887.

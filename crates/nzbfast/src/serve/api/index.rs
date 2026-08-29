@@ -82,6 +82,7 @@ fn m_index_stats(
         // the dashboard shows db_bytes as "the file" and
         // quotes live_bytes as what it will become.
         let file_bytes = std::fs::metadata(&d.index_db).map(|m| m.len()).unwrap_or(0);
+        let ledger = d.index_ledger_snapshot();
         let cap = d.index_max_bytes.load(Ordering::Relaxed);
         json!({
             // The master switch, separate from `paused`: the
@@ -109,6 +110,9 @@ fn m_index_stats(
             "index_evict": d.index_evict.load(Ordering::Relaxed),
             "index_evict_order": d.index_evict_order.lock_ok().clone(),
             "index_evict_kinds": d.index_evict_kinds.lock_ok().clone(),
+            "index_keep_kinds": d.index_keep_kinds.lock_ok().clone(),
+            "index_evict_scope": d.index_evict_scope.lock_ok().clone(),
+            "index_evict_headroom": d.index_evict_headroom.load(Ordering::Relaxed),
             "compact_pending": d.compact_pending.load(Ordering::Relaxed),
             // Truth-audit I: the hourly trim, narrated. The manual
             // button reports exactly what it removed; the automatic
@@ -118,6 +122,34 @@ fn m_index_stats(
             // something.
             "last_auto_trim": d.last_auto_trim.lock_ok().map(|(at, removed)| json!({
                 "at": at, "removed": removed,
+            })),
+            // The two facts the space readout was designed around and
+            // which nothing recorded until now: has the reclaim ever
+            // actually run, and what has the cap cost so far. Read from
+            // the in-memory mirror - a poll may never take the index
+            // mutex (TODO 166) - and persisted in the database's own kv,
+            // so a restart does not report "never compacted" about a
+            // file that was compacted last night.
+            //
+            // `last_compact` is null when this database has never been
+            // compacted, which the dashboard says in words rather than
+            // drawing as a zero. `evicted` is null before either figure
+            // has moved, for the same reason: "0 releases removed" and
+            // "nothing has ever needed removing" read very differently
+            // beside a size limit.
+            // The `stats_cold` of the ledger: its stored half has not
+            // been read back yet, so a null below means "not known"
+            // rather than "never happened". Only the never-compacted
+            // sentence needs it - the others degrade to silence - but
+            // that one is an assertion, and it must not be made out of
+            // a figure the daemon has not fetched.
+            "ledger_cold": !ledger.loaded,
+            "last_compact": ledger.last_compact_at.map(|at| json!({
+                "at": at, "freed_bytes": ledger.last_compact_freed,
+            })),
+            "evicted": (ledger.evicted_rows > 0).then(|| json!({
+                "rows": ledger.evicted_rows,
+                "live_bytes": ledger.evicted_bytes,
             })),
         })
     })
@@ -754,6 +786,9 @@ fn m_index_wipe(
                 failed.push(format!("{}: {e}", art.display()));
             }
             if failed.is_empty() {
+                // The ledger's facts were about the file that just went.
+                // Memory only, so this takes no index handle.
+                d.reset_index_ledger();
                 info!(
                     target: "index",
                     "{} wiped by request - rescan starts next cycle",
@@ -795,6 +830,10 @@ fn m_index_compact(
             let after = std::fs::metadata(&d.index_db).map(|m| m.len()).unwrap_or(0);
             let freed = before.saturating_sub(after);
             if ok {
+                // Memory only, and no index handle - so this adds no
+                // reach to a handler that TODO 166's gate already
+                // classifies as an explicit admin action.
+                d.note_compact(freed);
                 info!(target: "index", "compacted - {} MB reclaimed", freed / (1 << 20));
                 // An explicit compact answers whatever a prune
                 // deferred, so the idle loop has nothing left to do.
@@ -879,6 +918,54 @@ fn m_index_shrink_to(
                         }
                     }
                 }
+            }
+        }
+    })
+}
+
+/// The dry run: what WOULD an eviction at the current cap (or an
+/// explicit `value=<size>`) remove? Deletes nothing - the engine walks
+/// the same candidate order and stops where the real pass would.
+fn m_index_evict_preview(
+    d: &Arc<Daemon>,
+    _req: &mut tiny_http::Request,
+    params: &std::collections::HashMap<String, String>,
+    _ctx: &ApiCtx<'_>,
+    _api_body: &mut Option<Vec<u8>>,
+) -> Option<Value> {
+    Some({
+        let target = match params.get("value").map(String::as_str) {
+            Some(v) => match parse_size(v) {
+                Some(t) => t,
+                None => {
+                    return Some(json!({"status": false,
+                        "error": "pass value=<size>, e.g. value=20G"}));
+                }
+            },
+            None => d.index_max_bytes.load(Ordering::Relaxed),
+        };
+        if target == 0 {
+            json!({"status": false,
+                "error": "index_max_bytes is 0 (unlimited) - set a cap, \
+                          or ask with an explicit value=<size>"})
+        } else {
+            match d.evict_preview_at(target) {
+                None => json!({"status": false, "error": "index unavailable"}),
+                Some((pv, n_prot)) => json!({
+                    "status": true,
+                    "target_bytes": pv.target_bytes,
+                    "low_bytes": pv.low_bytes,
+                    "live_bytes": pv.live_bytes,
+                    "rows": pv.rows,
+                    "est_bytes": pv.est_bytes,
+                    "by_kind": pv.by_kind.iter().map(|(k, n, b)| json!({
+                        "kind": k, "rows": n, "est_bytes": b,
+                    })).collect::<Vec<_>>(),
+                    "reachable": pv.reachable,
+                    "truncated": pv.truncated,
+                    "protected_keys": n_prot,
+                    "protected_skipped": pv.protected_skipped,
+                }),
             }
         }
     })
@@ -2079,6 +2166,7 @@ pub(in crate::serve) fn dispatch(
         // (The way to prune with eviction off is index_shrink_to,
         // where the user names the size themselves.)
         "index_evict_now" => return m_index_evict_now(d, _req, params, ctx, _api_body),
+        "index_evict_preview" => return m_index_evict_preview(d, _req, params, ctx, _api_body),
         // Newsgroup discovery (the dashboard's "Find newsgroups"
         // browser): search/filter/sort/page the cached LIST
         // ACTIVE catalogue. First call with no catalogue and no
