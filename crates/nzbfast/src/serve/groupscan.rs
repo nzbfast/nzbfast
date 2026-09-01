@@ -882,10 +882,9 @@ mod sampler_stays_sequential {
         let peak = Arc::new(AtomicUsize::new(0));
         let port = counting_listener(peak.clone(), Arc::new(AtomicUsize::new(0)));
 
-        let dir =
-            std::env::temp_dir().join(format!("nzbfast-groupscan-serial-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-groupscan-serial-{}", std::process::id())),
+        );
         let cfg = dir.join("config.local.json");
         std::fs::write(
             &cfg,
@@ -952,11 +951,16 @@ mod disabled_server_never_dialled {
         port
     }
 
-    fn two_server_config(off_port: u16, on_port: u16) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("nzbfast-groupscan-enabled-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    /// The guard comes back with the path because the config lives
+    /// inside it - drop it here and the file is gone before the sampler
+    /// reads it.
+    fn two_server_config(
+        off_port: u16,
+        on_port: u16,
+    ) -> (crate::testscratch::ScratchDir, std::path::PathBuf) {
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-groupscan-enabled-{}", std::process::id())),
+        );
         let p = dir.join("config.local.json");
         let mut f = std::fs::File::create(&p).unwrap();
         // The incident's shape exactly: the DISABLED account is first in
@@ -971,7 +975,7 @@ mod disabled_server_never_dialled {
                    "enabled":true,"connections":1}}]}}"#
         )
         .unwrap();
-        p
+        (dir, p)
     }
 
     #[tokio::test]
@@ -979,7 +983,7 @@ mod disabled_server_never_dialled {
         let (tx, rx) = mpsc::channel();
         let off_port = spy(tx.clone(), "disabled");
         let on_port = spy(tx, "enabled");
-        let cfg = two_server_config(off_port, on_port);
+        let (_scratch, cfg) = two_server_config(off_port, on_port);
 
         // The sample itself cannot succeed against a socket that hangs up
         // on the greeting, and does not need to: the question is only

@@ -3,7 +3,8 @@
 //! on disk, however the process dies.
 //!
 //! Its own file rather than `sabcompat.rs`'s, for the size gate (TODO
-//! 106) - the parent is at its 3,000-line ceiling. Same module.
+//! 106) - `sabcompat.rs` was at 3,039 of its 3,000-line ceiling on
+//! 15 Aug 2026. Same module.
 
 use super::*;
 

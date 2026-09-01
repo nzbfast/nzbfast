@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head>
+    <meta type="password">let me in</meta>
+  </head>
+  <file poster="poster@news.example" date="1690000000" subject="&quot;Some.Release.part01.rar&quot; yEnc (1/8)">
+    <groups>
+      <group>alt.binaries.test</group>
+      <group>alt.binaries.multimedia</group>
+    </groups>
+    <segments>
+      <segment bytes="768000" number="1">d1-1@news.example</segment>
+      <segment bytes="768000" number="2">d1-2@news.example</segment>
+      <segment bytes="768000" number="3">d1-3@news.example</segment>
+      <segment bytes="768000" number="4">d1-4@news.example</segment>
+    </segments>
+  </file>
+  <file poster="poster@news.example" date="1690000010" subject="&quot;Some.Release.par2&quot; yEnc (1/1)">
+    <groups>
+      <group>alt.binaries.test</group>
+      <group>alt.binaries.multimedia</group>
+    </groups>
+    <segments>
+      <segment bytes="40000" number="1">m-1@news.example</segment>
+    </segments>
+  </file>
+  <file poster="poster@news.example" date="1690000011" subject="&quot;Some.Release.vol000+01.par2&quot; yEnc (1/2)">
+    <groups>
+      <group>alt.binaries.test</group>
+      <group>alt.binaries.multimedia</group>
+    </groups>
+    <segments>
+      <segment bytes="768000" number="1">v0-1@news.example</segment>
+      <segment bytes="768000" number="2">v0-2@news.example</segment>
+    </segments>
+  </file>
+  <file poster="poster@news.example" date="1690000012" subject="&quot;Some.Release.vol001+02.par2&quot; yEnc (1/3)">
+    <groups>
+      <group>alt.binaries.test</group>
+      <group>alt.binaries.multimedia</group>
+    </groups>
+    <segments>
+      <segment bytes="768000" number="1">v1-1@news.example</segment>
+      <segment bytes="768000" number="2">v1-2@news.example</segment>
+      <segment bytes="768000" number="3">v1-3@news.example</segment>
+    </segments>
+  </file>
+  <file poster="poster@news.example" date="1690000013" subject="&quot;Some.Release.vol-01.par2&quot; yEnc (1/2)">
+    <groups>
+      <group>alt.binaries.test</group>
+      <group>alt.binaries.multimedia</group>
+    </groups>
+    <segments>
+      <segment bytes="768000" number="1">v2-1@news.example</segment>
+      <segment bytes="768000" number="2">v2-2@news.example</segment>
+    </segments>
+  </file>
+</nzb>

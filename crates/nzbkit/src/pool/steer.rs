@@ -835,6 +835,59 @@ impl Shared {
     }
 }
 
+impl ServerLive {
+    /// This server's published windowed delivery rate right now, B/s,
+    /// or `None` while it has never delivered a body this run.
+    ///
+    /// Lives here rather than beside [`ServerLive::down_secs`] because
+    /// it is the READ half of [`Shared::note_srv_bytes`] a few lines
+    /// above, and the two have to stay in step: that fold stores the
+    /// rate ALREADY divided by tau (`ewma_rate(folded)`), so this reader
+    /// must decay it and must not divide again. Dividing twice reads a
+    /// 100 MB/s provider as 7 MB/s and looks entirely plausible.
+    ///
+    /// DECAYED BY HAND, and that is the whole reason this is a method
+    /// and not a field read. The mirror only moves when it is TOUCHED,
+    /// so a server that stopped delivering keeps its last fold forever -
+    /// a Servers pane reading the field raw would report a provider that
+    /// went silent ten minutes ago at full speed. `srv_rate_at` is
+    /// stamped beside the value for exactly this, and it is a WALL-CLOCK
+    /// stamp (`now_ms`), unlike the [`Shared::srv_rate`] twin's, which
+    /// is against the run clock - a reader outside the pool has no run
+    /// clock to ask.
+    ///
+    /// 0 is the never-folded sentinel, so an untrained server is `None`
+    /// rather than a confident zero: `for_servers` starts the stamp at
+    /// 0 and the fold only ever writes a real `now_ms`.
+    ///
+    /// THE TWIN'S SENTINEL IS A DIFFERENT VALUE, and that asymmetry is
+    /// the one thing to know before writing a third reader of this
+    /// quantity. [`Shared::srv_rate`] one screen up gates on
+    /// `prev == u64::MAX`, because `Shared::new` initialises its own
+    /// `srv_rate_at` vector to `u64::MAX`; the published mirror beside
+    /// it starts at 0. Both are correct where they are, and both are
+    /// pinned by a test, so nothing on the tree is wrong today - what
+    /// is easy is copying one gate into the other's reader, which is
+    /// SILENT and answers `Some(0.0)` where `None` is owed, in BOTH
+    /// directions. The mirror given `u64::MAX` reads an untrained
+    /// stamp of 0 as trained and decays a colossal `dt` to zero; the
+    /// Shared reader given `0` reads `u64::MAX` as trained and
+    /// `saturating_sub` floors `dt` at zero. The second is the one
+    /// with teeth: `steer_rate_per_worker` falls back to the whole-run
+    /// average PRECISELY when `srv_rate` is `None`, so a `Some(0.0)`
+    /// hands the depth clamp and the racing gates a cold fleet dressed
+    /// as a 0 B/s provider. Take the sentinel from the initialiser of
+    /// the stamp you are actually reading, never from the neighbour.
+    pub fn srv_rate_bps(&self) -> Option<f64> {
+        let at = self.srv_rate_at.load(Ordering::Relaxed);
+        if at == 0 {
+            return None;
+        }
+        let dt = now_ms().saturating_sub(at);
+        Some(ewma_decay(self.srv_rate.load(Ordering::Relaxed), dt) as f64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1024,6 +1077,56 @@ mod tests {
         assert!(
             (rate - expect).abs() < expect * 0.05,
             "steady-state rate should read ~{expect} B/s, got {rate}"
+        );
+    }
+
+    #[test]
+    fn published_srv_rate_is_untrained_decays_and_is_not_divided_twice() {
+        // Built by hand rather than driven through `note_srv_bytes`:
+        // that fold only writes the mirror when the pool carries a
+        // `LiveStats`, and `PoolConfig::default()` carries none - so a
+        // rig test would be asserting on a field nothing had written.
+        let sl = ServerLive::default();
+        assert_eq!(
+            sl.srv_rate_bps(),
+            None,
+            "0 is the never-folded sentinel, not a confident zero"
+        );
+
+        // The fold stores B/s. The reader must hand that back, NOT
+        // divide by tau a second time - which would read a 100 MB/s
+        // provider as ~7 MB/s and look entirely plausible.
+        //
+        // THE BANDS BELOW ARE DELIBERATELY WIDE, and that is the same
+        // lesson `per_worker_rate_divides_by_live_workers` records a
+        // few tests down: this reader re-decays against `now_ms()` at
+        // the instant it is called, so the gap between STORING the
+        // stamp and READING it is whatever the scheduler gave, and a
+        // tight band is a bound on the scheduler rather than on the
+        // answer. A 1% band here would have failed on any gap over
+        // 145 ms, which a loaded Windows shard or the qemu armv7 leg
+        // can produce; a floor of half the value tolerates a full ten
+        // seconds. Neither mutation survives the widening - the double
+        // division answers 6.93 M against a 50 M floor, and no decay
+        // at all answers 100 M against a 60 M ceiling.
+        sl.srv_rate.store(100_000_000, Ordering::Relaxed);
+        sl.srv_rate_at.store(now_ms(), Ordering::Relaxed);
+        let now = sl.srv_rate_bps().expect("trained once the stamp is set");
+        assert!(
+            (50_000_000.0..=100_000_001.0).contains(&now),
+            "a fresh fold reads back as itself, not divided by tau twice (that is 6.93 M); got {now}"
+        );
+
+        // Silence decays it. One half-life of it halves the number, so
+        // a provider that went quiet cannot go on reporting full speed.
+        sl.srv_rate_at.store(
+            now_ms().saturating_sub(SRV_RATE_HALF_LIFE_MS),
+            Ordering::Relaxed,
+        );
+        let half = sl.srv_rate_bps().expect("still trained");
+        assert!(
+            (40_000_000.0..=60_000_000.0).contains(&half),
+            "one half-life of silence halves the published rate (no decay would be 100 M); got {half}"
         );
     }
 
@@ -1536,6 +1639,7 @@ mod tests {
             prebyte_expiries: 0,
             soft_430: 0,
             recheck_430: 0,
+            recheck_at: 0,
             fenced: false,
             rearms: 0,
             ladder: false,

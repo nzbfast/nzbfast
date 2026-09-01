@@ -1,7 +1,7 @@
 Package: nzbfast
 Version: @@VERSION@@
 Architecture: @@ARCH@@
-Maintainer: nzbfast <releases@nzbfast.com>
+Maintainer: nzbfast <nzbfast@pm.me>
 Installed-Size: @@INSTALLED_SIZE@@
 Depends: passwd
 Section: net

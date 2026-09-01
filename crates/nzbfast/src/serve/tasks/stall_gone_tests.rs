@@ -194,10 +194,15 @@ fn window(tick: u64, samples: &[(u64, u64, u64)]) -> VecDeque<Sample> {
 
 /// A daemon with somewhere for the queue to go next, without which
 /// every demotion arm correctly stays silent.
-fn daemon_with_a_peer_waiting(tag: &str) -> Arc<Daemon> {
-    let dir = std::env::temp_dir().join(format!("nzbfast-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+/// The guard comes back with the daemon because the daemon reads and
+/// writes under `dir` for its whole life: drop it here and the tree goes
+/// out from under it. Handing back a bare `Arc<Daemon>` and leaking the
+/// directory is what this used to do - one `$TMPDIR` entry per tag per
+/// run, forever. See `crates/nzbfast/tests/scratch/mod.rs`.
+fn daemon_with_a_peer_waiting(tag: &str) -> (crate::testscratch::ScratchDir, Arc<Daemon>) {
+    let dir = crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-{tag}-{}", std::process::id())),
+    );
     let d = crate::serve::testutil::test_daemon(&dir);
     let waiting = crate::serve::job_from_json(&serde_json::json!({
         "nzo_id": "waiting1",
@@ -210,7 +215,7 @@ fn daemon_with_a_peer_waiting(tag: &str) -> Arc<Daemon> {
     d.queue
         .lock_ok()
         .push_back(Arc::new(std::sync::Mutex::new(waiting)));
-    d
+    (dir, d)
 }
 
 /// The flatline is the NEWEST unbroken run of samples with the same
@@ -255,7 +260,7 @@ fn a_byte_in_the_newest_interval_ends_the_flatline() {
 /// article".
 #[test]
 fn a_flatline_full_of_refusals_is_the_partial_verdict() {
-    let d = daemon_with_a_peer_waiting("partialarm");
+    let (_scratch, d) = daemon_with_a_peer_waiting("partialarm");
     let l = live(&["a.example"]);
     l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
     l.servers[0].articles_tried.store(1400, Ordering::Relaxed);
@@ -293,7 +298,7 @@ fn a_flatline_full_of_refusals_is_the_partial_verdict() {
 /// from, so a single tick of flatline is deliberately not enough.
 #[test]
 fn a_flatline_under_the_floor_holds_its_tongue() {
-    let d = daemon_with_a_peer_waiting("partialfloorsecs");
+    let (_scratch, d) = daemon_with_a_peer_waiting("partialfloorsecs");
     let l = live(&["a.example"]);
     l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
     l.servers[0].articles_missing.store(100, Ordering::Relaxed);
@@ -311,7 +316,7 @@ fn a_flatline_under_the_floor_holds_its_tongue() {
 /// either kind.
 #[test]
 fn a_flatline_with_no_refusals_in_it_is_a_tail_not_a_takedown() {
-    let d = daemon_with_a_peer_waiting("partialtail");
+    let (_scratch, d) = daemon_with_a_peer_waiting("partialtail");
     let l = live(&["a.example"]);
     l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
     l.servers[0].articles_missing.store(800, Ordering::Relaxed);
@@ -336,7 +341,7 @@ fn a_flatline_with_no_refusals_in_it_is_a_tail_not_a_takedown() {
 /// asked yet stands this arm down exactly as it does its early twin.
 #[test]
 fn an_unprobed_server_stands_the_partial_verdict_down() {
-    let d = daemon_with_a_peer_waiting("partialunprobed");
+    let (_scratch, d) = daemon_with_a_peer_waiting("partialunprobed");
     let l = live(&["a.example", "quiet.example"]);
     l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);
     l.servers[0].articles_missing.store(200, Ordering::Relaxed);
@@ -368,7 +373,7 @@ fn an_unprobed_server_stands_the_partial_verdict_down() {
 /// and costs a restart when nothing can.
 #[test]
 fn the_partial_arm_stays_silent_with_nothing_else_to_run() {
-    let d = daemon_with_a_peer_waiting("partialalone");
+    let (_scratch, d) = daemon_with_a_peer_waiting("partialalone");
     d.queue.lock_ok().clear();
     let l = live(&["a.example"]);
     l.servers[0].bytes.store(4_800_000, Ordering::Relaxed);

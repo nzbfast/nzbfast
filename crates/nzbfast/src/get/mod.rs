@@ -11,6 +11,8 @@ mod vrig;
 use vrig::{Rig, build_rig, install_seek};
 mod fleet;
 use fleet::{Fleet, build_fleet};
+mod jobspec;
+pub(crate) use jobspec::{JobSpec, JournalOwner};
 mod plan;
 use plan::{FetchPlan, Intake, build_fetch_plan, build_intake, clamp_concurrency};
 // The demotion watchdog (`serve/tasks/stall.rs`) predicts this gate's
@@ -26,15 +28,28 @@ mod dropped;
 // PLAN M31 stage 1: borrow a bad block's bytes from a duplicate
 // posting's live articles, before repair spends a recovery block on it.
 mod dupefill;
+mod emptydesc;
+mod latesets;
+mod publishplan;
+// X5-24: which loss a leftover recovery set stands for, when the post
+// admits exactly one answer (30 Aug 2026 ruling).
+mod residual;
+// M4-07: a sidecar entry declaring the CRC32 of the empty input names a
+// zero-byte placeholder nothing was posted for (30 Aug 2026 ruling).
+mod sfvempty;
+mod sfvname;
 mod tail;
+/// M4-70: which ARTICLE's yEnc name a file is published under. The
+/// weakest naming tier, last, over the files still sitting under a name
+/// only a yEnc header ever gave them.
+mod yencname;
 use tail::finish_run;
-mod settle;
-use settle::fetch_matched_deferred;
 mod rig;
+mod settle;
 mod workers;
 use workers::{
-    Counters, TailWatchers, build_counters, drain_network, spawn_deadlock_watchdog,
-    spawn_decode_consumers, spawn_rate_ticker, spawn_tail_watchers,
+    TailWatchers, build_counters, drain_network, spawn_deadlock_watchdog, spawn_decode_consumers,
+    spawn_rate_ticker, spawn_tail_watchers,
 };
 
 /// Queue-row activity token, advanced at section transitions only
@@ -161,18 +176,6 @@ async fn run_fetch(
     }
 }
 
-/// Test-only (`NZBFAST_TEST_STALL_TAIL_MS`): hold the post-network tail
-/// open so the §129 lane suite can observe the Finishing state
-/// deterministically. Unset (the only production state) is a no-op.
-async fn test_stall_tail() {
-    if let Some(ms) = std::env::var("NZBFAST_TEST_STALL_TAIL_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-    }
-}
-
 /// Sweep F1 (27 Aug 2026): a §293 donation lands AFTER the restore
 /// already ran in the map shape - which wrote NO volume bytes, every
 /// restored span still sitting in the previous run's output files,
@@ -289,10 +292,13 @@ fn donation_reshape(
 ///
 /// A free function rather than the inline loop it was until 28 Aug 2026,
 /// and the reason is worth stating so nobody folds it back: its caller
-/// sits at the 500-line function ceiling (`tools/size-gate.py`), so an
-/// ordinary lane threading one more counter through has nowhere to put
-/// it. Behaviour is unchanged - the same loop over the same three
-/// inputs, hoisted whole.
+/// sat at EXACTLY the 500-line function ceiling (`tools/size-gate.py`),
+/// so an ordinary lane threading one more counter through had nowhere
+/// to put it. The 31 Aug 2026 split bought that caller 120 lines of
+/// margin, which is room to fold this back and no reason to - and a
+/// new OPTION now has [`JobSpec`] to live in, which costs the caller
+/// nothing at all. Behaviour is unchanged - the same loop over the
+/// same three inputs, hoisted whole.
 fn seed_donated_slots(
     donated: &donor::Donated,
     slot_file: &[usize],
@@ -313,71 +319,50 @@ fn seed_donated_slots(
     }
 }
 
-#[expect(clippy::too_many_arguments)]
-pub(crate) async fn get_with_progress(
-    config: &Path,
-    nzb_path: &Path,
-    out_dir: &Path,
-    connections: usize,
-    window: usize,
-    decoders: usize,
-    // PAR2 fast verify (TODO §10): CRC32-only in-stream block claims.
-    // NZBFAST_FAST_VERIFY=0/1 overrides for bench A/Bs.
-    fast_verify: bool,
-    // M32 "lean" verify (slow-CPU boost): with fast verify on, also skip
-    // the per-article yEnc CRC once PAR2 covers a file - in-stream
-    // integrity rests on the PAR2 block CRC32 alone (one CRC32 layer
-    // instead of two). Settle read-back + repair authority unchanged;
-    // PAR2-less downloads keep full article CRCs automatically.
-    verify_lean: bool,
-    no_extract: bool,
-    // Delete the spent recovery set once a repair has VERIFIED: the
-    // daemon's `par_cleanup`, threaded in because the only place that
-    // reads it today (the job tail's extension sweep) cannot see the
-    // files this one deletes. Bears solely on the obfuscated disk-side
-    // arm below, which removes magic-sniffed volumes no extension rule
-    // can ever match; named `*.par2` stays the job tail's business.
-    par_cleanup: bool,
-    // PLAN M32 leftover (sabnzbd#3475): leave a job's sample/proof
-    // clips unfetched instead of downloading them and deleting them
-    // afterwards. Off by default - see the setting's own note for why
-    // ours differs from SABnzbd's.
-    skip_samples: bool,
-    // Explicit archive password (CLI/API). NZB `<meta type="password">`
-    // and the `Name{{password}}.nzb` filename convention are picked up
-    // automatically; this overrides both.
-    password: Option<String>,
-    // TODO 101: this job's own yes to the volume-eating unpack, given in
-    // the disk-full drawer. Consulted only in `low_disk` mode - `always`
-    // is itself the consent and `off` cannot be talked into it - and
-    // never enough on its own: the set must still have verified.
-    eat_consent: bool,
-    // §293: directories whose files the disk repair's adoption scan may
-    // read as block sources - a failed predecessor's output, resolved
-    // by the daemon when this job is a switch (`alt_from`). Read-only
-    // everywhere downstream; empty on the CLI, the sidecar and every
-    // ordinary job.
-    donor_dirs: Vec<PathBuf>,
-    // PLAN M31: NZBs of DUPLICATE POSTINGS whose ARTICLES may fill a bad
-    // block - see `get::dupefill`. Empty on the CLI and wherever no
-    // alternative is held, which is the pass's whole no-op test.
-    donor_nzbs: Vec<PathBuf>,
-    progress: Option<Arc<AtomicU64>>,
-    hub: Option<Arc<StreamHub>>,
-    // The nzo_id that owns this run's hub extractor (daemon jobs); empty for
-    // CLI downloads. Tags the installed extractor so /stream ownership is
-    // checked atomically with the clone (finding 11).
-    stream_owner: &str,
-    // net_done fires when the network phase is done (all articles
-    // terminal, consumers drained) - the daemon starts the next job's
-    // download then, while this job's tail (settle/repair/extract) runs.
-    // Carries the instant, because the runner may only READ it later:
-    // since the cross-job hand-over it can be holding a predecessor's
-    // drain when this job's network ends, and a wall time taken at the
-    // read would bill that wait to this job's average speed.
-    net_done: Option<tokio::sync::oneshot::Sender<std::time::Instant>>,
-    budget: nzbkit::mem::MemBudget,
-) -> Result<()> {
+/// The one-pass download drive: fetch, decode, verify, repair and
+/// extract one NZB. Its inputs are [`JobSpec`] - see that module for
+/// why they are a struct and what belongs in it - destructured here
+/// onto the same names the inline parameters used.
+pub(crate) async fn get_with_progress(job: JobSpec<'_>) -> Result<()> {
+    let JobSpec {
+        config,
+        nzb_path,
+        out_dir,
+        connections,
+        window,
+        decoders,
+        fast_verify,
+        verify_lean,
+        no_extract,
+        journal_owner,
+        par_cleanup,
+        skip_samples,
+        password,
+        eat_consent,
+        donor_dirs,
+        donor_nzbs,
+        progress,
+        hub,
+        stream_owner,
+        net_done,
+        budget,
+    } = job;
+    // THE OUTPUT ROOT, RESOLVED ONCE - every line below carries the
+    // resolved path. `nzbkit::disk::open_out_leaf` refuses a payload
+    // whose immediate parent is a symlink, and for a flat name that
+    // parent is this directory, so a job pointed at a symlinked (or, on
+    // Windows, junctioned) downloads folder errored on its first write
+    // where it used to succeed. The fix belongs HERE and not at the
+    // write: following a symlink there is the hole X5-08 was. What it
+    // deliberately leaves alone - a link ABOVE the root, and an ordinary
+    // directory, which comes back byte-identical - is at
+    // `resolve_out_root`.
+    //
+    // FIRST: `clamp_concurrency` below probes this directory's storage
+    // and `build_intake` opens the journal in it, and a probe of a link
+    // and a probe of its target can disagree.
+    let resolved_out = nzbkit::disk::resolve_out_root(out_dir);
+    let out_dir: &Path = &resolved_out;
     // B4 small-RAM clamp + rotational decoder pick: see clamp_concurrency.
     let (connections, window, decoders) = clamp_concurrency(connections, window, decoders, out_dir);
 
@@ -403,7 +388,7 @@ pub(crate) async fn get_with_progress(
         resume_vols,
         resume_map,
         resume_route,
-        resume_state,
+        mut resume_state,
     } = build_intake(config, nzb_path, out_dir, password, no_extract, &hub)?;
     // §293 plan-side adoption (TODO 305 item 2): before the plan
     // finalizes, take whole member files off a failed predecessor's disk
@@ -422,6 +407,11 @@ pub(crate) async fn get_with_progress(
         completed,
         resume_route,
     );
+    // M4-70 across a crash: run 1's per-slot name tally, taken before the
+    // state is freed. `build_fetch_plan` seeds it into the slots it
+    // builds, because a resumed slot with an EMPTY tally reads as "every
+    // article agreed" and the settle-time re-decision never runs.
+    let resume_votes = std::mem::take(&mut resume_state.name_votes);
     drop(resume_state);
     publish_resume_route(&hub, stream_owner, resume_route);
     // The slot + article fetch plan: see build_fetch_plan. The
@@ -446,6 +436,7 @@ pub(crate) async fn get_with_progress(
         &resume_vols,
         skip_samples,
         &donated.by_file,
+        &resume_votes,
     );
     // The resume id set is read exactly once - by the plan walk above -
     // and nothing downstream asks about it again (`resuming` already
@@ -538,7 +529,7 @@ pub(crate) async fn get_with_progress(
     let Fleet {
         buf_pool,
         out_pool,
-        servers,
+        mut servers,
     } = build_fleet(
         &cfg_all,
         config,
@@ -550,63 +541,53 @@ pub(crate) async fn get_with_progress(
         &budget,
     )
     .await;
+    // Where a pool reports that it is HOLDING an article's terminal
+    // verdict back. Wired here rather than inside `build_fleet` because
+    // the flag belongs to the JOB's extractor, not to a server's
+    // configuration - and the extractor exists by now, `build_rig`
+    // having run above. The tail watchers' recovery side-fetch inherits
+    // it with the rest of the fleet, deliberately: a recovery block that
+    // will not arrive is the same doubt about the same set repairing
+    // from what is still in RAM. See `nzbkit::extract::LossDoubt`.
+    for (_, c) in &mut servers {
+        c.loss_doubt = Some(extractor.loss_doubt());
+    }
+    let servers = servers;
 
     // The outcome channel, the shared counters and samples, the
     // consumer throttle, the backfill cell: see build_counters in
-    // get/workers.rs.
-    let Counters {
-        tx,
-        rx,
-        decoded_bytes,
-        decode_errors,
-        retention_excluded,
-        missing_430,
-        takedown_430,
-        unasked_430,
-        unasked_noted,
-        transport_failed,
-        transport_sample,
-        decode_error_sample,
-        disk_full_sample,
-        throttle_mbps,
-        throttle_t0,
-        backfill,
-        rt,
-    } = build_counters(&budget, progress, &hub, resume_have_bytes);
+    // get/workers.rs. NOT destructured onto inline names the way the
+    // other phase bundles are - it is handed WHOLE to the decode fleet
+    // below and, as `counters.loss`, to the tail, which is what stops
+    // two of its five identically-typed `Arc<CauseSplit>` ledgers being
+    // swapped in a long positional call. See `spawn_decode_consumers`
+    // and `workers::LossLedgers` for the whole reasoning.
+    let counters = build_counters(&budget, progress, &hub, resume_have_bytes);
+    // Body-encryption spike (Tensai75 draft, `NZBFAST_YENC_CRYPT=1`):
+    // the job's decryption context, None whenever the spike is off, the
+    // job has no password, or the NZB cannot carry the draft's
+    // continuous segmentIndex - see `nzbkit::yencrypt::JobCrypt`.
+    let yencrypt = nzbkit::yencrypt::JobCrypt::for_job(&nzb.files, &slot_file, password.as_deref());
     // The decode-consumer fleet: see spawn_decode_consumers.
     let (consumers, pending_d, pending_r) = spawn_decode_consumers(
         decoders,
-        &rx,
+        &counters,
         &buf_pool,
         &out_pool,
         &slots,
         &id_to_slot,
         &seek_names,
-        &decoded_bytes,
         &fetch_done,
-        &decode_errors,
-        &retention_excluded,
-        &missing_430,
-        &takedown_430,
-        &unasked_430,
-        &unasked_noted,
-        &transport_failed,
-        &transport_sample,
-        &decode_error_sample,
-        &disk_full_sample,
         &verifier,
         &extractor,
         &shape_said,
         &par2_outstanding,
         &journal,
-        &backfill,
         &sniff,
         &replay,
         &queue_ctl,
-        &rt,
-        throttle_mbps,
-        throttle_t0,
         servers.first().is_some_and(|(_, c)| c.crc_steer),
+        &yencrypt,
     );
     // The consumers hold the only other references to the id manifest,
     // and nothing downstream of the spawn reads it. Dropping the
@@ -618,7 +599,7 @@ pub(crate) async fn get_with_progress(
     // Live rate ticker: see spawn_rate_ticker. It also carries §282
     // item 3's running damage projection - see `DamageWatch`.
     let ticker = spawn_rate_ticker(
-        decoded_bytes.clone(),
+        counters.decoded_bytes.clone(),
         slots.clone(),
         workers::DamageWatch {
             nzb: nzb.clone(),
@@ -636,7 +617,7 @@ pub(crate) async fn get_with_progress(
     // Deadlock watchdog: see spawn_deadlock_watchdog.
     let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog = spawn_deadlock_watchdog(
-        decoded_bytes.clone(),
+        counters.decoded_bytes.clone(),
         slots.clone(),
         queue_ctl.clone(),
         abort_flag.clone(),
@@ -665,12 +646,12 @@ pub(crate) async fn get_with_progress(
         &verifier,
         &queue_ctl,
         &fetch_done,
-        &decoded_bytes,
+        &counters.decoded_bytes,
         &slot_file,
     );
     // The network fetch itself - sharded across I/O runtimes when the
     // fleet is big enough (D1), single-runtime otherwise: see run_fetch.
-    let stats = run_fetch(&servers, ids, tx, &queue_ctl).await;
+    let stats = run_fetch(&servers, ids, counters.tx, &queue_ctl).await;
     // Network phase over: stop the side tasks, join the decode
     // consumers, flush the last D records, honor abort/pause, signal
     // net_done and re-read the late password: see drain_network in
@@ -691,65 +672,20 @@ pub(crate) async fn get_with_progress(
         watchdog,
         &stalled,
         &abort_flag,
-        &disk_full_sample,
+        &counters.disk_full_sample,
         &queue_ctl,
         &note_activity,
         net_done,
         &hub,
         stream_owner,
         password,
-        &backfill,
+        &counters.backfill,
     )
     .await?;
 
-    // §94 A backstop: any restored file whose offset-0 article never
-    // arrived (a 430, a take-down, an abort) still owes its bytes to
-    // the extractor. Feeding them here holds exactly as the old
-    // up-front driver did, which is the correct cost for a volume that
-    // has no header to place against - and it is what stops a restored
-    // span being silently dropped. No-op on a fresh run, on the adopt
-    // path, and on the ordinary case where every head landed.
-    if !replay.is_empty() {
-        replay.drain_rest(&extractor, &verifier);
-    }
-    {
-        // Their article ids sit in `completed`, so nothing downstream
-        // can tell the extractor never received those bytes: the run
-        // must fail loudly rather than settle over the hole (Codex
-        // F-04). Deleting the journal makes the next attempt a fresh
-        // fetch, where the providers still have the articles.
-        let failed = replay.failures();
-        if !failed.is_empty() {
-            anyhow::bail!(
-                "resume replay failed for {} - delete the job's .nzbfast.journal and retry to fetch it afresh",
-                failed.join(", ")
-            );
-        }
-        let (files, bytes) = replay.replayed();
-        if files > 0 {
-            info!(
-                target: "resume",
-                "replayed {files} restored file(s) ({:.1} MB) through the one-pass path, {:.1} MB left in place",
-                bytes as f64 / 1e6,
-                replay.left_in_place() as f64 / 1e6
-            );
-        }
-    }
-
-    test_stall_tail().await;
-
-    // Issue #14 drain fallback - deferred slots the active set covers
-    // fetch on the side machinery: see fetch_matched_deferred in
-    // get/settle.rs.
-    fetch_matched_deferred(
-        &verifier, &sniff, &slots, &slot_file, &servers, &nzb, out_dir, &buf_pool, &extractor,
-        cancel,
-    )
-    .await;
-
-    // Everything after the network drain - accounting, settle/repair,
-    // extraction, the unpack tail and the journal's retirement: see
-    // finish_run in get/tail.rs.
+    // Everything after the network drain - the §94 A replay backstop,
+    // post-drain accounting, settle/repair, extraction, the unpack tail
+    // and the journal's retirement: see finish_run in get/tail.rs.
     finish_run(
         &servers,
         &stats,
@@ -762,15 +698,9 @@ pub(crate) async fn get_with_progress(
         journal,
         out_dir,
         &buf_pool,
-        &decode_errors,
-        &retention_excluded,
-        &decoded_bytes,
-        &missing_430,
-        &takedown_430,
-        &unasked_430,
-        &transport_failed,
-        &transport_sample,
-        &decode_error_sample,
+        &counters.decode_errors,
+        &counters.decoded_bytes,
+        &counters.loss,
         &stalled,
         &pending_r,
         elapsed,
@@ -778,11 +708,13 @@ pub(crate) async fn get_with_progress(
         &resume_vols,
         &prefetched,
         &restored,
+        &replay,
         fast_verify,
         par_cleanup,
         password,
         resuming,
         no_extract,
+        journal_owner,
         resume_map,
         eat_consent,
         &note_activity,

@@ -40,6 +40,15 @@ use nzbkit::extract::DiskArchive;
 /// straddles it.
 const SFX_HEADER_SLACK: usize = 64 << 10;
 
+/// How much head [`nzbkit::sfx::is_launcher_stub`] is given to answer
+/// "is this a program". It reads at most `e_lfanew + 4` of a PE and four
+/// bytes of anything else, and a real DOS stub puts `e_lfanew` inside
+/// the first few hundred bytes, so 4 KiB is generous rather than tight.
+/// Its own read, ahead of the two the arms below do: for a file that is
+/// NOT a program this is the only read that happens at all, and for one
+/// that is it is a page against the 4 MiB the head scan then takes.
+const STUB_PROBE_BYTES: usize = 4 << 10;
+
 /// Is this file an SFX self-extractor - an executable-ish name with a real
 /// archive sitting behind the launcher stub?
 ///
@@ -75,7 +84,11 @@ pub(crate) fn is_sfx_archive(path: &std::path::Path) -> bool {
 ///
 /// Zip is probed first only because its test is the cheapest to run to a
 /// verdict - one tail read, no scan - so a stubbed zip never pays for a
-/// 4 MiB head read it does not need.
+/// 4 MiB head read it does not need. Both are behind
+/// [`nzbkit::sfx::is_launcher_stub`], which is the gate that carries the
+/// safety: confirmation says an archive is THERE, and only a program
+/// header says the file is a self-extractor rather than a data file that
+/// happens to contain one (M4-101).
 ///
 /// A zip whose entries say it is the DELIVERABLE - a jar behind a Launch4j
 /// launcher, an NW.js resource bundle - is not an SFX for our purposes and
@@ -86,6 +99,21 @@ pub(crate) fn sfx_kind(path: &std::path::Path) -> Option<SfxKind> {
         .file_name()
         .is_some_and(|n| nzbkit::sfx::is_sfx_name(&n.to_string_lossy()));
     if !sfx_ext {
+        return None;
+    }
+    // M4-101, and it holds for all THREE families rather than only the
+    // two the row named: measured 31 Aug 2026, a `feature.bin` of dump
+    // bytes with a real RAR at offset 1024 answered `Some(Rar)` here,
+    // and the same dump carrying a zip answered `Some(Zip)`. The
+    // in-stream sniff destroyed that file; this arm does not - the
+    // `.bin` survives, because `is_extractable_archive` keeps SFX out
+    // of the spent-intermediate sweep - but it still sprays an
+    // unrelated archive's members over the release directory, claims
+    // `Produced` and stands the later arms down. The name gate cannot
+    // tell the two apart; a program header can. See
+    // `nzbkit::sfx::is_launcher_stub` for why this is structural and
+    // not a deny list.
+    if !nzbkit::sfx::is_launcher_stub(&read_head(path, STUB_PROBE_BYTES)) {
         return None;
     }
     match nzbkit::zip::stubbed_archive(path) {
@@ -403,11 +431,92 @@ mod sfx_tests {
     /// than vendored so the test owns its inputs (and no third-party
     /// fixture rides into this repo for it).
     fn sfx_from(fixture: &str, out: &std::path::Path, stub_len: usize) {
-        let arch = std::fs::read(fixture).unwrap();
-        let mut stub = vec![0x4du8, 0x5a]; // "MZ", so it looks like a PE
-        stub.extend(std::iter::repeat_n(0x90u8, stub_len));
-        stub.extend(arch);
+        let mut stub = pe_stub(stub_len);
+        stub.extend(std::fs::read(fixture).unwrap());
         std::fs::write(out, stub).unwrap();
+    }
+
+    /// A launcher stub: the three fields `nzbkit::sfx::is_launcher_stub`
+    /// reads, then filler. Both builders here take it, so there is one
+    /// answer in this module to "what does a program look like" - these
+    /// fixtures carried a bare `MZ` before M4-101, which the rule reads
+    /// as a data file that starts with two coincidental bytes.
+    fn pe_stub(len: usize) -> Vec<u8> {
+        let mut v = vec![0x90u8; len.max(0x44)];
+        v[0..2].copy_from_slice(b"MZ");
+        v[2..0x40].fill(0);
+        v[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        v[0x40..0x44].copy_from_slice(b"PE\0\0");
+        v
+    }
+
+    /// M4-101 on the disk side, all three families. A `.bin` that is a
+    /// DUMP carrying an archive is not a self-extractor, and the name
+    /// gate cannot say so: measured 31 Aug 2026 on origin/main, this
+    /// exact fixture answered `Some(Rar)` for the RAR head scan and
+    /// `Some(Zip)` for the zip tail probe. The in-stream sniff destroyed
+    /// the file outright; here the `.bin` survives, but the arm still
+    /// unpacked an unrelated archive over the release directory and
+    /// claimed the level.
+    ///
+    /// Both halves of each pair carry the SAME archive at the SAME
+    /// offset under the SAME name - only the prefix differs - so this
+    /// fails if the rule ever goes back to reading the extension.
+    #[test]
+    fn a_dump_carrying_an_archive_is_not_a_self_extractor() {
+        let dir = tmp("m4101-disk");
+        // Transport-stream sync bytes: no program header anywhere.
+        let dump: Vec<u8> = (0..1024)
+            .map(|i| {
+                if i % 188 == 0 {
+                    0x47u8
+                } else {
+                    (i as u8).wrapping_mul(7)
+                }
+            })
+            .collect();
+        let rar = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../vendor/rars/tests/fixtures/rar50/solid.rar"
+        ))
+        .unwrap();
+        let sevenz = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../nzbkit/tests/fixtures/sevenz/store-single.7z"
+        ))
+        .unwrap();
+        let zip = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../nzbkit/tests/fixtures/zip/store_deflate.zip"
+        ))
+        .unwrap();
+
+        for (label, arch, want) in [
+            ("rar", &rar, SfxKind::Rar),
+            ("7z", &sevenz, SfxKind::SevenZ),
+            ("zip", &zip, SfxKind::Zip),
+        ] {
+            let bad = dir.join(format!("{label}-dump.bin"));
+            let mut b = dump.clone();
+            b.extend(arch);
+            std::fs::write(&bad, &b).unwrap();
+            assert_eq!(sfx_kind(&bad), None, "{label}: a dump is not a program");
+            assert!(!is_sfx_archive(&bad), "{label}");
+
+            // The negative control: same bytes, same offset, behind a
+            // real program. The feature is narrowed, not switched off.
+            let good = dir.join(format!("{label}-real.bin"));
+            let mut g = pe_stub(1024);
+            g.extend(arch);
+            std::fs::write(&good, &g).unwrap();
+            assert_eq!(sfx_kind(&good), Some(want), "{label}: behind a program");
+        }
+        assert_eq!(
+            collect_sfx_archives(&dir).unwrap().len(),
+            3,
+            "the three programs, and none of the three dumps"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The payload is found by SIGNATURE and past the stub. RAR was the
@@ -602,8 +711,7 @@ mod sfx_tests {
     /// bytes so the caller can also write it bare.
     fn zip_sfx(dir: &std::path::Path, name: &str, stub_len: usize, specs: &[Spec]) -> Vec<u8> {
         let z = nzbkit::zip::fixtures::zip_of(specs);
-        let mut buf = vec![0x4du8, 0x5a];
-        buf.extend(std::iter::repeat_n(0x90u8, stub_len));
+        let mut buf = pe_stub(stub_len);
         buf.extend(&z);
         std::fs::write(dir.join(name), buf).unwrap();
         z

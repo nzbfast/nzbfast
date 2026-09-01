@@ -26,6 +26,15 @@ fn srv(host: &str, connected: usize, budget: usize, bytes: u64, blocked: u64) ->
         tried: 100,
         missing: 0,
         art_ms: 0,
+        // TODO 318: no provider has stated a connection cap. The
+        // default every case but the sole-source ones wants, and it
+        // must stay 0: `capped_since` is the gate on the whole
+        // `SoleCap` arm, so a non-zero default would let that verdict
+        // land in a case that is about something else.
+        capped_since: 0,
+        granted_hi: 0,
+        capped_at: 0,
+        cap_said: String::new(),
     }
 }
 
@@ -66,6 +75,19 @@ struct Rig {
     /// flight, which is what a rig with no drain slot reports and
     /// what every case written before this field assumed.
     drain_connected: usize,
+    /// TODO 318: PER-SERVER (tried, missing), for the cases where the
+    /// whole point is that the servers do not agree. `miss` above is
+    /// fleet-uniform, which is the right default for every case about
+    /// the POST - and useless for a case about one server holding a
+    /// post the others have lost, which is the shape this arm exists
+    /// for. Consulted first; a host with no entry falls back to `miss`
+    /// and then to `srv`'s own 100-tried default, so adding this field
+    /// changed no existing case.
+    per_miss: HashMap<String, (u64, u64)>,
+    /// TODO 318: per-server (capped_since, granted_hi, capped_at,
+    /// said) - what a provider has stated about its own connection
+    /// ceiling. Empty for every case but the sole-source ones.
+    caps: HashMap<String, (u64, usize, usize, &'static str)>,
 }
 
 impl Rig {
@@ -82,7 +104,22 @@ impl Rig {
             fleet: (0, 0, false),
             knee: None,
             drain_connected: 0,
+            per_miss: HashMap::new(),
+            caps: HashMap::new(),
         }
+    }
+
+    /// TODO 318: give one host its own article census.
+    fn miss_on(&mut self, host: &str, tried: u64, missing: u64) -> &mut Rig {
+        self.per_miss.insert(host.into(), (tried, missing));
+        self
+    }
+
+    /// TODO 318: state a provider's connection ceiling on one host -
+    /// it granted `granted` of the `asked` we wanted, and said so.
+    fn cap_on(&mut self, host: &str, granted: usize, asked: usize, said: &'static str) -> &mut Rig {
+        self.caps.insert(host.into(), (T0, granted, asked, said));
+        self
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -108,12 +145,23 @@ impl Rig {
                     *blocked += dbl;
                     let recon = self.recon.entry(h.into()).or_default();
                     *recon += dr;
-                    let (tried, missing) = self.miss.unwrap_or((100, 0));
+                    let (tried, missing) = self
+                        .per_miss
+                        .get(h)
+                        .copied()
+                        .or(self.miss)
+                        .unwrap_or((100, 0));
+                    let (since, granted, asked, said) =
+                        self.caps.get(h).copied().unwrap_or((0, 0, 0, ""));
                     ServerTick {
                         refused,
                         reconnects: *recon,
                         tried,
                         missing,
+                        capped_since: since,
+                        granted_hi: granted,
+                        capped_at: asked,
+                        cap_said: said.into(),
                         ..srv(h, c, b, *bytes, *blocked)
                     }
                 })
@@ -369,6 +417,292 @@ fn an_old_post_two_backbones_agree_is_gone() {
         ],
     );
     assert_eq!(r.core.verdict(), (Layer::Missing, "gone"));
+}
+
+/// TODO 318, and the regime this whole arm exists for. Measured on a
+/// live three-provider install, 29 Aug 2026: giganews 98% missing,
+/// usenet.farm 47%, vipernews 0.1%, and vipernews pinned at its own
+/// account's ceiling (`502 connection limit (40) reached`) holding a
+/// handful of the 40 sockets asked for. The published verdict was `missing`/`gone` -
+/// "waiting will not help" - about a post one provider had in full.
+#[test]
+fn the_only_server_that_has_the_post_being_capped_is_its_own_verdict() {
+    let mut r = Rig::new();
+    // Old enough that the `gone` arm would otherwise be licensed, and
+    // two backbones DO agree about their own spools. Neither fact is
+    // about the post.
+    r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
+    r.miss_on("news.giganews.com", 4000, 3920)
+        .miss_on("news.usenetfarm.eu", 4000, 1880)
+        .miss_on("news.vipernews.com", 4000, 4)
+        .cap_on(
+            "news.vipernews.com",
+            7,
+            40,
+            "502 connection limit (40) reached",
+        );
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[
+            ("news.giganews.com", 8, 8, 5_000_000, 100, 0, false),
+            ("news.usenetfarm.eu", 8, 8, 5_000_000, 100, 0, false),
+            // Under its budget, which is what a capped host looks like
+            // - and what `worst_refusal` would convict it for, one arm
+            // further down, in words that send the reader away from the
+            // only server that can finish this job.
+            ("news.vipernews.com", 2, 40, 60_000_000, 100, 0, false),
+        ],
+    );
+    assert_eq!(
+        r.core.verdict(),
+        (Layer::SoleCap, "news.vipernews.com"),
+        "the operative constraint is the cap on the one server that has it"
+    );
+    let e = r.core.sole_capped().expect("the receipts travel with it");
+    assert_eq!(e.granted_hi, 7);
+    assert_eq!(e.capped_at, 40);
+    assert_eq!(e.said, "502 connection limit (40) reached");
+    assert!((e.missing_pct - 0.1).abs() < 0.001, "{}", e.missing_pct);
+    // ...and the fleet-wide rate the old verdict rested on is
+    // untouched: both numbers are true, and the panel ships both.
+    let fleet = r.core.fleet_missing().expect("sample is large enough");
+    assert!((fleet - 0.4837).abs() < 0.001, "{fleet}");
+}
+
+/// The same census with NO provider cap stated. Nothing here licenses
+/// naming a cap, so the verdict falls back to the post - but NOT to
+/// `gone`, because a server holding 99.9% of it refutes "waiting will
+/// not help" whatever the other two backbones agree about.
+#[test]
+fn a_sole_source_with_no_stated_cap_is_the_post_but_never_gone() {
+    let mut r = Rig::new();
+    r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
+    r.miss_on("news.giganews.com", 4000, 3920)
+        .miss_on("news.usenetfarm.eu", 4000, 1880)
+        .miss_on("news.vipernews.com", 4000, 4);
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[
+            ("news.giganews.com", 8, 8, 5_000_000, 100, 0, false),
+            ("news.usenetfarm.eu", 8, 8, 5_000_000, 100, 0, false),
+            ("news.vipernews.com", 8, 8, 60_000_000, 100, 0, false),
+        ],
+    );
+    assert_eq!(r.core.verdict(), (Layer::Missing, ""));
+    assert!(r.core.sole_capped().is_none(), "no cap was ever stated");
+}
+
+/// A cap the provider stated and then GRANTED in full binds nothing.
+/// `capped_since` alone is a fact about some earlier moment; the pair
+/// with `capped_at > granted_hi` is what says sockets were refused.
+#[test]
+fn a_stated_cap_that_granted_everything_asked_binds_nothing() {
+    let mut r = Rig::new();
+    r.miss_on("news.giganews.com", 4000, 3920)
+        .miss_on("news.usenetfarm.eu", 4000, 1880)
+        .miss_on("news.vipernews.com", 4000, 4)
+        .cap_on(
+            "news.vipernews.com",
+            40,
+            40,
+            "502 connection limit (40) reached",
+        );
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[
+            ("news.giganews.com", 8, 8, 5_000_000, 100, 0, false),
+            ("news.usenetfarm.eu", 8, 8, 5_000_000, 100, 0, false),
+            ("news.vipernews.com", 40, 40, 60_000_000, 100, 0, false),
+        ],
+    );
+    assert_eq!(r.core.verdict().0, Layer::Missing);
+}
+
+/// TWO servers holding the post is not a sole source, and a cap on one
+/// of them binds nothing: the other carries what the capped one
+/// cannot. The whole claim rests on there being no second source.
+#[test]
+fn two_servers_holding_the_post_is_not_a_sole_source() {
+    let mut r = Rig::new();
+    r.miss_on("news.giganews.com", 4000, 3920)
+        .miss_on("news.usenetfarm.eu", 4000, 4)
+        .miss_on("news.vipernews.com", 4000, 4)
+        .cap_on(
+            "news.vipernews.com",
+            7,
+            40,
+            "502 connection limit (40) reached",
+        );
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[
+            ("news.giganews.com", 8, 8, 5_000_000, 100, 0, false),
+            ("news.usenetfarm.eu", 8, 8, 32_000_000, 100, 0, false),
+            ("news.vipernews.com", 2, 40, 33_000_000, 100, 0, false),
+        ],
+    );
+    assert!(r.core.sole_capped().is_none(), "two holders, not one");
+    assert_eq!(r.core.verdict().0, Layer::Missing);
+}
+
+/// On a ONE-provider install "only this server has it" is true of
+/// every post ever downloaded and says nothing. The honest verdict
+/// there is the plain provider one, which is what a capped single
+/// server already got.
+#[test]
+fn a_single_provider_install_is_never_sole_sourced() {
+    let mut r = Rig::new();
+    r.miss_on("news.vipernews.com", 4000, 4).cap_on(
+        "news.vipernews.com",
+        7,
+        40,
+        "502 connection limit (40) reached",
+    );
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[("news.vipernews.com", 2, 40, 70_000_000, 100, 0, false)],
+    );
+    assert!(r.core.sole_capped().is_none());
+    assert_eq!(
+        r.core.verdict(),
+        (Layer::Provider, "news.vipernews.com"),
+        "under its budget: the existing single-host arm, unchanged"
+    );
+}
+
+/// A server that saw a handful of requests and missed none of them is
+/// not evidence that it HOLDS the post - and without
+/// `BACKBONE_MIN_TRIED` it would be the best server on every run. Here
+/// the two real servers have both lost the post, so `gone` stands.
+#[test]
+fn a_barely_used_server_cannot_be_the_one_that_has_it() {
+    let mut r = Rig::new();
+    r.post_unix = (r.t / 1000) as i64 - 9 * 86_400;
+    r.miss_on("news.giganews.com", 4000, 3920)
+        .miss_on("news.usenetfarm.eu", 4000, 1880)
+        .miss_on("news.vipernews.com", 20, 0)
+        .cap_on(
+            "news.vipernews.com",
+            7,
+            40,
+            "502 connection limit (40) reached",
+        );
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[
+            ("news.giganews.com", 8, 8, 35_000_000, 100, 0, false),
+            ("news.usenetfarm.eu", 8, 8, 35_000_000, 100, 0, false),
+            ("news.vipernews.com", 2, 40, 0, 100, 0, false),
+        ],
+    );
+    assert!(r.core.sole_capped().is_none());
+    assert_eq!(r.core.verdict(), (Layer::Missing, "gone"));
+}
+
+/// The YOUNG arm is deliberately left alone by the holder guard: one
+/// backbone holding a post the others have not received yet IS
+/// propagation, so a holder corroborates that claim rather than
+/// refuting it. Uncapped, so the cap arm stays out of the way.
+#[test]
+fn a_holder_corroborates_propagation_rather_than_refuting_it() {
+    let mut r = Rig::new();
+    r.post_unix = (r.t / 1000) as i64 - 2 * 3600;
+    r.miss_on("news.giganews.com", 4000, 3920)
+        .miss_on("news.usenetfarm.eu", 4000, 1880)
+        .miss_on("news.vipernews.com", 4000, 4);
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[
+            ("news.giganews.com", 8, 8, 5_000_000, 100, 0, false),
+            ("news.usenetfarm.eu", 8, 8, 5_000_000, 100, 0, false),
+            ("news.vipernews.com", 8, 8, 60_000_000, 100, 0, false),
+        ],
+    );
+    assert_eq!(r.core.verdict(), (Layer::Missing, "young"));
+}
+
+/// TODO 318 item 1 on its own: the best single server's own miss rate,
+/// which is the number that says whether a post is completable at all.
+/// Qualified by `BACKBONE_MIN_TRIED`, and stable across ticks - a tie
+/// broken by HashMap order would flap a verdict's detail without the
+/// evidence moving.
+#[test]
+fn the_best_single_server_is_the_lowest_qualified_miss_rate() {
+    let mut r = Rig::new();
+    r.miss_on("news.giganews.com", 4000, 3920)
+        .miss_on("news.usenetfarm.eu", 4000, 1880)
+        .miss_on("news.vipernews.com", 4000, 4)
+        // A fill host with a tiny perfect sample: excluded, or it
+        // would be the best server on every run.
+        .miss_on("news.zeta.com", 10, 0);
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[
+            ("news.giganews.com", 8, 8, 5_000_000, 100, 0, false),
+            ("news.usenetfarm.eu", 8, 8, 5_000_000, 100, 0, false),
+            ("news.vipernews.com", 8, 8, 60_000_000, 100, 0, false),
+            ("news.zeta.com", 1, 1, 0, 0, 0, false),
+        ],
+    );
+    let (host, rate) = r.core.best_missing().expect("four servers, three qualify");
+    assert_eq!(host, "news.vipernews.com");
+    assert!((rate - 0.001).abs() < 1e-9, "{rate}");
+    // ...and no server asked enough to have an opinion yields nothing
+    // at all, which is what the payload's empty host field carries. A
+    // rate of 0.0 with no host would read as "some server has all of
+    // it", which is the exact misreading this field exists to stop.
+    let mut r = Rig::new();
+    r.miss = Some((10, 0));
+    r.run(
+        WINDOW,
+        70e6,
+        0,
+        1_000_000_000,
+        30.0,
+        false,
+        &[("news.alpha.com", 8, 8, 70_000_000, 100, 0, false)],
+    );
+    assert!(r.core.best_missing().is_none());
 }
 
 /// Five resellers of ONE backbone are one opinion. The same old

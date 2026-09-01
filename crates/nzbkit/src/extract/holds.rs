@@ -1977,4 +1977,57 @@ mod tests {
         assert_eq!(std::fs::read(dir.join(inner)).unwrap(), data);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// Read-only sweep finding 5 (31 Aug 2026): a LATE placement names
+    /// its file the out_dir-relative way, like every other `Frag`
+    /// producer - the chase arm, the deliver arm and `jobs_to_persist`'s
+    /// Placed list all moved onto `out_name_of` in the 30 Aug 2026
+    /// relpath sweep and this one did not.
+    ///
+    /// What it costs is the encrypted-refeed and held-drain journal:
+    /// restore JOINS `Frag::file` onto out_dir, so a payload living at
+    /// `out_dir/VIDEO_TS/x.vob` journaled `x.vob` and the replay opened
+    /// `out_dir/x.vob` - a refetch of bytes already on disk at best, and
+    /// a write into the wrong path at worst.
+    ///
+    /// Same drive as `held_then_drained_articles_surface_their_placements`
+    /// above, one member name over: everything but offset-0 parks, then
+    /// the sniff drains it all through the under-the-lock re-feed that
+    /// is the only producer of a `LatePlacement`.
+    #[test]
+    fn a_late_placement_of_a_tree_payload_names_its_file_relative_to_out_dir() {
+        let dir = tmpdir("holds-late-tree");
+        // A member whose own name carries a directory:
+        // `sanitize_out_name` rules the path safe and preserves it,
+        // which is the whole reason a basename and this differ.
+        let inner = "VIDEO_TS/VTS_01_1.VOB";
+        let data = payload(600_000, 11);
+        let vol = fixtures::rar5_volume(&[(inner, 600_000, &data, false, false)]);
+        let art = 100_000usize;
+        let n = vol.len().div_ceil(art);
+        let ex = Extractor::new(&dir, 1, true);
+        for i in (1..n).rev() {
+            let s = i * art;
+            let e = ((i + 1) * art).min(vol.len());
+            ex.write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
+                .unwrap();
+        }
+        // The sniff: maps the volume and drains every parked byte.
+        ex.write(0, "v.rar", vol.len() as u64, 0, &vol[..art])
+            .unwrap();
+        let late = ex.drain_late_placements();
+        assert!(
+            !late.is_empty(),
+            "nothing drained - the fixture no longer exercises the arm"
+        );
+        assert!(
+            late.iter().all(|p| p.frag.file == inner),
+            "a late placement named its file by basename - restore joins this \
+             onto out_dir and opens a path nothing wrote: {late:?}"
+        );
+        let rep = ex.finish().unwrap();
+        assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+        assert_eq!(std::fs::read(dir.join(inner)).unwrap(), data);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

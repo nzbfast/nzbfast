@@ -132,9 +132,11 @@ fn slot(hint: &str, total: usize) -> Arc<crate::unpack::FileSlot> {
     Arc::new(crate::unpack::FileSlot {
         hint: hint.into(),
         hint_is_posted_name: true,
+        yenc_votes: Default::default(),
         name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
         is_par2_main: false,
         sample_skipped: false,
+        par2_name_demoted: Default::default(),
         par2_sniffed: AtomicBool::new(false),
         total_segments: total,
         remaining: AtomicUsize::new(0),

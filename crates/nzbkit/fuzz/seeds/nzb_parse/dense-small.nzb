@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="p@news.example" date="1" subject="&quot;dense.part001.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d1-1@news.example</segment>
+      <segment bytes="1" number="2">d1-2@news.example</segment>
+      <segment bytes="1" number="3">d1-3@news.example</segment>
+      <segment bytes="1" number="4">d1-4@news.example</segment>
+      <segment bytes="1" number="5">d1-5@news.example</segment>
+      <segment bytes="1" number="6">d1-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="2" subject="&quot;dense.part002.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d2-1@news.example</segment>
+      <segment bytes="1" number="2">d2-2@news.example</segment>
+      <segment bytes="1" number="3">d2-3@news.example</segment>
+      <segment bytes="1" number="4">d2-4@news.example</segment>
+      <segment bytes="1" number="5">d2-5@news.example</segment>
+      <segment bytes="1" number="6">d2-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="3" subject="&quot;dense.part003.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d3-1@news.example</segment>
+      <segment bytes="1" number="2">d3-2@news.example</segment>
+      <segment bytes="1" number="3">d3-3@news.example</segment>
+      <segment bytes="1" number="4">d3-4@news.example</segment>
+      <segment bytes="1" number="5">d3-5@news.example</segment>
+      <segment bytes="1" number="6">d3-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="4" subject="&quot;dense.part004.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d4-1@news.example</segment>
+      <segment bytes="1" number="2">d4-2@news.example</segment>
+      <segment bytes="1" number="3">d4-3@news.example</segment>
+      <segment bytes="1" number="4">d4-4@news.example</segment>
+      <segment bytes="1" number="5">d4-5@news.example</segment>
+      <segment bytes="1" number="6">d4-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="5" subject="&quot;dense.part005.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d5-1@news.example</segment>
+      <segment bytes="1" number="2">d5-2@news.example</segment>
+      <segment bytes="1" number="3">d5-3@news.example</segment>
+      <segment bytes="1" number="4">d5-4@news.example</segment>
+      <segment bytes="1" number="5">d5-5@news.example</segment>
+      <segment bytes="1" number="6">d5-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="6" subject="&quot;dense.part006.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d6-1@news.example</segment>
+      <segment bytes="1" number="2">d6-2@news.example</segment>
+      <segment bytes="1" number="3">d6-3@news.example</segment>
+      <segment bytes="1" number="4">d6-4@news.example</segment>
+      <segment bytes="1" number="5">d6-5@news.example</segment>
+      <segment bytes="1" number="6">d6-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="7" subject="&quot;dense.part007.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d7-1@news.example</segment>
+      <segment bytes="1" number="2">d7-2@news.example</segment>
+      <segment bytes="1" number="3">d7-3@news.example</segment>
+      <segment bytes="1" number="4">d7-4@news.example</segment>
+      <segment bytes="1" number="5">d7-5@news.example</segment>
+      <segment bytes="1" number="6">d7-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="8" subject="&quot;dense.part008.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d8-1@news.example</segment>
+      <segment bytes="1" number="2">d8-2@news.example</segment>
+      <segment bytes="1" number="3">d8-3@news.example</segment>
+      <segment bytes="1" number="4">d8-4@news.example</segment>
+      <segment bytes="1" number="5">d8-5@news.example</segment>
+      <segment bytes="1" number="6">d8-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="9" subject="&quot;dense.part009.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d9-1@news.example</segment>
+      <segment bytes="1" number="2">d9-2@news.example</segment>
+      <segment bytes="1" number="3">d9-3@news.example</segment>
+      <segment bytes="1" number="4">d9-4@news.example</segment>
+      <segment bytes="1" number="5">d9-5@news.example</segment>
+      <segment bytes="1" number="6">d9-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="10" subject="&quot;dense.part010.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d10-1@news.example</segment>
+      <segment bytes="1" number="2">d10-2@news.example</segment>
+      <segment bytes="1" number="3">d10-3@news.example</segment>
+      <segment bytes="1" number="4">d10-4@news.example</segment>
+      <segment bytes="1" number="5">d10-5@news.example</segment>
+      <segment bytes="1" number="6">d10-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="11" subject="&quot;dense.part011.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d11-1@news.example</segment>
+      <segment bytes="1" number="2">d11-2@news.example</segment>
+      <segment bytes="1" number="3">d11-3@news.example</segment>
+      <segment bytes="1" number="4">d11-4@news.example</segment>
+      <segment bytes="1" number="5">d11-5@news.example</segment>
+      <segment bytes="1" number="6">d11-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="12" subject="&quot;dense.part012.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d12-1@news.example</segment>
+      <segment bytes="1" number="2">d12-2@news.example</segment>
+      <segment bytes="1" number="3">d12-3@news.example</segment>
+      <segment bytes="1" number="4">d12-4@news.example</segment>
+      <segment bytes="1" number="5">d12-5@news.example</segment>
+      <segment bytes="1" number="6">d12-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="13" subject="&quot;dense.part013.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d13-1@news.example</segment>
+      <segment bytes="1" number="2">d13-2@news.example</segment>
+      <segment bytes="1" number="3">d13-3@news.example</segment>
+      <segment bytes="1" number="4">d13-4@news.example</segment>
+      <segment bytes="1" number="5">d13-5@news.example</segment>
+      <segment bytes="1" number="6">d13-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="14" subject="&quot;dense.part014.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d14-1@news.example</segment>
+      <segment bytes="1" number="2">d14-2@news.example</segment>
+      <segment bytes="1" number="3">d14-3@news.example</segment>
+      <segment bytes="1" number="4">d14-4@news.example</segment>
+      <segment bytes="1" number="5">d14-5@news.example</segment>
+      <segment bytes="1" number="6">d14-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="15" subject="&quot;dense.part015.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d15-1@news.example</segment>
+      <segment bytes="1" number="2">d15-2@news.example</segment>
+      <segment bytes="1" number="3">d15-3@news.example</segment>
+      <segment bytes="1" number="4">d15-4@news.example</segment>
+      <segment bytes="1" number="5">d15-5@news.example</segment>
+      <segment bytes="1" number="6">d15-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="16" subject="&quot;dense.part016.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d16-1@news.example</segment>
+      <segment bytes="1" number="2">d16-2@news.example</segment>
+      <segment bytes="1" number="3">d16-3@news.example</segment>
+      <segment bytes="1" number="4">d16-4@news.example</segment>
+      <segment bytes="1" number="5">d16-5@news.example</segment>
+      <segment bytes="1" number="6">d16-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="17" subject="&quot;dense.part017.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d17-1@news.example</segment>
+      <segment bytes="1" number="2">d17-2@news.example</segment>
+      <segment bytes="1" number="3">d17-3@news.example</segment>
+      <segment bytes="1" number="4">d17-4@news.example</segment>
+      <segment bytes="1" number="5">d17-5@news.example</segment>
+      <segment bytes="1" number="6">d17-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="18" subject="&quot;dense.part018.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d18-1@news.example</segment>
+      <segment bytes="1" number="2">d18-2@news.example</segment>
+      <segment bytes="1" number="3">d18-3@news.example</segment>
+      <segment bytes="1" number="4">d18-4@news.example</segment>
+      <segment bytes="1" number="5">d18-5@news.example</segment>
+      <segment bytes="1" number="6">d18-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="19" subject="&quot;dense.part019.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d19-1@news.example</segment>
+      <segment bytes="1" number="2">d19-2@news.example</segment>
+      <segment bytes="1" number="3">d19-3@news.example</segment>
+      <segment bytes="1" number="4">d19-4@news.example</segment>
+      <segment bytes="1" number="5">d19-5@news.example</segment>
+      <segment bytes="1" number="6">d19-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="20" subject="&quot;dense.part020.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d20-1@news.example</segment>
+      <segment bytes="1" number="2">d20-2@news.example</segment>
+      <segment bytes="1" number="3">d20-3@news.example</segment>
+      <segment bytes="1" number="4">d20-4@news.example</segment>
+      <segment bytes="1" number="5">d20-5@news.example</segment>
+      <segment bytes="1" number="6">d20-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="21" subject="&quot;dense.part021.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d21-1@news.example</segment>
+      <segment bytes="1" number="2">d21-2@news.example</segment>
+      <segment bytes="1" number="3">d21-3@news.example</segment>
+      <segment bytes="1" number="4">d21-4@news.example</segment>
+      <segment bytes="1" number="5">d21-5@news.example</segment>
+      <segment bytes="1" number="6">d21-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="22" subject="&quot;dense.part022.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d22-1@news.example</segment>
+      <segment bytes="1" number="2">d22-2@news.example</segment>
+      <segment bytes="1" number="3">d22-3@news.example</segment>
+      <segment bytes="1" number="4">d22-4@news.example</segment>
+      <segment bytes="1" number="5">d22-5@news.example</segment>
+      <segment bytes="1" number="6">d22-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="23" subject="&quot;dense.part023.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d23-1@news.example</segment>
+      <segment bytes="1" number="2">d23-2@news.example</segment>
+      <segment bytes="1" number="3">d23-3@news.example</segment>
+      <segment bytes="1" number="4">d23-4@news.example</segment>
+      <segment bytes="1" number="5">d23-5@news.example</segment>
+      <segment bytes="1" number="6">d23-6@news.example</segment>
+    </segments>
+  </file>
+  <file poster="p@news.example" date="24" subject="&quot;dense.part024.rar&quot; yEnc (1/40)">
+    <groups>
+      <group>alt.binaries.test</group>
+    </groups>
+    <segments>
+      <segment bytes="1" number="1">d24-1@news.example</segment>
+      <segment bytes="1" number="2">d24-2@news.example</segment>
+      <segment bytes="1" number="3">d24-3@news.example</segment>
+      <segment bytes="1" number="4">d24-4@news.example</segment>
+      <segment bytes="1" number="5">d24-5@news.example</segment>
+      <segment bytes="1" number="6">d24-6@news.example</segment>
+    </segments>
+  </file>
+</nzb>

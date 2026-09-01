@@ -330,8 +330,6 @@ fn allowlist_and_get_config_agree() {
          apply_setting in serve.rs, or to ECHOED_READ_ONLY here if it is \
          display-only."
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A saved setting is still in force after a restart.
@@ -409,8 +407,6 @@ fn settings_survive_a_restart() {
          the restore path in serve() (the boolean table) or to \
          apply_saved_settings."
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The §282 alternate-candidate NUMBERS survive a restart too.
@@ -480,7 +476,6 @@ fn the_alternate_candidate_numbers_survive_a_restart() {
              never read back at launch - add it to restore_ui_and_index_settings"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Turning fast verify off means full verify, and it stays off.
@@ -558,8 +553,6 @@ fn turning_fast_verify_off_survives_a_restart_after_lean_was_chosen() {
         );
         assert_eq!(s["fast_verify"], true, "fast verify came back off: {s:?}");
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A launcher that owns the port keeps it: the API refuses to save one,
@@ -634,8 +627,6 @@ fn a_locked_port_cannot_be_moved_from_the_dashboard() {
         // The listener answering us IS d.port - the saved 6999 did not win.
         assert_ne!(d.port, 6999);
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The launcher handshake: `runtime.json` plus a challenge is what lets a
@@ -716,8 +707,6 @@ fn the_daemon_proves_its_identity_to_a_launcher() {
         junk.get("hs_proof").is_none(),
         "an out-of-shape nonce was answered: {junk}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `--port 0` binds an OS-chosen port, and the daemon reports which one.
@@ -832,7 +821,6 @@ fn port_zero_binds_an_os_chosen_port_and_says_which() {
     );
 
     drop(child);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The recoverable-delete default follows the platform.
@@ -869,7 +857,6 @@ fn the_trash_default_follows_the_platform() {
          On Linux it must be OFF: the trash lands on the download volume \
          itself and fills the user's disk with files nothing will empty."
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Turning the low-disk floor OFF stays off across a restart.
@@ -939,26 +926,8 @@ fn a_min_free_of_zero_survives_a_restart() {
         Some(25_000_000_000),
         "a non-zero floor did not survive the restart"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A relative move destination is refused, and refused BEFORE the daemon
-/// creates anything.
-///
-/// `create_dir_all` is happy to make a relative path, and it lands under
-/// the daemon's WORKING DIRECTORY: `/var/lib/nzbfast` under the systemd
-/// unit, the container's workdir under Docker, and wherever the launcher
-/// happened to be otherwise. Typing `nas/movies` into the settings field
-/// therefore created a real folder, passed `path_writable`, passed the
-/// download-folder check, and was stored - and completed jobs were then
-/// moved into a directory the user never chose and would not think to
-/// look in.
-///
-/// Both the global destination and the per-category list reach the same
-/// `move_tree`, so both are pinned. The ordering assertion is the point
-/// of the test: a refusal that fires AFTER `create_dir_all` still leaves
-/// the stray folder behind.
 /// History retention round-trips in SECONDS, and a config written
 /// before the unit changed still means what it meant.
 ///
@@ -1083,10 +1052,24 @@ fn history_retention_round_trips_in_seconds_and_reads_the_older_days_key() {
             "the legacy days key overruled the current one"
         );
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A relative move destination is refused, and refused BEFORE the daemon
+/// creates anything.
+///
+/// `create_dir_all` is happy to make a relative path, and it lands under
+/// the daemon's WORKING DIRECTORY: `/var/lib/nzbfast` under the systemd
+/// unit, the container's workdir under Docker, and wherever the launcher
+/// happened to be otherwise. Typing `nas/movies` into the settings field
+/// therefore created a real folder, passed `path_writable`, passed the
+/// download-folder check, and was stored - and completed jobs were then
+/// moved into a directory the user never chose and would not think to
+/// look in.
+///
+/// Both the global destination and the per-category list reach the same
+/// `move_tree`, so both are pinned. The ordering assertion is the point
+/// of the test: a refusal that fires AFTER `create_dir_all` still leaves
+/// the stray folder behind.
 #[test]
 fn a_relative_move_destination_is_refused_before_it_is_created() {
     let dir = scratch("relmove");
@@ -1146,7 +1129,6 @@ fn a_relative_move_destination_is_refused_before_it_is_created() {
     );
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Percent-encode a query value. `/` is left alone so paths stay legible
@@ -1265,7 +1247,6 @@ fn a_rules_pattern_verdict_is_reported_but_never_stored() {
     assert_eq!(stored[2]["not_match"].as_str(), Some(".*"));
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// #18, the save-time half: the answer to Apply carries the warning.
@@ -1335,7 +1316,6 @@ fn saving_an_uncompilable_rule_warns_in_the_answer_without_refusing_the_save() {
     assert!(w.contains("\"Anime\"") && w.contains("(unclosed"), "{w}");
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// #17: importing a sabnzbd.ini brings its categories over, merged.
@@ -1442,7 +1422,6 @@ fn importing_a_sabnzbd_ini_merges_its_categories_and_says_what_it_could_not_take
     }
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// PLAN M32 / nzbget#359: the other half of the switcher funnel.
@@ -1544,7 +1523,6 @@ fn importing_an_nzbget_conf_brings_servers_categories_and_the_speed_limit() {
     );
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A malformed or unreadable nzbget.conf refuses cleanly, with a
@@ -1584,7 +1562,6 @@ fn a_malformed_nzbget_conf_is_refused_not_partially_imported() {
     );
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// #46: probing a user-typed path says WHY it came up empty. There is
@@ -1616,7 +1593,6 @@ fn probing_a_typed_path_says_why_it_found_nothing() {
     assert!(r["miss"].is_null(), "{r}");
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// POST a JSON body and return the response body (headers stripped).
@@ -1699,7 +1675,6 @@ fn max_source_ips_round_trips_and_clears() {
     );
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §291 box 2 (public issue #60): the per-server TLS name override, end
@@ -1826,7 +1801,6 @@ fn tls_hostname_round_trips_and_clears() {
     );
     assert_eq!(srv(d.port)["tls_hostname"], "", "and echoes blank again");
     d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §291 (public issue #60): the per-server address-family preference,
@@ -1939,7 +1913,6 @@ fn address_family_round_trips_and_clears() {
         "the bad value must not be stored: {disk}"
     );
     d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M32's route controls (`bind_ip`, `socks5`) shipped in the engine in
@@ -2088,7 +2061,6 @@ fn socks5_and_bind_ip_round_trip_without_echoing_the_proxy_password() {
     }
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO §20c: a feed url embeds the indexer's API key, and `get_config`
@@ -2207,7 +2179,6 @@ fn a_feed_url_is_masked_in_get_config_and_round_trips_by_id() {
     assert!(disk.contains(key), "a refused save changes nothing: {disk}");
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A Flatpak install must be told apart from a container install, because
@@ -2486,5 +2457,4 @@ fn the_output_umask_survives_a_restart_including_zero_and_off() {
     );
 
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }

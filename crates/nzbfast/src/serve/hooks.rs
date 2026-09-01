@@ -826,11 +826,9 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::TcpListener;
 
-    fn scratch(name: &str) -> std::path::PathBuf {
+    fn scratch(name: &str) -> crate::testscratch::ScratchDir {
         let dir = std::env::temp_dir().join(format!("nzbfast-hooks-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
+        crate::testscratch::ScratchDir::attach(&dir)
     }
 
     fn target(url: &str, events: &[&str], secret: &str) -> Target {
@@ -1232,8 +1230,6 @@ mod tests {
             ran.exists(),
             "an ordinary completion must still run its post-processing script"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The hook fan-out must belong to the round the caller planned it
@@ -1352,7 +1348,5 @@ mod tests {
             d.notify_health.lock_ok().contains_key(&key),
             "and the live half still records its outcome"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

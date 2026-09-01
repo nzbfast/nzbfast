@@ -137,7 +137,6 @@ async fn a_finished_job_holds_no_output_handles() {
              blocks survive an *arr import: {held:?}"
         ),
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same invariant as above, on the path that was never covered: a
@@ -292,5 +291,4 @@ async fn a_failed_job_holds_no_output_handles() {
              its folder cannot be deleted until the daemon restarts: {held:?}"
         ),
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

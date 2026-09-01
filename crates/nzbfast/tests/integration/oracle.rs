@@ -90,6 +90,57 @@ fn over(number: u64, subject: &str, msgid: &str, date: i64) -> OverEntry {
     }
 }
 
+/// How long [`settle_index`] will wait for the daemon's startup index
+/// open to finish. See `integration/nzblnk.rs`'s copy of this constant
+/// for the measurement it is based on (60 s is an 11x margin over the
+/// longest settle seen under 8x concurrent load).
+const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Block until the daemon's index will answer a read.
+///
+/// This test pre-seeds its database with `Index::open` before the daemon
+/// starts, then reads it back over `mode=index_browse` and `mode=wall2`
+/// moments after the daemon's own port is ready. Both go through
+/// `Daemon::index_read_checked`, which before the daemon's first
+/// read-write open falls back to the write mutex on a BOUNDED 2 s wait
+/// and reports `{"busy":true,"error":"the index is busy - try again in a
+/// moment"}` rather than parking an HTTP worker on it (TODO 143's second
+/// half, TODO 166). Under box load that open is still running when this
+/// file's first read arrives, and none of the assertions below admit
+/// that answer. `http_get`'s own retry loop does not help here: it
+/// retries a connection refusal, not a 200 whose body says busy.
+///
+/// Mirrors `integration/nzblnk.rs::settle_index` exactly - same seam,
+/// same probe mode, same budget - and is duplicated rather than shared
+/// because `http_get` itself is already duplicated per test module in
+/// this crate. `key` is the `&apikey=...` this daemon needs, or empty
+/// where it has none. An auth refusal PANICS rather than returning: a
+/// probe the daemon answers "API Key Incorrect" carries no `busy` flag,
+/// so it would exit the loop at once and disable the settle in silence.
+fn settle_index(port: u16, key: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        let last = http_get(
+            port,
+            &format!("/api?mode=index_search&q=nzbfastsettleprobe{key}&output=json"),
+        )
+        .1;
+        assert!(
+            !last.contains("API Key"),
+            "the settle probe was refused, so it was never settling anything:\n{last}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_default();
+        if v["busy"] != true {
+            return;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index never settled in {SETTLE_BUDGET:?}:\n{last}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn seeded_ledger_drives_browse_verdicts() {
     let dir = std::env::temp_dir().join(format!("nzbfast-oracle-{}", std::process::id()));
@@ -205,6 +256,12 @@ async fn seeded_ledger_drives_browse_verdicts() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
+        // Before anything is asserted: rung 1 of the index reads below is
+        // refused as busy while the daemon's own startup index open
+        // still holds the write mutex, and this test demands the real
+        // rows and verdicts.
+        settle_index(port, "&apikey=sekrit");
+
         // Browse: each row carries its ledger verdict.
         let (code, body) = http_get(
             port,
@@ -290,5 +347,4 @@ async fn seeded_ledger_drives_browse_verdicts() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

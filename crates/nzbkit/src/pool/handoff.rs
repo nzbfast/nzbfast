@@ -34,6 +34,16 @@
 //! blocked on it AND it is not its server's last live worker. With no
 //! successor there are no waiters, so a single job's fleet idles, hedges
 //! and drains exactly as it did before this module existed.
+//!
+//! **And one permit is not a download's to take** ([`POST_PROCESS_RESERVE`],
+//! 30 Aug 2026). The cap is divided by [`LeaseClass`] rather than handed
+//! out first-come: a download fleet stops one short of the account's
+//! number so a post-processing side-fetch - a recovery-volume pull, the
+//! speculative prefetch - always has a permit to dial on. Without it a
+//! repair running on job A's tail waits on connections job B holds for
+//! the whole of its own run, and every retry waits the same way. The
+//! account's total is unchanged, so the provider never sees a socket it
+//! did not license; what moves is who may hold the last one.
 
 use crate::sync::MutexExt;
 use std::collections::HashMap;
@@ -59,6 +69,146 @@ impl Drop for WaiterGuard<'_> {
     }
 }
 
+/// Permits held back from every account's cap so a POST-PROCESSING
+/// fetch always has one (30 Aug 2026; the measurement that priced it
+/// and the option taken are `research/SIDEFETCH-LEASE-2026-08-30.md`).
+///
+/// **Why a reserve exists at all.** A recovery side-fetch runs by
+/// construction on job A's post-download tail, which is exactly when
+/// job B has started downloading and taken every permit on the account.
+/// The lease is per-account and lives for the daemon's life, so without
+/// a reserve job A's repair parks in [`HostLease::acquire`] until job
+/// B's fleet starts going idle - which on a healthy long download is
+/// near the END of it, and on a wedged one never. The repair then
+/// fails, retries, and each retry starves the same way: a repair behind
+/// a long job cannot succeed however often it is tried.
+///
+/// **Why the number is ONE and not a fleet.** Measured, not guessed, in
+/// `one_spare_permit_is_enough_for_a_side_fetch_to_finish`: a width-6
+/// side pool against a cap-6 lease with five permits held drains the
+/// whole recovery set on the single spare. A side pool does not need
+/// its configured width to make progress, it needs A PERMIT. One worker
+/// that can dial drains the set, slower; the others sit in `acquire`
+/// and retire when the run ends. So the price of removing the "cannot
+/// succeed" property is one connection, per account - 2.5% of a
+/// 40-connection account's width, paid whether or not a repair ever
+/// runs. It is not free and it is not sold as free.
+///
+/// **Why not simply let the side pool ignore the lease.** Because the
+/// repair side-fetch runs at the MAIN FLEET's width, not at one
+/// connection per server (pinned by
+/// `the_repair_side_fetch_runs_at_the_main_fleets_width`), so a side
+/// pool outside the accounting is a whole SECOND fleet on an account
+/// that already has one - 2x the provider's cap, which is the "502
+/// connection limit reached" wall `park_or_probe` and the ghost-capacity
+/// machinery exist for. The reserve never exceeds the cap: the
+/// account's total is unchanged and only its DIVISION moves.
+///
+/// **The stated limit, and it is bigger than one account.** The 2.5%
+/// above is 1/40, and the reserve is ONE PERMIT rather than a share, so
+/// on a small cap it is a large fraction: 1 in 4 is 25% and 1 in 2 is
+/// half. It also comes out of what THIS RUN dialled and not out of the
+/// provider's licensed number - `get::fleet` sizes the lease to the
+/// fleet it spawns, which a line cap or the auto-tune knee may have put
+/// well under the account's own figure. So a download narrowed by a cap
+/// is narrowed once more here. [`MIN_DOWNLOAD_FLEET`] bounds the worst
+/// of that and nothing bounds the middle of it; a user on a small
+/// account pays a real share of their line for a repair that may never
+/// run.
+pub const POST_PROCESS_RESERVE: usize = 1;
+
+/// Connections a download keeps whatever [`POST_PROCESS_RESERVE`] would
+/// otherwise take (30 Aug 2026).
+///
+/// **Measured, and it is why this const exists at all.** With a flat
+/// reserve and no floor, an account at cap 2 gives its download ONE
+/// connection - half the line for a repair that may never run - and the
+/// daemon then reports one thing and does another: `whyslow`'s fleet
+/// panel publishes `fleet_cap` from the gauge the run computed, so it
+/// says 2 while two sockets is exactly what the fleet may no longer
+/// hold. `daemon_whyslow::the_fleet_verdict_is_produced_end_to_end_on_a_
+/// running_daemon` fails on precisely that, at a typed fleet cap of 2.
+///
+/// **Two and not some larger tidy number**, because two is the point at
+/// which this pool stops being a fleet at all: `get::fleet` will not
+/// even build a live connection target below it (`applied > 1`), the
+/// endgame's duplicate racing has nothing to race, and a single socket
+/// is the one shape whose throughput is not a share of the line but a
+/// different regime. Anything above two would be a number nobody
+/// measured. What this does NOT do is bound the middle of the curve -
+/// at cap 3 the reserve is still a third - and that is stated rather
+/// than papered over.
+pub const MIN_DOWNLOAD_FLEET: usize = 2;
+
+/// Which class of work a pool's workers take their permits as.
+///
+/// The two differ ONLY in what they are allowed to take from the
+/// account's cap; both are bounded by it, so no class can put a socket
+/// on the wire the provider has not licensed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LeaseClass {
+    /// A download fleet. Bounded by [`HostLease::download_cap`], which
+    /// is the account's cap minus [`POST_PROCESS_RESERVE`].
+    #[default]
+    Download,
+    /// A post-processing side pool - a recovery-volume fetch, or the
+    /// M2c.5 speculative prefetch. May take the reserved permit, so it
+    /// is never starved by a download that holds its own cap for the
+    /// whole of a long run.
+    ///
+    /// Two post-processing pools on one account contend with each other
+    /// for the reserve, which is fine and bounded: both terminate, and
+    /// neither can hold it past its own run.
+    PostProcess,
+}
+
+/// One server row's seat at its account's lease: the shared
+/// [`HostLease`], plus THIS run's count of its own workers parked in
+/// [`HostLease::acquire_as`] on it.
+///
+/// The count is here rather than in `HostLease` because the lease is
+/// per ACCOUNT and outlives every run on it, while the question the
+/// count answers is a run's own: [`POST_PROCESS_RESERVE`] holds one
+/// permit back from every download while `get::fleet` spawns a fleet the
+/// size of the lease's own cap, so on a server with no line-cap spawn
+/// headroom the reserve leaves this run's LAST worker parked for the
+/// whole run - blocked by its own fleet and not by anybody else's.
+/// `HostLease::waiters` counts it like any other; the run subtracts its
+/// own before concluding a successor is waiting
+/// (`Shared::own_lease_waiters`).
+#[derive(Debug)]
+pub(super) struct LeaseSeat {
+    lease: Arc<HostLease>,
+    parked: AtomicUsize,
+}
+
+impl LeaseSeat {
+    /// One seat per server row, `None` where that row has no lease -
+    /// the CLI and every test that does not opt in.
+    pub(super) fn seats(
+        servers: &[(crate::config::ServerConfig, super::PoolConfig)],
+    ) -> Vec<Option<Self>> {
+        servers
+            .iter()
+            .map(|(_, c)| {
+                c.lease.clone().map(|lease| Self {
+                    lease,
+                    parked: AtomicUsize::new(0),
+                })
+            })
+            .collect()
+    }
+}
+
+/// See [`super::Shared::park_on_lease`].
+pub(super) struct LeaseParkGuard<'a>(&'a AtomicUsize);
+
+impl Drop for LeaseParkGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 /// A host's connection cap as permits. See the module doc.
 #[derive(Debug)]
 pub struct HostLease {
@@ -75,8 +225,8 @@ struct LeaseState {
     held: usize,
 }
 
-/// One held connection slot. Dropping it frees the slot and wakes one
-/// waiter.
+/// One held connection slot. Dropping it frees the slot and wakes every
+/// parked acquirer to re-check.
 pub struct Permit {
     lease: Arc<HostLease>,
 }
@@ -87,7 +237,20 @@ impl Drop for Permit {
             let mut st = self.lease.state.lock_ok();
             st.held = st.held.saturating_sub(1);
         }
-        self.lease.woken.notify_one();
+        // `notify_waiters` and NOT `notify_one`, and the reserve is why.
+        // Since [`POST_PROCESS_RESERVE`] the parked acquirers no longer
+        // all want the same thing: a `Download` waiter is satisfied only
+        // below [`HostLease::download_cap`] and a `PostProcess` one
+        // anywhere below `cap`. `notify_one` wakes ONE of them, and a
+        // download waiter woken by a release that only frees the
+        // RESERVED slot fails its re-check and goes back to sleep
+        // without passing the wake on - so the side-fetch the reserve
+        // exists for sleeps forever with its slot standing free. That is
+        // the lost-wakeup shape of the 27 Aug sweep's finding 24, one
+        // release later. Waking all of them costs a re-check per parked
+        // worker on an event that happens when a worker retires, not per
+        // article; at most one wins and the rest park again.
+        self.lease.woken.notify_waiters();
     }
 }
 
@@ -121,14 +284,29 @@ impl HostLease {
         }
     }
 
-    /// Take a slot, waiting for one if the host is at its cap. Counted
-    /// as a waiter for the whole wait, which is what the predecessor's
-    /// idle workers read.
+    /// Take a slot as a DOWNLOAD worker: bounded by
+    /// [`Self::download_cap`], so the post-processing reserve is never
+    /// the permit this hands out.
     pub async fn acquire(self: &Arc<Self>) -> Permit {
+        self.acquire_as(LeaseClass::Download).await
+    }
+
+    /// Take a slot, waiting for one if the account has none free for
+    /// this class. Counted as a waiter for the whole wait, which is what
+    /// the predecessor's idle workers read.
+    ///
+    /// A waiter here is any parked acquirer and NOT necessarily a
+    /// successor: since [`POST_PROCESS_RESERVE`] a download fleet
+    /// spawned to the size of its own lease cap parks its last worker
+    /// here for the whole run, blocked by its own run rather than by
+    /// anybody else's. This type has no notion of a run, so it counts
+    /// what it can see; `Shared::handoff_wanted` subtracts the workers
+    /// that are its own before concluding anything.
+    pub async fn acquire_as(self: &Arc<Self>, class: LeaseClass) -> Permit {
         loop {
             {
                 let mut st = self.state.lock_ok();
-                if st.held < st.cap {
+                if st.held < limit_for(&st, class) {
                     st.held += 1;
                     return Permit {
                         lease: self.clone(),
@@ -149,18 +327,17 @@ impl HostLease {
             // and only await after a failed re-check. Notify's memory
             // for UNREGISTERED waiters is ONE stored permit, so with
             // two waiters past the check above and neither polled yet,
-            // two `notify_one` calls collapse into one wake - a slot
-            // sits free while a waiter sleeps forever (27 Aug sweep
-            // finding 24). An enabled waiter is woken directly instead
-            // of through that single-permit memory, and a release that
-            // lands between the check above and `enable` is caught by
-            // the re-check.
+            // two wakes collapse into one - a slot sits free while a
+            // waiter sleeps forever (27 Aug sweep finding 24). An
+            // enabled waiter is woken directly instead of through that
+            // single-permit memory, and a release that lands between the
+            // check above and `enable` is caught by the re-check.
             let notified = self.woken.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
                 let mut st = self.state.lock_ok();
-                if st.held < st.cap {
+                if st.held < limit_for(&st, class) {
                     st.held += 1;
                     return Permit {
                         lease: self.clone(),
@@ -171,15 +348,51 @@ impl HostLease {
         }
     }
 
-    /// Successor workers currently blocked in [`HostLease::acquire`].
+    /// Workers currently blocked in [`HostLease::acquire_as`], of every
+    /// class and of every run. Read by a predecessor's idle workers,
+    /// which subtract their own first - see [`Self::acquire_as`].
     pub fn waiters(&self) -> usize {
         self.waiters.load(Ordering::Acquire)
     }
 
-    /// `(held, cap)` right now - diagnostics and tests.
+    /// `(held, cap)` right now - diagnostics and tests. `cap` is the
+    /// ACCOUNT's number, which is what no class may exceed; what a
+    /// download alone may hold is [`Self::download_cap`].
     pub fn snapshot(&self) -> (usize, usize) {
         let st = self.state.lock_ok();
         (st.held, st.cap)
+    }
+
+    /// What [`LeaseClass::Download`] alone may hold: the cap less
+    /// [`POST_PROCESS_RESERVE`], floored at [`MIN_DOWNLOAD_FLEET`] so
+    /// the reserve can never take a download's fleet down to one socket
+    /// (and floored again at the cap itself, so a one- or
+    /// two-connection account is left exactly as it was).
+    pub fn download_cap(&self) -> usize {
+        let st = self.state.lock_ok();
+        download_cap_of(st.cap)
+    }
+}
+
+/// [`HostLease::download_cap`] as arithmetic, so both the acquire path
+/// (which already holds the lock) and the public reader spell the rule
+/// once.
+///
+/// The `min(cap)` is what keeps [`MIN_DOWNLOAD_FLEET`] a FLOOR and never
+/// a raise: a one-connection account may not be handed two.
+fn download_cap_of(cap: usize) -> usize {
+    cap.saturating_sub(POST_PROCESS_RESERVE)
+        .max(MIN_DOWNLOAD_FLEET)
+        .min(cap.max(1))
+}
+
+/// How many permits `class` may hold at a cap of `st.cap`. Bounded by
+/// the account's own number for BOTH classes: the reserve moves the
+/// division, never the total.
+fn limit_for(st: &LeaseState, class: LeaseClass) -> usize {
+    match class {
+        LeaseClass::Download => download_cap_of(st.cap),
+        LeaseClass::PostProcess => st.cap,
     }
 }
 
@@ -304,10 +517,49 @@ impl super::Shared {
     /// server's fleet: a successor blocked on this host's lease, and this
     /// run past queue-dry.
     fn handoff_wanted(&self, idx: usize) -> bool {
-        let Some(Some(lease)) = self.leases.get(idx) else {
+        let Some(Some(seat)) = self.leases.get(idx) else {
             return false;
         };
-        lease.waiters() > 0 && self.tail_started.lock_ok().is_some()
+        seat.lease.waiters() > self.own_lease_waiters(&seat.lease)
+            && self.tail_started.lock_ok().is_some()
+    }
+
+    /// This run's own workers parked on `lease` - the ones a hand-over
+    /// would feed back to itself.
+    ///
+    /// Summed over every server sharing that lease by `Arc::ptr_eq` and
+    /// not read out of one index, because the lease is per ACCOUNT while
+    /// `lease_parked` is per SERVER ROW: two rows for one account (a
+    /// second entry for the same host, port and login) share one
+    /// `HostLease`, so its `waiters` already counts both rows' parked
+    /// workers and subtracting one row's would leave the other's reading
+    /// as a successor. Identity by pointer rather than by key, because
+    /// the pointer IS what `waiters` was counted on.
+    fn own_lease_waiters(&self, lease: &Arc<HostLease>) -> usize {
+        self.leases
+            .iter()
+            .flatten()
+            .filter(|s| Arc::ptr_eq(&s.lease, lease))
+            .map(|s| s.parked.load(Ordering::Acquire))
+            .sum()
+    }
+
+    /// RAII around one worker's park in [`HostLease::acquire_as`], so
+    /// [`Self::own_lease_waiters`] counts it for exactly as long as
+    /// `HostLease::waiters` does.
+    ///
+    /// Held across the whole `tokio::select!` in `runlife::worker` and
+    /// not around the await alone: that select DROPS the acquire future
+    /// mid-await when the run ends, which is the same cancellation path
+    /// `WaiterGuard` exists for on the other side of the count. Both
+    /// sides must fall to zero on it or the subtraction goes negative in
+    /// meaning - `waiters` back at 0 with this still charged reads as
+    /// "fewer waiters than my own", which saturates to no hand-over ever
+    /// again on a lease that outlives the run.
+    pub(super) fn park_on_lease(&self, idx: usize) -> Option<LeaseParkGuard<'_>> {
+        let seat = self.leases.get(idx)?.as_ref()?;
+        seat.parked.fetch_add(1, Ordering::AcqRel);
+        Some(LeaseParkGuard(&seat.parked))
     }
 
     /// Is there room for ONE more worker to leave this server - i.e.
@@ -418,24 +670,200 @@ mod tests {
     #[tokio::test]
     async fn a_lease_never_exceeds_its_cap_and_waiters_are_counted() {
         let b = ConnBudget::new();
-        let l = b.lease("h", 2);
+        // Cap 3, so a download may hold 2 and the third permit is the
+        // post-processing reserve.
+        let l = b.lease("h", 3);
+        assert_eq!(l.download_cap(), 2);
         let p1 = l.acquire().await;
         let p2 = l.acquire().await;
-        assert_eq!(l.snapshot(), (2, 2));
+        assert_eq!(l.snapshot(), (2, 3), "a download stops one short");
         assert_eq!(l.waiters(), 0);
+        // Bounded, here and below: a reserve that stops working turns
+        // these into hangs, and a test that hangs reports nothing.
+        let p3 = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            l.acquire_as(LeaseClass::PostProcess),
+        )
+        .await
+        .expect("post-processing may take the reserved permit");
+        assert_eq!(l.snapshot(), (3, 3), "and post-processing may have it");
         let l2 = l.clone();
         let waiter = tokio::spawn(async move { l2.acquire().await });
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        assert_eq!(l.waiters(), 1, "the third acquire parks");
+        assert_eq!(l.waiters(), 1, "the next download parks");
         assert!(!waiter.is_finished());
+        // The RESERVED slot freeing is not a download's slot freeing.
+        drop(p3);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !waiter.is_finished(),
+            "a download may not take the reserve back"
+        );
+        assert_eq!(l.snapshot(), (2, 3));
         drop(p1);
-        let p3 = waiter.await.unwrap();
+        let p4 = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("a freed download slot seats the parked download")
+            .unwrap();
         assert_eq!(l.waiters(), 0);
-        assert_eq!(l.snapshot(), (2, 2));
+        assert_eq!(l.snapshot(), (2, 3));
         assert_eq!(b.held_total(), 2);
         drop(p2);
-        drop(p3);
+        drop(p4);
         assert_eq!(b.held_total(), 0);
+    }
+
+    /// The reserve, from the download side: a fleet spawned to its own
+    /// lease cap seats one fewer worker, and the permit it leaves is
+    /// there for a post-processing side pool. The account's TOTAL is
+    /// unchanged - which is the whole difference between this and simply
+    /// letting the side pool ignore the lease.
+    #[tokio::test]
+    async fn the_reserve_holds_one_permit_back_from_a_download() {
+        let b = ConnBudget::new();
+        const CAP: usize = 6;
+        let l = b.lease("h", CAP);
+        assert_eq!(l.download_cap(), CAP - POST_PROCESS_RESERVE);
+        let mut fleet = Vec::new();
+        for _ in 0..CAP - 1 {
+            fleet.push(l.acquire().await);
+        }
+        assert_eq!(l.snapshot(), (CAP - 1, CAP));
+        // The fleet's last worker: spawned, and it may not be seated.
+        let l2 = l.clone();
+        let surplus = tokio::spawn(async move { l2.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(!surplus.is_finished(), "the reserve is not a download's");
+
+        // The side pool takes it at once, with no wait at all.
+        let side = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            l.acquire_as(LeaseClass::PostProcess),
+        )
+        .await
+        .expect("post-processing is never starved by a download");
+        assert_eq!(
+            l.snapshot(),
+            (CAP, CAP),
+            "and the account is at its cap, never past it"
+        );
+
+        // A SECOND post-processing worker is bounded by the same cap:
+        // the reserve is one permit, not a second fleet's licence.
+        let l3 = l.clone();
+        let side2 = tokio::spawn(async move { l3.acquire_as(LeaseClass::PostProcess).await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !side2.is_finished(),
+            "the reserve must never take the account past its cap"
+        );
+        assert_eq!(l.snapshot(), (CAP, CAP));
+
+        side2.abort();
+        surplus.abort();
+        let _ = side2.await;
+        let _ = surplus.await;
+        drop(side);
+        drop(fleet);
+        assert_eq!(b.held_total(), 0);
+    }
+
+    /// The lost wakeup the reserve introduces, and the reason
+    /// `Permit::drop` wakes ALL parked acquirers rather than one.
+    ///
+    /// Two classes park on one `Notify` wanting different things. A
+    /// download release frees a slot only post-processing may take; wake
+    /// one waiter and it can be the download, which fails its re-check,
+    /// sleeps again and passes the wake on to nobody - so the side-fetch
+    /// the reserve exists for sleeps forever beside a free slot.
+    #[tokio::test]
+    async fn a_post_processing_waiter_is_woken_when_a_download_permit_frees() {
+        let b = ConnBudget::new();
+        let l = b.lease("h", 3);
+        let d1 = l.acquire().await;
+        let d2 = l.acquire().await;
+        let pp1 = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            l.acquire_as(LeaseClass::PostProcess),
+        )
+        .await
+        .expect("the reserved permit seats the first post-processing worker");
+        assert_eq!(l.snapshot(), (3, 3));
+
+        // The download waiter parks FIRST, so a single wake goes to it.
+        let l2 = l.clone();
+        let dw = tokio::spawn(async move { l2.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let l3 = l.clone();
+        let pw = tokio::spawn(async move { l3.acquire_as(LeaseClass::PostProcess).await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(l.waiters(), 2);
+
+        drop(d1);
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), pw)
+            .await
+            .expect("the post-processing waiter must be woken by the release")
+            .unwrap();
+        assert!(!dw.is_finished(), "which the download still may not have");
+        dw.abort();
+        let _ = dw.await;
+        drop(got);
+        drop(d2);
+        drop(pp1);
+        assert_eq!(b.held_total(), 0);
+    }
+
+    /// The whole curve, in one place, because the reserve is a PERMIT
+    /// and not a share and the cost of it is therefore 1/cap: what a
+    /// download keeps at every cap a user can set.
+    ///
+    /// The two floors are the ones with incidents behind them. At cap 1
+    /// there is nothing to hold back without exceeding the account's own
+    /// number. At cap 2 the reserve would leave a download ONE socket -
+    /// half the line for a repair that may never run, and a daemon that
+    /// publishes `fleet_cap` 2 while holding one, which is what
+    /// `daemon_whyslow::the_fleet_verdict_is_produced_end_to_end_on_a_
+    /// running_daemon` catches.
+    #[test]
+    fn the_reserve_never_takes_a_downloads_fleet_below_two() {
+        // cap 1 and 2 keep everything; from 3 up the reserve is one.
+        for (cap, keep) in [(1usize, 1usize), (2, 2), (3, 2), (4, 3), (6, 5), (40, 39)] {
+            assert_eq!(
+                download_cap_of(cap),
+                keep,
+                "a download at cap {cap} keeps {keep}"
+            );
+            assert!(
+                download_cap_of(cap) <= cap,
+                "the floor is a floor, never a raise past the cap"
+            );
+        }
+    }
+
+    /// The stated limit at [`POST_PROCESS_RESERVE`]: a one-connection
+    /// account has nothing to hold back without exceeding its own
+    /// number, so the download keeps its single permit and a side-fetch
+    /// waits for it exactly as it did before the reserve existed.
+    #[tokio::test]
+    async fn a_single_connection_account_has_no_reserve_to_give() {
+        let b = ConnBudget::new();
+        let l = b.lease("h", 1);
+        assert_eq!(l.download_cap(), 1, "floored, so a download still runs");
+        let d = l.acquire().await;
+        let l2 = l.clone();
+        let side = tokio::spawn(async move { l2.acquire_as(LeaseClass::PostProcess).await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !side.is_finished(),
+            "there is no spare slot to reserve at cap 1"
+        );
+        drop(d);
+        let p = tokio::time::timeout(std::time::Duration::from_secs(5), side)
+            .await
+            .expect("the single permit reaches it once the download lets go")
+            .unwrap();
+        assert_eq!(l.snapshot(), (1, 1));
+        drop(p);
     }
 
     #[tokio::test]
@@ -472,7 +900,8 @@ mod tests {
     #[tokio::test]
     async fn lowering_the_cap_holds_the_successor_until_holders_drain() {
         let b = ConnBudget::new();
-        let l = b.lease("h", 3);
+        // Cap 4 for three download permits: one is the reserve.
+        let l = b.lease("h", 4);
         let held: Vec<Permit> = vec![l.acquire().await, l.acquire().await, l.acquire().await];
         // The next job computed a smaller cap for the same host.
         let l_again = b.lease("h", 1);
@@ -484,7 +913,7 @@ mod tests {
         drop(held.pop());
         drop(held.pop());
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        assert!(!waiter.is_finished(), "2 held > cap 1: still waiting");
+        assert!(!waiter.is_finished(), "1 held is already the cap of 1");
         drop(held.pop());
         let _p = waiter.await.unwrap();
         assert_eq!(l.snapshot(), (1, 1));
@@ -613,6 +1042,68 @@ mod tests {
         *shared.tail_started.lock_ok() = Some(Instant::now());
         assert!(!shared.want_handoff(0));
         assert!(!shared.claim_handoff(0));
+    }
+
+    /// A run's OWN worker, parked because the post-processing reserve
+    /// holds back the permit it would have taken, must not read as a
+    /// successor waiting on this host.
+    ///
+    /// `get::fleet` spawns a fleet the size of the lease's own cap, so on
+    /// a server with no line-cap spawn headroom the reserve leaves
+    /// exactly one worker parked here for the whole run. Counted as a
+    /// waiter it would make `want_handoff` true on EVERY download that
+    /// reaches queue-dry with no successor anywhere - and that answer
+    /// turns the endgame's duplicate fetching off (`next_work` returns
+    /// None rather than a dup) and retires an idle worker to hand its
+    /// socket to its own sibling. The lease has no notion of a run, so
+    /// the run subtracts its own.
+    #[tokio::test]
+    async fn a_run_does_not_read_its_own_reserve_parked_worker_as_a_successor() {
+        let budget = ConnBudget::new();
+        // Cap 3: two download seats, one reserved permit. Not cap 2 -
+        // `MIN_DOWNLOAD_FLEET` leaves a two-connection account whole, so
+        // there is no surplus worker there to be mistaken for anybody.
+        let lease = budget.lease("s", 3);
+        assert_eq!(lease.download_cap(), 2);
+        let mut servers = one_server();
+        servers[0].1.lease = Some(lease.clone());
+        let reqs: Vec<ArticleReq> = vec![ArticleReq::fresh("<a0>")];
+        let (shared, _) = Shared::new(reqs, &servers);
+        shared.alive[0].store(2, Ordering::Relaxed);
+        *shared.tail_started.lock_ok() = Some(Instant::now());
+
+        let seated = vec![lease.acquire().await, lease.acquire().await];
+        let l2 = lease.clone();
+        let surplus = tokio::spawn(async move { l2.acquire().await });
+        let parked = shared.park_on_lease(0).expect("this server has a lease");
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(lease.waiters(), 1, "the surplus worker is parked");
+        assert!(
+            !shared.want_handoff(0),
+            "but it is this run's own, so there is nobody to hand over to"
+        );
+        assert!(!shared.claim_handoff(0));
+
+        // Another RUN's worker on the same account: a real successor,
+        // and the door opens for it with the same own count charged.
+        let l3 = lease.clone();
+        let successor = tokio::spawn(async move { l3.acquire().await });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(lease.waiters(), 2);
+        assert!(
+            shared.want_handoff(0),
+            "a waiter that is not one of ours is a successor"
+        );
+
+        // And the count falls back to zero when our worker gives up, so
+        // a lease that outlives the run carries no charge into the next.
+        drop(parked);
+        assert_eq!(shared.own_lease_waiters(&lease), 0);
+        successor.abort();
+        surplus.abort();
+        let _ = successor.await;
+        let _ = surplus.await;
+        drop(seated);
     }
 
     #[tokio::test]

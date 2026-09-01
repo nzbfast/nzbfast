@@ -30,8 +30,11 @@ fn get_with(config: &Path, nzb: &Path, out: &Path, sub_args: &[&str]) -> (String
         .args(sub_args);
     let out = cmd.output().expect("run nzbfast");
     (
+        // stdout/stderr are separate pipes with no shared clock - label
+        // the seam so a bare join can't be misread as one chronology.
+        // Copy the comment along with the string.
         format!(
-            "{}{}",
+            "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ),

@@ -24,9 +24,11 @@ fn slot(
     Arc::new(crate::unpack::FileSlot {
         hint: "f".into(),
         hint_is_posted_name: nzbkit::release::stem_is_a_name("f"),
+        yenc_votes: Default::default(),
         name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
         is_par2_main: par2,
         sample_skipped: false,
+        par2_name_demoted: Default::default(),
         par2_sniffed: AtomicBool::new(false),
         total_segments: 10,
         remaining: AtomicUsize::new(remaining),
@@ -43,6 +45,7 @@ fn row(id: &str, slot: Option<usize>) -> JobFileRow {
         id: id.into(),
         name: format!("{id}.rar"),
         bytes: 1_000,
+        date: 0,
         segments: 10,
         slot,
     }

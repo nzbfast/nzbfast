@@ -31,6 +31,7 @@
 //! fails here rather than passing as a job that simply completed.
 
 use super::*;
+use crate::payloads;
 
 /// Is the external `par2` binary on this box? Same probe and same
 /// `NZBFAST_REQUIRE_PAR2` assertion as `e2e.rs` - a skipped test reads
@@ -62,7 +63,18 @@ fn damaged_rar_release(build: &Path) -> (HashMap<String, Vec<u8>>, String, Vec<u
     // WinRAR-true geometry, copied from e2e's `rar_release`: volume 0
     // carries one byte more data than volume 1 (no volume-number field
     // in its main header).
-    let inner = payload(900_000, 7);
+    // **NOT `payload`, and the rebuilt count below is why** (follow-up
+    // 13a-4, 31 Aug 2026,
+    // `research/PAYLOAD-GENERATOR-CONSOLIDATION-2026-08-31.md`).
+    // `daemon.rs::payload` is `29 * (i mod 256) + seed` with no position
+    // term, so a volume built from it is one 256-byte window written
+    // over and over and its PAR2 blocks recur every 256 bytes. Measured
+    // on the shape below: `1 block(s) rebuilt across 2 file(s), 266
+    // block(s) adopted from r.part3.rar` - 266 of the 267 blocks the
+    // damage cost came out of a sibling volume's copy of the same
+    // window, and the recovery set did one block of work. Both rows
+    // here would have stayed green with the parity empty.
+    let inner = payloads::unique_payload(900_000, 7);
     let vols = [
         fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
         fixtures::rar5_volume_n(
@@ -266,6 +278,21 @@ async fn a_repair_fallback_job_reaches_a_terminal_history_row() {
             log.contains("re-extracting"),
             "no re-extraction pass after the repair:\n{log}"
         );
+        // The MECHANISM proof, and it is the other half of the route
+        // proof above (follow-up 13a-4). "The fallback was taken" is
+        // satisfied by a repair that solved nothing: on `daemon.rs::
+        // payload` this row completed `1 block(s) rebuilt ... 266
+        // block(s) adopted from r.part3.rar`, the recovery set having
+        // done one block of work while the sliding scan harvested the
+        // rest out of a sibling volume's copy of the same 256-byte
+        // window. The payload is `payloads::unique_payload` now, so a
+        // block that is gone is gone - and this says the parity is what
+        // brought it back.
+        assert!(
+            !log.contains("0 block(s) rebuilt"),
+            "the repair must SOLVE the damage from the recovery set, not \
+             harvest it back out of the job's own bytes:\n{log}"
+        );
         // These volumes carry no data CRC (see e2e's `rar_release_r`), so
         // nothing downstream checksums the payload - the byte comparison
         // is what stands in for it.
@@ -276,7 +303,6 @@ async fn a_repair_fallback_job_reaches_a_terminal_history_row() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Upload one NZB and return the id the daemon minted for it.
@@ -450,5 +476,4 @@ async fn every_job_in_a_queue_with_a_repair_fallback_reaches_history() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

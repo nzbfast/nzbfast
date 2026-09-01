@@ -52,7 +52,7 @@ IF NOTHING OPENS AT ALL
 almost always means the download lost its Unix permissions on the
 way to you. That happens when the files are passed on through a
 chat app, a cloud drive or a re-zip rather than downloaded from
-nzbfast.com or the GitHub releases page - macOS keeps the permission
+the GitHub releases page - macOS keeps the permission
 bit inside the .zip, and those channels do not.
 
 Download the .dmg or the .zip directly from the releases page and it

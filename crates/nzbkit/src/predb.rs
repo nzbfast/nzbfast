@@ -423,20 +423,6 @@ fn plain_kind(word: &str) -> Option<PreKind> {
     }
 }
 
-/// The three plain wire shapes the 2026 relay survey found live
-/// (research/PREDB-RELAYS-DEEP-2026-08.md), tried in order:
-///
-/// ```text
-/// predataba.se : pre | SECTION | RELEASE            (pipe-delimited)
-/// corrupt-net  : PRE: [SECTION] RELEASE
-/// scenep2p     : (PRE) (SECTION) RELEASE
-/// ```
-///
-/// None of these carry a filename or a timestamp: the caller's arrival
-/// clock (`seen_at`) is the pre time, which is fine - relay latency is
-/// seconds. The title is anchored from the LEFT (keyword, then
-/// section), and what remains is taken opaquely, per the survey's
-/// warning that the trailing field has no terminator.
 /// The `pre | SECTION | RELEASE` shape (predataba.se). `None` when the
 /// line is not that shape, which is [`parse_plain`]'s cue to keep trying.
 fn parse_pipe(t: &str) -> Option<PreLine> {
@@ -463,6 +449,20 @@ fn parse_pipe(t: &str) -> Option<PreLine> {
     Some(p)
 }
 
+/// The three plain wire shapes the 2026 relay survey found live
+/// (research/PREDB-RELAYS-DEEP-2026-08.md), tried in order:
+///
+/// ```text
+/// predataba.se : pre | SECTION | RELEASE            (pipe-delimited)
+/// corrupt-net  : PRE: [SECTION] RELEASE
+/// scenep2p     : (PRE) (SECTION) RELEASE
+/// ```
+///
+/// None of these carry a filename or a timestamp: the caller's arrival
+/// clock (`seen_at`) is the pre time, which is fine - relay latency is
+/// seconds. The title is anchored from the LEFT (keyword, then
+/// section), and what remains is taken opaquely, per the survey's
+/// warning that the trailing field has no terminator.
 fn parse_plain(text: &str) -> Option<PreLine> {
     let t = text.trim();
     if t.is_empty() {

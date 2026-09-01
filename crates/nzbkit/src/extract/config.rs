@@ -18,6 +18,66 @@ use crate::sync::MutexExt;
 /// override (tests); resolved by [`nested_depth_cap`].
 pub(super) const NESTED_MAX_DEPTH_DEFAULT: usize = 5;
 
+/// The absolute ceiling a store-only chain may raise the cap to.
+///
+/// Only COMPRESSING layers count against [`NESTED_MAX_DEPTH_DEFAULT`],
+/// because that cap is a decompression-bomb backstop and a STORED layer
+/// cannot expand - its every level is the same bytes with a header on
+/// the front. That is right about the BOMB and would be wrong as an open
+/// licence: a store ladder a million levels deep still costs a real
+/// extractor, real buffers and real scratch per level, so it is a
+/// resource attack even though no byte ever inflates. This is the
+/// backstop for that residue. It is deliberately far above any real post
+/// - measured usenet nesting is 2-3 levels and the deepest ladder in the
+/// bench corpus is 10 - so it never binds on legitimate content, and it
+/// is not a knob.
+///
+/// PUBLIC because the exemption it bounds is enforced in TWO crates: the
+/// disk post-pass twin of the in-stream ceiling test derives its ladder
+/// from this number rather than spelling 64, so moving the ceiling moves
+/// both tests with it instead of leaving a magic number that passes for
+/// the wrong reason.
+///
+/// IT IS A PER-SITE CEILING AND NOT A PER-JOB ONE, which the paragraph
+/// above reads as promising and does not deliver. The two sites run in
+/// SEQUENCE on a job that demotes mid-ladder - the in-stream chain
+/// materializes what it could not reach, and the disk post-pass then
+/// starts its own count against a freshly resolved cap - so such a job
+/// can traverse up to `2 * NESTED_MAX_DEPTH_HARD_CEILING - 1` levels in
+/// total. The residue argument survives that, which is why the number
+/// stayed 64 when it was measured (31 Aug 2026): what it bounds is a
+/// real extractor, real buffers and real scratch PER LIVE LEVEL, and
+/// two sequential phases never hold two ceilings' worth at once - the
+/// doubling is in total work, which is still bounded and still far
+/// above any real post. The same composition applies one level down to
+/// the operator's own `nested_max_depth`; the argument for leaving both
+/// per-site, and why threading a single depth across the demote cannot
+/// be made correct, is at `nzbfast::unpack::TAIL_NESTED_ENTRY_DEPTH`
+/// and in `research/NESTED-DEPTH-TWO-SITE-BUDGET-2026-08-31.md`.
+pub const NESTED_MAX_DEPTH_HARD_CEILING: usize = 64;
+
+/// The cap a child inherits across a layer PROVEN to store everything it
+/// holds: one more level than its parent had, clamped to
+/// [`NESTED_MAX_DEPTH_HARD_CEILING`].
+///
+/// THE RULE LIVES HERE BECAUSE IT IS ENFORCED AT TWO INDEPENDENT SITES.
+/// The in-stream chain applies it in `Extractor::ensure_child`; the
+/// disk post-pass applies it in `nzbfast::unpack::extract_nested_capped`,
+/// which carries its own cap down the recursion for the resumed and
+/// disk-only jobs the in-stream half never sees. `c0b1c788a` changed only the first of the
+/// two and said so in its own message - TODO 15g had already recorded
+/// that the two "share one nested_max_depth setting", and the point of
+/// this function is that they now share the RULE and not only the
+/// NUMBER. A raise spelled out a second time is a raise that can drift
+/// out of step with its twin in silence, which is exactly how the disk
+/// site came to charge a stored layer that the stream site did not.
+///
+/// Saturating rather than wrapping: `cap` comes from a daemon setting a
+/// user types, and `usize::MAX + 1` is not a deeper ladder.
+pub fn nested_cap_after_store_layer(cap: usize) -> usize {
+    cap.saturating_add(1).min(NESTED_MAX_DEPTH_HARD_CEILING)
+}
+
 /// Process-global nested depth cap set from the daemon `nested_max_depth`
 /// setting. 0 = unset (fall back to [`NESTED_MAX_DEPTH_DEFAULT`]). Both
 /// the in-stream child chain (via the ctor default) and the disk
@@ -230,6 +290,28 @@ pub(super) fn rar_drop_env_off() -> bool {
 
 /// Pure parse of the RAR drop escape-hatch value.
 pub(super) fn rar_drop_env_off_value(v: Option<&str>) -> bool {
+    v == Some("1")
+}
+
+/// Escape hatch for the drop's LOSS-DOUBT veto
+/// ([`crate::extract::LossDoubt`]): with it set, only a TERMINAL verdict
+/// stands the drop down and a held one does not - the pre-30 Aug 2026
+/// behaviour, where the trim could win the race against the verdict and
+/// drop a prefix the mapped repair then needed
+/// (`research/CHASE-TRIM-DROPS-BEFORE-VERDICT-2026-08-30.md`).
+///
+/// It exists so one binary has both arms, which is what pricing the
+/// spill this restores costs on the loopback rig needs - the drop/spill
+/// balance is a MEASURED trade (21-22 Aug 2026) and a fix to it that
+/// cannot be A/B'd is a claim rather than a result. It is not a
+/// correctness knob: the doubt is a veto, so setting this can only ever
+/// make the trim less careful. Latched at construction.
+pub(super) fn loss_doubt_env_off() -> bool {
+    loss_doubt_env_off_value(std::env::var("NZBFAST_NO_LOSS_DOUBT").ok().as_deref())
+}
+
+/// Pure parse of the loss-doubt escape-hatch value.
+pub(super) fn loss_doubt_env_off_value(v: Option<&str>) -> bool {
     v == Some("1")
 }
 

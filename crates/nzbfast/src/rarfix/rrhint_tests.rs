@@ -500,3 +500,55 @@ fn a_damaged_volume_without_a_record_still_fails_the_rung_under_a_hint() {
     assert!(!dir.join("inner").exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A volume named AT the component cap must still reach its recovery
+/// record.
+///
+/// `rr_repair_volume` claims a unique temp beside the volume BEFORE it
+/// has looked at the archive at all, and it used to spell that temp
+/// `path.with_extension("rrtmp{n}")`. `with_extension` REPLACES, so it
+/// grows whenever the new extension is longer than the old, and `.rar`
+/// -> `.rrtmp0` always is: a leaf at 255 bytes - which is what
+/// `sanitize_out_name` hands back for any long posted name, capping being
+/// what produced it - becomes 258, and `create_new` refuses it with
+/// `ENAMETOOLONG` (measured on APFS 31 Aug 2026: 255 creates, 256 does
+/// not). The whole loop then ran out of candidates and the RR pass gave
+/// up on the volume before reading a byte of it.
+///
+/// Driven through a `.rar` that is NOT an archive, which is exactly what
+/// `collect_rar_volumes` hands this function - it takes any `.rar`-suffixed
+/// entry - and which puts the answer one step past the temp claim: the
+/// error names the SIGNATURE, so reaching it proves the temp was taken.
+/// A pre-fix tree cannot get there; it fails at the claim.
+#[test]
+fn a_volume_named_at_the_cap_gets_past_the_repair_temp_claim() {
+    let dir = std::env::temp_dir().join(format!(
+        "nzbfast-rrtmpcap-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let name = nzbkit::disk::sanitize_out_name(&format!("{}.rar", "y".repeat(400)));
+    assert_eq!(name.len(), 255, "the premise moved");
+    let vol = dir.join(&name);
+    std::fs::write(&vol, b"not an archive at all").unwrap();
+
+    let e = super::rr_repair_volume(&vol, None).expect_err("nothing here is repairable");
+    assert!(
+        e.to_string().contains("not a RAR5 volume"),
+        "the temp claim must be the step this gets PAST, not the one it \
+         dies at: {e}"
+    );
+    // And the claim cleans up after itself, whatever name it took.
+    let strays: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|x| x.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("rrtmp"))
+        .collect();
+    assert!(strays.is_empty(), "repair temps left behind: {strays:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

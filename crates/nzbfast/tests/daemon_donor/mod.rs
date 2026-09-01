@@ -18,6 +18,7 @@
 //! between the sets - the adoption is pure content match.
 
 use super::*;
+use crate::payloads;
 
 /// Write the release files, run `par2 create` over them at `block`
 /// bytes per slice with ONE recovery block, and return the resulting
@@ -52,6 +53,58 @@ fn par2_set(
         })
         .collect();
     out.sort();
+    out
+}
+
+/// `par2_set`, but ONE INDEPENDENT recovery set PER FILE - GH #63's
+/// shape, and the one `tests/e2e_multiset` models. Each file gets its
+/// own `par2 create` under its own base name, so the post carries N
+/// sets with N distinct set ids, and each set's single recovery block
+/// speaks only for its own file.
+///
+/// The packets are collected and REMOVED after each file, because
+/// `par2 create` writes into the build directory and a later file's
+/// scan would otherwise pick up the earlier one's volumes.
+fn par2_set_per_file(
+    build: &std::path::Path,
+    files: &[(&str, &[u8])],
+    block: u64,
+) -> Vec<(String, Vec<u8>)> {
+    std::fs::create_dir_all(build).unwrap();
+    for (name, data) in files {
+        std::fs::write(build.join(name), data).unwrap();
+    }
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    for (name, _) in files {
+        let base = name.rsplit_once('.').map_or(*name, |(stem, _)| stem);
+        let st = Command::new("par2")
+            .arg("create")
+            .arg(format!("-s{block}"))
+            .arg("-c1")
+            .arg("-q")
+            .arg(base)
+            .arg(name)
+            .current_dir(build)
+            .status();
+        assert!(
+            st.is_ok_and(|s| s.success()),
+            "par2 create failed for {name}"
+        );
+        let mut mine: Vec<(String, Vec<u8>)> = std::fs::read_dir(build)
+            .unwrap()
+            .filter_map(|e| {
+                let p = e.unwrap().path();
+                let n = p.file_name()?.to_string_lossy().to_string();
+                (p.extension().is_some_and(|x| x == "par2")).then(|| {
+                    let b = std::fs::read(&p).unwrap();
+                    std::fs::remove_file(&p).unwrap();
+                    (n, b)
+                })
+            })
+            .collect();
+        mine.sort();
+        out.extend(mine);
+    }
     out
 }
 
@@ -221,8 +274,8 @@ async fn a_promoted_replacement_completes_by_adopting_the_predecessors_blocks() 
     let _scratch = scratch::ScratchDir::attach(&base);
 
     // The release: two files, identical bytes in both posts.
-    let f1 = payload(80_000, 51);
-    let f2 = payload(160_000, 53);
+    let f1 = payloads::unique_payload(80_000, 51);
+    let f2 = payloads::unique_payload(160_000, 53);
     // Two independent recovery sets over the same bytes: different
     // block sizes mean different set ids and zero shared checksums,
     // and DIFFERENT MEMBER NAMES, which is the third thing that keeps
@@ -267,7 +320,7 @@ async fn a_promoted_replacement_completes_by_adopting_the_predecessors_blocks() 
     // "10 block(s) borrowed from a duplicate posting" and then "clean
     // download - no repair", so the adoption it is named for had not run
     // for as long as M31 had been in the tree, with the green tick
-    // intact. `dupefill::donor_set` fetches the donor's Par2Main OFF THE
+    // intact. `dupefill::donor_sets` fetches the donor's Par2Main OFF THE
     // WIRE - an NZB carries no digest, so that index is the only thing
     // that can say the two postings are the same bytes - so ghosting it
     // shuts that path out and leaves this one. The article donor gets
@@ -338,6 +391,22 @@ async fn a_promoted_replacement_completes_by_adopting_the_predecessors_blocks() 
     // and adopts. Same posts, same mock, same damage.
     let dir_b = base.join("leg-b");
     std::fs::create_dir_all(&dir_b).unwrap();
+    // ADOPTION IS THIS LEG, not an artefact of it. `adoptguard::
+    // refuse_a_solve_that_solved_nothing` reads every daemon log at
+    // teardown and refuses a repair that rebuilt zero blocks from parity
+    // and adopted some - and this leg completes exactly `0 block(s)
+    // rebuilt across 1 file(s), 10 block(s) adopted from
+    // f2p.bin.nzbfast-partial`, which is the sentence the test is named
+    // for. It cannot be otherwise: the successor declares ONE recovery
+    // block against a ten-block hole, which is what leg A above proves
+    // by failing on the same post with no predecessor to donate.
+    crate::adoptguard::adoption_is_the_premise(
+        &dir_b,
+        "TODO 293 stage 2 IS the disk adoption scan - ten blocks short \
+         against one declared recovery block, so no block of the hole \
+         can come from parity and leg A fails on exactly that; the \
+         predecessor's copy closing all ten is the assertion",
+    );
     let cfg_b = dir_b.join("config.json");
     std::fs::write(&cfg_b, &addr).unwrap();
     let db = serve(&dir_b, daemon_in(dir_b.clone(), cfg_b.clone())).await;
@@ -350,7 +419,7 @@ async fn a_promoted_replacement_completes_by_adopting_the_predecessors_blocks() 
         upload(port_b, &p2_xml, "Donor.Show.S05E01.1080p.nzb");
         let q = http(port_b, "/api?mode=queue&output=json", None);
         assert!(
-            q.contains("\"Duplicate\""),
+            any_held_behind_a_copy(&q),
             "the alternative was not held: {q}"
         );
         http(port_b, "/api?mode=resume&output=json", None);
@@ -389,7 +458,6 @@ async fn a_promoted_replacement_completes_by_adopting_the_predecessors_blocks() 
         "the article donor ran, so this leg is not the disk A/B it is named \
          for - see the fixture note on the predecessor's dead par2:\n{lg}"
     );
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// PLAN M31 stage 1, end to end on a real daemon job: the promoted
@@ -489,8 +557,8 @@ async fn a_promoted_replacement_borrows_the_predecessors_live_articles_over_the_
     // both block sizes, so a dead article is a whole number of bad
     // blocks and the counts asserted below are arithmetic rather than
     // an observation of one run.
-    let f2 = payload(160_000, 61);
-    let f3 = payload(120_000, 67);
+    let f2 = payloads::unique_payload(160_000, 61);
+    let f3 = payloads::unique_payload(120_000, 67);
     // The predecessor calls f3 something else, and that single
     // difference is what splits this run across BOTH donor sources -
     // see the "two sources, one run" block in the doc comment.
@@ -575,7 +643,7 @@ async fn a_promoted_replacement_borrows_the_predecessors_live_articles_over_the_
         upload(port_b, &p1_xml, "Dupe.Show.S06E02.720p.nzb");
         upload(port_b, &p2_xml, "Dupe.Show.S06E02.1080p.nzb");
         let q = http(port_b, "/api?mode=queue&output=json", None);
-        assert!(q.contains("\"Duplicate\""), "the spare was not held: {q}");
+        assert!(any_held_behind_a_copy(&q), "the spare was not held: {q}");
         http(port_b, "/api?mode=resume&output=json", None);
 
         let got1 = outcome(port_b, "720p", 600).expect("the predecessor never settled");
@@ -674,7 +742,6 @@ async fn a_promoted_replacement_borrows_the_predecessors_live_articles_over_the_
              the successor started: {after:?}"
         );
     }
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// PLAN M31 item 4: a store-RAR release is REACHED by the article fill
@@ -723,7 +790,7 @@ async fn a_store_rar_release_is_reached_by_the_article_fill_once_its_volume_is_a
     // One store RAR volume carrying the payload, posted as a real
     // release is: the slot the verifier settles is the VOLUME, and the
     // extractor maps it rather than writing it out.
-    let movie = payload(240_000, 71);
+    let movie = payloads::unique_payload(240_000, 71);
     let rar = nzbkit::rar::fixtures::rar5_volume(&[(
         "movie.bin",
         movie.len() as u64,
@@ -777,7 +844,7 @@ async fn a_store_rar_release_is_reached_by_the_article_fill_once_its_volume_is_a
         upload(port, &p1_xml, "Rar.Show.S06E02.720p.nzb");
         upload(port, &p2_xml, "Rar.Show.S06E02.1080p.nzb");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains("\"Duplicate\""), "the spare was not held: {q}");
+        assert!(any_held_behind_a_copy(&q), "the spare was not held: {q}");
         http(port, "/api?mode=resume&output=json", None);
         assert_eq!(
             outcome(port, "720p", 600).expect("the predecessor never settled"),
@@ -852,5 +919,313 @@ async fn a_store_rar_release_is_reached_by_the_article_fill_once_its_volume_is_a
     )
     .expect("extracted payload");
     assert_eq!(got, movie, "the extracted payload is not byte-exact");
-    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The duplicate-donor pass over a post that ships ONE RECOVERY SET PER
+/// FILE, which until 31 Aug 2026 nothing exercised anywhere.
+///
+/// # Why this fixture had to be built
+///
+/// `dupefill::FILL_BUDGET` and `MAX_FILL_BYTES` were created INSIDE
+/// `fill_wanted`, which `settle::fill_from_duplicates` calls once per
+/// recovery set - so both ceilings were per SET where `FILL_BUDGET`'s
+/// own doc comment says "the whole pass". On GH #63's eighteen-set post
+/// an unreachable donor cost eighteen 90-second waits at each of the
+/// two entry points rather than one, and the number of sets is the
+/// POSTER's choice, so the cost was bounded by nothing this end
+/// controls. `research/DUPEFILL-CALIBRATION-2026-08-31.md` measured
+/// that from the code and said so: no multi-set donor fixture existed
+/// to run it on. `tests/e2e_multiset` has the multi-set shape and no
+/// donor; `daemon_donor`'s two siblings above have the donor and one
+/// set. This is the crossing.
+///
+/// # What it pins, and what it deliberately does not
+///
+/// It pins that the pass RUNS ON EVERY SET of a multi-set post off ONE
+/// shared budget: three `🔎` lines, one per set, and fifteen blocks
+/// borrowed across the three, with no truncation line. That is the
+/// regression the scope fix could plausibly have caused - a shared
+/// budget can starve a later set where a per-set one could not - and it
+/// is the half a unit test over `fill_wanted` cannot reach, because the
+/// budget is created by the CALLER's loop.
+///
+/// It does NOT pin the sharing itself. Seeing a later set refused needs
+/// a budget that is actually spent, which is 90 seconds or 256 MiB, and
+/// neither is reachable on a mock. The sharing is pinned deterministically
+/// one level down, in `get::dupefill::dupefill_tests` -
+/// `two_sets_of_one_pass_spend_one_budget_between_them` and
+/// `a_set_arriving_on_a_spent_budget_asks_for_nothing_and_says_which_ceiling`.
+/// The division is the usual one in this repo: the cheap portable check
+/// holds the mechanism, the expensive one holds the wiring.
+///
+/// # The fixture
+///
+/// Three 120 KB files, three articles each at the harness's 40 KB, and
+/// one independent recovery set per file in BOTH posts at different
+/// block sizes - so no checksum is shared between a target set and a
+/// donor set and every match is by content.
+///
+/// | | f1/f2/f3, 4 KB blocks, 1 declared | dead |
+/// |---|---|---|
+/// | predecessor | 30 blocks per file | part 1 (10 blocks) |
+/// | successor, 8 KB blocks | 15 blocks per file | part 3 (5 blocks) |
+///
+/// The holes are DISJOINT, so each post's damage is the other's live
+/// articles. Five blocks short against one declared sinks each of the
+/// successor's three sets, so the fifteen blocks it borrows are fifteen
+/// it could not otherwise have had; there is no separate leg A because
+/// that arithmetic is the argument and the sibling above already
+/// carries the A/B for the one-set case.
+///
+/// **The predecessor names every member differently** (`f1p.bin` for
+/// `f1.bin`), which is what puts this test on the WIRE. `dupefill`
+/// reads a donor DIRECTORY first and finds a member there by NAME, so
+/// same-named files would be served off the predecessor's own disk and
+/// the budget - a bound on wire work - would never be exercised at all.
+/// Two posts of one release disagreeing about a filename is the
+/// ordinary case rather than a contrivance:
+/// `nzbkit::dupedonor::match_by_content` pairs members by DIGEST for
+/// exactly that reason.
+///
+/// The predecessor's own hole in each file is load-bearing the same way
+/// it is in the sibling above: §305's plan-side arm takes a donor
+/// member WHOLE on the successor's own `FileDesc` MD5, and a
+/// byte-perfect copy is exactly what that arm takes, leaving this pass
+/// nothing to do while the test read green.
+///
+/// # THE DONOR SHIPS ONE SET PER FILE TOO, since 31 Aug 2026
+///
+/// It shipped ONE set over all three files for its first hours, and had
+/// to: `dupefill::donor_sets` adopted the LARGEST donor set only (TODO
+/// 311's last box), so a DONOR that ships one set per file donated for
+/// exactly one target set and no other. Measured on this very fixture
+/// the day it was built - with a per-file donor, `f1` borrowed its five
+/// blocks and the other two sets logged "a duplicate posting of a
+/// DIFFERENT encode - no byte range in common", then completed off
+/// §293's repair-time adoption instead, so the run read GREEN while two
+/// thirds of the pass under test had not happened.
+///
+/// So the assertions below are now over BOTH halves at once, which is
+/// GH #63's exact shape: `donor_sets` probes every `Par2Main` in the
+/// donor NZB and `dupedonor::match_by_content_multi` pairs across all
+/// of them under one claim per target file. Run against the
+/// largest-set-only rule this test heals FIVE blocks and not fifteen -
+/// the `✔ f2.bin` and `✔ f3.bin` lines are what go missing, and they
+/// are asserted individually for that reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fill_runs_on_every_recovery_set_of_a_multi_set_post_off_one_budget() {
+    if !have_par2() {
+        eprintln!("par2 not on PATH - skipping the multi-set donor fixture");
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("nzbfast-multiset-donor-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&base);
+
+    // Exact multiples of the 40 KB article size and of both block
+    // sizes, so a dead article is a whole number of bad blocks and
+    // every count asserted below is arithmetic rather than an
+    // observation of one run.
+    let f1 = payloads::unique_payload(120_000, 71);
+    let f2 = payloads::unique_payload(120_000, 73);
+    let f3 = payloads::unique_payload(120_000, 79);
+    // ONE INDEPENDENT SET PER FILE on the donor side as well, which is
+    // what makes both posts GH #63's shape rather than only the
+    // successor. See the doc comment: this was one joined set until the
+    // largest-set-only rule was lifted.
+    let set_a = par2_set_per_file(
+        &base.join("build-a"),
+        &[
+            ("f1p.bin", &f1[..]),
+            ("f2p.bin", &f2[..]),
+            ("f3p.bin", &f3[..]),
+        ],
+        4_000,
+    );
+    let set_b = par2_set_per_file(
+        &base.join("build-b"),
+        &[
+            ("f1.bin", &f1[..]),
+            ("f2.bin", &f2[..]),
+            ("f3.bin", &f3[..]),
+        ],
+        8_000,
+    );
+    for (which, built) in [("donor", &set_a), ("target", &set_b)] {
+        assert!(
+            built.len() >= 3,
+            "the {which} post needs three independent sets, so at least three \
+             index files: {:?}",
+            built.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        );
+    }
+
+    let mut articles = HashMap::new();
+    // The PREDECESSOR. Its recovery volumes are ALIVE on purpose: the
+    // pass fetches a donor's own recovery index to prove by digest that
+    // the two postings are of the same bytes, and a donor whose index
+    // cannot be read donates nothing.
+    let mut p1 = Post::new();
+    for (i, (name, data)) in [("f1p.bin", &f1), ("f2p.bin", &f2), ("f3p.bin", &f3)]
+        .iter()
+        .enumerate()
+    {
+        p1.add_holed(name, data, &format!("p1f{i}"), &[1], &mut articles);
+    }
+    for (i, (name, bytes)) in set_a.iter().enumerate() {
+        p1.add(name, bytes, &format!("p1par{i}"), &mut articles);
+    }
+    // The SUCCESSOR, damaged where the predecessor is whole.
+    let mut p2 = Post::new();
+    for (i, (name, data)) in [("f1.bin", &f1), ("f2.bin", &f2), ("f3.bin", &f3)]
+        .iter()
+        .enumerate()
+    {
+        p2.add_holed(name, data, &format!("p2f{i}"), &[3], &mut articles);
+    }
+    for (i, (name, bytes)) in set_b.iter().enumerate() {
+        p2.add(name, bytes, &format!("p2par{i}"), &mut articles);
+    }
+    let p1_xml = p1.xml();
+    let p2_xml = p2.xml();
+    let srv = MockServer::start(articles, Chaos::default()).await;
+    let addr = format!(
+        "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+        srv.addr.ip(),
+        srv.addr.port()
+    );
+
+    let dir = base.join("run");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.json");
+    std::fs::write(&cfg, &addr).unwrap();
+    let d = serve(&dir, daemon_in(dir.clone(), cfg.clone())).await;
+    let port = d.port;
+    tokio::task::spawn_blocking(move || {
+        // Paused, so the second add is HELD as the duplicate of the
+        // first (same episode key) before either runs.
+        http(port, "/api?mode=pause&output=json", None);
+        upload(port, &p1_xml, "Multi.Show.S01E01.720p.nzb");
+        upload(port, &p2_xml, "Multi.Show.S01E01.1080p.nzb");
+        let q = http(port, "/api?mode=queue&output=json", None);
+        assert!(any_held_behind_a_copy(&q), "the spare was not held: {q}");
+        http(port, "/api?mode=resume&output=json", None);
+
+        let got1 = outcome(port, "720p", 600).expect("the predecessor never settled");
+        assert_eq!(got1, "Failed", "the predecessor must fail to donate");
+        let got2 = outcome(port, "1080p", 600).expect("the successor never settled");
+        println!("multi-set donor: the successor post {got2}");
+        assert_eq!(
+            got2, "Completed",
+            "fifteen blocks across three sets, one declared block each - only \
+             the donor can have closed them"
+        );
+    })
+    .await
+    .unwrap();
+
+    let lg = d.log();
+    // THE MULTI-SET ASSERTION. `fill_from_duplicates` loops over the
+    // job's adopted sets and each set's pass opens with this line, so
+    // three of them is the pass having run on all three sets - off the
+    // one budget the loop now creates outside itself.
+    let passes = lg
+        .matches("bad block(s) across 1 file(s) - looking for them in 1 duplicate posting(s)")
+        .count();
+    assert_eq!(
+        passes, 3,
+        "the pass ran on {passes} recovery set(s), not on all three:\n{lg}"
+    );
+    // ...and every one of them borrowed, which a per-set count alone
+    // would not say: a set the pass opened and then did nothing for
+    // would still print the line above.
+    for f in ["f1.bin", "f2.bin", "f3.bin"] {
+        assert!(
+            lg.contains(&format!(
+                "✔ {f}: 5 block(s) borrowed from a duplicate posting"
+            )),
+            "{f} borrowed nothing, so one of the three sets was not served:\n{lg}"
+        );
+    }
+    // The job's own summary, over the SUM of the three sets' reports.
+    // `0 off the predecessor's own files` is the fixture's differing
+    // member names doing their job: every block came off the wire, so
+    // the budget this test exists for was actually exercised.
+    assert!(
+        lg.contains(
+            "🤝 recovered 15 block(s) from a duplicate posting (0 off the \
+             predecessor's own files,"
+        ),
+        "the summary does not report fifteen wire-borrowed blocks:\n{lg}"
+    );
+    // The wire cost, reported apart from the accepted bytes since
+    // 31 Aug 2026 - it is the quantity `MAX_FILL_BYTES` caps, and
+    // nothing returned it before, so no field install could say what
+    // either ceiling should be.
+    assert!(
+        lg.contains(" MB off the wire of which "),
+        "the summary does not split the wire cost from the bytes that \
+         landed:\n{lg}"
+    );
+    // A LOWER BOUND and deliberately not an equality. One article covers
+    // each file's whole five-block hole, so three is the floor - but the
+    // first ask of a plan is BLIND (an NZB states encoded sizes and no
+    // offsets), so a hole at an article's edge can pull one extra body
+    // before `candidate_segments_anchored` re-cuts the rest against it.
+    // Four is what this fixture actually pulls; pinning that number
+    // would pin the estimator's slack rather than the wire half's reach.
+    let fetched: usize = {
+        let at = lg.find(" article(s) fetched").expect("the summary line");
+        lg[..at]
+            .rsplit(' ')
+            .next()
+            .and_then(|t| t.parse().ok())
+            .expect("article count")
+    };
+    assert!(
+        fetched >= 3,
+        "{fetched} article(s) fetched for three sets - the wire half did not \
+         run for every one of them:\n{lg}"
+    );
+    // The two figures are different quantities and must be reported as
+    // such; that they can DIFFER is pinned exactly one level down, in
+    // `dupefill_tests::the_reported_wire_cost_is_the_quantity_the_byte_ceiling_caps`,
+    // because on this fixture the damage is article-aligned so every
+    // fetched byte lands and the two differ only by the yEnc overhead.
+    let (wire, landed) = {
+        let at = lg
+            .find(" MB off the wire of which ")
+            .expect("the split line");
+        let head: f64 = lg[..at]
+            .rsplit(' ')
+            .next()
+            .and_then(|t| t.parse().ok())
+            .expect("wire figure");
+        let rest = &lg[at + " MB off the wire of which ".len()..];
+        let tail: f64 = rest
+            .split(' ')
+            .next()
+            .and_then(|t| t.parse().ok())
+            .expect("landed figure");
+        (head, tail)
+    };
+    assert!(
+        wire >= landed,
+        "the wire cost ({wire}) cannot be below the bytes that landed \
+         ({landed}) - every landed byte was pulled over the wire"
+    );
+    // THE REGRESSION GUARD for the shared budget: three sets served off
+    // one 90-second, 256 MiB budget must not truncate. A run that did
+    // would say so here, and this line is the one thing that would fire
+    // if the shared budget ever became too small for a healthy donor.
+    assert!(
+        !lg.contains("the duplicate-posting pass stopped on"),
+        "one budget was not enough for three sets of a HEALTHY donor - the \
+         shared-budget trade needs re-reading:\n{lg}"
+    );
+    // Nothing else did the work: repair is where §293's block adoption
+    // lives and the successor never reached it.
+    assert!(
+        lg.contains("clean download - no repair"),
+        "repair ran, so the completion is not this pass's:\n{lg}"
+    );
 }

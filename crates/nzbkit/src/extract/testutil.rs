@@ -6,6 +6,17 @@
 use super::*;
 use crate::rar::fixtures;
 
+/// How long a multi-step test wait in this module tolerates seeing no
+/// progress at all before it reports a stall, mirroring
+/// `serve::testutil::NO_PROGRESS` on the nzbfast side.
+///
+/// A no-progress gap, reset whenever the counter the wait is polling
+/// advances, never a total budget for the whole wait: what stays bounded
+/// is one step, and the number of steps a case needs is a property of
+/// the test rather than of the box. Sized at the same 30 s
+/// `feed_chase_volumes_paced` above already uses per volume.
+pub(super) const NO_PROGRESS: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Run `ex.finish()` under a hard wall-clock deadline (a BELT, not the
 /// fix): a demote that joins a chase worker parked on a hole used to
 /// wedge forever (TODO 255), and a test with no deadline turns that into
@@ -34,11 +45,9 @@ pub(super) fn finish_within(ex: &Arc<Extractor>, secs: u64) -> io::Result<Extrac
     }
 }
 
-pub(super) fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("nzbfast-extract-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+pub(super) fn tmpdir(tag: &str) -> crate::testscratch::ScratchDir {
+    let d = std::env::temp_dir().join(format!("nzbkit-extract-{tag}-{}", std::process::id()));
+    crate::testscratch::ScratchDir::attach(&d)
 }
 
 pub(super) fn payload(n: usize, seed: u8) -> Vec<u8> {

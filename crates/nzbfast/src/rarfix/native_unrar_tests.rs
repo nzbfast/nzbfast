@@ -480,6 +480,220 @@ fn entry_paths_cannot_escape_output_dir() {
     assert!(sanitized_entry_path(dir, "").is_none());
 }
 
+/// An archive entry with a component no filesystem will create is
+/// CAPPED here rather than at any of the writers, and that placement is
+/// the whole point: this function's result is both the path the entry is
+/// written to and the filesystem-IDENTITY key the module compares on
+/// (`extract_one_zip`'s duplicate-target dedup, `resumeout::plan`'s "did
+/// the chase publish exactly here" test). Capping at a writer would
+/// shorten one end of that comparison and not the other, and two members
+/// that resolve to ONE path would stop being seen as one and race on the
+/// pool, each verifying only its own CRC over interleaved bytes.
+///
+/// Nothing that works today changes: 255 bytes creates and 300 is
+/// `ENAMETOOLONG` for both `mkdir` and `create` (measured on APFS,
+/// 31 Aug 2026), so every name shortened here is one the write refused.
+#[test]
+fn an_overlong_entry_component_is_capped_where_the_key_and_the_path_are_one() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-entrycap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let long = "L".repeat(300);
+
+    // Every component the extractor will have to create is writable -
+    // and it really creates, which is what the byte count stands in for.
+    let p = sanitized_entry_path(&dir, &format!("sub/{long}.bin")).expect("kept, not escaped");
+    let rel = p.strip_prefix(&dir).expect("stayed under dir");
+    for c in rel.components() {
+        let n = c.as_os_str().to_string_lossy();
+        assert!(n.len() <= 255, "{} bytes: {n}", n.len());
+    }
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, b"x").expect("the capped path must be creatable");
+
+    // Deterministic, so the key a second reader computes is the key the
+    // writer used - and distinct per input, so two overlong members do
+    // not collapse onto one file and race.
+    assert_eq!(
+        Some(p.clone()),
+        sanitized_entry_path(&dir, &format!("sub/{long}.bin"))
+    );
+    assert_ne!(
+        Some(p.clone()),
+        sanitized_entry_path(&dir, &format!("sub/{}.bin", "M".repeat(300)))
+    );
+
+    // A FLAT overlong member is now spelled exactly as the in-stream
+    // side spells it, so `resumeout::plan` matches where it used to fall
+    // back to byte zero. The two sanitizers are allowed to disagree (the
+    // plan tolerates it), but agreeing is strictly better and is what
+    // capping both ends bought.
+    let flat = format!("{long}.mkv");
+    assert_eq!(
+        sanitized_entry_path(&dir, &flat),
+        Some(nzbkit::disk::join_out_name(
+            &dir,
+            &nzbkit::disk::sanitize_out_name(&flat)
+        ))
+    );
+
+    // AND THE TREE CASE, which is the last one that parted (31 Aug
+    // 2026). This side has always capped the component in place and
+    // kept the tree; the in-stream side REFUSED an overlong component
+    // and flattened the whole path, so `VIDEO_TS/<300>.VOB` came back
+    // as two different names - not merely two shapes, two different
+    // hash tags, because one hashed the flattened whole and the other
+    // hashed the component. Both now compose
+    // `cap_component(sanitize_filename_for(c))` per component, so there
+    // is one spelling. Assert it against the in-stream function rather
+    // than against a literal: a pin on the literal would still pass if
+    // BOTH sides moved together to something unwritable.
+    let tree = format!("VIDEO_TS/{long}.VOB");
+    assert_eq!(
+        sanitized_entry_path(&dir, &tree),
+        Some(nzbkit::disk::join_out_name(
+            &dir,
+            &nzbkit::disk::sanitize_out_name(&tree)
+        )),
+        "the disk and in-stream spellings of an overlong member inside a \
+         tree parted, so a resume refetches it from byte zero"
+    );
+    assert!(
+        nzbkit::disk::sanitize_out_name(&tree).contains('/'),
+        "the in-stream side flattened the tree, which is what this closed"
+    );
+
+    // The two are still allowed to part on DEPTH and TOTAL, and that is
+    // a decision rather than an oversight - `None` here aborts the whole
+    // extraction where `None` there only means "flatten", so this side
+    // must not grow those limits. Pinned so a lane that "fixes" the
+    // remaining disagreement has to read that reasoning first (it is on
+    // `nzbkit::disk::sanitize_relpath_for`).
+    let deep = (0..20)
+        .map(|i| format!("d{i}"))
+        .collect::<Vec<_>>()
+        .join("/");
+    let deep_disk = sanitized_entry_path(&dir, &deep).expect("kept, not escaped");
+    assert_eq!(
+        deep_disk.strip_prefix(&dir).unwrap().components().count(),
+        20,
+        "the disk side grew a depth limit, which turns a deep archive \
+         from extracted into failed"
+    );
+    assert!(
+        !nzbkit::disk::sanitize_out_name(&deep).contains('/'),
+        "the in-stream side stopped flattening past MAX_DEPTH"
+    );
+
+    // And a name that fits is untouched, so nothing that works changes.
+    assert_eq!(
+        sanitized_entry_path(&dir, "sub/file.bin"),
+        Some(dir.join("sub").join("file.bin"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An archive entry whose components are each legal but whose JOINED
+/// path is past the filesystem's ceiling used to take the whole archive
+/// down, and the cost was never limited to that entry.
+///
+/// Measured on origin/main, 31 Aug 2026: a zip carrying `ordinary.bin`
+/// and one member of 8 components of 200 bytes failed
+/// `extract_one_zip` outright with `ENAMETOOLONG` - raised by
+/// `create_dir_all` in the pre-vetting loop, which runs before a single
+/// payload byte is written, so `ordinary.bin` was not extracted either -
+/// one awkward entry, and the user got nothing.
+///
+/// Refusing in `sanitized_entry_path` would have bought that same
+/// outcome by a shorter route, since every caller turns `None` into an
+/// aborted extraction. So the budget answers with the flat capped NAME
+/// instead, and it is the SAME function the in-stream side falls back
+/// to - which is why the agreement below is asserted against
+/// `sanitize_out_name` rather than against a literal: a pin on the
+/// literal would still pass if both sides moved together to something
+/// unwritable.
+#[test]
+fn an_over_budget_entry_lands_flat_instead_of_failing_the_archive() {
+    use nzbkit::zip::fixtures::{Spec, zip_of};
+    let dir = temp_dir("overbudget");
+    let out = dir.join("stage");
+    let published = dir.join("pub");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&published).unwrap();
+
+    let long: String = (0..8)
+        .map(|i| format!("{}{i}", "d".repeat(199)))
+        .collect::<Vec<_>>()
+        .join("/");
+    assert!(long.len() > 1023, "{} bytes", long.len());
+    assert!(
+        long.split('/').all(|c| c.len() <= 255),
+        "every component must be LEGAL, or the per-component cap is what \
+         this row exercises and the total budget is unfalsified"
+    );
+
+    // The name: flat, capped, and spelled exactly as the in-stream
+    // sanitizer spells it, so `resumeout::plan` matches instead of
+    // falling back to byte zero.
+    let target = sanitized_entry_path(&out, &long).expect("a long name is not a hostile one");
+    let rel = target.strip_prefix(&out).unwrap();
+    assert_eq!(rel.components().count(), 1, "{rel:?}");
+    assert_eq!(
+        Some(target.clone()),
+        Some(nzbkit::disk::join_out_name(
+            &out,
+            &nzbkit::disk::sanitize_out_name(&long)
+        )),
+        "the disk and in-stream spellings of an over-budget member parted"
+    );
+    // Deterministic and distinct, so two over-budget members cannot
+    // collapse onto one file and race on the pool.
+    assert_eq!(Some(target.clone()), sanitized_entry_path(&out, &long));
+    let other: String = (0..8)
+        .map(|i| format!("{}{i}", "e".repeat(199)))
+        .collect::<Vec<_>>()
+        .join("/");
+    assert_ne!(Some(target.clone()), sanitized_entry_path(&out, &other));
+
+    // And the outcome that actually matters: the archive extracts, and
+    // the innocent sibling is written.
+    let arch = zip_of(&[
+        Spec::stored("ordinary.bin", b"good payload"),
+        Spec::stored(&long, b"long payload"),
+    ]);
+    let zp = dir.join("a.zip");
+    std::fs::write(&zp, &arch).unwrap();
+    extract_one_zip(&out, &published, &[zp], None).expect("one long entry must not fail the zip");
+    assert_eq!(
+        std::fs::read(out.join("ordinary.bin")).unwrap(),
+        b"good payload",
+        "the sibling member was lost to another entry's name"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"long payload");
+
+    // DEPTH is still not a limit on this side, and that is a decision -
+    // `None` here aborts the archive, so a merely-deep tree must not be
+    // refused. The reasoning is on `nzbkit::disk::sanitize_relpath_for`.
+    let deep = (0..20)
+        .map(|i| format!("d{i}"))
+        .collect::<Vec<_>>()
+        .join("/");
+    let deep_disk = sanitized_entry_path(&out, &deep).expect("kept, not escaped");
+    assert_eq!(
+        deep_disk.strip_prefix(&out).unwrap().components().count(),
+        20,
+        "the disk side grew a depth limit, which turns a deep archive from \
+         extracted into failed"
+    );
+
+    // A name that fits is untouched, so nothing that works changes.
+    assert_eq!(
+        sanitized_entry_path(&out, "sub/file.bin"),
+        Some(out.join("sub").join("file.bin"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn drive_relative_component_cannot_escape_on_windows() {
     let dir = std::path::Path::new("/tmp/out");

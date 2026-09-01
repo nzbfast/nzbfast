@@ -186,7 +186,7 @@ impl Extractor {
                             .out_names
                             .get(&e.name)
                             .cloned()
-                            .unwrap_or_else(|| sanitize_filename(&e.name));
+                            .unwrap_or_else(|| sanitize_out_name(&e.name));
                         heads
                             .entry(e.name.as_str())
                             .or_insert((out, e.unpacked_size));

@@ -106,10 +106,12 @@ pub fn is_final_file(path: &Path) -> bool {
 }
 
 /// [`is_final_file`] over an already-lowercased file name.
+///
+/// Reads the extension through [`crate::disk::trimmed_extension`], not
+/// `Path::extension()`: a trailing dot or space defeats the latter (T6),
+/// the same defect `extract::names::is_final_name` carried.
 fn is_final_name(lower: &str) -> bool {
-    Path::new(lower)
-        .extension()
-        .is_some_and(|e| FINAL_FILE_EXTS.contains(&&*e.to_string_lossy()))
+    crate::disk::trimmed_extension(lower).is_some_and(|e| FINAL_FILE_EXTS.contains(&e))
 }
 
 /// WinZip-spanned continuation part: `.z01` … (letter z + at least two

@@ -156,45 +156,211 @@ impl Daemon {
         // previous job is still draining behind it (the cross-job
         // hand-over), otherwise the figure dips at every queue boundary
         // while the line is in fact full.
-        let drain = self
-            .drain_dl
-            .lock_ok()
-            .as_ref()
-            .map_or(0, |s| s.progress.load(Ordering::Relaxed));
-        let done = self.progress.load(Ordering::Relaxed).saturating_add(drain);
         let active = self.started_at.lock_ok().is_some();
-        let mut win = self.speed_win.lock_ok();
         if !active {
-            win.clear();
+            self.speed_win.lock_ok().clear();
             return 0.0;
         }
-        let now = Instant::now();
-        if win.back().is_some_and(|&(_, b)| done < b) {
-            win.clear();
-        }
-        win.push_back((now, done));
-        while win
+        // BOTH counters inside the closure, so both are read under the
+        // window's lock - see `window_rate`. The drain slot is the other
+        // half of this figure, so a stale reading of it inverts exactly
+        // as a stale reading of `progress` would. Lock order is
+        // speed_win -> drain_dl and there is no other: `speed_win` is
+        // touched here and nowhere else in the tree.
+        window_rate(&self.speed_win, || {
+            let drain = self
+                .drain_dl
+                .lock_ok()
+                .as_ref()
+                .map_or(0, |s| s.progress.load(Ordering::Relaxed));
+            self.progress.load(Ordering::Relaxed).saturating_add(drain)
+        })
+    }
+}
+
+/// Bytes/sec over a ~5 s rolling window of monotonic byte samples.
+///
+/// `read_done` is called INSIDE the window's own lock, and that is the
+/// point of taking a closure rather than a number. Every poll of the
+/// queue payload samples these windows, several can be in flight at
+/// once (a dashboard, a phone remote, a *arr), and a counter read
+/// BEFORE the lock lets two readers arrive out of order - the later
+/// reading pushed first, the earlier one then looking like a counter
+/// that went backwards, which drops the window.
+///
+/// Closed on inspection rather than after an incident, and said plainly
+/// because the two are easy to confuse: this is NOT what caused the
+/// 29 Aug 2026 sawtooth on the early start's trace - the eviction rule
+/// below was, and closing this one did not move it. What makes the hole
+/// worth closing anyway is that the early start reads at ~780 MB/s,
+/// where the counter moves ~780 bytes per microsecond, so any
+/// reordering at all inverts. Under the lock it cannot happen rather
+/// than being unlikely, and the closure is what makes that structural
+/// instead of a rule the next caller has to remember.
+///
+/// Shared rather than copied, because there is a SECOND live rate now:
+/// the idle-server early start runs its own pipeline on its own counter
+/// (`Sidecar::rate_bps`), and the dashboard draws the two as two series
+/// on one chart. Two hand-copied windows would be two rates computed
+/// slightly differently and drawn against each other as if they were
+/// comparable - which is the one thing a second series on the same axis
+/// promises. Every rule below is therefore in one place:
+///
+/// * a counter that went BACKWARDS is a new download on a reused window,
+///   so the window is dropped rather than reporting a negative rate as a
+///   huge positive one;
+/// * samples older than 5 s leave, BUT never the last two. A window fed
+///   by its own readers must not be able to evict itself empty: a client
+///   polling more slowly than the window is long would then find one
+///   sample every time and read 0 forever. Measured on a live early
+///   start at ~777 MB/s on 29 Aug 2026 - a background dashboard tab
+///   backs its poll off past five seconds, and the second trace
+///   alternated its true rate with zero, once per poll. Held to two, a
+///   sparse poller gets an honest average over its own gap instead;
+/// * the leading no-progress samples are dropped, because at download
+///   start the window otherwise spans the TLS/connect handshakes and the
+///   first figures are bytes divided by dead time - a rate that climbs
+///   to the truth over five seconds and reads as a slow ramp-up the line
+///   never had. Measured from the first byte that moved, the first
+///   figure is the real one. Steady state is untouched: consecutive
+///   one-second samples always differ while bytes flow;
+/// * under a quarter second of span is not a measurement.
+pub(in crate::serve) fn window_rate(
+    win: &Mutex<VecDeque<(Instant, u64)>>,
+    read_done: impl FnOnce() -> u64,
+) -> f64 {
+    let win = &mut *win.lock_ok();
+    let done = read_done();
+    let now = Instant::now();
+    if win.back().is_some_and(|&(_, b)| done < b) {
+        win.clear();
+    }
+    win.push_back((now, done));
+    while win.len() > 2
+        && win
             .front()
             .is_some_and(|&(t, _)| now.duration_since(t).as_secs_f64() > 5.0)
-        {
-            win.pop_front();
+    {
+        win.pop_front();
+    }
+    while win.len() >= 2 && win[0].1 == win[1].1 {
+        win.pop_front();
+    }
+    match (win.front(), win.back()) {
+        (Some(&(t0, b0)), Some(&(t1, b1))) if t1.duration_since(t0).as_secs_f64() > 0.25 => {
+            (b1 - b0) as f64 / t1.duration_since(t0).as_secs_f64()
         }
-        // Drop the leading no-progress samples: at download start the
-        // window otherwise spans the TLS/connect handshakes, and the
-        // first shown figures are bytes divided by dead time - a rate
-        // that climbs to the truth over five seconds and reads as a slow
-        // ramp-up the line never had. Measured from the first byte that
-        // moved, the first figure is the real one. Steady state is
-        // untouched: consecutive one-second samples always differ while
-        // bytes flow.
-        while win.len() >= 2 && win[0].1 == win[1].1 {
-            win.pop_front();
+        _ => 0.0,
+    }
+}
+
+#[cfg(test)]
+mod window_rate_tests {
+    use super::*;
+
+    /// The counter must be read INSIDE the window's lock, or two
+    /// concurrent pollers can invert and the earlier reading clears the
+    /// window - which is what put a 765 / 0 / 765 / 0 sawtooth on the
+    /// early start's chart trace before this was a closure.
+    ///
+    /// Ordering is proved rather than raced: the test holds the lock,
+    /// and while it does, the reader parked behind it must not have
+    /// sampled anything. A machine slow enough that the thread has not
+    /// reached the lock yet fails this test in the SAFE direction (it
+    /// passes), so there is no flaky red in it.
+    #[test]
+    fn the_counter_is_never_read_before_the_window_lock() {
+        let win: Arc<Mutex<VecDeque<(Instant, u64)>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let sampled = Arc::new(AtomicU64::new(0));
+        let guard = win.lock_ok();
+        let t = {
+            let win = win.clone();
+            let sampled = sampled.clone();
+            std::thread::spawn(move || {
+                window_rate(&win, || {
+                    sampled.fetch_add(1, Ordering::SeqCst);
+                    7
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert_eq!(
+            sampled.load(Ordering::SeqCst),
+            0,
+            "the counter was sampled while the window was locked by someone else"
+        );
+        drop(guard);
+        t.join().expect("reader");
+        assert_eq!(
+            sampled.load(Ordering::SeqCst),
+            1,
+            "and it is sampled exactly once, once the lock is free"
+        );
+        assert_eq!(win.lock_ok().len(), 1, "the reading reached the window");
+    }
+
+    /// A reader slower than the window is long still gets a rate. The
+    /// window is fed BY its readers, so evicting on age alone let it
+    /// empty itself: one sample in, everything else aged out, 0 back,
+    /// every time. That is what put a 777 / 0 / 777 / 0 sawtooth on the
+    /// early start's trace when the dashboard tab went to the
+    /// background and backed its poll off past five seconds.
+    #[test]
+    fn a_poller_slower_than_the_window_still_reads_a_rate() {
+        let win = Mutex::new(VecDeque::new());
+        assert_eq!(window_rate(&win, || 0), 0.0, "one sample is no rate");
+        // Six seconds is past the window's own length, so age alone
+        // would have taken the first sample with it.
+        let old = Instant::now() - std::time::Duration::from_secs(6);
+        win.lock_ok().front_mut().expect("the first sample").0 = old;
+        let r = window_rate(&win, || 600_000_000);
+        assert!(
+            (r - 100_000_000.0).abs() < 1_000_000.0,
+            "600 MB over ~6 s is ~100 MB/s, not zero: {r}"
+        );
+        assert_eq!(
+            win.lock_ok().len(),
+            2,
+            "the older sample was kept, not aged out"
+        );
+    }
+
+    /// ...and a busy poller still gets a ~5 s window rather than the
+    /// whole run, which is what makes the figure follow a stall.
+    #[test]
+    fn a_busy_poller_still_gets_a_rolling_window() {
+        let win = Mutex::new(VecDeque::new());
+        for i in 0..8 {
+            window_rate(&win, || i * 1_000);
         }
-        match (win.front(), win.back()) {
-            (Some(&(t0, b0)), Some(&(t1, b1))) if t1.duration_since(t0).as_secs_f64() > 0.25 => {
-                (b1 - b0) as f64 / t1.duration_since(t0).as_secs_f64()
-            }
-            _ => 0.0,
+        let n = win.lock_ok().len();
+        assert_eq!(n, 8, "nothing is old enough to leave yet");
+        // Age everything but the last two past the window.
+        let old = Instant::now() - std::time::Duration::from_secs(9);
+        for e in win.lock_ok().iter_mut().take(6) {
+            e.0 = old;
         }
+        window_rate(&win, || 9_000);
+        assert_eq!(
+            win.lock_ok().len(),
+            3,
+            "the six stale samples left; the two fresh ones and the new one stay"
+        );
+    }
+
+    /// A counter that really did go backwards - a new download on a
+    /// reused window - drops the history rather than reporting the
+    /// difference as an enormous positive rate.
+    #[test]
+    fn a_counter_that_went_backwards_drops_the_window() {
+        let win = Mutex::new(VecDeque::new());
+        assert_eq!(window_rate(&win, || 1_000), 0.0, "one sample is no rate");
+        assert_eq!(win.lock_ok().len(), 1);
+        assert_eq!(window_rate(&win, || 10), 0.0);
+        assert_eq!(
+            win.lock_ok().len(),
+            1,
+            "the older history went with the counter that no longer explains it"
+        );
     }
 }

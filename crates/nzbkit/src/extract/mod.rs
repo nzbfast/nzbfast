@@ -60,7 +60,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 
-use crate::disk::{FileWriter, sanitize_filename};
+use crate::disk::{FileWriter, out_name_of, sanitize_out_name};
 use crate::rar::{ArchiveMap, ArithGate, EntryCrypt, MapBlocker, Method, RarVersion, VolumeMapper};
 use crate::rarcrypt;
 
@@ -88,18 +88,30 @@ mod testutil;
 mod zip;
 mod zip_split;
 
-pub use chase::DroppedVolume;
 use chase::*;
+pub use chase::{DroppedVolume, LossDoubt};
 use config::*;
 pub use config::{
-    nested_depth_cap, prefer_external_unrar, set_nested_depth_cap, set_prefer_external_unrar,
+    NESTED_MAX_DEPTH_HARD_CEILING, nested_cap_after_store_layer, nested_depth_cap,
+    prefer_external_unrar, set_nested_depth_cap, set_prefer_external_unrar,
 };
 pub use crypto::CryptoJournalEvent;
 use crypto::*;
 use frontier::*;
 use holds::*;
 pub use holds_ledger::{HoldsLedger, install_process_ledger, process_ledger};
-pub use names::{is_final_file, is_final_name, release_stem, vol_sort_key};
+// `archive_sniff_eligible_name` and its path form are public rather than
+// `pub(crate)` on purpose: the DISK post-pass asks the identical
+// question, and it must reach for these rather than write a second
+// grammar for one question. It carried that second grammar until 31 Aug
+// 2026 - nine sites spelling `!is_final_file(p) && magic(p)`, which is
+// the same rule with the payload-content half missing - and all nine
+// now call `archive_sniff_eligible`. The roll-call, and which one
+// actually loses the file, is at `archive_sniff_eligible_name`.
+pub use names::{
+    archive_sniff_eligible, archive_sniff_eligible_name, is_final_file, is_final_name,
+    release_stem, vol_sort_key,
+};
 pub use park::{ParkHook, WireGauge};
 use reasons::*;
 pub use reasons::{
@@ -456,8 +468,9 @@ struct WriteJob {
 /// are, and the running count of bytes the replay left in place. See
 /// [`Extractor::write_in_place`].
 struct InPlace<'a> {
-    /// Output-directory file name, as the journal's `Frag::file` names
-    /// it (the writer path's final component).
+    /// The journal's `Frag::file` for this span: the out_dir-RELATIVE
+    /// output name, `out_name_of`'s form, which is what every producer
+    /// of a `Frag` records since the 30 Aug 2026 relpath sweep.
     file: &'a str,
     /// Offset in `file` of the span's FIRST byte; a job's source offset
     /// within the span (`src_start`) is added to it.
@@ -467,11 +480,18 @@ struct InPlace<'a> {
 
 impl InPlace<'_> {
     /// Does this derived placement land on its own source bytes? The
-    /// file is compared the way the journal recorded it - by the
-    /// writer path's file name - and the offset by `src_start`
-    /// arithmetic that cannot overflow a span that fit in memory.
-    fn matches(&self, j: &WriteJob) -> bool {
-        j.writer.path.file_name().is_some_and(|f| f == self.file)
+    /// file is compared the way the journal recorded it - the
+    /// out_dir-relative name - and the offset by `src_start` arithmetic
+    /// that cannot overflow a span that fit in memory.
+    ///
+    /// It compared `file_name()` until the 31 Aug 2026 read-only sweep's
+    /// finding 11. Once `Frag::file` became tree-relative, a resume of a
+    /// tree payload matched NOTHING here, so every overlapping span took
+    /// the write path instead of being noted in place: the same bytes,
+    /// the same result, and the whole of §94 A's saved I/O thrown away
+    /// on exactly the shape (a disc tree) that has the most of it.
+    fn matches(&self, out_dir: &Path, j: &WriteJob) -> bool {
+        out_name_of(out_dir, &j.writer.path) == self.file
             && self.off.checked_add(j.src_start as u64) == Some(j.file_off)
     }
 }
@@ -649,6 +669,10 @@ pub struct Extractor {
 }
 
 struct Inner {
+    /// Copy of [`Extractor::out_dir`], for the lock-held static helpers
+    /// (`drop_slot_file`) that must turn a writer's path back into the
+    /// out_dir-relative output name it claimed.
+    out_dir: PathBuf,
     slots: Vec<Slot>,
     groups: HashMap<String, Group>,
     /// Inner-file name → canonical group key. Entries are added when a
@@ -805,6 +829,16 @@ struct Inner {
     /// holds bytes nothing will decode, and this flag is what arms
     /// their proactive spill ([`Extractor::run_stalled_page_pass`]).
     lost_articles: Arc<AtomicBool>,
+    /// The caller's DOUBT about an article whose terminal verdict it is
+    /// holding back - the same veto as `lost_articles`, one round trip
+    /// earlier, and SHARED down the child chain for the same reason.
+    /// Raised by the fetch pool, read only by the drop-behind trim's
+    /// gate; [`LossDoubt`] carries the whole story and the measurement.
+    loss_doubt: Arc<LossDoubt>,
+    /// `NZBFAST_NO_LOSS_DOUBT=1` is unset: the drop-behind trim honours
+    /// `loss_doubt` above as well as `lost_articles`. Latched at
+    /// construction, per extractor - see `loss_doubt_env_off`.
+    loss_doubt_on: bool,
     /// Live split-7z sets, keyed by `sevenz_part_name` base, so a
     /// `.7z.002` classifying later can find the container `.7z.001`
     /// opened and join it. Cleared as each set settles. Zip splits
@@ -841,9 +875,31 @@ struct Inner {
     rar_split_on: bool,
     /// Nested depth cap for this chain: the child created AT this depth is
     /// disabled, so the deepest layer materializes (never a hard failure).
-    /// Resolved from the daemon setting / env at construction and inherited
-    /// unchanged by every child. See [`nested_depth_cap`].
+    /// Resolved from the daemon setting / env at construction, and
+    /// inherited by every child EXCEPT across a proven store-only layer -
+    /// see [`Extractor::ensure_child`] and the two flags below.
     nested_max_depth: usize,
+    /// Whether this layer's archive was seen to COMPRESS anything, and
+    /// whether it was seen to store anything. Latched off the RAR
+    /// mapper's per-entry `Method` at header-parse time (`chase.rs`),
+    /// which is the only place in this tree that reports it.
+    ///
+    /// Only COMPRESSING layers count against the nested depth cap: the
+    /// cap is a decompression-bomb backstop, and a STORE ladder cannot be
+    /// a bomb - its every level is the same bytes with a header on the
+    /// front, so it cannot expand. The benign 10-deep store ladder in the
+    /// bench corpus (`x2-depth10-ladder`) was stopping at the default cap
+    /// of 5 for a reason that does not apply to it.
+    ///
+    /// Read as `saw_store && !saw_compressed`, so the raise needs POSITIVE
+    /// evidence and everything else counts normally: a ZIP, 7z or tar
+    /// layer sets neither flag (nothing outside the RAR mapper reports a
+    /// method here), an unparsed layer sets neither, and both count
+    /// against the cap exactly as before. That is the conservative
+    /// direction - the failure mode of getting this wrong is a bomb guard
+    /// that does not guard.
+    saw_compressed: bool,
+    saw_store: bool,
     /// Final-output CRC gate (`NZBFAST_NO_OUTPUT_CRC` / runtime setter).
     /// On (the default): level 0 composes and checks its store payloads'
     /// header CRCs exactly like the nested levels, so a payload the
@@ -1043,6 +1099,20 @@ impl Extractor {
         true
     }
 
+    /// Test hook: did the offset-0 sniff LOOK at this slot and find no
+    /// container shape to map or chase? The output tree cannot answer
+    /// that on its own - a slot the sniff DECLINED and one it attached,
+    /// chased and then demoted both end as the same byte-exact file on
+    /// disk - so a test that only reads the tree cannot tell a name gate
+    /// that held from a container engine that happened to fail. This
+    /// reports the routing DECISION, which is the thing the eligibility
+    /// predicates in `names.rs` actually control.
+    #[cfg(test)]
+    pub(crate) fn slot_plain_by_sniff(&self, slot: usize) -> bool {
+        let inner = self.inner.lock_ok();
+        slot < inner.slots.len() && inner.slots[slot].plain_by_sniff
+    }
+
     /// Test hook: keys of groups whose pieces the arithmetic gate ever
     /// placed beyond what chain resolution had confirmed. The multi-file
     /// regressions assert this stays empty - those sets must live and
@@ -1163,6 +1233,7 @@ impl Extractor {
             trim_spilled_off_lock: AtomicU64::new(0),
             spill_settled: Condvar::new(),
             inner: Mutex::new(Inner {
+                out_dir: out_dir.to_path_buf(),
                 slots: (0..n_slots).map(|_| Self::new_slot()).collect(),
                 groups: HashMap::new(),
                 alias: HashMap::new(),
@@ -1206,12 +1277,16 @@ impl Extractor {
                 chase_trimmed: 0,
                 resume_pending: Vec::new(),
                 lost_articles: Arc::new(AtomicBool::new(false)),
+                loss_doubt: Arc::new(LossDoubt::default()),
+                loss_doubt_on: !loss_doubt_env_off(),
                 sevenz_sets: HashMap::new(),
                 zip_split_decl: HashMap::new(),
                 rar_splits: HashMap::new(),
                 rar_split_on: !rar_split_env_off(),
                 pending_child_decl: Vec::new(),
                 nested_max_depth: nested_max_depth.max(1),
+                saw_compressed: false,
+                saw_store: false,
                 verify_output_crc,
                 promote: None,
                 self_weak: Weak::new(),
@@ -1361,13 +1436,37 @@ impl Extractor {
     /// budget, the name claims, the password, and the routing gate; a
     /// child AT the depth cap is created disabled, so every deeper file
     /// simply materializes Plain.
+    ///
+    /// A layer PROVEN store-only does not spend a level of the cap - see
+    /// `Inner::saw_compressed` for why a stored layer cannot be a
+    /// decompression bomb. It is spelled as a raise of the CHILD'S cap
+    /// rather than as a second counter, so there is still exactly one
+    /// number to reason about at any depth, and each store layer hands
+    /// its child one more level than it had.
+    ///
+    /// [`NESTED_MAX_DEPTH_HARD_CEILING`] is what stops that being
+    /// unbounded. Store levels are individually harmless and a million of
+    /// them is still an attack - each one is a real extractor with real
+    /// buffers - so the raise is clamped rather than open-ended. A store
+    /// ladder deeper than the ceiling materializes at it, which is the
+    /// same graceful outcome the cap has always produced.
     fn ensure_child(&self, inner: &mut Inner) -> Arc<Extractor> {
         if inner.child.is_none() {
             let depth = self.depth + 1;
+            // Positive evidence only: `saw_store` without `saw_compressed`
+            // means the mapper read this layer's entries and every one of
+            // them was stored. No mapper, a ZIP/7z/tar layer, or any
+            // compressed entry all leave the cap where it was.
+            let store_only = inner.saw_store && !inner.saw_compressed;
+            let cap = if store_only {
+                nested_cap_after_store_layer(inner.nested_max_depth)
+            } else {
+                inner.nested_max_depth
+            };
             let child = Arc::new(Self::build(
                 &self.out_dir,
                 0,
-                depth < inner.nested_max_depth,
+                depth < cap,
                 self.resume,
                 depth,
                 inner.self_weak.clone(),
@@ -1383,7 +1482,7 @@ impl Extractor {
                 inner.tar_on,
                 inner.holds_page_on,
                 inner.head_grace_on,
-                inner.nested_max_depth,
+                cap,
                 inner.verify_output_crc,
                 inner.password.clone(),
                 // One latch per chain: the child's observations land in
@@ -1404,6 +1503,10 @@ impl Extractor {
                 // its stalled-frontier spill off the same report the
                 // root received.
                 ci.lost_articles = inner.lost_articles.clone();
+                // And the doubt that stands in front of it, for the same
+                // reason: the trim gate a nested chase runs is the same
+                // gate, and the pool reports per JOB, not per depth.
+                ci.loss_doubt = inner.loss_doubt.clone();
                 ci.verify_gate_waits = inner.verify_gate_waits;
             }
             inner.child = Some(child);
@@ -1746,7 +1849,7 @@ impl Extractor {
             if let Some(ip) = in_place.as_deref_mut()
                 && j.crypto.is_none()
                 && !j.repair
-                && ip.matches(j)
+                && ip.matches(&self.out_dir, j)
             {
                 j.writer.note_covered(j.file_off, j.len as u64)?;
                 ip.covered += j.len as u64;
@@ -1757,7 +1860,13 @@ impl Extractor {
                 // file's own crypto mutex.
                 Some(cs) if j.repair => cs.patch(&j.writer, j.file_off, part)?,
                 Some(cs) => cs.ingest(&j.writer, j.file_off, part)?,
-                None => j.writer.write_at(j.file_off, part)?,
+                // A REPAIR rewrite's bytes differ from the damaged ones
+                // it replaces by design, so it keeps the plain door.
+                None if j.repair => j.writer.write_at(j.file_off, part)?,
+                // The article-delivery door: two articles that claim one
+                // range and disagree about it latch a conflict for settle
+                // to fail on (`FileWriter::write_article_at`).
+                None => j.writer.write_article_at(j.file_off, part)?,
             }
         }
         // This span breached the cap while another thread's spill was
@@ -1830,6 +1939,7 @@ impl Extractor {
             }
         }
         Ok(Self::compose_persist(
+            &self.out_dir,
             jobs,
             fwd,
             fwd_persist,
@@ -1844,9 +1954,13 @@ impl Extractor {
     /// forwards' children reported back, folded into THIS volume's
     /// address space. Journalable only when the fragments cover the whole
     /// span; a partially held span returns its plain fragments so the
-    /// caller's drain can complete it later. Pure - no lock, no I/O.
-    /// Split out of `write_impl_scratched` (TODO 106 function ceiling).
+    /// caller's drain can complete it later. `out_dir_for_frags` is here
+    /// only to NAME those fragments: a `Frag.file` is out_dir-relative,
+    /// so composing one needs the root to measure against. Still pure -
+    /// no lock, no I/O; `out_name_of` is a `strip_prefix`. Split out of
+    /// `write_impl_scratched` (TODO 106 function ceiling).
     fn compose_persist(
+        out_dir_for_frags: &Path,
         jobs: &[WriteJob],
         fwd: &[FwdSpan],
         fwd_persist: Vec<Persist>,
@@ -1865,13 +1979,14 @@ impl Extractor {
         let mut frags: Vec<Frag> = jobs
             .iter()
             .map(|j| Frag {
-                file: j
-                    .writer
-                    .path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
+                // The out_dir-RELATIVE name, never the bare one (30 Aug 2026
+                // sweep): the resume journal resolves a fragment's file by
+                // joining this onto out_dir, and matches it against the `S`/`M`
+                // records, which carry `sanitize_out_name`'s tree form. A bare
+                // basename sent restore to `out_dir/x.vob` for a payload living
+                // at `out_dir/VIDEO_TS/x.vob` - every article whose bytes were
+                // in it refetched, and its crypto facts unfindable.
+                file: out_name_of(out_dir_for_frags, &j.writer.path),
                 file_off: j.file_off,
                 vol_off: offset + j.src_start as u64,
                 len: j.len as u64,
@@ -1890,13 +2005,16 @@ impl Extractor {
             jobs.iter()
                 .filter(|j| j.crypto.is_none())
                 .map(|j| Frag {
-                    file: j
-                        .writer
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
+                    // The same out_dir-RELATIVE name the Placed arm
+                    // twenty lines up records, and for the identical
+                    // reason - this map was left on the bare basename by
+                    // the 30 Aug relpath sweep and named by the 31 Aug
+                    // read-only sweep as finding 6. `jobs_to_persist`
+                    // writing tree form for Placed and a basename for
+                    // the Held remainder means a resumed held span of a
+                    // tree payload replays into `out_dir/x.vob` while
+                    // the writer is at `out_dir/VIDEO_TS/x.vob`.
+                    file: out_name_of(out_dir_for_frags, &j.writer.path),
                     file_off: j.file_off,
                     vol_off: offset + j.src_start as u64,
                     len: j.len as u64,
@@ -2262,6 +2380,11 @@ impl Drop for Extractor {
 #[cfg(test)]
 mod mod_tests;
 
+// mod_tests.rs regrew past its own ceiling (TODO 106); this is its tail
+// (payload provenance, preclaimed names, replay spans) split out whole.
+#[cfg(test)]
+mod replay_tests;
+
 #[cfg(test)]
 mod nested_tests;
 
@@ -2273,3 +2396,6 @@ mod zip_split_tests;
 
 #[cfg(test)]
 mod trim_spill_tests;
+
+#[cfg(test)]
+mod polyglot_tests;

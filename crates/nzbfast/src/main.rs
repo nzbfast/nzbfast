@@ -71,6 +71,8 @@ mod plex;
 mod post_cmd;
 mod rarfix;
 mod ratelimit;
+#[cfg(test)]
+mod renameclaim;
 mod repair;
 mod resumeout;
 mod rss;
@@ -85,6 +87,8 @@ mod sizes;
 mod smart;
 mod splitjoin;
 mod srrdb;
+#[cfg(test)]
+mod testscratch;
 mod tools;
 mod unpack;
 mod unpackprog;
@@ -98,6 +102,7 @@ mod wall;
 mod wall;
 mod watchlist;
 mod xrel;
+mod yencvec_cmd;
 use sfx::*;
 use unpack::*;
 mod check;
@@ -207,7 +212,14 @@ enum Command {
         year: Option<u32>,
     },
     /// Connection + TLS + AUTHINFO smoke test; reports RTT and capabilities.
-    Probe,
+    Probe {
+        /// Also report per-server POSTING capability without posting:
+        /// greeting code, CAPABILITIES advertisement, and a POST
+        /// command aborted before any article data moves (a 340 answer
+        /// followed by a connection drop posts nothing).
+        #[arg(long)]
+        post_check: bool,
+    },
     /// Throughput A/B: pipelined vs serial article fetching.
     Bench {
         /// Group to draw benchmark articles from.
@@ -779,10 +791,10 @@ enum Command {
         #[arg(long, default_value = "alt.binaries.test")]
         group: String,
         /// From header value.
-        #[arg(long, default_value = "corpus@nzbfast.com")]
+        #[arg(long, default_value = "corpus@nzbfast.invalid")]
         from: String,
         /// Message-ID domain (right-hand side of generated ids).
-        #[arg(long, default_value = "corpus.nzbfast.com")]
+        #[arg(long, default_value = "nzbfast.invalid")]
         msgid_domain: String,
         /// Decoded payload bytes per article ("700K", "512K", …).
         #[arg(long, default_value = "700K")]
@@ -798,6 +810,54 @@ enum Command {
         /// hash it against the sources.
         #[arg(long)]
         verify: bool,
+        /// Corpus mode: admit 0-byte files (each posts as one empty yEnc
+        /// article). Off by default - an empty file in an ordinary post
+        /// is nearly always a staging mistake.
+        #[arg(long)]
+        allow_empty: bool,
+        /// No-RAR mode: post bare files under a random subject and a
+        /// random yEnc `name=`, so a scraper that never saw the NZB
+        /// cannot tie an article to a release. The real names ride in
+        /// the NZB, and in the PAR2 FileDesc packets when --par2 is on.
+        /// This breaks header LINKAGE and hides no bytes: yEnc is +42,
+        /// so the payload is as readable as it ever was.
+        #[arg(long)]
+        obfuscate: bool,
+        /// With --obfuscate, leave the yEnc `name=` empty instead of
+        /// repeating the subject's random token.
+        #[arg(long)]
+        obfuscate_empty_name: bool,
+        /// Build and post a PAR2 set beside the payload, carrying the
+        /// real names and directory tree in its FileDesc packets. The
+        /// value is a percentage of the input slice count; 0 is a
+        /// verify-only set with no recovery slices. Native - no
+        /// external par2 binary, so a 0-byte member is described
+        /// rather than skipped.
+        #[arg(long, value_name = "PERCENT")]
+        par2: Option<u32>,
+        /// PAR2 slice size ("512K", "700K", …); default is derived from
+        /// the payload size. Must be a multiple of 4.
+        #[arg(long)]
+        par2_block_size: Option<String>,
+        /// Base name of the emitted .par2 files. Default: a random
+        /// token under --obfuscate, the NZB's own stem otherwise.
+        #[arg(long)]
+        par2_base: Option<String>,
+    },
+    /// Write a deterministic yEnc-encryption test corpus (Tensai75
+    /// draft, body + control-lines + combined): wire-exact articles,
+    /// NZBs with the draft's required subjects and password meta, and
+    /// the full derivation-chain vectors. No network anywhere.
+    YencVectors {
+        /// Directory to create the corpus in.
+        #[arg(long)]
+        out: PathBuf,
+        /// Session password embedded in the NZBs' meta tags.
+        #[arg(long, default_value = "test123")]
+        password: String,
+        /// Decoded payload bytes per article.
+        #[arg(long, default_value_t = 6000)]
+        article_size: usize,
     },
     /// Build an NZB of one COMPLETE release (data + par2 main + volumes,
     /// one poster, shared filename stem) found via OVER - the full-pipeline
@@ -895,8 +955,9 @@ fn main() -> Result<()> {
 
 /// The mockserve throughput line, every 10 s while it serves.
 ///
-/// Out of line only because `run()` is at the §106 function ceiling and
-/// this is the one piece of that arm that stands alone. Silent while
+/// Out of line only because `run()` was at 487 of the §106 500-line
+/// function ceiling on 15 Aug 2026, and this is the one piece of that
+/// arm that stands alone. Silent while
 /// nothing is being served: a bench log that prints zeros every ten
 /// seconds buries the run it is measuring.
 fn spawn_benchserve_stats(set: std::sync::Arc<nzbkit::benchserve::BenchSet>) {
@@ -937,9 +998,14 @@ async fn run() -> Result<()> {
     // mem::opt_out_of_power_throttling).
     nzbkit::mem::opt_out_of_power_throttling();
     let budget = match &cli.mem_limit {
-        Some(v) => nzbkit::mem::MemBudget::with_total(
+        // `from_user_limit` and not `with_total`: this is a figure a
+        // PERSON typed, and the clamp used to be silent - `--mem-limit`
+        // parses decimal, so 8M/32M/64M are all one budget. See
+        // `MemBudget::from_user_limit`.
+        Some(v) => nzbkit::mem::MemBudget::from_user_limit(
             serve::parse_size(v)
                 .ok_or_else(|| anyhow::anyhow!("--mem-limit: can't parse size {v:?}"))?,
+            "--mem-limit",
         ),
         None => nzbkit::mem::MemBudget::auto(),
     };
@@ -949,7 +1015,7 @@ async fn run() -> Result<()> {
     match cli.command {
         Command::Inspect { nzb } => inspect(&nzb),
         Command::Identify { file, year } => identify_cmd(&cli.config, &file, year),
-        Command::Probe => probe(&cli.config).await,
+        Command::Probe { post_check } => probe(&cli.config, post_check).await,
         Command::Stream {
             nzb,
             host,
@@ -1063,10 +1129,23 @@ async fn run() -> Result<()> {
             title,
             connections,
             verify,
+            allow_empty,
+            obfuscate,
+            obfuscate_empty_name,
+            par2,
+            par2_block_size,
+            par2_base,
         } => {
             let asize = serve::parse_size(&article_size)
                 .ok_or_else(|| anyhow::anyhow!("bad --article-size {article_size:?}"))?
                 as usize;
+            let par2_block_size = par2_block_size
+                .as_deref()
+                .map(|v| {
+                    serve::parse_size(v)
+                        .ok_or_else(|| anyhow::anyhow!("bad --par2-block-size {v:?}"))
+                })
+                .transpose()?;
             post_cmd::run(
                 &cli.config,
                 post_cmd::PostArgs {
@@ -1080,10 +1159,25 @@ async fn run() -> Result<()> {
                     title,
                     connections,
                     verify,
+                    allow_empty,
+                    obfuscate,
+                    obfuscate_empty_name,
+                    par2,
+                    par2_block_size,
+                    par2_base,
                 },
             )
             .await
         }
+        Command::YencVectors {
+            out,
+            password,
+            article_size,
+        } => yencvec_cmd::run(yencvec_cmd::VecArgs {
+            out,
+            password,
+            article_size,
+        }),
         #[cfg(feature = "indexer")]
         Command::PredbSeed { days, max_rows, db } => {
             // Blocking (paced HTTP, one request every 2 s) and there is

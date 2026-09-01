@@ -331,6 +331,71 @@ pub(super) struct ReplayPending {
     pub(super) pending_r: Arc<std::sync::Mutex<super::workers::PendingR>>,
 }
 
+/// The marker [`test_park_in_replay`] prints before it parks. Named
+/// once so the product and the probe that waits for it cannot drift
+/// apart in the way two hand-typed string literals do.
+const PARK_IN_REPLAY_MARK: &str = "resume replay fed its first chunk - parked for the delete probe";
+
+/// Has [`test_park_in_replay`] already parked in this process? The
+/// barrier is for ONE window and a replay feeds many chunks across many
+/// seeds, so without this it would park on every one of them and the
+/// probe would be measuring a sleep loop rather than a window.
+static REPLAY_PARKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Test-only (`NZBFAST_TEST_PARK_IN_REPLAY_MS`): announce that the
+/// resume replay has fed its FIRST chunk back through the extractor and
+/// then hold this thread for up to that many milliseconds. Unset - the
+/// only production state - is a no-op and reads no clock.
+///
+/// This is a BARRIER, not a delay, and the difference is the whole
+/// point - `get::tail::test_park_after_engine_finish` carries the
+/// argument at length and this is its sibling. X5-12 asks what a DELETE
+/// does to a run that is halfway through replaying restored bytes back
+/// through the extractor, and that window closes in milliseconds on a
+/// small fixture: a test that sleeps into it is guessing, and a guess on
+/// a box running nine lanes' cargo builds is a flake in both directions.
+/// So the product says WHERE it is and holds; the probe waits for the
+/// LINE - a state - and deletes. The `ms` is only a wedge bound, never
+/// the thing being waited for.
+///
+/// AFTER THE FIRST CHUNK AND NOT BEFORE THE SEED, because the row is
+/// about a delete landing ACROSS a replay rather than before one. Parked
+/// at the top of `feed_spans` the extractor has taken nothing, the
+/// output holds no replayed byte, and the question collapses into the
+/// ordinary "delete a queued job" that `daemon_delete` already asks.
+fn test_park_in_replay() {
+    use std::sync::atomic::Ordering::Relaxed;
+    // Already spent, which after the one park is every call for the
+    // rest of the process. First because it is the cheapest question -
+    // see the latch below for why the env read is not asked here.
+    if REPLAY_PARKED.load(Relaxed) {
+        return;
+    }
+    // READ ONCE, and that is not tidiness: this sits inside the replay's
+    // per-CHUNK loop, so an env read here is one per 4 MiB replayed - on
+    // a large resume, thousands of them, each taking the process-wide
+    // environment lock that every other thread's reads and any
+    // `set_var` share. `test_park_after_engine_finish` can afford the
+    // straightforward spelling because it is called once per JOB. A
+    // `OnceLock` is the right shape rather than a second `AtomicBool`
+    // because the answer is a VALUE, and it is deliberately not a
+    // mutation as far as `tools/test-global-gate.py` is concerned:
+    // `get_or_init` is idempotent and no test moves it.
+    static MS: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let Some(ms) = *MS.get_or_init(|| {
+        std::env::var("NZBFAST_TEST_PARK_IN_REPLAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+    }) else {
+        return;
+    };
+    if REPLAY_PARKED.swap(true, Relaxed) {
+        return;
+    }
+    info!(target: "resume", "{PARK_IN_REPLAY_MARK}");
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
 impl ReplayPending {
     /// Journal one replayed article under the route the extractor just
     /// took for it, mirroring the consumer's handling of `Persist`:
@@ -342,6 +407,7 @@ impl ReplayPending {
     /// pwrite the extractor skipped because the bytes were already at
     /// their derived destination still returns its fragment, so the
     /// record says the bytes are there, which they are.
+    #[expect(clippy::too_many_arguments)]
     fn record(
         &self,
         seed: &ReplaySeed,
@@ -350,6 +416,7 @@ impl ReplayPending {
         len: u64,
         fed: Fed,
         extractor: &nzbkit::extract::Extractor,
+        crc: Option<u32>,
     ) {
         let Some(journal) = self.journal.upgrade() else {
             return;
@@ -367,6 +434,7 @@ impl ReplayPending {
                     &seed.name,
                     seed.size,
                     &frags,
+                    crc,
                 );
             }
             Fed::Crypto(mut frags) => {
@@ -377,6 +445,7 @@ impl ReplayPending {
                     seed.name.clone(),
                     seed.size,
                     frags,
+                    crc,
                 ));
             }
             Fed::Held(frags) => {
@@ -392,6 +461,7 @@ impl ReplayPending {
                         len,
                         frags,
                         par2_main: false,
+                        crc,
                     });
             }
             Fed::No => {}
@@ -524,7 +594,19 @@ impl ReplayPending {
         // ends in volume space, and what the extractor did with it so
         // far. `spans` is sorted, so an article's spans are contiguous
         // and a change of id closes the previous article's record.
-        let mut cur: Option<(std::sync::Arc<str>, u64, u64, Fed)> = None;
+        // X5-02: the replay re-records every article it feeds back, so
+        // it owes the same content commitment the download path records.
+        // It has no pcrc32 to copy - the bytes come off DISK, not off
+        // the wire - so it takes the crc over the very bytes it feeds,
+        // which is the same question asked one hop later. Free: the
+        // bytes are already in `buf` and already being read.
+        //
+        // Correct by the same argument the restore side hashes on. An
+        // article's spans are contiguous in VOLUME space and `spans` is
+        // sorted, so reading them in order reconstructs the payload the
+        // original pcrc32 was taken over - the loop below is already
+        // relying on exactly that to know when an article ends.
+        let mut cur: Option<(std::sync::Arc<str>, u64, u64, Fed, crc32fast::Hasher)> = None;
         for ReplaySpan {
             off,
             len,
@@ -537,10 +619,26 @@ impl ReplayPending {
                 .as_ref()
                 .is_some_and(|c| !std::sync::Arc::ptr_eq(&c.0, id) && *c.0 != **id)
             {
-                let (pid, poff, pend, fed) = cur.take().expect("checked above");
-                self.record(seed, &pid, poff, pend - poff, fed, extractor);
+                let (pid, poff, pend, fed, h) = cur.take().expect("checked above");
+                self.record(
+                    seed,
+                    &pid,
+                    poff,
+                    pend - poff,
+                    fed,
+                    extractor,
+                    Some(h.finalize()),
+                );
             }
-            let cur = cur.get_or_insert_with(|| (id.clone(), *off, *off, Fed::Placed(Vec::new())));
+            let cur = cur.get_or_insert_with(|| {
+                (
+                    id.clone(),
+                    *off,
+                    *off,
+                    Fed::Placed(Vec::new()),
+                    crc32fast::Hasher::new(),
+                )
+            });
             if !srcs.contains_key(file) {
                 let f = std::fs::File::open(self.out_dir.join(&**file)).map_err(|e| {
                     std::io::Error::new(e.kind(), format!("{file} failed to open: {e}"))
@@ -575,6 +673,7 @@ impl ReplayPending {
                 };
                 let fed = std::mem::replace(&mut cur.3, Fed::No);
                 cur.3 = fed.fold(persist);
+                cur.4.update(&buf[..chunk]);
                 verifier.on_data_unverified(
                     seed.slot,
                     &seed.name,
@@ -583,11 +682,22 @@ impl ReplayPending {
                     &buf[..chunk],
                 );
                 done += chunk as u64;
+                // The X5-12 window, held open on demand. Unset in
+                // production, which is every run but a probe's.
+                test_park_in_replay();
             }
             cur.2 = cur.2.max(off + len);
         }
-        if let Some((pid, poff, pend, fed)) = cur.take() {
-            self.record(seed, &pid, poff, pend - poff, fed, extractor);
+        if let Some((pid, poff, pend, fed, h)) = cur.take() {
+            self.record(
+                seed,
+                &pid,
+                poff,
+                pend - poff,
+                fed,
+                extractor,
+                Some(h.finalize()),
+            );
         }
         self.files.fetch_add(1, Ordering::Relaxed);
         self.in_place.fetch_add(left, Ordering::Relaxed);

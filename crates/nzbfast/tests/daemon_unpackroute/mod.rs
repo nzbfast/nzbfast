@@ -171,7 +171,6 @@ async fn set_password_mid_download_unlocks_in_same_run() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Any `lp.part*.rar` anywhere under `root` - a demoted volume
@@ -381,7 +380,6 @@ async fn set_password_mid_download_goes_one_pass() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Wrong-then-right: a wrong password typed mid-download must not burn
@@ -565,7 +563,6 @@ async fn set_password_wrong_then_right_mid_download_one_pass() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The `prefer_external_unrar` setting, applied live over the API (no
@@ -742,7 +739,6 @@ async fn prefer_external_unrar_setting_routes_unpack_to_subprocess() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The counterpart guarantee: an OBFUSCATED hash-named set ignores
@@ -907,5 +903,4 @@ async fn prefer_external_unrar_setting_ignored_for_obfuscated_sets() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

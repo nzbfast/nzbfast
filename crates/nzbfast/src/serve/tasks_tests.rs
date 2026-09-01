@@ -6,11 +6,9 @@ use super::*;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
-fn tdir(name: &str) -> std::path::PathBuf {
+fn tdir(name: &str) -> crate::testscratch::ScratchDir {
     let p = std::env::temp_dir().join(format!("nzbfast-tsk-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p
+    crate::testscratch::ScratchDir::attach(&p)
 }
 
 fn mkjob(name: &str, identity: &str) -> Job {
@@ -277,7 +275,6 @@ fn prune_person_art_spares_posters_and_leaves_an_under_cap_dir_alone() {
     super::prune_person_art(&dir, 10_000);
     assert!(dir.join("p1.jpg").exists());
     assert!(dir.join("p2.jpg").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[cfg(feature = "indexer")]
@@ -294,7 +291,6 @@ fn prune_person_art_evicts_oldest_first_and_stops_at_the_cap() {
     assert!(dir.join("p2.jpg").exists());
     assert!(dir.join("p3.jpg").exists());
     assert!(dir.join("m_poster.jpg").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -360,7 +356,6 @@ fn sample_job_excludes_recovery_volumes_and_wraps_ids() {
     // The BODY probe draws the index, which is the cheaper seed and the
     // one that carries the Main packet in its first bytes.
     assert_eq!(r.seed, vec!["<par2main@test>".to_string()]);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A post with no PAR2 at all has nothing to say about a recovery set,
@@ -382,7 +377,6 @@ fn sample_job_has_no_recovery_half_without_par2() {
     std::fs::write(&path, xml).unwrap();
     let s = super::sample_job(&path, 8).expect("sampled");
     assert!(s.recovery.is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -402,7 +396,6 @@ fn sample_job_answers_none_for_volume_only_or_unreadable_posts() {
     std::fs::write(&path, xml).unwrap();
     assert!(super::sample_job(&path, 8).is_none());
     assert!(super::sample_job(&dir.join("missing.nzb"), 8).is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -475,7 +468,6 @@ fn tune_hint_bands_stale_setting_well_short_and_clear() {
     // In between: the hint clears.
     super::update_tune_hint(&d, &servers, &map(1.0));
     assert!(d.tune_hint.lock_ok().is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §210: the local link is the yardstick. Providers measured at
@@ -547,7 +539,6 @@ fn tune_hint_scores_providers_against_the_local_link_not_the_line() {
     *d.local_link.lock_ok() = None;
     super::update_tune_hint(&d, &servers, &m);
     assert!(d.tune_hint.lock_ok().contains("~1000 Mbps line"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -573,7 +564,6 @@ fn tune_hint_block_accounts_never_gate_the_verdict() {
     m.insert("news.a.example".to_string(), tuned(0.5, 20, 20));
     super::update_tune_hint(&d, &mixed, &m);
     assert!(d.tune_hint.lock_ok().contains("well short"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M7b.2 §5.7: a `block_account` server is invisible to the tuner in
@@ -616,7 +606,6 @@ fn tune_hint_ignores_servers_flagged_as_billed_per_byte() {
         d.tune_hint.lock_ok().contains("well short"),
         "one flagged server must not suppress the verdict for the install"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -656,7 +645,6 @@ fn tune_hint_tips_tier_cap_unknown_asked_and_single_provider() {
             .lock_ok()
             .contains("a second provider adds parallel headroom")
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -674,6 +662,7 @@ fn download_idle_requires_both_pipelines_quiet() {
         nzo_id: "s1".to_string(),
         hub: Arc::new(crate::StreamHub::default()),
         progress: Arc::new(AtomicU64::new(0)),
+        rate_win: Mutex::new(VecDeque::new()),
         cancelled: Arc::new(AtomicBool::new(false)),
         task: rt.spawn(async {}),
         borrowed: false,
@@ -691,7 +680,6 @@ fn download_idle_requires_both_pipelines_quiet() {
     assert!(!super::download_idle(&d));
     *d.sidecar.lock_ok() = None;
     assert!(super::download_idle(&d));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -745,7 +733,6 @@ fn instant_arrivals_kicks_complete_hits_and_first_sighting_wins() {
     super::instant_arrivals(&d, Vec::new(), 3, 300);
     assert_eq!(d.instant_pending.lock_ok().get(&9), Some(&100));
     assert_eq!(d.instant_hint.lock_ok().len(), hints_before);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -904,8 +891,6 @@ fn no_enabled_servers_is_zero_enabled_and_not_every_config_error() {
     // path nobody could read: SAB installed, no server enabled in it.
     std::fs::write(&sab, "[servers]\n[[a]]\nhost = news.example\nenable = 0\n").unwrap();
     assert_eq!(verdict(&dir.join("nothing-here.json")), Unknown);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The idle trim's log gate (spawn_memory_trim) is a >=64 MB drop of
@@ -1072,7 +1057,6 @@ async fn the_server_probe_carries_the_config_the_pick_needs() {
         Some(1),
         "the last good snapshot survives an unreadable read"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

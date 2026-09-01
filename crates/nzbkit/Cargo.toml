@@ -68,6 +68,15 @@ aes = "0.9"
 cbc = "0.2"
 hmac = "0.13"
 sha2 = "0.11"
+# yEnc body-layer encryption spike (Tensai75 draft, TODO: yencrypt.rs
+# header): XChaCha20-Poly1305 per segment + Argon2id key derivation.
+# Same RustCrypto stack/major line as the aes/hmac entries above.
+argon2 = "0.6"
+chacha20poly1305 = "0.11"
+# FF1 (NIST SP 800-38G) needs arbitrary-precision Feistel halves: a
+# radix-253 control line is a ~hundred-digit number. Already in the
+# lockfile transitively (0.4.8), so this adds an edge, not a crate.
+num-bigint = "0.4"
 # Nested one-pass phase 2: the chasing decompressor drives the vendored
 # RAR engine's streaming reader over still-arriving inner volumes.
 rars = { path = "../../vendor/rars" }
@@ -193,4 +202,14 @@ tokio = { version = "1", features = ["test-util"] }
 #   cargo test -p nzbkit --test conn_tuner --features heavy-tests
 [[test]]
 name = "conn_tuner"
+required-features = ["heavy-tests"]
+
+# par2gen at scale - tens of megabytes of generated fixture and seconds
+# of Reed-Solomon per case, and nightly builds DEBUG, where this crate's
+# GF(2^16) fold is ~40x slower than release. Same `required-features`
+# gate and the same reason: per-push CI must not BUILD it. Its own header
+# prices every fixture. Run locally with:
+#   cargo test --release -p nzbkit --test par2gen_large_set --features heavy-tests
+[[test]]
+name = "par2gen_large_set"
 required-features = ["heavy-tests"]

@@ -26,6 +26,7 @@
 //! recovery blocks.
 
 use super::*;
+use crate::payloads;
 
 /// Public issue #9: a fully obfuscated post whose recovery set we could
 /// not see, so a repairable download failed while SABnzbd repaired it.
@@ -41,6 +42,21 @@ use super::*;
 /// outcome: real damage, real recovery, repaired output, and the
 /// activation marker proving it happened in-stream rather than in the
 /// disk-side fallback arm.
+///
+/// **THE PAYLOAD IS `unique_payload` AND THE REBUILT COUNT IS PART OF
+/// THE ROW**, here and in the two repairing fixtures below (30 Aug
+/// 2026, `research/E2E-PARITY-BUDGET-CENSUS-2026-08-30.md`). On
+/// `super::payload` all three greened with `0 block(s) rebuilt ... 200
+/// block(s) adopted`: that generator is one sequence of period 131,072,
+/// so a 1.2 MB file carries every block of itself nine times over and
+/// the sliding scan healed the holes out of the damaged copy without
+/// the recovery set being read at all. "Real recovery" was the one
+/// clause of the sentence above that nothing tested - the row would
+/// have stayed green with every recovery slice empty. splitmix64 leaves
+/// the holed blocks nowhere else to be found, so the exact-fit fetch
+/// and the Reed-Solomon solve are now load-bearing. Do NOT relax the
+/// rebuilt-count assertion to a bare `repair complete`, and do not put
+/// `payload` back.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_obfuscated_post_repairs_from_its_own_unnamed_par2() {
     if !have_par2() {
@@ -48,7 +64,7 @@ async fn an_obfuscated_post_repairs_from_its_own_unnamed_par2() {
         return;
     }
     let mut fx = Fixture::new("obfpar2");
-    let data = payload(1_200_000, 33);
+    let data = payloads::unique_payload(1_200_000, 0x5b17_0033);
     // Payload obfuscated too - hash subject AND hash yEnc name - so the
     // repair has to adopt it by content hash, not by its name.
     fx.add_file_obfuscated("Lp3vWq8xNc2", "Lp3vWq8xNc2", &data, 40_000);
@@ -85,6 +101,15 @@ async fn an_obfuscated_post_repairs_from_its_own_unnamed_par2() {
     .unwrap();
 
     assert!(ok, "get failed on a repairable obfuscated post:\n{log}");
+    // The recovery set did the whole repair: 200 holed blocks solved
+    // from parity, nothing adopted. See this suite's generator note -
+    // on `super::payload` this read `0 block(s) rebuilt ... 200 block(s)
+    // adopted` and the recovery data was never consulted.
+    assert!(
+        log.contains("200 block(s) rebuilt") && !log.contains("block(s) adopted from"),
+        "the sniffed set's parity did not solve the holes - the repair \
+         found them somewhere else:\n{log}"
+    );
     assert!(
         log.contains("recovery volume identified in-stream"),
         "the magic sniff never reclassified a volume:\n{log}"
@@ -126,13 +151,13 @@ async fn a_repaired_obfuscated_post_leaves_only_the_restored_payload() {
         return;
     }
     let mut fx = Fixture::new("obfpar2dup");
-    let data = payload(1_200_000, 35);
+    let data = payloads::unique_payload(1_200_000, 0x5b17_0035);
     fx.add_file_renamed_by_par2("Real.Movie.2026.mkv", "g5lNXo3O7CTT6VS", &data, 40_000);
     // A companion that keeps its real name, as a real release has. It is
     // what makes `repair_present_sets` recognise the set as present at
     // all: that test asks whether any FileDesc name is on disk, and on a
     // wholly renamed post the answer is no and the set is skipped.
-    let nfo = payload(4_000, 36);
+    let nfo = payloads::unique_payload(4_000, 0x5b17_0036);
     fx.add_file("Real.Movie.2026.nfo", &nfo, 40_000);
     assert!(fx.add_par2_obfuscated(30, &["Real.Movie.2026.mkv", "Real.Movie.2026.nfo"], 40_000));
     assert!(
@@ -167,6 +192,15 @@ async fn a_repaired_obfuscated_post_leaves_only_the_restored_payload() {
     .unwrap();
 
     assert!(ok, "get failed on a repairable obfuscated post:\n{log}");
+    // The recovery set did the whole repair: 199 holed blocks solved
+    // from parity, nothing adopted. See this suite's generator note -
+    // on `super::payload` this read `0 block(s) rebuilt ... 199 block(s)
+    // adopted` and the recovery data was never consulted.
+    assert!(
+        log.contains("199 block(s) rebuilt") && !log.contains("block(s) adopted from"),
+        "the sniffed set's parity did not solve the holes - the repair \
+         found them somewhere else:\n{log}"
+    );
     // The cleanup is what removed them, not some earlier sweep that
     // happened to catch the same files - the end-state assertion below
     // cannot tell those apart on its own.
@@ -183,7 +217,9 @@ async fn a_repaired_obfuscated_post_leaves_only_the_restored_payload() {
     );
 
     // ...and it is the ONLY thing left. Both the obfuscated original the
-    // bytes were adopted from and the spent recovery volumes are gone.
+    // repair superseded (it donated nothing once the payload stopped
+    // being self-similar - see the generator note above) and the spent
+    // recovery volumes are gone.
     let mut left: Vec<String> = std::fs::read_dir(&out)
         .unwrap()
         .flatten()
@@ -218,7 +254,7 @@ async fn a_wholly_renamed_post_still_repairs_and_cleans_up() {
         return;
     }
     let mut fx = Fixture::new("obfpar2whole");
-    let data = payload(1_200_000, 37);
+    let data = payloads::unique_payload(1_200_000, 0x5b17_0037);
     fx.add_file_renamed_by_par2("Real.Movie.2026.mkv", "g5lNXo3O7CTT6VS", &data, 40_000);
     assert!(fx.add_par2_obfuscated(30, &["Real.Movie.2026.mkv"], 40_000));
     assert!(
@@ -252,6 +288,15 @@ async fn a_wholly_renamed_post_still_repairs_and_cleans_up() {
     .unwrap();
 
     assert!(ok, "get failed on a wholly renamed repairable post:\n{log}");
+    // The recovery set did the whole repair: 200 holed blocks solved
+    // from parity, nothing adopted. See this suite's generator note -
+    // on `super::payload` this read `0 block(s) rebuilt ... 200 block(s)
+    // adopted` and the recovery data was never consulted.
+    assert!(
+        log.contains("200 block(s) rebuilt") && !log.contains("block(s) adopted from"),
+        "the sniffed set's parity did not solve the holes - the repair \
+         found them somewhere else:\n{log}"
+    );
     let repaired = std::fs::read(out.join("Real.Movie.2026.mkv"))
         .unwrap_or_else(|e| panic!("payload missing from {}: {e}\n{log}", out.display()));
     assert!(
@@ -420,20 +465,7 @@ async fn kill9_resume_of_an_obfuscated_post_still_defers_recovery_volumes() {
         let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
         let served = served.clone();
         tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
-                .arg("--config")
-                .arg(&cfg)
-                .arg("get")
-                .arg(&nzb)
-                .arg("--out")
-                .arg(&out)
-                .arg("--connections")
-                .arg("2")
-                .arg("--window")
-                .arg("1")
-                .spawn()
-                .unwrap();
+            let run = run_get_spawn(&cfg, &nzb, &out, &[], &[], 2, 1);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let journal = out.join(".nzbfast.journal");
             while served.load(std::sync::atomic::Ordering::Relaxed) < 20
@@ -444,8 +476,7 @@ async fn kill9_resume_of_an_obfuscated_post_still_defers_recovery_volumes() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            child.kill().unwrap();
-            let _ = child.wait();
+            run.kill9();
         })
         .await
         .unwrap();

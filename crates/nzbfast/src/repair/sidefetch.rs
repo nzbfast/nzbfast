@@ -85,6 +85,35 @@ impl SideCancel {
 
 /// `.volNNN+MM.par2` / `.volNNN-MMM.par2` → declared recovery-slice count.
 pub(crate) fn vol_count_from_name(name: &str) -> Option<usize> {
+    // par2-rule-gate: this forwards a COUNT, not a classification, so it
+    // is not a door onto the rule and its callers are not asking the one
+    // true copy the wrong question. Measured 31 Aug 2026 (T2): every
+    // caller reaches it behind a `FileKind::Par2Volume` gate, and
+    // `nzb::vol_suffix`'s ONLY isolation-dependent arm is the
+    // whitespace-tail allowance - `Some(t) if !isolated && t.starts_with
+    // (char::is_whitespace)` - so the isolated rule accepts a strict
+    // SUBSET of the raw one, an isolated `Some` implies the same raw
+    // `Some` at the same offset, and the two answers cannot part behind
+    // that gate. What survives is the NAME these callers pass
+    // (`filename_hint().unwrap_or(&subject)` rather than
+    // `SubjectClass::name`), which is claim `subjectclass-name-residue`,
+    // not this one.
+    //
+    // The judgement is made ONCE, here, and covers the call sites -
+    // which is the point of resolving forwarders at all: it lives where
+    // the next reader of the wrapper meets it, instead of being restated
+    // at six call sites where it would decay six ways. Delete these lines
+    // and all six callers are hits again. A NEW wrapper inherits nothing:
+    // it is a door the day it is written, and has to earn its own reason.
+    //
+    // ONE CALLER IS NOT BEHIND THAT GATE and is named rather than
+    // rounded off: `repair::recovery_candidates`'s SNIFFED arm reaches
+    // this on a file whose kind is not `Par2Volume` at all, because
+    // packet magic identified it and its name did not. The raw rule can
+    // therefore hand it a declared count off a name the classifier had
+    // refused. Never measured live, and it substitutes a declared count
+    // for a size ESTIMATE on a file already known to be recovery data,
+    // so it is recorded as a residue rather than fixed in passing.
     nzbkit::nzb::par2_vol_count(name)
 }
 
@@ -436,14 +465,24 @@ pub(crate) fn side_pool_servers(
             // built, far above. Setting only that one leaves the "tiny side
             // pool" a full second fleet, opened mid-download.
             pc.connections = 1;
-            // Same reason it must stay small: side-pool workers are not part
-            // of the download, so they must not move the dashboard's
-            // per-server gauges either.
-            pc.live = None;
-            // fetch_volume_articles strips the rest itself (the 7 Aug
-            // 2026 wedge came in through a caller that bypassed this
-            // helper); applied here too so the side pool's config
-            // states its own contract.
+            // Everything else a side pool must give up - the consumer-ack
+            // seams, the line cap's steering wheel, the dashboard gauges
+            // and the run's hand-over signal - is [`strip_side_pool_seams`]'
+            // job, and this helper does NOT repeat it. `live` was written
+            // out here as well until 31 Aug 2026, on the same reasoning
+            // ("side-pool workers are not part of the download, so they
+            // must not move the dashboard's per-server gauges either") -
+            // which was right, and was true of only one of the two side
+            // pools, because the repair path never comes through here.
+            // Moving it into the strip covers both; leaving a copy behind
+            // would leave one rule written twice, with only this one under
+            // a test.
+            //
+            // Still called here rather than left to the driver
+            // (`fetch_volume_articles` applies it itself) so the config
+            // this helper hands back already states its own contract -
+            // the 7 Aug 2026 wedge came in through a caller that bypassed
+            // this helper, not through one that trusted it.
             strip_side_pool_seams(&mut pc);
             (sc, pc)
         })
@@ -454,6 +493,23 @@ pub(crate) fn side_pool_servers(
 /// pool may run on it. Called from the one driver every side-fetch goes
 /// through, so no caller can reintroduce one of these by cloning the
 /// download's configs and skipping [`side_pool_servers`].
+///
+/// TWO THINGS ARE DELIBERATELY KEPT and each says why at its own line:
+/// `lease` (a side pool outside the accounting is a second fleet on an
+/// account that already has one) and `connections`. The width is the
+/// one of these that is a PRODUCT trade rather than a correctness one,
+/// and it was priced on 31 Aug 2026 rather than left as a reading: the
+/// same 40-article recovery set took 1.86 s at the download's width and
+/// 8.14 s on one connection, and the two arguments that used to favour
+/// narrowing are both spent - the account cap is held by `lease` (with
+/// `lease_class` below reducing the side pool to the ONE reserved
+/// permit for as long as any download is running) and the dashboard
+/// noise is held by `live` above. So a recovery fetch runs at the main
+/// fleet's width, and `the_repair_side_fetch_runs_at_the_main_fleets_
+/// width` is the pin that says so. Narrowing it would belong HERE,
+/// beside the rest - but it is a product decision about how fast a
+/// repair should be allowed to go, not a tidy-up, so it is not one to
+/// take in passing.
 fn strip_side_pool_seams(pc: &mut nzbkit::pool::PoolConfig) {
     // TODO 114: the steer seam defers each Done's completion until the
     // consumer's note_decoded verdict - and the side-fetch consumer
@@ -488,6 +544,263 @@ fn strip_side_pool_seams(pc: &mut nzbkit::pool::PoolConfig) {
     pc.live_target = None;
     pc.line_cap_fleet = 0;
     pc.line_cap_auto = false;
+    // Nor may a side pool move the DASHBOARD's per-server gauges: it is
+    // not part of the download, and every number on those rows says
+    // "download". `side_pool_servers` has refused this for the M2c.5
+    // speculative prefetch since it was written, saying exactly that in
+    // its own doc - and the REPAIR path does not go through that helper
+    // (`repair::fetch_volumes` hands the download's configs down
+    // verbatim), so until 31 Aug 2026 the bigger of the two side pools
+    // was the one that did it. MEASURED on the tree before this line,
+    // through this very driver, on a 40-part recovery fetch six workers
+    // wide: `bytes=26458`, `articles_tried=40`, `connected_peak=6`, all
+    // of it charged to the download's own server row after that download
+    // had finished. The strip belongs HERE for the reason the paragraph
+    // at `fetch_volume_articles` gives: it is the one driver every
+    // side-fetch goes through, so no caller can reintroduce it.
+    pc.live = None;
+    // And the side pool must not tell the daemon that the DOWNLOAD's
+    // fleet is going idle. `handoff` is the run's per-run latch, and
+    // `Shared::note_idle_after_dry` latches it the first time a
+    // level-0 worker finds itself idle past ITS OWN queue-dry - which
+    // for a side pool is the ordinary end of a two-volume fetch, not a
+    // statement about the download's connections at all.
+    //
+    // MEASURED, same probe: the signal came back LATCHED, and (through
+    // the `live` seam above) the run note "connections are going idle -
+    // the next job may start on them" was written onto the download's
+    // event ring by a fetch that ran after the download ended.
+    //
+    // On the REPAIR path the latch is inert today, and that is luck
+    // rather than design: `drain_network` sends `net_done` BEFORE
+    // settle, and `serve::tasks::worker`'s runner selects on it
+    // `biased`, so by the time a repair side-fetch runs the runner has
+    // already left the arm that waits on this signal. The M2c.5
+    // SPECULATIVE PREFETCH has no such luck - it runs MID-DOWNLOAD
+    // (`drain_network` awaits its task before sending `net_done`), so
+    // there the runner IS waiting, and a prefetch rung going dry starts
+    // the next job while the download's own fleet is at full width and
+    // nowhere near idle. The lease keeps that inside the account's cap,
+    // so it is not a connection overshoot; it is the next job's whole
+    // pipeline - out_dir, decoders, memory budget, index pass - opened
+    // on a signal that was never about it.
+    pc.handoff = None;
+    // And the side pool takes its lease permits as POST-PROCESSING work
+    // rather than as a download (30 Aug 2026; the measurement and the
+    // option taken are `research/SIDEFETCH-LEASE-2026-08-30.md`).
+    //
+    // `lease` itself is NOT given up, and that is the decision rather
+    // than an omission. A recovery side-fetch runs at the MAIN FLEET's
+    // width (these configs are the download's, and nothing here narrows
+    // `connections`), so a pool outside the accounting is a whole second
+    // fleet on an account that already has one - 2x the provider's cap,
+    // which is the "502 connection limit reached" wall the lease exists
+    // to stay inside, and a refusal there hurts the OTHER job's download
+    // too. What was wrong was the class, not the lease: taking permits
+    // as a download put this pool behind the next job's fleet, which
+    // holds the account at its cap for the whole of its own run, so a
+    // repair on job A's tail parked in `HostLease::acquire` and every
+    // retry parked the same way. As post-processing it takes the
+    // reserved permit instead - one, measured, which is all a side pool
+    // needs to drain a recovery set - and never exceeds the cap.
+    pc.lease_class = nzbkit::pool::handoff::LeaseClass::PostProcess;
+}
+
+/// How long a recovery side-fetch may resolve NOTHING before it is
+/// treated as wedged (`NZBFAST_SIDEFETCH_STALL_SECS`, default 300 s).
+///
+/// Three times the download watchdog's 180 s
+/// (`NZBFAST_STALL_ABORT_SECS`), deliberately. That one is protecting a
+/// live download the user is watching; this one is protecting a tail
+/// that has already left the network phase, where a long silence is
+/// cheaper to sit through than a wrong abort - and where the cost of
+/// firing is a repair that has to be retried rather than a download
+/// that has to be resumed.
+fn side_stall_secs() -> u64 {
+    side_stall_secs_from(
+        std::env::var("NZBFAST_SIDEFETCH_STALL_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// [`side_stall_secs`] with the environment read out of it, so the
+/// parsing is testable without touching a process-global that ~1750
+/// unit tests share a process with.
+///
+/// An unparseable or zero value is the DEFAULT and never an instant
+/// abort: a debug knob must not be able to turn a watchdog into a
+/// guillotine by being mistyped.
+fn side_stall_secs_from(v: Option<&str>) -> u64 {
+    v.and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(300)
+}
+
+/// The watchdog's decision, as a pure state machine over per-tick
+/// counters - the same shape (and for the same reason) as the daemon's
+/// `serve::tasks::stall::StallTracker`: the timing logic is the part
+/// worth testing, and a `tokio::spawn` with a sleep in it is the part
+/// that cannot be.
+struct SideStallTracker {
+    secs: u64,
+    resolved: u64,
+    deferred: u64,
+    frozen: u64,
+}
+
+impl SideStallTracker {
+    fn new(secs: u64, resolved: u64, deferred: u64) -> Self {
+        Self {
+            secs,
+            resolved,
+            deferred,
+            frozen: 0,
+        }
+    }
+
+    /// One sample, `poll` seconds after the last. True once BOTH
+    /// counters have stood still for the whole window.
+    ///
+    /// A change in EITHER is liveness, and both halves are
+    /// load-bearing. `resolved` alone misses a pass spent entirely in
+    /// the bare-430 confirming repeat or TODO 315's late re-ask, which
+    /// resolves nothing and is working. `deferred` alone misses an
+    /// ordinary healthy fetch, which never defers anything at all.
+    fn observe(&mut self, resolved: u64, deferred: u64, poll: u64) -> bool {
+        if resolved != self.resolved || deferred != self.deferred {
+            self.resolved = resolved;
+            self.deferred = deferred;
+            self.frozen = 0;
+            return false;
+        }
+        self.frozen += poll;
+        self.frozen >= self.secs
+    }
+}
+
+/// Deadlock watchdog for a recovery side-fetch - the download pool's
+/// [`crate::get::workers::spawn_deadlock_watchdog`] applied to the pool
+/// that never had one.
+///
+/// # The incident, 30 Aug 2026
+///
+/// A live daemon's tail parked here for **eleven hours** and only a
+/// restart ended it (`research/WEDGE-THOR-REPAIRING-SLOT-2026-08-30.md`).
+/// The shape is worth reading before touching this, because every
+/// symptom pointed somewhere else:
+///
+/// * `[repair] need 371 block(s) -> fetching 7 volume(s), 8541.6 MB` at
+///   04:46:18Z, and the matching `fetched ... MB of recovery data` line
+///   never came. That line prints AFTER the fetch, so a wedge here logs
+///   NOTHING AT ALL - the whole episode is a gap.
+/// * The queue row read `Repairing, 100%, timeleft 0:00:00` for the
+///   duration, because `get/settle/repair.rs`'s `run_set_repair` writes
+///   `note_activity("repairing")` BEFORE this fetch and only `park`
+///   ever clears the token. Nothing was repairing.
+/// * The indexer stood down for twelve hours saying "a download is
+///   running": the `IndexJobGuard` lives in the lane's `PostprocTicket`,
+///   which is parked awaiting the engine future this call is inside.
+///   No download was running - the record had been `Finishing` for
+///   hours.
+/// * The daemon sat at ~1% CPU with every tokio worker parked, and a
+///   `sample` showed no thread blocked on a mutex. Nothing looked
+///   broken; the process was simply idle.
+///
+/// The one place it IS visible is the pool's own summary, which prints
+/// only once the run ends: `run 20783.37s - queue dry at 11.20s -
+/// drained at 20783.22s`. The work queue emptied after eleven seconds
+/// and the pool took five hours and forty-six minutes to drain, which
+/// is the fingerprint of an article that never went terminal.
+///
+/// # Why this was reachable at all
+///
+/// [`HeavyCpu::without_permit`]'s own doc comment already names the
+/// hazard - "a side-fetch has no overall deadline (`fetch_volumes` ->
+/// `fetch_all_multi_ctl`, bounded only by the pool's own retry ladder
+/// and stall watchdog, and cancellable only by deleting the job)". The
+/// clause that was wrong is "and stall watchdog": `spawn_deadlock_watchdog`
+/// has exactly one call site, `get/mod.rs`, and it watches the MAIN
+/// download pool. The side pool got the retry ladder and nothing else.
+///
+/// # What it watches, and why not bytes
+///
+/// Two signals, both of which a healthy fetch moves and a wedged one
+/// does not:
+///
+/// * articles RESOLVED (the relay's counter) - every `FetchOutcome` the
+///   pool emits, whether it carried a body or a refusal. A dead post
+///   moves no bytes at all while the pool works through its refusal
+///   ladder perfectly, so bytes alone would abort exactly the run that
+///   is behaving (the 31 Jul 2026 abort the download watchdog's own
+///   comment is about);
+/// * `QueueControl::deferred` - responses that advanced an article
+///   without resolving it. The bare-430 confirming repeat and TODO 315's
+///   late re-ask both spend a whole pass there, resolving nothing and
+///   working correctly.
+///
+/// A change in EITHER is liveness. Both frozen for `side_stall_secs()`
+/// is the wedge.
+///
+/// # Why aborting is safe here
+///
+/// A short recovery fetch is a first-class outcome on this path: an
+/// incomplete volume stays fetchable and repair proves the bytes. The
+/// caller's `?` fails the repair, the journal is kept, and a retry
+/// resumes - the same ending the download watchdog's abort already
+/// produces one phase earlier. That is a far better ending than the
+/// eleven-hour silence it replaces.
+///
+/// Returns the task (abort it when the fetch returns) and the latch the
+/// caller must read: an aborted pool's unresolved articles emit no
+/// outcome, so the caller MUST NOT treat the result as clean.
+fn spawn_side_stall_watchdog(
+    resolved: &Arc<std::sync::atomic::AtomicU64>,
+    ctl: &Arc<nzbkit::pool::QueueControl>,
+    secs: u64,
+) -> (tokio::task::JoinHandle<()>, Arc<AtomicBool>) {
+    // Poll several times per window (bounded 1..=15 s) so a short
+    // override fires promptly in tests and production stays low-churn -
+    // the download watchdog's own cadence, for its reasons.
+    let poll = (secs / 4).clamp(1, 15);
+    let wedged = Arc::new(AtomicBool::new(false));
+    let resolved = resolved.clone();
+    let wedged_task = wedged.clone();
+    // The handle holds the pool by `Weak` inside, so cloning the `Arc`
+    // keeps the pool up not at all: once the fetch returns `deferred()`
+    // answers None, and the caller aborts this task in the same breath.
+    let ctl = ctl.clone();
+    let task = tokio::spawn(async move {
+        let mut tracker = SideStallTracker::new(
+            secs,
+            resolved.load(Ordering::Relaxed),
+            ctl.deferred().unwrap_or(0),
+        );
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(poll)).await;
+            // `unwrap_or(last)` and never `unwrap_or(0)`: once the pool
+            // is gone `deferred()` answers None, and reading that as a
+            // fall to zero is a phantom CHANGE - liveness reported by a
+            // pool that no longer exists.
+            let deferred = ctl.deferred().unwrap_or(tracker.deferred);
+            if !tracker.observe(resolved.load(Ordering::Relaxed), deferred, poll) {
+                continue;
+            }
+            let frozen = tracker.frozen;
+            warn!(
+                target: "repair",
+                "recovery fetch wedged: no article resolved for {frozen}s and \
+                 nothing deferred - the side pool has left an article \
+                 non-terminal. Dumping state and abandoning this fetch; the \
+                 journal keeps what landed and a retry resumes."
+            );
+            ctl.dump_state();
+            wedged_task.store(true, Ordering::Relaxed);
+            ctl.abort();
+            return;
+        }
+    });
+    (task, wedged)
 }
 
 /// Inner driver for recovery-volume side-fetches: downloads the given
@@ -591,19 +904,53 @@ pub(crate) async fn fetch_volume_articles_with(
     // modest fixed depth (≈25 MB) instead of the old 256 (~200 MB of
     // budget-exempt bytes on a box that may only have 256 MB total).
     let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(32);
+    // The watchdog's liveness signal: one tick per article the pool
+    // RESOLVED, counted as the outcome passes. A relay rather than a
+    // parameter on `consume_volume_articles` because the consumer has
+    // six other callers, all tests, and the count is this driver's
+    // concern and not the consumer's. One extra hop on a bounded(32)
+    // channel over a few hundred recovery articles is not measurable
+    // beside the bodies moving through it.
+    let (relay_tx, mut relay_rx) = tokio::sync::mpsc::channel::<FetchOutcome>(32);
+    let resolved = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let resolved_relay = resolved.clone();
+    let relay = tokio::spawn(async move {
+        while let Some(o) = relay_rx.recv().await {
+            resolved_relay.fetch_add(1, Ordering::Relaxed);
+            if tx.send(o).await.is_err() {
+                break;
+            }
+        }
+    });
     let out_dir2 = out_dir.to_path_buf();
     let pool2 = buf_pool.clone();
     let consumer = tokio::spawn(async move {
         consume_volume_articles(rx, id_to_file, out_dir2, pool2, prealloc_cap, open).await
     });
+    // A QueueControl even when the caller has no cancel handle (the
+    // CLI): the watchdog below needs one to read `deferred` and to
+    // abort, and a fetch nobody can cancel is exactly the one with no
+    // other way out. Shared as an `Arc` because the watchdog outlives
+    // this stack frame's borrow of it.
+    let ctl: Arc<nzbkit::pool::QueueControl> = match cancel {
+        Some(c) => c.ctl.clone(),
+        None => Arc::new(nzbkit::pool::QueueControl::default()),
+    };
     let t0 = Instant::now();
+    // Read ONCE: the message below must name the window the watchdog
+    // actually ran on, not whatever the environment says by the time it
+    // is printed.
+    let stall_secs = side_stall_secs();
+    let (watchdog, wedged) = spawn_side_stall_watchdog(&resolved, &ctl, stall_secs);
     let stats = match cancel {
         Some(c) => {
-            c.guard(fetch_all_multi_ctl(servers, ids, tx, Some(&c.ctl)))
+            c.guard(fetch_all_multi_ctl(servers, ids, relay_tx, Some(&ctl)))
                 .await
         }
-        None => fetch_all_multi_ctl(servers, ids, tx, None).await,
+        None => fetch_all_multi_ctl(servers, ids, relay_tx, Some(&ctl)).await,
     };
+    watchdog.abort();
+    let _ = relay.await;
     let (failures, paths) = consumer.await?;
     let failed = failures.total();
     // An aborted run's unresolved articles emit NO outcome, so `failures`
@@ -614,6 +961,26 @@ pub(crate) async fn fetch_volume_articles_with(
     // interrupted download's partials are, and the sweep owns them.
     if cancel.is_some_and(SideCancel::is_cancelled) {
         anyhow::bail!("recovery fetch cancelled after {:.2?}", t0.elapsed());
+    }
+    // The watchdog aborted this fetch, so its unresolved articles
+    // emitted no outcome and `failures` can read 0 over volumes that are
+    // actually short - the SAME H2 false-shortfall shape the
+    // cancellation arm above refuses, reached a different way. Never
+    // hand that back as a clean result: a caller allowed to believe it
+    // would strike the whole volume off its fetch list. The written
+    // paths are abandoned on disk exactly as an interrupted download's
+    // partials are, and the sweep owns them.
+    //
+    // BELOW the cancellation arm on purpose. A user who pressed stop is
+    // entitled to hear that they did, and a fetch wedged against a
+    // silent provider is exactly the one somebody is most likely to
+    // cancel by hand - so the two race, and the proximate cause wins.
+    if wedged.load(Ordering::Relaxed) {
+        anyhow::bail!(
+            "recovery fetch wedged - no article resolved for {stall_secs}s; \
+             abandoned after {:.2?} (the journal keeps what landed and a retry resumes)",
+            t0.elapsed()
+        );
     }
     let raw: u64 = stats.iter().map(|s| s.bytes).sum();
     info!(
@@ -824,6 +1191,70 @@ impl LossSpelling {
     }
 }
 
+/// Whether the file already at a volume's destination is one a
+/// side-fetch may write. `true` for a free name.
+///
+/// The name a volume lands under is the poster's: `dec.name` is the
+/// article's own yEnc `name=` header, sanitised and joined, and nothing
+/// ties it to the volume the fetch believes it asked for. So a volume
+/// whose yEnc name collides with a file already in `out_dir` used to
+/// truncate it (`Fresh`) or write holes through it (`Additive`), and
+/// the file at risk is the download's own PAYLOAD - the one thing in
+/// that directory nothing can refetch. Pre-existing, and belonging to
+/// every recovery-volume side-fetch there has ever been; claim
+/// `sidefetch-volume-write-unguarded`, and the census that found it is
+/// `exclusive-rename-for-occupancy-refusals`'s.
+///
+/// WHY THIS IS NOT A BARE "the name is taken, decline". The destination
+/// of a recovery volume is legitimately OCCUPIED in the shape this
+/// side-fetch exists to serve: a rung that landed a volume partially is
+/// deliberately left "fetchable" and the post-settle ladder fetches it
+/// again (`get::workers::recovery`), and `Additive`'s whole contract is
+/// writing into a volume the demote already materialized. Refusing an
+/// occupied name would turn both into a shortfall the job used to
+/// repair, which is the wrong trade for a guard against a rarity.
+///
+/// So the question asked is what the destination IS, not whether it is
+/// there. Two answers are ours to overwrite and everything else is
+/// somebody's payload:
+///
+/// * a PAR2 packet head - an earlier copy of this same volume, whole or
+///   partial, since any article that landed carries the chain's magic;
+/// * ALL ZERO (an empty file included) - the preallocated placeholder an
+///   attempt that never landed its first article leaves behind.
+///
+/// STATED LIMIT: a payload file whose first 72 bytes are zero would pass
+/// the second arm. Nothing this pipeline publishes has that shape - RAR,
+/// ZIP, 7z, MKV and MP4 all carry a non-zero magic in their first bytes,
+/// and a yEnc-decoded member starts at the poster's own first byte - and
+/// the arm cannot be dropped without refusing the refetch above. An
+/// unreadable destination is REFUSED rather than assumed free: a head
+/// that cannot be read decides nothing, and the safe direction here is
+/// to keep the bytes.
+fn destination_takes_a_volume(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; nzbkit::par2::SNIFF_WINDOW + 8];
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        // Not there at all is the ordinary case and the only one that
+        // is free by absence. Any OTHER open error - a permission, a
+        // directory, an unreadable device - is a destination this
+        // fetch cannot reason about, so it does not get written.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    let mut n = 0usize;
+    while n < head.len() {
+        match f.read(&mut head[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    nzbkit::par2::head_is_packet_file(&head[..n]) || head[..n].iter().all(|b| *b == 0)
+}
+
 /// Decode side-fetched articles onto their volume files. Returns
 /// ([`VolumeFailures`], paths actually written) - split out of
 /// [`fetch_volume_articles`] so the writer-failure path is reachable from
@@ -844,7 +1275,7 @@ pub(crate) async fn consume_volume_articles(
     prealloc_cap: u64,
     open: VolumeOpen,
 ) -> (VolumeFailures, Vec<PathBuf>) {
-    use nzbkit::disk::{FileWriter, sanitize_filename};
+    use nzbkit::disk::{FileWriter, join_out_name, sanitize_out_name};
     use nzbkit::pool::FetchOutcome;
     use std::collections::hash_map::Entry;
     use std::collections::{HashMap, HashSet};
@@ -855,6 +1286,10 @@ pub(crate) async fn consume_volume_articles(
     // full disk that would be thousands of failing opens - and so the
     // failure is reported once.
     let mut unwritable: HashSet<usize> = HashSet::new();
+    // Destinations this fetch has already taken - see the collision
+    // note at the claim below.
+    let mut claimed: HashSet<String> = HashSet::new();
+    let fold = nzbkit::disk::case_insensitive_dir(&out_dir);
     let mut failures = VolumeFailures::default();
     while let Some(outcome) = rx.recv().await {
         match outcome {
@@ -883,23 +1318,61 @@ pub(crate) async fn consume_volume_articles(
                         let w = match writers.entry(fi) {
                             Entry::Occupied(e) => Some(&e.into_mut().1),
                             Entry::Vacant(slot) => {
-                                let path = out_dir.join(sanitize_filename(&dec.name));
+                                let name = sanitize_out_name(&dec.name);
+                                let path = join_out_name(&out_dir, &name);
+                                // TWO volumes of one fetch resolving to
+                                // ONE destination is the same loss
+                                // without an outsider: the poster
+                                // names them alike, and the second
+                                // truncates (or holes) the first. The
+                                // fetch owns both, so this is decided
+                                // here rather than by the head test
+                                // below, which would see the first
+                                // volume's own packet magic and allow
+                                // it. Folded where the volume folds,
+                                // because two spellings are one file
+                                // there and an exact compare would miss
+                                // the collision it is looking for.
+                                let key = if fold {
+                                    path.to_string_lossy().to_lowercase()
+                                } else {
+                                    path.to_string_lossy().into_owned()
+                                };
+                                if !claimed.insert(key) || !destination_takes_a_volume(&path) {
+                                    warn!(
+                                        target: "repair",
+                                        "declined to write recovery volume {} under the name \
+                                         its article declares: something that is not a \
+                                         recovery volume is already there and this fetch \
+                                         will not write over it",
+                                        path.display()
+                                    );
+                                    unwritable.insert(fi);
+                                    failures.charge(fi, Blame::Ours);
+                                    continue;
+                                }
                                 // The declared `size=` is the poster's
                                 // number and on Linux preallocation is a
                                 // real fallocate, so it reserves only up
                                 // to the ceiling. `size` itself stays
                                 // unclamped (the writer reports it).
-                                let made = match open {
-                                    VolumeOpen::Fresh => FileWriter::create_capped(
-                                        &path,
-                                        dec.file_size,
-                                        prealloc_cap,
-                                    ),
-                                    VolumeOpen::Additive => FileWriter::create_resume_capped(
-                                        &path,
-                                        dec.file_size,
-                                        prealloc_cap,
-                                    ),
+                                // A tree-preserved name needs its parent
+                                // first; a refusal lands on the same
+                                // unwritable arm as a failed create.
+                                let made = match nzbkit::disk::create_out_dirs(&out_dir, &name) {
+                                    Err(e) => Err(e),
+                                    Ok(()) => match open {
+                                        VolumeOpen::Fresh => FileWriter::create_capped(
+                                            &path,
+                                            dec.file_size,
+                                            prealloc_cap,
+                                        ),
+                                        VolumeOpen::Additive => FileWriter::create_resume_capped(
+                                            &path,
+                                            dec.file_size,
+                                            prealloc_cap,
+                                        ),
+                                    },
                                 };
                                 match made {
                                     Ok(f) => Some(&slot.insert((path, Arc::new(f))).1),
@@ -1021,6 +1494,19 @@ mod side_pool_strip_tests {
         assert!(!pc.crc_steer);
         assert!(!pc.arrival_ack);
         assert!(pc.channel_gauge.is_none());
+        // The lease is KEPT - a side pool outside the accounting is a
+        // second fleet on the account - and taken as post-processing, so
+        // it may have the reserved permit instead of queuing behind the
+        // next job's download for the whole of that job's run.
+        assert!(
+            pc.lease.is_none(),
+            "this fixture builds no lease; the class is what is pinned here"
+        );
+        assert_eq!(
+            pc.lease_class,
+            nzbkit::pool::handoff::LeaseClass::PostProcess,
+            "a side pool must not take permits as a download"
+        );
         assert_eq!(target.get(), 5, "the download's own target moved");
     }
 }
@@ -1226,6 +1712,86 @@ mod volume_yield_tests {
         );
     }
 
+    /// The 30 Aug 2026 wedge, as the decision that would have ended it:
+    /// a side-fetch pool that resolves nothing and defers nothing is
+    /// abandoned once the window elapses, instead of parking the job's
+    /// whole finalize chain behind it for eleven hours.
+    ///
+    /// The window is checked at its EDGE in both directions - one tick
+    /// short must not fire - because the failure this replaces was
+    /// silent, and a watchdog that fires early on a slow provider is
+    /// how one gets its window raised until it never fires at all.
+    #[test]
+    fn a_side_fetch_that_resolves_nothing_is_abandoned_after_the_window() {
+        let mut t = SideStallTracker::new(300, 7, 3);
+        // 295 s of complete silence: not yet.
+        for _ in 0..59 {
+            assert!(!t.observe(7, 3, 5));
+        }
+        assert_eq!(t.frozen, 295);
+        // The tick that completes the window.
+        assert!(t.observe(7, 3, 5));
+    }
+
+    /// An article RESOLVING is liveness, and it resets the clock rather
+    /// than merely postponing it: a fetch that delivers one article
+    /// every four minutes is slow, not wedged, and must survive
+    /// indefinitely.
+    #[test]
+    fn one_resolved_article_resets_the_whole_window() {
+        let mut t = SideStallTracker::new(60, 0, 0);
+        for _ in 0..11 {
+            assert!(!t.observe(0, 0, 5));
+        }
+        assert_eq!(t.frozen, 55);
+        assert!(!t.observe(1, 0, 5));
+        assert_eq!(t.frozen, 0, "a resolved article must reset, not pause");
+        // ...and the next window is a full one.
+        for _ in 0..11 {
+            assert!(!t.observe(1, 0, 5));
+        }
+        assert!(t.observe(1, 0, 5));
+    }
+
+    /// A DEFERRAL is liveness too, and this is the half a resolved-only
+    /// watchdog would get wrong. The bare-430 confirming repeat and
+    /// TODO 315's late re-ask both spend a whole pass advancing
+    /// articles without resolving any of them - a wholly dead post can
+    /// take that path for every article it has - so counting only
+    /// resolutions would abandon a fetch that is working perfectly.
+    /// That is the 31 Jul 2026 abort the download watchdog's own
+    /// comment is about, one pool over.
+    #[test]
+    fn a_deferral_alone_counts_as_liveness() {
+        let mut t = SideStallTracker::new(60, 4, 0);
+        for _ in 0..11 {
+            assert!(!t.observe(4, 0, 5));
+        }
+        // Nothing resolved - only the deferral counter moved.
+        assert!(!t.observe(4, 1, 5));
+        assert_eq!(t.frozen, 0);
+        for _ in 0..11 {
+            assert!(!t.observe(4, 1, 5));
+        }
+        assert!(t.observe(4, 1, 5));
+    }
+
+    /// A mistyped debug knob must not turn the watchdog into a
+    /// guillotine. Zero and unparseable both mean the default, never an
+    /// instant abort of every recovery fetch on the box.
+    #[test]
+    fn a_nonsense_stall_window_falls_back_to_the_default() {
+        assert_eq!(side_stall_secs_from(None), 300);
+        assert_eq!(side_stall_secs_from(Some("")), 300);
+        assert_eq!(side_stall_secs_from(Some("0")), 300);
+        assert_eq!(side_stall_secs_from(Some("-5")), 300);
+        assert_eq!(side_stall_secs_from(Some("later")), 300);
+        // A real override is honoured, including one far below the
+        // default - the e2e suite needs a window it can wait out.
+        assert_eq!(side_stall_secs_from(Some("2")), 2);
+        assert_eq!(side_stall_secs_from(Some("900")), 900);
+    }
+
     /// `ours` is a SUBSET of `failed` and the arithmetic holds it to
     /// that rather than trusting a caller: an `ours` past `failed`
     /// would subtract more from the denominator than from the
@@ -1309,6 +1875,115 @@ mod recovery_volume_tests {
         ))
         .await
         .expect("the recovery-volume consumer task must not panic")
+    }
+
+    /// Claim `sidefetch-volume-write-unguarded`: a recovery volume whose
+    /// yEnc name collides with a file already in `out_dir` does not
+    /// overwrite it.
+    ///
+    /// The name a volume lands under is `dec.name`, the article's own
+    /// header, and nothing ties it to the volume the fetch asked for -
+    /// so before 31 Aug 2026 this went straight to `create_capped`,
+    /// which TRUNCATES. The file at risk is the download's own payload,
+    /// which is the one thing in that directory no later pass can
+    /// refetch.
+    ///
+    /// Graded on the BYTES and not on the failure count: what the row is
+    /// about is a file the user already has, so the assertion that
+    /// matters is that it is still there and still itself. The count is
+    /// asserted too, because a volume declined is a volume this fetch
+    /// did not get and `Blame::Ours` is what says so - the provider
+    /// served it and our own name resolution lost it.
+    #[tokio::test]
+    async fn a_volume_never_overwrites_a_payload_file_it_collides_with() {
+        let dir = temp_dir("collide");
+        let payload = b"RIFF....a movie, not a recovery volume at all".to_vec();
+        std::fs::write(dir.join("movie.bin"), &payload).unwrap();
+        let (failures, paths) = consume(
+            &dir,
+            vec![(0, article("movie.bin", 4096, &vec![0xCCu8; 512]))],
+            u64::MAX,
+        )
+        .await;
+        assert_eq!(
+            std::fs::read(dir.join("movie.bin")).unwrap(),
+            payload,
+            "a side-fetched recovery volume overwrote a payload file it \
+             collided with by name"
+        );
+        assert!(
+            paths.is_empty(),
+            "the declined volume was reported as written"
+        );
+        assert_eq!(failures.ours(), 1, "a declined volume is charged to us");
+        assert_eq!(failures.total(), 1, "the volume is one article short");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of that guard, and the reason it is not a bare
+    /// "the name is taken, decline": an earlier attempt at THIS volume
+    /// is exactly what the destination legitimately holds, and refusing
+    /// it would turn a repair the post-settle ladder completes today
+    /// into a shortfall.
+    ///
+    /// Both shapes an earlier attempt leaves: a partial volume, whose
+    /// head carries the packet chain's magic, and the preallocated
+    /// placeholder an attempt that never landed its first article leaves
+    /// behind, which is all zeros.
+    #[tokio::test]
+    async fn a_volume_still_replaces_an_earlier_attempt_at_itself() {
+        for (tag, occupant) in [
+            ("partial", {
+                let mut v = vec![0u8; 2048];
+                v[..8].copy_from_slice(nzbkit::par2::MAGIC);
+                v
+            }),
+            ("placeholder", vec![0u8; 2048]),
+        ] {
+            let dir = temp_dir(tag);
+            std::fs::write(dir.join("set.vol000+02.par2"), &occupant).unwrap();
+            let (failures, paths) = consume(
+                &dir,
+                vec![(0, article("set.vol000+02.par2", 512, &vec![0xDDu8; 512]))],
+                u64::MAX,
+            )
+            .await;
+            assert_eq!(failures.total(), 0, "{tag}: the refetch was declined");
+            assert_eq!(paths.len(), 1, "{tag}: no volume was written");
+            assert_eq!(
+                std::fs::read(&paths[0]).unwrap(),
+                vec![0xDDu8; 512],
+                "{tag}: the refetch did not replace the earlier attempt"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// TWO volumes of one fetch resolving to ONE destination is the same
+    /// loss with no outsider involved - the poster names them alike and
+    /// the second truncates the first. Decided by the fetch's own claim
+    /// set rather than by the head test, which would see the first
+    /// volume's packet magic and allow it.
+    #[tokio::test]
+    async fn two_volumes_of_one_fetch_never_share_a_destination() {
+        let dir = temp_dir("twoclaim");
+        let (failures, paths) = consume(
+            &dir,
+            vec![
+                (0, article("same.vol000+01.par2", 512, &vec![0x11u8; 512])),
+                (1, article("same.vol000+01.par2", 512, &vec![0x22u8; 512])),
+            ],
+            u64::MAX,
+        )
+        .await;
+        assert_eq!(paths.len(), 1, "both volumes took a destination: {paths:?}");
+        assert_eq!(
+            std::fs::read(&paths[0]).unwrap(),
+            vec![0x11u8; 512],
+            "the second volume wrote over the first"
+        );
+        assert_eq!(failures.ours(), 1, "the declined volume is charged to us");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// BUG (HIGH): the PAR2 recovery-volume side-fetch preallocated the
@@ -1418,7 +2093,18 @@ mod recovery_volume_tests {
             // 2 KB already on disk at offsets 0..2048 (the good prefix),
             // the refetch delivers only part 2 (a single-part article at
             // offset 0 of size 512 stands in for "some other range").
-            std::fs::write(&path, vec![0xAAu8; 2048]).unwrap();
+            //
+            // It opens with the PAR2 packet magic because what it stands
+            // for IS a volume the demote materialized, and since 31 Aug
+            // 2026 the consumer asks: a destination that is neither a
+            // packet head nor all zeros is somebody's payload and is not
+            // written (`destination_takes_a_volume`). The filler behind
+            // the magic is what the assertions below read, and the
+            // article overwrites the first 512 bytes in both modes, so
+            // nothing about what this test grades moved.
+            let mut on_disk = vec![0xAAu8; 2048];
+            on_disk[..8].copy_from_slice(nzbkit::par2::MAGIC);
+            std::fs::write(&path, on_disk).unwrap();
             let (tx, rx) = tokio::sync::mpsc::channel::<FetchOutcome>(4);
             let mut id_to_file = HashMap::new();
             let id: Arc<str> = "<p@test>".into();

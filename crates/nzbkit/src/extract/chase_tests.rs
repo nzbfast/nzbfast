@@ -461,6 +461,7 @@ fn chase_volume_set_cases() {
     chase_patch_below_the_trim_point_forfeits_and_materializes_repaired();
     a_forfeit_after_a_drop_reports_the_holes_for_refetch();
     a_chase_beside_a_lost_article_spills_instead_of_dropping();
+    a_chase_beside_a_doubted_article_spills_instead_of_dropping();
     stalled_chase_pages_cold_frontier_then_demotes_byte_exact();
     chase_read_defers_its_paged_preads_off_the_extractor_lock();
     healthy_chase_never_pages_on_a_loss_it_does_not_own();
@@ -600,13 +601,22 @@ fn holds_backpressure_parks_near_the_cap_and_reopens_as_the_engine_catches_up() 
     // Its progress marks drive the pager, whose re-evaluation trims the
     // consumed volumes and reopens the allowance.
     drop(pause);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut seen = ex.chase_consumed_volumes();
+    let mut deadline = std::time::Instant::now() + NO_PROGRESS;
     while ex.chase_consumed_volumes() + 2 < vols.len() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(2));
+        let c = ex.chase_consumed_volumes();
+        if c > seen {
+            seen = c;
+            deadline = std::time::Instant::now() + NO_PROGRESS;
+        }
     }
     assert!(
         ex.chase_consumed_volumes() + 2 >= vols.len(),
-        "engine never caught up"
+        "engine stalled: no volume consumed for {}s at {} of {}",
+        NO_PROGRESS.as_secs(),
+        ex.chase_consumed_volumes(),
+        vols.len()
     );
     let last = vols.len() - 1;
     feed(&ex, last, &names[last], &vols[last], 7000, 33 + last as u64);
@@ -950,13 +960,24 @@ fn a_nested_chase_over_the_cap_spills_its_trim_and_streams() {
         ex.write(0, "v.rar", outer.len() as u64, s as u64, &outer[s..e])
             .unwrap();
         let arrived = cum.iter().take_while(|&&c| c <= e).count();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while arrived >= lead
-            && ex.chase_consumed_volumes() + lead <= arrived
-            && ex.chase_retained_bytes() > 0
-            && std::time::Instant::now() < deadline
-        {
+        let lagging = || {
+            arrived >= lead
+                && ex.chase_consumed_volumes() + lead <= arrived
+                && ex.chase_retained_bytes() > 0
+        };
+        let deadline = std::time::Instant::now() + NO_PROGRESS;
+        while lagging() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if lagging() {
+            eprintln!(
+                "PACED FEED DEADLINE EXPIRED: chunk {i} fed but engine consumed only {} volumes \
+                 (lead {lead}, retained {} bytes) after {}s - the rest of this case measures a \
+                 runaway feed, not the paced shape it was written for",
+                ex.chase_consumed_volumes(),
+                ex.chase_retained_bytes(),
+                NO_PROGRESS.as_secs()
+            );
         }
     }
     let rep = ex.finish().unwrap();
@@ -1088,13 +1109,24 @@ fn an_outer_breach_relieves_the_child_chase_before_demoting_the_group() {
             breached = true;
         }
         let arrived = cum.iter().take_while(|&&c| c <= e).count();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while arrived >= lead
-            && ex.chase_consumed_volumes() + lead <= arrived
-            && ex.chase_retained_bytes() > 0
-            && std::time::Instant::now() < deadline
-        {
+        let lagging = || {
+            arrived >= lead
+                && ex.chase_consumed_volumes() + lead <= arrived
+                && ex.chase_retained_bytes() > 0
+        };
+        let deadline = std::time::Instant::now() + NO_PROGRESS;
+        while lagging() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if lagging() {
+            eprintln!(
+                "PACED FEED DEADLINE EXPIRED: chunk {i} fed but engine consumed only {} volumes \
+                 (lead {lead}, retained {} bytes) after {}s - the rest of this case measures a \
+                 runaway feed, not the paced shape it was written for",
+                ex.chase_consumed_volumes(),
+                ex.chase_retained_bytes(),
+                NO_PROGRESS.as_secs()
+            );
         }
     }
     assert!(breached, "the chase never held a byte - nothing was tested");
@@ -1344,6 +1376,11 @@ fn chase_patch_below_the_trim_point_forfeits_and_materializes_repaired() {
     assert!(rar_drop_env_off_value(Some("1")));
     assert!(!rar_drop_env_off_value(Some("0")));
     assert!(!rar_drop_env_off_value(None));
+    // The doubt veto's own hatch, which restores the pre-30 Aug 2026
+    // race so the spill it costs can be priced on the loopback rig.
+    assert!(loss_doubt_env_off_value(Some("1")));
+    assert!(!loss_doubt_env_off_value(Some("0")));
+    assert!(!loss_doubt_env_off_value(None));
 
     let dir = tmpdir("chase-trim-patch");
     let (_, vols, names) = chase_volume_set();
@@ -1554,6 +1591,52 @@ fn a_chase_beside_a_lost_article_spills_instead_of_dropping() {
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert!(trimmed > 0, "nothing was trimmed - the test proved nothing");
     assert_eq!(ex.chase_dropped_bytes(), 0, "dropped beside a lost article");
+    assert_eq!(&std::fs::read(dir.join("F.bin")).unwrap(), f);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The same veto ONE ROUND TRIP EARLIER, and the case the flag above
+/// cannot cover on its own (30 Aug 2026,
+/// `research/CHASE-TRIM-DROPS-BEFORE-VERDICT-2026-08-30.md`).
+///
+/// `note_article_lost` is called from a TERMINAL fetch verdict and its
+/// own doc says those land late - "retries exhaust last" - so between
+/// the pool deciding an article is one refusal from gone and the
+/// verdict arriving, the gate above still reads false and the trim
+/// DROPS. Measured on the row-26 e2e leg under the holds park: 10 of 12
+/// loaded runs dropped a PAR2-vouched prefix, and every one of the 10
+/// then took the disk ladder because `try_mapped_repair` had no backing
+/// data left. So the pool raises [`LossDoubt`] at the hold, and this
+/// pins that it vetoes the drop exactly as a landed verdict does.
+///
+/// Deliberately a sibling of the case above rather than a parameter on
+/// it: what is being asserted is that a SECOND, differently-sourced
+/// flag reaches the same gate, and a shared body could pass with either
+/// one of them wired to nothing.
+fn a_chase_beside_a_doubted_article_spills_instead_of_dropping() {
+    let dir = tmpdir("chase-drop-doubt");
+    let (f, vols, names) = chase_volume_set();
+    let headroom = 3 * vols[0].len();
+
+    let ex = Arc::new(Extractor::new(&dir, vols.len() + 3, true));
+    ex.anchor();
+    ex.set_holds_cap(1);
+    eat_budget_to(&ex, vols.len(), headroom, 149);
+    // No slot, and no terminal verdict: the pool is still ASKING.
+    ex.loss_doubt().raise();
+    assert!(
+        !ex.inner_read().lost_articles.load(Ordering::Relaxed),
+        "the doubt must not stand in for a terminal verdict - it does          not arm the paging pass and does not mark a slot"
+    );
+    let trimmed = feed_chase_volumes_paced(&ex, names, vols, 7000, 2);
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert!(trimmed > 0, "nothing was trimmed - the test proved nothing");
+    assert_eq!(
+        ex.chase_dropped_bytes(),
+        0,
+        "dropped while a terminal verdict was being held back"
+    );
     assert_eq!(&std::fs::read(dir.join("F.bin")).unwrap(), f);
     std::fs::remove_dir_all(&dir).unwrap();
 }

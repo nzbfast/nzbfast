@@ -228,8 +228,11 @@ fn expect_refusal(dir: &Path, port: u16, extra: &[&str]) -> String {
         match child.try_wait().unwrap() {
             Some(status) => {
                 let out = child.wait_with_output().unwrap();
+                // stdout/stderr are separate pipes with no shared clock -
+                // label the seam so a bare join can't be misread as one
+                // chronology. Copy the comment along with the string.
                 let log = format!(
-                    "{}{}",
+                    "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
                     String::from_utf8_lossy(&out.stdout),
                     String::from_utf8_lossy(&out.stderr)
                 );
@@ -469,8 +472,11 @@ fn an_empty_existing_keyfile_refuses_to_start_instead_of_opening_the_api() {
         !out.status.success(),
         "daemon accepted an empty credential file"
     );
+    // stdout/stderr are separate pipes with no shared clock - label the
+    // seam so a bare join can't be misread as one chronology. Copy the
+    // comment along with the string.
     let log = format!(
-        "{}{}",
+        "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );

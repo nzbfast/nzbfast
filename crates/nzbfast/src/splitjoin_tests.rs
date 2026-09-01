@@ -970,3 +970,226 @@ fn a_plain_split_in_a_subfolder_survives_a_clean_nested_pass_and_the_sweep() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Write `total` as `name.000`, `.001`, … - the 0-ORIGIN spelling.
+fn write_parts_from_zero(
+    dir: &std::path::Path,
+    name: &str,
+    total: &[u8],
+    chunk: usize,
+) -> Vec<PathBuf> {
+    total
+        .chunks(chunk)
+        .enumerate()
+        .map(|(i, c)| {
+            let p = dir.join(format!("{name}.{i:03}"));
+            std::fs::write(&p, c).unwrap();
+            p
+        })
+        .collect()
+}
+
+/// Matrix row M4-30 (no-RAR matrix, 30 Aug 2026). Scene joiners and
+/// several GUI splitters number the FIRST part `.000`, and the
+/// gapless-from-1 rule refused those sets outright: `.000 .001 .002` is
+/// not `1..=3` and does not even contain 1.
+///
+/// MEASURED RED on origin/main at `8fbe1c3bd`: `collect_split_sets`
+/// returned 0 sets for exactly this directory, so a 0-origin split
+/// landed as loose parts with the join left to the user. The 1-origin
+/// control beside it (`a_three_part_split_joins_and_hashes_correctly`)
+/// was green throughout, which is what says the refusal was the ORIGIN
+/// and nothing else about the fixture.
+#[test]
+fn a_split_numbered_from_zero_joins_like_any_other() {
+    let dir = split_dir("zero-origin");
+    let total = payload(300_000);
+    let parts = write_parts_from_zero(&dir, "Movie.mkv", &total, 120_000);
+    assert_eq!(parts.len(), 3, "120,000-byte chunks of 300,000 bytes");
+
+    let sets = collect_split_sets(&dir).unwrap();
+    assert_eq!(sets.len(), 1, "a .000-origin split was not detected");
+    assert_eq!(sets[0].base, "Movie.mkv");
+    assert_eq!(sets[0].parts.len(), 3);
+    assert_eq!(sets[0].parts[0], parts[0], "part .000 leads the join");
+    assert_eq!(sets[0].total, total.len() as u64);
+
+    assert!(join_split_sets(&dir, &sets));
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("Movie.mkv")).unwrap()),
+        sha256(&total),
+        "the joined file is the original, byte for byte"
+    );
+    for p in &parts {
+        assert!(!p.exists(), "{} is spent and removed", p.display());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The 0-origin run in its UNPADDED spelling, past the rollover: rule 3
+/// measures "minimal width" from the run's own first index, so `.0` …
+/// `.9`, `.10` is one consistent set. Written out because the obvious
+/// off-by-one - keeping `(i + 1)` while the run starts at 0 - refuses
+/// the set at exactly part `.9`, which no fixture stopping at 3 parts
+/// can see.
+#[test]
+fn a_zero_origin_run_rolls_over_from_one_digit_to_two() {
+    let dir = split_dir("zero-origin-rollover");
+    let total = payload(11_000);
+    for (i, c) in total.chunks(1_000).enumerate() {
+        std::fs::write(dir.join(format!("Movie.mkv.{i}")), c).unwrap();
+    }
+    let sets = collect_split_sets(&dir).unwrap();
+    assert_eq!(sets.len(), 1, "0-origin .0 … .10 was not detected");
+    assert_eq!(sets[0].parts.len(), 11);
+    assert!(join_split_sets(&dir, &sets));
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("Movie.mkv")).unwrap()),
+        sha256(&total)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other half of rule 1, and the reason 0-origin is an EXTRA origin
+/// rather than "any first index will do": a run that starts anywhere
+/// else is a FRAGMENT of a set - the parts before it are missing, and
+/// joining what is left publishes a silently truncated file. `.002
+/// .003 .004` must still refuse.
+#[test]
+fn a_run_starting_at_two_is_a_fragment_and_still_refuses() {
+    let dir = split_dir("origin-two");
+    let total = payload(300_000);
+    for (i, c) in total.chunks(100_000).enumerate() {
+        std::fs::write(dir.join(format!("Movie.mkv.{:03}", i + 2)), c).unwrap();
+    }
+    assert!(
+        collect_split_sets(&dir).unwrap().is_empty(),
+        "a run starting at .002 is missing its first parts and must not join"
+    );
+    assert!(dir.join("Movie.mkv.002").exists(), "the parts are kept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Write `total` as `name.part01`, `.part02`, … in `chunk`-byte parts -
+/// the M4-55 spelling of the same raw byte split [`write_parts`] writes
+/// bare-numeric.
+fn write_part_parts(dir: &std::path::Path, name: &str, total: &[u8], chunk: usize) -> Vec<PathBuf> {
+    total
+        .chunks(chunk)
+        .enumerate()
+        .map(|(i, c)| {
+            let p = dir.join(format!("{name}.part{:02}", i + 1));
+            std::fs::write(&p, c).unwrap();
+            p
+        })
+        .collect()
+}
+
+/// M4-55 - a RAW byte split spelled `.part01` / `.part02` rather than
+/// `.001` / `.002`. No archive anywhere; the whole "extraction" is a
+/// concatenation, exactly as for the bare-numeric spelling.
+///
+/// MEASURED on the 30 Aug 2026 baseline: `numeric_tail` required the
+/// last dot-tail to be 1-4 ASCII DIGITS, so `Movie.mkv.part01` produced
+/// no set at all and both halves were left loose on disk under whatever
+/// names they arrived with. The bare-numeric control in the same probe
+/// produced its one set, which is what said the grammar was the whole
+/// difference.
+///
+/// `a_three_part_split_joins_and_hashes_correctly` is the CONTROL for
+/// this row - same shape, bare-numeric tails - so a red here is the
+/// spelling and not the joiner.
+#[test]
+fn a_part_prefixed_raw_split_joins_like_the_bare_numeric_one() {
+    let dir = split_dir("part-prefixed");
+    let total = payload(300_000);
+    let parts = write_part_parts(&dir, "Movie.mkv", &total, 120_000);
+    assert_eq!(parts.len(), 3);
+
+    let sets = collect_split_sets(&dir).unwrap();
+    assert_eq!(sets.len(), 1, "a .partNN run is a split set");
+    assert_eq!(sets[0].base, "Movie.mkv");
+    assert_eq!(sets[0].parts.len(), 3);
+    assert_eq!(sets[0].total, total.len() as u64);
+
+    assert!(join_split_sets(&dir, &sets));
+    assert_eq!(
+        sha256(&std::fs::read(dir.join("Movie.mkv")).unwrap()),
+        sha256(&total),
+        "the joined file is the original, byte for byte"
+    );
+    for p in &parts {
+        assert!(!p.exists(), "{} is spent and removed", p.display());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M4-55 / M4-74 - ONE base, two spellings. `Movie.mkv.01` beside
+/// `Movie.mkv.part02` is either two splitters' output sharing a stem or
+/// one run somebody half-renamed; nothing in the names says which, and
+/// the joiner DELETES what it joins. So the set is refused whole and
+/// every part stays on disk, which is the answer a hole in the run
+/// already gets.
+///
+/// Structural rather than a special case: the spelling joins the WIDTH
+/// as a per-set uniformity rule, so `.1` beside `.01` and `.01` beside
+/// `.part02` are refused by two neighbouring tests of the same shape.
+#[test]
+fn one_base_spelled_two_ways_refuses_the_whole_set() {
+    // The pair is `.01` / `.part02` and NOT `.001` / `.part02`, which
+    // matters: the widths agree here (2 and 2), so the pre-existing
+    // width rule cannot refuse this and the spelling rule is the only
+    // thing between it and a join. MEASURED: with the `.001` spelling
+    // the width rule catches it anyway and this test passes even with
+    // the spelling rule deleted.
+    let dir = split_dir("mixed-spelling");
+    let total = payload(240_000);
+    std::fs::write(dir.join("Movie.mkv.01"), &total[..120_000]).unwrap();
+    std::fs::write(dir.join("Movie.mkv.part02"), &total[120_000..]).unwrap();
+    assert!(
+        collect_split_sets(&dir).unwrap().is_empty(),
+        "a base spelled two ways is not a set we understand"
+    );
+    assert!(dir.join("Movie.mkv.01").exists());
+    assert!(dir.join("Movie.mkv.part02").exists());
+    assert!(!dir.join("Movie.mkv").exists(), "nothing was published");
+
+    // And the M4-74 shape - `.001` beside `.part02` - refused too. That
+    // one the WIDTH rule already owned, which is why it is asserted
+    // beside the sharper case rather than instead of it.
+    let dir2 = split_dir("mixed-spelling-width");
+    std::fs::write(dir2.join("Movie.mkv.001"), &total[..120_000]).unwrap();
+    std::fs::write(dir2.join("Movie.mkv.part02"), &total[120_000..]).unwrap();
+    assert!(collect_split_sets(&dir2).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&dir2);
+}
+
+/// M4-55 - an obfuscated RAR set whose `.rar` was stripped and whose
+/// volumes wear the `.partNN` tail is still NOT a raw split.
+///
+/// The check that stops it is rule 5, not the name: every RAR volume
+/// carries `Rar!` and the head is read on EVERY part, so a set of them
+/// refuses however its tails are spelled. That is the argument the
+/// module header already makes for the bare-numeric spelling; this pins
+/// it for the spelling M4-55 added, because widening a NAME grammar is
+/// exactly the edit that would rest the routing on names alone.
+///
+/// NOT vacuous, and that was checked rather than assumed: with the
+/// signature replaced by four other bytes the same fixture DOES form a
+/// set, so this is the head rule speaking and not the arithmetic.
+#[test]
+fn part_prefixed_rar_volumes_are_still_not_a_raw_split() {
+    let dir = split_dir("part-prefixed-rar");
+    // RAR5 signature, then filler - every volume of a real set carries it.
+    let mut vol = b"Rar!\x1a\x07\x01\x00".to_vec();
+    vol.extend_from_slice(&payload(40_000));
+    std::fs::write(dir.join("release.part01"), &vol).unwrap();
+    std::fs::write(dir.join("release.part02"), &vol).unwrap();
+    assert!(
+        collect_split_sets(&dir).unwrap().is_empty(),
+        "an archive head on a part refuses the plain reading"
+    );
+    assert!(dir.join("release.part01").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}

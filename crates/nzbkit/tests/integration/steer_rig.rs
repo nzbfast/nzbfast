@@ -122,6 +122,27 @@ fn envelope_cfg() -> PoolConfig {
     }
 }
 
+/// The peerless re-ask arm: one server, ONE connection, window one.
+///
+/// Serial on purpose, and it is the two legs' whole claim to exact
+/// counts. `REASK_WASTE_CAP` is charged when a re-ask goes OUT and
+/// refunded when it comes back clean, so with articles in flight the
+/// budget also bounds how many re-asks may be OUTSTANDING at once - a
+/// burst of concurrent corrupt bodies wider than the budget is refused,
+/// which is the corrupt-storm case the budget exists to refuse and is
+/// timing-dependent by nature. A serial pipeline settles each re-ask
+/// before the next verdict, so what these legs measure is the rule and
+/// not the fleet's arrival order.
+fn lone_cfg() -> PoolConfig {
+    PoolConfig {
+        connections: 1,
+        window: 1,
+        crc_steer: true,
+        ramp_delay: Duration::from_millis(0),
+        ..PoolConfig::default()
+    }
+}
+
 fn server_for(srv: &MockServer, cfg: PoolConfig) -> (ServerConfig, PoolConfig) {
     let mut sc = srv.server_config();
     sc.connections = CONNS as u32;
@@ -461,6 +482,134 @@ async fn raced_desync_never_creates_false_missing_or_misfiles() {
          the racing paths"
     );
     assert_eq!(c.owned_bad, 0);
+}
+
+/// A LONE server re-asks its own damage, and the whole rescue happens
+/// on the wire with no peer anywhere.
+///
+/// The 31 Aug 2026 finding
+/// (`research/CORRUPT-BODY-NO-SECOND-ASK-2026-08-31.md`): the steer was
+/// the only retry a corrupt body ever got, so where no peer was
+/// eligible - which is every single-server install - a corrupt article
+/// was terminal damage on the first bad copy, while a genuinely MISSING
+/// article was requeued and could still complete. This is the leg for
+/// the fault that makes a second ask worth making:
+/// [`Chaos::corrupt_once`], a broken cache node behind a load balancer
+/// answering a fraction of requests badly, where the re-ask lands
+/// somewhere healthy.
+///
+/// The counts are EXACT rather than bounded, which is the point of
+/// using the once-shape instead of `corrupt_every`: one extra dispatch
+/// per damaged article and not one more, so a regression that re-asks
+/// twice, or that re-asks an undamaged article, fails here.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lone_server_re_asks_its_own_damage() {
+    let n = 60;
+    let (articles, reqs) = corpus(n);
+    // Every third article is damaged on its first serve only.
+    let damaged: std::collections::HashSet<String> = reqs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 3 == 0)
+        .map(|(_, r)| r.id.to_string())
+        .collect();
+    let n_damaged = damaged.len();
+    let solo = MockServer::start(
+        articles,
+        Chaos {
+            corrupt_once: damaged,
+            throttle: Throttle {
+                per_conn_bps: FAST_BPS,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = run("ci-lone-reask", vec![(&solo, lone_cfg())], reqs).await;
+    eprintln!("{}", c.line());
+    assert_eq!(c.done, n, "every article must complete");
+    assert_eq!(
+        c.lost, 0,
+        "nothing may go terminal - the second copy is good"
+    );
+    assert_eq!(
+        c.owned_bad, 0,
+        "{n_damaged} damaged bodies and no peer to steer to: without the \
+         same-server re-ask every one of them is owned as damage"
+    );
+    let fleet: u64 = c.tried.iter().sum();
+    assert_eq!(
+        fleet,
+        (n + n_damaged) as u64,
+        "exactly one extra dispatch per damaged article: {}",
+        c.line()
+    );
+}
+
+/// And the budget is what stops that becoming a doubled fetch when the
+/// re-ask cannot help.
+///
+/// [`Chaos::corrupt`] is the other real corruption: a damaged article in
+/// the spool, which answers the same bad bytes to every ask forever. Here
+/// the re-ask is pure waste, which is exactly what `REASK_WASTE_CAP`
+/// counts - so the first few damaged articles are asked twice, the rest
+/// are owned on their first bad copy, and the run's total overage is the
+/// budget rather than the storm.
+///
+/// The budget is an eighth of the run's articles up to 32, so 60
+/// articles buy 7, and what it controls is NOT the damage. Every
+/// damaged article is still owned as damage, because its second copy is
+/// bad too - `owned_bad` is `n_damaged` here whatever the budget is, and
+/// asserting that is what proves the re-ask does not launder a corrupt
+/// storm into a clean run. The budget's whole job is the line below it:
+/// the run pays 7 extra fetches and not 30.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wasted_re_ask_budget_bounds_a_peerless_storm() {
+    let n = 60;
+    let (articles, reqs) = corpus(n);
+    let damaged: std::collections::HashSet<String> = reqs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 0)
+        .map(|(_, r)| r.id.to_string())
+        .collect();
+    let n_damaged = damaged.len();
+    let budget = (n / 8).clamp(1, 32);
+    assert!(
+        n_damaged > budget * 2,
+        "the storm has to be bigger than the budget or this proves nothing"
+    );
+    let solo = MockServer::start(
+        articles,
+        Chaos {
+            corrupt: damaged,
+            throttle: Throttle {
+                per_conn_bps: FAST_BPS,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let c = run("ci-lone-storm", vec![(&solo, lone_cfg())], reqs).await;
+    eprintln!("{}", c.line());
+    assert_eq!(c.done, n, "every article still reaches a verdict");
+    assert_eq!(
+        c.owned_bad,
+        n_damaged,
+        "a spool this damaged still ends as damage - the second copy is \
+         bad too, and the budget never pretended otherwise: {}",
+        c.line()
+    );
+    let fleet: u64 = c.tried.iter().sum();
+    assert_eq!(
+        fleet,
+        (n + budget) as u64,
+        "a spool full of damage costs the budget and not a second fetch of \
+         the job: {}",
+        c.line()
+    );
 }
 
 /// The corrupt-storm regression (design §7 leg 5): the tail-fanout

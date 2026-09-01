@@ -25,6 +25,10 @@ fn parses_fixture_set_metadata() {
     let set = parse_set();
     assert_eq!(set.block_size, 4096);
     assert_eq!(set.files.len(), 2);
+    // testset.vol0+4.par2 carries 4 recovery slices - the "+4". This is
+    // the field `get::settle` seeds `on_hand` from, and since Y4b it
+    // counts only slices that can SERVE a block rather than every
+    // exponent the volume mentions.
     assert_eq!(set.recovery_blocks_seen, 4);
 
     let alpha = file(&set, "alpha.bin");
@@ -99,13 +103,6 @@ fn truncated_data_fails_missing_blocks() {
     assert!(!v.md5_ok);
     // Only ~8 KiB present, so the first-16k hash fails too.
     assert!(!v.md5_16k_ok);
-}
-
-#[test]
-fn recovery_block_count_matches_volume_filename() {
-    // testset.vol0+4.par2 carries 4 recovery slices - the "+4".
-    assert_eq!(Par2Set::recovery_block_count(VOL), 4);
-    assert_eq!(Par2Set::recovery_block_count(MAIN), 0);
 }
 
 #[test]
@@ -330,4 +327,112 @@ fn streaming_verify_matches_reference_on_the_fixtures() {
     // reference behaviours, neither of them a panic.
     assert_streaming_agrees(beta, 4092, BETA, "beta at the wrong block size");
     assert_streaming_agrees(beta, 0, BETA, "beta at block size zero");
+}
+
+/// Build one structurally valid PAR2 packet, sealed with the packet MD5
+/// the scanner checks (MD5 of set id + type + body).
+fn pkt(set_id: [u8; 16], ptype: &[u8; 16], body: &[u8]) -> Vec<u8> {
+    use md5::Digest as _;
+    assert!(
+        body.len().is_multiple_of(4),
+        "packet bodies are 4-byte aligned"
+    );
+    let mut p = Vec::new();
+    p.extend_from_slice(b"PAR2\0PKT");
+    p.extend_from_slice(&(64u64 + body.len() as u64).to_le_bytes());
+    p.extend_from_slice(&[0u8; 16]); // md5, patched below
+    p.extend_from_slice(&set_id);
+    p.extend_from_slice(ptype);
+    p.extend_from_slice(body);
+    let d: [u8; 16] = md5::Md5::digest(&p[32..]).into();
+    p[16..32].copy_from_slice(&d);
+    p
+}
+
+/// X5-14, against the REAL par2cmdline set rather than a synthetic one.
+///
+/// One physical `.par2` whose FIRST valid packet belongs to another set
+/// and whose remainder is this whole fixture. `set_id_of` returned that
+/// first packet's id, so a caller grouping physical files by it filed
+/// the buffer under the foreign set; reparsing that group then saw the
+/// fixture's packets and answered `MixedRecoverySets`, and no group for
+/// the real set was ever formed - a complete, valid, two-file set
+/// vanished on the strength of one 84-byte Creator packet.
+///
+/// The synthetic arms of this row live in `par2::tests`; what this one
+/// adds is that a real set with real IFSC lists survives contamination
+/// INTACT - every file, its length and its per-block checksums - rather
+/// than merely parsing.
+#[test]
+fn a_stray_foreign_packet_does_not_hide_the_real_set_behind_it() {
+    let clean = parse_set();
+    let foreign = [0xA5u8; 16];
+    assert_ne!(foreign, clean.recovery_set_id, "the stray set is foreign");
+
+    let mut buf = pkt(foreign, b"PAR 2.0\0Creator\0", b"someone-else\0\0\0\0");
+    buf.extend_from_slice(MAIN);
+    buf.extend_from_slice(VOL);
+
+    assert_eq!(
+        Par2Set::set_id_of(&buf),
+        Some(clean.recovery_set_id),
+        "the grouping key followed one stray packet instead of the set"
+    );
+    let got = Par2Set::parse(&[&buf]).expect("the real set is still described");
+    assert_eq!(got.recovery_set_id, clean.recovery_set_id);
+    assert_eq!(got.block_size, clean.block_size);
+    assert_eq!(got.recovery_blocks_seen, clean.recovery_blocks_seen);
+    let names = |s: &Par2Set| {
+        s.files
+            .iter()
+            .map(|f| (f.name.clone(), f.length, f.blocks.len()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&got),
+        names(&clean),
+        "contamination cost the set files, lengths or block checksums"
+    );
+}
+
+/// X5-15's CONTROL, and it must STAY green: the singular locator is
+/// RIGHT to hand back both packets of a duplicated exponent, because the
+/// repair side dedupes by exponent downstream. What was wrong is
+/// COUNTING them as capacity - the count keyed its dedupe on the packet
+/// MD5, and two slices at one exponent with different bytes are two MD5s
+/// and one row of the coding matrix, so a volume holding 1 block of
+/// repair power advertised 2 to the planner.
+///
+/// Asserted against the REAL fixture's set id and block size, so the
+/// synthetic packets join the fixture's own set and the count is read off
+/// `recovery_blocks_seen` - the field `get::settle` seeds `on_hand` from,
+/// and the only one left since Y4b deleted `recovery_block_count`.
+#[test]
+fn duplicate_recovery_exponents_are_two_locators_and_one_block() {
+    let real = parse_set();
+    let set = real.recovery_set_id;
+    let bs = real.block_size as usize;
+    let slice = |exp: u32, fill: u8| {
+        let mut b = exp.to_le_bytes().to_vec();
+        b.extend_from_slice(&vec![fill; bs]);
+        pkt(set, b"PAR 2.0\0RecvSlic", &b)
+    };
+    let mut vol = slice(0, 0x11);
+    vol.extend_from_slice(&slice(0, 0x22));
+
+    let locs = nzbkit::par2repair::recovery_slice_locators(&vol, &set);
+    assert_eq!(locs.len(), 2, "both packets are located");
+    let exps: std::collections::HashSet<u32> = locs.iter().map(|(e, _, _)| *e).collect();
+    assert_eq!(exps.len(), 1, "they carry one distinct exponent");
+    assert_eq!(
+        Par2Set::parse(&[MAIN, &vol])
+            .expect("the fixture's index plus these slices is one set")
+            .recovery_blocks_seen,
+        1,
+        "the planner sizes its fetch on this number"
+    );
+
+    // And the real volume, whose four exponents are four genuine blocks,
+    // is unchanged by the tighter key.
+    assert_eq!(real.recovery_blocks_seen, 4);
 }

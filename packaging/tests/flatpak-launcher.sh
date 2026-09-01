@@ -44,6 +44,17 @@
 # and `xdg-open` are stubs on PATH. Run: packaging/tests/flatpak-launcher.sh
 set -uo pipefail
 
+# EVERY boolean assertion below reads `$out` through a HERESTRING, never
+# `printf '%s' "$out" | grep`. Under the `pipefail` on the line above,
+# `grep -q` exiting the moment it matches SIGPIPEs the printf still
+# writing behind it, and the pipeline then reports the printf's failure -
+# so an assertion that MATCHED is read as a miss. It is a race, so it
+# fires only on the longest message and only when the box is slow enough:
+# green on the dev Mac, and it took main red on 30 Aug 2026
+# (`packaging-gates`, run 33326857656) on the one case whose refusal runs
+# to five lines - "refused without saying why", quoting a message that
+# said exactly why. Do not put the pipe back.
+
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 LAUNCHER="$ROOT/packaging/flatpak/nzbfast-launcher.sh"
 [ -f "$LAUNCHER" ] || { echo "cannot find nzbfast-launcher.sh"; exit 1; }
@@ -258,13 +269,13 @@ run_case() {
         bad "$desc: expected a refusal, exited 0 ($out)"
       elif [ -n "$url" ]; then
         bad "$desc: refused but still opened '$url' in the browser"
-      elif ! printf '%s' "$out" | grep -q 'it is not nzbfast'; then
+      elif ! grep -q 'it is not nzbfast' <<<"$out"; then
         bad "$desc: refused without saying why ($out)"
       # WHICH port it refused about is the assertion, not a nicety. A
       # refusal naming the recorded port when the user asked for another
       # one is the lockout this suite grew the escape-hatch cases for,
       # and it reads identically to a correct refusal without this line.
-      elif ! printf '%s' "$out" | head -1 | grep -q "port $expport,"; then
+      elif ! head -1 <<<"$out" | grep -q "port $expport,"; then
         bad "$desc: refused about the wrong port, wanted $expport ($(printf '%s' "$out" | head -1))"
       # A refusal that stops before saying how to get out of it is the
       # defect this file's escape-hatch cases exist for, one step
@@ -272,7 +283,7 @@ run_case() {
       # name an application that exists: it named com.nzbfast.nzbfast for
       # a while, and this app is io.github.nzbfast.nzbfast, so the one
       # command the user was handed could not run.
-      elif ! printf '%s' "$out" | grep -q -- '--env=NZBFAST_PORT=[0-9]* io.github.nzbfast.nzbfast'; then
+      elif ! grep -q -- '--env=NZBFAST_PORT=[0-9]* io.github.nzbfast.nzbfast' <<<"$out"; then
         bad "$desc: refused without usable advice ($out)"
       # Nothing may precede our own message. A listener that closes
       # abruptly - which is exactly what a stranger on the port does -
@@ -290,9 +301,9 @@ run_case() {
       # the escape hatch is that a daemon is started on the port the user
       # ASKED for rather than on the one runtime.json remembers, and a
       # bare grep for STARTED cannot tell those apart.
-      if ! printf '%s' "$out" | grep -q STARTED; then
+      if ! grep -q STARTED <<<"$out"; then
         bad "$desc: expected to start a daemon, got rc=$rc ($out)"
-      elif ! printf '%s' "$out" | grep -q -- "--port $expport"; then
+      elif ! grep -q -- "--port $expport" <<<"$out"; then
         bad "$desc: started on the wrong port, wanted --port $expport ($out)"
       else
         ok "$desc: started a daemon on $expport"

@@ -399,6 +399,32 @@ fn five_tabs_cannot_starve_the_pool() {
     };
 
     // Meanwhile: the canary calls answer promptly, every time.
+    //
+    // WARM `/` FIRST, and this is not a convenience - without it the
+    // first sample below measures something that is not contention at
+    // all. `/` is served out of a per-process cache (`SHELL_CACHE` in
+    // serve/webasset.rs), so the first request for it pays a one-time
+    // build - the substitutions over 1.4 MB of HTML, an FNV over the
+    // result and a level-6 deflate of that - and every request after it
+    // is a cache hit. That build is a fixed process-lifetime constant.
+    //
+    // Measured 31 Aug 2026 on a Core Ultra 9 laptop (Windows 11, MSVC,
+    // debug) with NO tabs polling at all: the first `/` took 2537 ms and
+    // the next nine 252-277 ms. So the assertion below fired on that
+    // first call and reported it as "behind five dashboard tabs", which
+    // was untrue - nothing was behind anything, and the same box failed
+    // it identically with the whole load absent. Warm, and under the
+    // full five-tab load, that box serves `/` in 245-322 ms.
+    //
+    // It is a DEBUG-build cost and not a user-facing one: the same cold
+    // call is 30 ms on a release binary and 212-607 ms on a debug one,
+    // both on the dev Mac, against 4-17 ms warm.
+    //
+    // Warming does not weaken the gate. The wedge being replayed is
+    // every worker parked on the index mutex, and a starved `/` misses
+    // the bound whether its page is built or cached; what the warm-up
+    // drops is the one sample that could never have been about the pool.
+    let _ = http(port, "/");
     for _ in 0..10 {
         let t = Instant::now();
         let v = api(port, "mode=version");

@@ -1129,6 +1129,64 @@ pub(super) fn spawn_http_workers(server: tiny_http::Server, daemon: Arc<Daemon>,
                     respond_page(req, user_css(&d.cfg_path), "text/css; charset=utf-8");
                     continue;
                 }
+                // The SABnzbd settings page an *arr sends the user to
+                // when its download-client Test refuses a category.
+                //
+                // That refusal is entirely the CLIENT's: its message, its
+                // error code, and an `infoLink` it builds from OUR host
+                // and port - `http://<host>:<port>/config/categories/`,
+                // because it believes it is talking to SABnzbd, which
+                // really does serve that path. Measured 31 Aug 2026
+                // during the *arr certification round: we answered 404,
+                // so the one user who is already stuck, on the first
+                // button they ever press, was handed a link that goes
+                // nowhere. Two clients hit it out of the box - Whisparr
+                // v3 ships category `whisparr` and Readarr ships
+                // `Readarr`, neither in DEFAULT_CATS.
+                //
+                // Deliberately ONE route and not a `/config/*` tree: the
+                // rest of that surface is a SABnzbd page layout we do not
+                // emulate, and a redirect for a path no client ever sends
+                // is a door with nothing behind it. The trailing slash
+                // the client actually sends is handled by the normalizer
+                // above, so both spellings arrive here as
+                // `/config/categories`.
+                //
+                // Unauthenticated, like the shell it points at: nothing
+                // follows this link but a human in a browser, it carries
+                // no content of its own, and a 403 here would put a
+                // refusal in front of somebody whose whole problem is
+                // that they cannot find the settings page. 302 rather
+                // than 301 - a permanent redirect is cached by the
+                // browser forever, and where this lands is a property of
+                // the dashboard, not of the protocol.
+                //
+                // `dashboard`-gated with the rest of the browser-facing
+                // surface (TODO 281 IO3b): with no page embedded there is
+                // nowhere to send anyone, and the 404 at the foot of this
+                // loop is the honest answer for that build.
+                #[cfg(feature = "dashboard")]
+                if path == "/config/categories" {
+                    let _ = req.respond(
+                        tiny_http::Response::from_string("")
+                            .with_status_code(302)
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Location"[..],
+                                    // The Categories card's own deep link
+                                    // (`data-sk="categories"` in
+                                    // web/dashboard.html): #settings/<key>
+                                    // selects the group, scrolls the card
+                                    // into view and flashes it, which is
+                                    // the row the client's message is
+                                    // talking about.
+                                    &b"/#settings/categories"[..],
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    continue;
+                }
                 // The one-time credential handoff for the browser this
                 // daemon opened for itself: the launch URL carries a
                 // token, not the API key, so the key never lands in a

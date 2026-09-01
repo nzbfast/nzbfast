@@ -417,6 +417,7 @@ fn stalled_holders_cannot_ratchet_the_pool_upward() {
 #[cfg(unix)]
 #[test]
 fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
+    use crate::serve::testutil::NO_PROGRESS;
     use script::DRAIN_THREADS;
 
     /// Pipe FDs this process holds open. Counted by `fstat` over the
@@ -480,16 +481,57 @@ fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
             .unwrap()
     };
 
-    /// Poll until both counts are back at their baseline, or give up.
-    /// A poll rather than one reading because the drains exit on their
-    /// own clock, and because other tests in this binary open and close
-    /// pipes of their own while this one runs.
-    fn settle(threads: usize, pipes: usize) -> (usize, usize) {
-        let end = Instant::now() + std::time::Duration::from_secs(10);
+    /// Poll until both counts are back at their target, or panic naming
+    /// `what` and both readings. A poll rather than one reading because
+    /// the drains exit on their own clock, and because other tests in
+    /// this binary open and close pipes of their own while this one
+    /// runs.
+    ///
+    /// THE BUDGET IS A NO-PROGRESS GAP ([`NO_PROGRESS`]) and never a
+    /// total, for that constant's reasons plus one of this site's own:
+    /// BOTH COUNTERS ARE PROCESS-WIDE. `DRAIN_THREADS` is a `static`
+    /// every script this binary runs adds to, and `open_pipes` is an
+    /// fstat census of this PROCESS's whole descriptor space, so a
+    /// neighbouring test holding a pipe open moves the number this test
+    /// reads through no fault of the drains. Progress is therefore
+    /// "either counter fell", which a neighbour cannot hold off
+    /// indefinitely, rather than a clock. (Measured 31 Aug 2026, that
+    /// noise did not in fact appear: the census read `(0, 2)` at both
+    /// samples in isolation and inside the full 2,768-test run alike.
+    /// It is a property of the measurement, not something observed, and
+    /// it is why the give-up below refuses to name a culprit.)
+    ///
+    /// AND IT PANICS HERE RATHER THAN HANDING THE READING BACK, which
+    /// is the half that was wrong rather than merely slow. This used to
+    /// return its last reading on give-up and the caller asserted on
+    /// it, so a census that had simply not come back yet printed as
+    /// `8 finished scripts left 3 drain threads alive (baseline 0)` - a
+    /// LEAK verdict on drains that were still retiring. One reading
+    /// cannot tell those apart, so nothing here claims to; the test
+    /// still FAILS on a real leak, because a leaked thread or FD never
+    /// brings its counter back and the gap trips.
+    fn settle(what: &str, threads: usize, pipes: usize) {
+        let (mut best_t, mut best_p) = (usize::MAX, usize::MAX);
+        let mut last_progress = Instant::now();
         loop {
             let (t, p) = (DRAIN_THREADS.load(Ordering::Relaxed), open_pipes());
-            if (t <= threads && p <= pipes) || Instant::now() >= end {
-                return (t, p);
+            if t <= threads && p <= pipes {
+                return;
+            }
+            if t < best_t || p < best_p {
+                (best_t, best_p) = (best_t.min(t), best_p.min(p));
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= NO_PROGRESS {
+                panic!(
+                    "{what}: the drain census stopped coming back for \
+                     {NO_PROGRESS:?}, at {t} drain thread(s) (target <= {threads}) \
+                     and {p} pipe FD(s) (target <= {pipes}). A finished script's \
+                     descendants outlive it, so the drains have to LET GO rather \
+                     than wait for EOF, and each drain owns a pipe read end it must \
+                     drop. Both counters are process-wide, so this cannot name which \
+                     of a leak and a neighbour it saw - check `uptime` before reading \
+                     it as a leak."
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -497,8 +539,28 @@ fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
 
     // One warm run first, so the baseline is a steady state: the thread
     // that ran it has retired and `sh` has been paged in.
+    //
+    // THE TARGET IS SAMPLED BEFORE THE WARM RUN, and it used to be the
+    // literal `settle(0, 0)` - a target this process cannot reach, so
+    // that call spent its whole budget on every run since the line was
+    // written. Neither counter ever returns to zero here: measured
+    // 31 Aug 2026 with the census instrumented, `open_pipes()` reads 2
+    // - the test harness's own captured stdout and stderr - both in
+    // isolation and inside the full 2,768-test run, and `settle(0, 0)`
+    // returned `(0, 2)` after 10.002 s with the target unmet where the
+    // very next call, against a reachable target, met it in 55 ms.
+    //
+    // WHAT THAT IS WORTH, measured rather than extrapolated, because
+    // the tempting figure is the wrong one. This test alone, four
+    // interleaved runs of each binary: 11.53-11.57 s before, 1.55-1.59
+    // s after - 10.0 s, reproducible to 40 ms. At SUITE level it is not
+    // separable at all: three interleaved full runs of each came in at
+    // 29.25-76.48 s on BOTH, so a 10 s saving is well inside this
+    // shared box's own noise and no percentage of the sweep should be
+    // claimed for it.
+    let before = (DRAIN_THREADS.load(Ordering::Relaxed), open_pipes());
     let mut pids = vec![run(0)];
-    settle(0, 0);
+    settle("the warm run", before.0, before.1);
     let base_threads = DRAIN_THREADS.load(Ordering::Relaxed);
     let base_pipes = open_pipes();
 
@@ -512,17 +574,16 @@ fn a_backgrounded_descendant_stops_costing_us_a_thread_and_a_pipe() {
         assert!(alive(pid), "descendant {pid} was killed on a clean exit");
     }
 
-    let (threads, pipes) = settle(base_threads, base_pipes);
-    assert!(
-        threads <= base_threads,
-        "{RUNS} finished scripts left {threads} drain threads alive \
-         (baseline {base_threads}); their descendants outlive them, so \
-         the drains have to let go rather than wait for EOF"
-    );
-    assert!(
-        pipes <= base_pipes,
-        "{RUNS} finished scripts left {pipes} pipe FDs open (baseline \
-         {base_pipes}); each drain owns a read end and must drop it"
+    // RETURNING IS THE ASSERTION - `settle` only comes back when both
+    // counters are at or below the baseline, and panics naming both
+    // readings otherwise. The two `assert!`s that used to sit here are
+    // gone rather than left trivially true; do NOT put them back.
+    // Taking `settle`'s last reading and asserting on it is precisely
+    // what printed a still-retiring drain as a leak.
+    settle(
+        &format!("after {RUNS} finished scripts"),
+        base_threads,
+        base_pipes,
     );
 
     // Leave nothing behind - the whole point of the exercise.
@@ -1541,6 +1602,29 @@ fn a_move_that_keeps_failing_backs_off_and_finally_gives_up() {
     );
 }
 
+/// Block until `redrive_move`'s background task has fully released the
+/// `moving` fence for `nzo_id` - not just until some earlier observable
+/// the task writes has settled, but until the task itself, including its
+/// trailing `save_queue()`, has actually finished.
+///
+/// `MoveClaim`'s `Drop` (`daemon_retry.rs`) is what clears the fence, and
+/// it runs at the END of the `spawn_blocking` closure, after
+/// `save_queue()` - so this is the one signal a caller can poll that
+/// proves the background write is done. Needed because a `ScratchDir`
+/// dropping the instant a test function returns races that still-running
+/// task, which recreates `spool/queue.json` under the tree the guard just
+/// removed (`research/TMPDIR-SCRATCH-LEAK-2026-08-31.md` section 4).
+async fn wait_for_move_quiesce(d: &Arc<Daemon>, nzo_id: &str) {
+    let deadline = std::time::Instant::now() + crate::serve::testutil::NO_PROGRESS;
+    while d.moving.lock_ok().contains(nzo_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{nzo_id}: redrive_move's background task never released the moving fence"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 /// The counter drives arming: the daemon stops re-arming at the give-up
 /// count and leaves the record amber for a human, and the drawer's own
 /// button restarts the whole ladder.
@@ -1549,9 +1633,9 @@ async fn the_move_ladder_stops_and_a_manual_retry_restarts_it() {
     use crate::serve::job::{JobState, MOVE_RETRY_GIVE_UP, job_from_json};
     use crate::serve::testutil::test_daemon;
 
-    let dir = std::env::temp_dir().join(format!("nzbfast-moveladder-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-moveladder-{}", std::process::id())),
+    );
     let d = test_daemon(&dir);
     d.auto_retry_secs.store(1200, Ordering::Relaxed);
     let mut j = job_from_json(&json!({
@@ -1612,7 +1696,13 @@ async fn the_move_ladder_stops_and_a_manual_retry_restarts_it() {
     // itself is a no-op - the reset is what this asserts.
     d.retry_move_now("SABnzbd_nzo_ladder");
     assert_eq!(job.lock_ok().move_attempts, 0);
-    let _ = std::fs::remove_dir_all(&dir);
+    // The reset above is synchronous, but `redrive_move` still spawned a
+    // background task that ends in `save_queue()` - wait for it, or the
+    // `ScratchDir` two lines below removes the tree while that task is
+    // still writing to it (`research/TMPDIR-SCRATCH-LEAK-2026-08-31.md`
+    // section 4: "the daemon re-creates the tree after the test removed
+    // it").
+    wait_for_move_quiesce(&d, "SABnzbd_nzo_ladder").await;
 }
 
 /// The whole reported path, through the real mover: a `move_completed`
@@ -1714,11 +1804,11 @@ fn an_unmounted_destination_says_so_instead_of_permission_denied() {
 #[tokio::test(flavor = "multi_thread")]
 async fn redrive_move_retries_the_move_and_clears_the_marker() {
     use crate::serve::job::{JobState, job_from_json};
-    use crate::serve::testutil::test_daemon;
+    use crate::serve::testutil::{NO_PROGRESS, test_daemon};
 
-    let dir = std::env::temp_dir().join(format!("nzbfast-redrive-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-redrive-{}", std::process::id())),
+    );
     let d = test_daemon(&dir);
     let nas = dir.join("nas");
     *d.move_completed.write_ok() = Some(nas.clone());
@@ -1741,8 +1831,35 @@ async fn redrive_move_retries_the_move_and_clears_the_marker() {
     d.history.lock_ok().push(job.clone());
 
     assert!(d.redrive_move("SABnzbd_nzo_redrive"));
-    // The move runs on the blocking pool; wait for it to settle.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // The move runs on the blocking pool, so the wait is on
+    // [`NO_PROGRESS`] rather than on a number sized from in here.
+    //
+    // AND NOT FOR THE REASON THE HANDOFF THAT CHIPPED THIS GAVE, which
+    // is worth writing down because the reasoning is the tempting one.
+    // `redrive_move`'s blocking task does end in `save_queue()`, so it
+    // does end behind the process-global `Daemon::hold_queue_writes` -
+    // but the OBSERVABLE this loop reads (`move_failed` cleared and
+    // `out_dir` moved) is written under `job2`'s own lock and dropped
+    // BEFORE that call, so this wait never queues behind it. Measured
+    // 31 Aug 2026 by holding that very lock on another thread for 5 s
+    // across the redrive: the settle was observed at 22 ms. What this
+    // site is actually exposed to is `relocate_completed` - a real file
+    // move, so DISK - plus `spawn_blocking`'s own scheduling, and the
+    // blocking pool belongs to this test's runtime rather than to the
+    // binary.
+    //
+    // ONE STEP, so the no-progress gap and the total are the same thing
+    // here and no progress loop is pretended. And the honest accounting
+    // of what the change buys THIS site, since the shared budget is 6x
+    // the old one: measured 21-44 ms both alone and inside the full
+    // 2,768-test run, 10 s was already a 227x margin, and the 127x disk
+    // tail that constant records puts the worst reading at 5.6 s -
+    // INSIDE 10 s. So 10 s was not demonstrably too small, unlike the
+    // picker spin in `serve::daemon::daemon_tests`, whose worst reading
+    // takes the same tail to 16.0 s. What this line buys is that the
+    // number is single-sourced and derived rather than hand-picked, and
+    // the give-up below is what buys the rest.
+    let deadline = std::time::Instant::now() + NO_PROGRESS;
     loop {
         {
             let g = job.lock_ok();
@@ -1750,12 +1867,42 @@ async fn redrive_move_retries_the_move_and_clears_the_marker() {
                 break;
             }
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "redrive did not settle"
-        );
+        if std::time::Instant::now() >= deadline {
+            // THE JOB'S OWN STATE, and not just "did not settle". Two
+            // very different things end up here and the old message
+            // named neither, which is the give-up-as-a-wrong-answer
+            // shape one field over: a move the daemon ATTEMPTED AND
+            // REFUSED is a defect at any load and arrives with its own
+            // reason attached, while a move that never ran is a stall
+            // and under contention a statement about the box.
+            //
+            // `move_attempts` is what tells them apart, and it is the
+            // reason this reports three fields rather than one.
+            // `settle_move_attempt` zeroes it on a success and bumps it
+            // on a refusal, and the fixture seeds only `move_failed` -
+            // so a non-zero count is a refusal carrying its reason, and
+            // a zero one under the seeded `move_failed` string is a
+            // task that never reached `relocate_completed` at all.
+            let g = job.lock_ok();
+            panic!(
+                "the redrive settled nothing in {NO_PROGRESS:?}: move_attempts {}, \
+                 move_failed {:?}, out_dir {:?}, pre-move out_dir {:?}. A NON-ZERO \
+                 move_attempts is a move that ran and was REFUSED - that reason is \
+                 the defect and it is real at any load. A ZERO one is a move that \
+                 never ran: a stall, so check `uptime` before believing it.",
+                g.move_attempts, g.move_failed, g.out_dir, job_dir
+            );
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    // The loop above waits for the OBSERVABLE the task writes, which
+    // lands before the task's own trailing `save_queue()` (see the
+    // comment above the loop). Wait for the task itself to be done, or
+    // the `ScratchDir` at the top of this test removes the tree while
+    // that write is still in flight - the same race
+    // `the_move_ladder_stops_and_a_manual_retry_restarts_it` closes the
+    // same way.
+    wait_for_move_quiesce(&d, "SABnzbd_nzo_redrive").await;
     let g = job.lock_ok();
     assert_eq!(g.out_dir, nas.join("Some.Release"));
     assert!(g.out_dir.join("payload.bin").exists());
@@ -1766,7 +1913,6 @@ async fn redrive_move_retries_the_move_and_clears_the_marker() {
     drop(g);
     // The fence is down again: a second call declines (nothing failed).
     assert!(!d.redrive_move("SABnzbd_nzo_redrive"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// B (7 Aug): setting move_completed must prove the daemon can WRITE
@@ -2060,6 +2206,7 @@ fn a_completed_row_with_a_deleted_folder_presents_failed_unless_the_volume_is_do
     let summary_row = |d: &Daemon| {
         let q = HistQuery {
             failed_only: false,
+            status: None,
             category: None,
             ids: None,
             search: None,
@@ -2096,6 +2243,44 @@ fn a_completed_row_with_a_deleted_folder_presents_failed_unless_the_volume_is_do
     let s = summary_row(&d);
     assert_eq!(s["status"], "Failed", "{s}");
     assert_eq!(s["fail_action"], "retry", "{s}");
+    // ...AND SO DO THE FILTERS AND THE CHIP COUNTS, which read `state`
+    // and not the published word until the 31 Aug 2026 read-only
+    // sweep's finding 13. `status=` was moved onto
+    // `sab_history_status_published` in `f2761fed8` and these were left
+    // behind, so the row above - the one the page renders `Failed` -
+    // was hidden by "Show failed", excluded by the Failed chip, and
+    // counted under `done` in the chip beside it.
+    let page = |failed_only: bool, bucket: Option<&str>| {
+        let q = HistQuery {
+            failed_only,
+            status: None,
+            category: None,
+            ids: None,
+            search: None,
+            bucket: bucket.map(str::to_string),
+            start: 0,
+            limit: 0,
+        };
+        history_page(&d, &q, true)
+    };
+    let (rows, _, facets) = page(true, None);
+    assert_eq!(
+        rows.len(),
+        1,
+        "failed_only must select a row the page publishes as Failed: {rows:?}"
+    );
+    assert_eq!(
+        page(false, Some("failed")).0.len(),
+        1,
+        "the Failed chip too"
+    );
+    assert_eq!(
+        page(false, Some("done")).0.len(),
+        0,
+        "and the Done chip must not ALSO claim it - one row, one bucket"
+    );
+    assert_eq!(facets["failed"], 1, "the chip count agrees with the row");
+    assert_eq!(facets["done"], 0, "{facets}");
 
     // Mid-move the directory is legitimately absent: no Failed flip.
     // (`Moving` is the stage word an owed move reports - issue #59 -
@@ -2156,6 +2341,7 @@ fn a_row_with_an_owed_move_reports_moving_until_the_attempt_settles() {
     let summary_row = |d: &Daemon| {
         let q = HistQuery {
             failed_only: false,
+            status: None,
             category: None,
             ids: None,
             search: None,
@@ -2188,6 +2374,83 @@ fn a_row_with_an_owed_move_reports_moving_until_the_attempt_settles() {
     assert_eq!(r["status"], "Completed", "{r}");
     let s = summary_row(&d);
     assert_eq!(s["status"], "Completed", "{s}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A renamed completed folder must NOT drag the release name with it:
+/// `storage` follows the rename, `name` does not.
+///
+/// The two fields are read for different things and an *arr needs both.
+/// It takes the FOLDER from `storage`, which is why the rename is safe at
+/// all; and it takes the SCENE NAME from `name`, which is what its
+/// library file ends up called when renaming is off: Radarr files under
+/// the recorded scene name rather than under the name on disk (measured
+/// from the outside, not read out of its source). So the release name
+/// surviving in `name` is the whole reason our synthesised folder name
+/// never reaches the user's library.
+///
+/// Measured on 31 Aug 2026 against Radarr 6.3.0, in both arms and with
+/// real media (`research/ARR-CERTIFICATION-REAL-MEDIA-2026-08-31.md`):
+/// nzbfast filed `Arrival 2016 480p/Arrival 2016 480p.mp4` and Radarr's
+/// movie file record came back `relativePath:
+/// Arrival.2016.480p.WEBRip.x264-CERT.mp4` with `originalFilePath:
+/// Arrival 2016 480p/Arrival 2016 480p.mp4`. It held for a download
+/// Radarr never grabbed, too, which is the arm the 28 Aug round's
+/// "it is safe" argument never covered: with no grab history there is no
+/// scene name from the grab, so `name` is the ONLY place it can come
+/// from.
+///
+/// The failure this pins is silent and total. A lane that "tidied" this
+/// by reporting the renamed folder in `name` would break no test, log
+/// nothing, and change every *arr library on every install to file
+/// synthesised names instead of release names.
+#[test]
+fn a_renamed_completed_folder_still_reports_the_original_release_name() {
+    use crate::serve::job::job_from_json;
+    use crate::serve::testutil::test_daemon;
+    let dir = std::env::temp_dir().join(format!("nzbfast-histrename-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = test_daemon(&dir);
+    // The shape smart naming leaves behind: out_dir carries the
+    // synthesised identity, the job still carries what was posted.
+    let release = "Arrival.2016.480p.WEBRip.x264-CERT";
+    let renamed = dir.join("downloads").join("Arrival 2016 480p");
+    std::fs::create_dir_all(&renamed).unwrap();
+    let job = Arc::new(Mutex::new(
+        job_from_json(&json!({
+            "nzo_id": "SABnzbd_nzo_histrename",
+            "name": release,
+            "nzb_path": dir.join("arrival.nzb").to_string_lossy(),
+            "out_dir": renamed.to_string_lossy(),
+            "state": "Completed",
+            "origin": "arr:radarr",
+        }))
+        .unwrap(),
+    ));
+    d.history.lock_ok().push(job.clone());
+    let r = history_json(&d, &std::collections::HashMap::new())["history"]["slots"][0].clone();
+
+    assert_eq!(r["status"], "Completed", "{r}");
+    // The folder the *arr will open.
+    assert_eq!(
+        r["storage"].as_str().unwrap(),
+        renamed.to_string_lossy(),
+        "storage must name the folder the files are actually in: {r}"
+    );
+    // The scene name the *arr will file under.
+    assert_eq!(
+        r["name"].as_str().unwrap(),
+        release,
+        "name must stay the posted release name after a rename: {r}"
+    );
+    // And they must genuinely differ here, or this test proves nothing.
+    assert_ne!(
+        r["name"].as_str().unwrap(),
+        renamed.file_name().unwrap().to_string_lossy(),
+        "fixture is not exercising a rename at all: {r}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2233,6 +2496,7 @@ fn an_arr_grabbed_row_stays_completed_when_the_arr_cleaned_up_its_folder() {
     let summary_row = |d: &Daemon| {
         let q = HistQuery {
             failed_only: false,
+            status: None,
             category: None,
             ids: None,
             search: None,
@@ -2309,6 +2573,7 @@ fn summary_row_carries_the_disk_full_verdict_and_space_figure() {
     let summary_row = |d: &Daemon| {
         let q = HistQuery {
             failed_only: false,
+            status: None,
             category: None,
             ids: None,
             search: None,
@@ -2349,9 +2614,9 @@ fn summary_row_carries_the_disk_full_verdict_and_space_figure() {
 fn a_delete_that_beats_the_pipelines_publish_still_stops_it() {
     use crate::serve::testutil::test_daemon;
 
-    let dir = std::env::temp_dir().join(format!("nzbfast-delabort-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-delabort-{}", std::process::id())),
+    );
     let d = test_daemon(&dir);
     // The runner has published the owner (reset_hub_for_job) but the
     // fetch has not reached install_seek: both handles are still empty.
@@ -2383,9 +2648,9 @@ fn a_delete_that_beats_the_pipelines_publish_still_stops_it() {
 fn the_delete_stop_signal_is_never_aimed_at_another_job() {
     use crate::serve::testutil::test_daemon;
 
-    let dir = std::env::temp_dir().join(format!("nzbfast-delabort2-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-delabort2-{}", std::process::id())),
+    );
     let d = test_daemon(&dir);
     *d.active_stream.lock_ok() = Some("SABnzbd_nzo_innocent".into());
     let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -706,6 +706,42 @@ pub fn stem_is_a_name(stem: &str) -> bool {
     !looks_obfuscated(bare_stem(stem))
 }
 
+/// A single token's trailing year or sequel number, taken off - `None`
+/// when the tail is neither, or when the head is not a bare word.
+///
+/// Both halves are what keeps this from laundering a blob. The DIGITS
+/// must read as a year (four, 1900..2100) or a sequel/edition number
+/// (one or two): "ABCDEFGHIJK123" and "abcdefghijkl123" end in three,
+/// which is neither, so nothing is stripped and both stay the hashes
+/// `obfuscated_hash_shapes_are_caught` has pinned since the rule was
+/// written. And the HEAD must be all letters, because "a word plus a
+/// number" is the whole shape being recognised - "a1b2c3d4e5f6g7h8i9j0k1l2"
+/// and "c1bceab2fac4d74f47b0a0e18311ec5c53" carry digits right through
+/// and were never that.
+///
+/// STATED LIMIT, because it is a decision and not an oversight: a head
+/// this function would already call a NAME with no tail on it is called
+/// a name with one on it too ("qwrtypasdf" and "qwrtypasdf99" get the
+/// same verdict, and that verdict is "name"). That is the property being
+/// asserted - the tail is not evidence - rather than a new claim about
+/// the head, and the alternative is a second, differently-drawn boundary
+/// for digit-tailed stems, which is exactly the drift this whole
+/// one-verdict function exists to refuse. Nothing downstream is
+/// loosened: `get::settle::filedesc_name_is_better` still refuses only
+/// the losing direction, so a stem that reads as a name declines a
+/// FileDesc HASH and takes a FileDesc NAME exactly as before.
+fn strip_year_or_sequel(tok: &str) -> Option<&str> {
+    let head = tok.trim_end_matches(|c: char| c.is_ascii_digit());
+    let digits = &tok[head.len()..];
+    let tail_reads_as_a_number = match digits.len() {
+        1 | 2 => true,
+        4 => is_year(digits),
+        _ => false,
+    };
+    (tail_reads_as_a_number && !head.is_empty() && head.chars().all(|c| c.is_ascii_alphabetic()))
+        .then_some(head)
+}
+
 /// Obfuscated stems: hex hashes, base64-ish blobs - nothing to present.
 /// pub(crate): the index's junk score reuses the same verdict (M28).
 pub fn looks_obfuscated(stem: &str) -> bool {
@@ -741,6 +777,27 @@ pub fn looks_obfuscated(stem: &str) -> bool {
     // Single token with no letters at all ("141444") is nothing to present.
     if !toks[0].chars().any(|c| c.is_ascii_alphabetic()) {
         return true;
+    }
+    // A YEAR or a SEQUEL NUMBER run onto the title is not a hash
+    // (M4-48, 30 Aug 2026). "Inception2010", "Godzilla1998" and
+    // "Terminator2" are honest subjects a poster wrote without
+    // separators, and the mixed-alnum rule below called all three
+    // blobs - which is not a cosmetic misread: `stem_is_a_name` is what
+    // `get::plan` turns into `hint_is_posted_name`, so GH #63's
+    // keep-the-honest-subject rule never armed and
+    // `get::settle::filedesc_name_is_better` renamed the good file TO
+    // the FileDesc hash. A wrong name on a real file.
+    //
+    // The tail carries NO evidence either way, so it is removed and the
+    // SAME question is asked of the head - never a new threshold, which
+    // is the fix that looks right and is not: "Terminator2" is eleven
+    // characters, so any length that admits it admits an eleven-
+    // character blob too. Every rule that catches a digit-free blob
+    // still catches it with a year on the end (scattered internal
+    // capitals, a long single-case run, a hex word), and the recursion
+    // terminates because the head cannot end in a digit.
+    if let Some(head) = strip_year_or_sequel(toks[0]) {
+        return looks_obfuscated(head);
     }
     // Single mixed-alnum blob with digits ("n1iY94U6fTpMVY9GPD", "2EBoCStAISS").
     if toks[0].len() >= 10
@@ -2240,6 +2297,19 @@ pub fn sanitize_name(t: &str) -> String {
         .trim_start_matches("- ")
         .trim_end_matches(" -")
         .trim();
+    // A leading dot is TITLE noise, and dropping it belongs here rather
+    // than in the sanitizer. `sanitize_filename_for` stopped deleting
+    // leading dots on 30 Aug 2026 (M4-66) because doing so folded two
+    // DECLARED member names - `.movie.mkv` and `movie.mkv` - onto one
+    // on-disk name, and a declared name is an identity the sanitizer may
+    // not quietly discard; it maps the dots to `_` instead. Nothing in
+    // this function is a declared name. `t` is a release TITLE - an NZB
+    // subject, a spot, a poster's typed line - being turned into
+    // something a human wants to read, so `.Hidden Movie (2024)` should
+    // name a folder `Hidden Movie (2024)` and not `_Hidden Movie (2024)`.
+    // Two different questions, answered in the two different places that
+    // own them.
+    let collapsed = collapsed.trim_start_matches('.').trim_start();
     if !collapsed.chars().any(|c| c.is_alphanumeric()) {
         return String::new();
     }

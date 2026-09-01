@@ -163,19 +163,60 @@ async fn a_damaged_chase_repairs_in_place_and_stays_one_pass() {
 /// `chase_stall_spill`). So the bytes the rebuilt blocks have to join,
 /// and the bytes the resumed decode then reads, are mostly NOT in RAM.
 ///
-/// Budget picked so the set pages without ever breaching: the holds cap
-/// is 45% of the memory budget floored at 64 MB, so `--mem-limit 8M`
-/// gives ~28.8 MB of cap against a ~20 MB set - over the ~7.2 MB stall
-/// window, under the cap. A trim would SPILL here rather than drop
-/// (`lost_articles` is set), and a spilled prefix is a volume file,
-/// which is exactly what the assertions below would catch.
+/// THE BUDGET IS SIZED AGAINST THE PARK ENGAGE MARK, NOT THE CAP, and
+/// this leg was red on origin/main for two days for getting that
+/// wrong. Three thresholds come off the holds cap (45% of the memory
+/// budget, which floors at 64 MiB) and only one of them is the cap:
+///
+/// * page the wedged pile to scratch above `cap / 4`
+///   (`chase_stall_spill`), which is the whole subject of this leg;
+/// * engage the holds backpressure PARK above `cap / 4 * 3`
+///   (`park_engage_mark`), measured over the holds PLUS the wire gauge
+///   PLUS the decode pipeline, never over the holds alone;
+/// * forfeit the chase above the cap itself.
+///
+/// `--mem-limit 8M` floors the budget at 64 MiB, so the cap was
+/// 28.8 MiB, the window 7.2 MiB and the park's mark 21.6 MiB - against
+/// a pile that peaks near 20 MiB before anything else is counted. The
+/// leg sat ON the park's mark and crossed it whenever paging was a
+/// beat late, which is a property of how loaded the box is rather than
+/// of the code under test: measured 30 Aug 2026, 0 of 6 passes with
+/// six copies of this leg running at once, against 29 of 32 run one at
+/// a time on the same tree. `--mem-limit 110M` gives a 47.2 MiB cap,
+/// so the pile still pages above 11.8 MiB and the park stays ~14 MiB
+/// away. Same box, same 12-way load: 12 of 12, every one paged, zero
+/// trims.
+///
+/// DO NOT LOWER IT BACK, and read what the park did here before
+/// deciding it was harmless. It trimmed, and the trim DROPPED a
+/// PAR2-vouched prefix (`chase trimmed 5 MB (5 dropped)`) rather than
+/// spilling it, because the drop gate's veto is
+/// `Inner::lost_articles` and the victim's terminal verdict had not
+/// landed yet. `try_mapped_repair` then declined for want of backing
+/// data, and the set took the disk ladder with a 4.5 MB re-fetch on
+/// top. A trim that SPILLED would be caught here too, by the
+/// volume-file assertion at the bottom.
+///
+/// THAT PRODUCT DEFECT IS FIXED (30 Aug 2026,
+/// `research/CHASE-TRIM-DROPS-BEFORE-VERDICT-2026-08-30.md`): the pool
+/// now raises `nzbkit::extract::LossDoubt` at the moment it HOLDS a
+/// terminal verdict back, and the drop gate honours that as well as the
+/// landed verdict. Measured at `8M` on this very leg, one binary and
+/// both arms in the same load window, 24 copies at once on an 18-core
+/// box: `NZBFAST_NO_LOSS_DOUBT=1` passed 2 of 12 and dropped in 10 of
+/// them, every one of the 10 materializing; stock passed 12 of 12,
+/// trimmed in all 12 and dropped in none. The budget is NOT lowered
+/// back on the strength of that - the size is what makes this leg test
+/// the PAGED repair rather than the park, which is a different
+/// subject - but the fingerprint is now something to report rather than
+/// something to size around.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_paged_out_wedged_chase_repairs_in_place_too() {
     if !have_par2() {
         eprintln!("skipping: par2 not installed");
         return;
     }
-    let (log, ok, doc, fx, names) = damaged_chase_job("chase-repair-paged", &[], "8M").await;
+    let (log, ok, doc, fx, names) = damaged_chase_job("chase-repair-paged", &[], "110M").await;
     assert!(ok, "job failed:\n{log}");
     assert_eq!(
         std::fs::read(fx.dir.join("out/movie.bin")).expect("extracted file"),
@@ -497,7 +538,14 @@ async fn poster_side_corruption_repairs_in_place_under_the_verify_gate() {
 /// reads like a bench leg log rather than a pass/fail.
 fn dump_route(log: &str) {
     for l in log.lines().filter(|l| {
-        l.starts_with("mem:")
+        // `[mem] ...`, the tracing target rendered - NOT `mem:`, which
+        // is what this arm asked for until 30 Aug 2026 and which no line
+        // this harness produces has ever started with. It is the one
+        // line that says whether the trim ran and whether it DROPPED,
+        // which is the difference between the two routes these legs are
+        // about, so a filter that cannot show it is a route dump missing
+        // its subject.
+        l.contains("[mem]")
             || l.contains("repair complete")
             || l.contains("materializing")
             || l.contains("archive:")

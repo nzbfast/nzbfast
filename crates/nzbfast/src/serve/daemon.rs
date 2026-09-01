@@ -57,7 +57,7 @@ mod daemon_idle;
 // them unqualified.
 #[path = "daemon_speed.rs"]
 mod daemon_speed;
-pub(in crate::serve) use daemon_speed::{AUTO_SPEED_TARGET_MS, auto_speed_step};
+pub(in crate::serve) use daemon_speed::{AUTO_SPEED_TARGET_MS, auto_speed_step, window_rate};
 // Split from the line above rather than folded into it: production
 // reads only the target and the step, and the three BOUNDS are read
 // only by the arithmetic pin in tests_index.rs. A single re-export is
@@ -518,6 +518,25 @@ pub struct Daemon {
     /// not repeated inside it. Overrides apply even when the global
     /// `move_completed` is unset (only listed categories move then).
     pub move_completed_cats: std::sync::RwLock<Vec<(String, PathBuf)>>,
+    /// TODO 317 (GitHub #67): write the payload STRAIGHT INTO the
+    /// category's destination instead of moving it there at completion.
+    ///
+    /// Global half of the opt-in - every category that has a
+    /// destination at all (a `move_completed_cats` override, or the
+    /// global `move_completed`) downloads into it from byte 0. Off by
+    /// default and it must stay that way: a destination on an SMB share
+    /// then pays per-write network latency for the whole download
+    /// instead of one bulk copy at the end, and nobody has measured
+    /// that. The per-category half is
+    /// [`Self::write_through_cats`] beside it; the two are a UNION, so
+    /// leaving this off and naming only the local-drive categories is
+    /// how a mixed install (one local disk, one share) is expressed.
+    pub write_through: AtomicBool,
+    /// TODO 317: the categories that write through even when
+    /// [`Self::write_through`] is off. Names only - the destination is
+    /// whatever `move_dest_root` already resolves for that category, so
+    /// there is one destination map and not two.
+    pub write_through_cats: Mutex<Vec<String>>,
     pub spool: PathBuf,
     /// The config file this daemon was started with. Held so the rename
     /// pipeline can read a bring-your-own-key value (the TMDB key) at
@@ -2138,6 +2157,16 @@ pub enum EvictOutcome {
     Unavailable,
 }
 
+/// The job with this id, out of an already-locked list. Takes the
+/// iterator rather than the daemon so a caller that is walking the queue
+/// for other reasons does not lock it twice.
+pub(super) fn find_job<'a>(
+    list: impl IntoIterator<Item = &'a Arc<Mutex<Job>>>,
+    id: &str,
+) -> Option<Arc<Mutex<Job>>> {
+    list.into_iter().find(|j| j.lock_ok().nzo_id == id).cloned()
+}
+
 /// The `wall_tip` response body. `tip: None` means the index read
 /// FAILED, and that has to reach the browser as something other than a
 /// number.
@@ -2153,16 +2182,6 @@ pub enum EvictOutcome {
 /// failure is `null`, which the poll's `typeof j.latest!=='number'`
 /// guard drops on the floor, leaving the cursor unlatched for the next
 /// tick.
-/// The job with this id, out of an already-locked list. Takes the
-/// iterator rather than the daemon so a caller that is walking the queue
-/// for other reasons does not lock it twice.
-pub(super) fn find_job<'a>(
-    list: impl IntoIterator<Item = &'a Arc<Mutex<Job>>>,
-    id: &str,
-) -> Option<Arc<Mutex<Job>>> {
-    list.into_iter().find(|j| j.lock_ok().nzo_id == id).cloned()
-}
-
 #[cfg(feature = "indexer")]
 pub(super) fn wall_tip_body(
     tip: Option<nzbkit::index::TipInfo>,

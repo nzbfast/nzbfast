@@ -77,39 +77,46 @@ pub(crate) async fn get_cmd(
             );
         }
     }
-    get_with_progress(
+    get_with_progress(crate::JobSpec {
         config,
-        &nzb,
-        &out,
+        nzb_path: &nzb,
+        out_dir: &out,
         connections,
         window,
         decoders,
         fast_verify,
         verify_lean,
         no_extract,
+        // X5-03: a `get` has no record but the journal, so its own good
+        // finish is the last durable word and retiring it there is
+        // correct. A second `get` over the same directory could not know
+        // the file is complete - a plain no-PAR2 post certifies nothing
+        // after the fact - so there is no terminal state for a deferred
+        // journal to wait on. See `JournalOwner`.
+        journal_owner: crate::JournalOwner::Run,
         // No CLI setting for this; matching the daemon default
         // keeps one behaviour across both front ends, and it
         // only ever fires on a repair that verified.
-        true,
+        par_cleanup: true,
         skip_samples,
         password,
         // No CLI consent prompt: `unpack_eat_volumes=low_disk`
         // asks per job through the dashboard drawer, and there is
         // nowhere here to ask. `always` needs no consent and
         // still applies to an offline `get`.
-        false,
+        eat_consent: false,
         // §293: donor directories are a daemon switch-job concern; a
         // CLI get has no predecessor to donate from.
-        Vec::new(),
+        donor_dirs: Vec::new(),
         // PLAN M31: and no held spare either - a CLI get is one NZB,
         // with no queue behind it holding duplicate postings of it.
-        Vec::new(),
-        None,
-        None,
-        "",
-        None,
+        donor_nzbs: Vec::new(),
+        progress: None,
+        hub: None,
+        stream_owner: "",
+        net_done: None,
         budget,
-    )
+    })
     .await
 }
 

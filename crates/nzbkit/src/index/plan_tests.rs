@@ -29,11 +29,10 @@
 
 use super::*;
 
-fn dir(tag: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("nzbfast-index-plan-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn dir(tag: &str) -> crate::testscratch::ScratchDir {
+    crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-index-plan-{tag}-{}", std::process::id())),
+    )
 }
 
 /// The plan SQLite chooses for `sql`, as one line per step.

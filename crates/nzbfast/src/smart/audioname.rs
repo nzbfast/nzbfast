@@ -79,17 +79,66 @@ pub fn rename_obfuscated_audio(dir: &Path) -> usize {
             continue; // contested: nobody gets it
         }
         let target = dir.join(name);
-        if target == *path || target.exists() {
+        // `symlink_metadata` and not `exists()`: the question this guard
+        // has to ask is whether an ENTRY is at the name, because
+        // `rename(2)` removes whatever entry is at its destination and
+        // never resolves it. `exists()` follows the link and answers
+        // false on any error, so a link here - dangling, or onto a share
+        // that is not mounted - read as free and the rename below
+        // deleted it. The whole argument, the APFS measurement it rests
+        // on and why this is NOT the X5-07 containment class are at
+        // `tv_rename`'s guard in `smart/filing.rs`; this file's tracks land in
+        // the job's own directory, so the population is narrower, and
+        // the harms settle it the same way either place: skipping costs
+        // a track its tag name and one `mv` undoes that, where the
+        // link's target string is the only record of where it pointed.
+        //
+        // AND IT IS A CLAIM RATHER THAN A LOOK, 31 Aug 2026, for the
+        // reason argued in full at that same guard: the `lstat` covered
+        // about 1% of its own interval and 96.8% of concurrent arrivals
+        // landed in the gap, and `create_new` answers `AlreadyExists`
+        // over all four entry kinds the census cares about - so the
+        // claim IS this guard, taken atomically rather than in two
+        // steps. Plain, not `disk::open_out_leaf_under`: the rename
+        // below resolves its destination by path, so a bound claim
+        // would refuse a job directory reached through a symlink that
+        // the rename itself accepts.
+        //
+        // `target == *path` stays in front of it because it is not a
+        // filesystem question at all - the file already carries the
+        // name its tags ask for, and there is nothing to claim.
+        if target == *path {
+            continue;
+        }
+        if let Err(e) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            // Taken is this guard's own answer and stays silent, as the
+            // `lstat` was: the track keeps its hash name and the count
+            // says so. Anything else is the door being unusable rather
+            // than taken, which the rename below would have reported.
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                warn!(target: "smart", "could not claim {}: {e}", target.display());
+            }
             continue;
         }
         match std::fs::rename(path, &target) {
             Ok(()) => renamed += 1,
-            Err(e) => warn!(
-                target: "smart",
-                "rename {} → {}: {e}",
-                path.display(),
-                target.display()
-            ),
+            Err(e) => {
+                // Our own placeholder, which would otherwise be a
+                // zero-byte file wearing the track's tag name - and a
+                // later pass reads it as the name being taken, so the
+                // track could never be named again.
+                let _ = std::fs::remove_file(&target);
+                warn!(
+                    target: "smart",
+                    "rename {} → {}: {e}",
+                    path.display(),
+                    target.display()
+                );
+            }
         }
     }
     if renamed > 0 {
@@ -129,7 +178,17 @@ fn track_name(path: &Path) -> Option<String> {
     if clean == "unnamed" || nzbkit::release::looks_obfuscated(&clean) || is_generic_stem(&clean) {
         return None;
     }
-    Some(format!("{clean}.{ext}"))
+    // Cap the COMPOSED name, not the stem: a stem capped at 255 with
+    // `.flac` on the end is 260 bytes and `ENAMETOOLONG` just the same.
+    // An ID3 title is poster-supplied and unbounded, and by the time it
+    // is read the bytes are on disk, so there is nobody left to refuse
+    // to - see `disk::sanitize_filename_capped_for` for that division.
+    // It runs AFTER the three checks above on purpose: `cap_component`
+    // appends a hex tag, which `looks_obfuscated` would read as noise
+    // and decline a perfectly good rename over.
+    Some(nzbkit::disk::sanitize_filename_capped(&format!(
+        "{clean}.{ext}"
+    )))
 }
 
 /// `07 - Artist - Title`, dropping whichever parts the tags did not
@@ -182,6 +241,103 @@ mod tests {
             .collect();
         v.sort();
         v
+    }
+
+    /// The occupancy guard is a CLAIM, so an entry that arrives while
+    /// the pass is running cannot be renamed over either.
+    ///
+    /// The case above asks WHICH QUESTION the guard asks, and the
+    /// `symlink_metadata` this door carried until 31 Aug 2026 answers
+    /// it exactly as the `create_new` claim does. What separates them is
+    /// the gap behind the answer, so this has to race: see
+    /// `crate::renameclaim` for the measurement and for why the arrival
+    /// hunts the rename rather than sweeping a fixed span. VERIFIED red
+    /// with this door alone reverted to the `lstat`.
+    #[test]
+    fn a_track_name_created_beside_the_pass_is_never_renamed_over() {
+        let dir = &scratch("claim-race");
+        let obfuscated = "aa45c7a08991e64c86c87cb4a9347db02712db3d54";
+        let target = dir.join("01 - Some Artist - First Song.flac");
+        crate::renameclaim::never_renames_over_a_neighbour(
+            &target,
+            300,
+            || track(dir, obfuscated, 1, "First Song"),
+            || {
+                rename_obfuscated_audio(dir);
+            },
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The occupancy guard asks about an ENTRY, not about a name that
+    /// RESOLVES. `Path::exists` follows symlinks and answers false on
+    /// any error, so a link at the track's target name - dangling, or
+    /// onto a share that is not mounted - read as "free" and the rename
+    /// then destroyed it. `rename(2)` removes whatever entry sits at the
+    /// destination and never resolves it, so the loss is real and the
+    /// link's target string is not recoverable from anywhere.
+    ///
+    /// The harms are not symmetric, which is what settles it: skipping
+    /// costs the track its tag name and one `mv` puts that back, where
+    /// the link is gone for good. Same argument, same shape and the same
+    /// measurement as `unpack::published_names`' weak tier (X5-20
+    /// residue 1, `b71c37e33`).
+    #[test]
+    fn a_track_name_already_taken_is_never_renamed_over() {
+        let dir = &scratch("occupied");
+        track(
+            dir,
+            "aa45c7a08991e64c86c87cb4a9347db02712db3d54",
+            1,
+            "First Song",
+        );
+        // PORTABLE half: an ordinary file at the target is declined, and
+        // was declined before this decision too. It is here so Windows
+        // runs the guard at all, and as the control that keeps the
+        // change specific to what a symlink does.
+        std::fs::write(
+            dir.join("01 - Some Artist - First Song.flac"),
+            b"users copy",
+        )
+        .unwrap();
+        assert_eq!(rename_obfuscated_audio(dir), 0);
+        assert_eq!(
+            std::fs::read(dir.join("01 - Some Artist - First Song.flac")).unwrap(),
+            b"users copy",
+            "the file that was already there keeps its bytes"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+
+        #[cfg(unix)]
+        {
+            let dir = &scratch("dangling");
+            track(
+                dir,
+                "ab45c7a08991e64c86c87cb4a9347db02712db3d54",
+                1,
+                "First Song",
+            );
+            let taken = dir.join("01 - Some Artist - First Song.flac");
+            std::os::unix::fs::symlink(dir.join("archived-elsewhere"), &taken).unwrap();
+            assert_eq!(
+                rename_obfuscated_audio(dir),
+                0,
+                "a dangling link is an entry, so the name is taken"
+            );
+            assert!(
+                std::fs::symlink_metadata(&taken)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the user's link must still be a link"
+            );
+            assert!(
+                dir.join("ab45c7a08991e64c86c87cb4a9347db02712db3d54")
+                    .exists(),
+                "and the track keeps the name it arrived with"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     /// Issue #55, the reporter's exact shape: an album posted with

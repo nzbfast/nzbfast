@@ -180,7 +180,17 @@ fn rows_inside_a_window_keep_every_field_they_had() {
         // Named, so a future edit to `seed` cannot quietly stop covering
         // the explanations this test exists for.
         assert_eq!(paged[0]["status"], "Paused", "the paused row");
-        assert_eq!(paged[2]["priority"], "Duplicate", "the held row");
+        // The hold is in SAB's `labels`, and `priority` stays inside
+        // SAB's own five-word vocabulary - see `sab_priority_name`.
+        // Both are named here rather than only the row equality above,
+        // so a regression that moved the hold back into `priority`
+        // would fail by name instead of only as "row 5 differs".
+        assert_eq!(paged[2]["priority"], "Normal", "the held row");
+        assert_eq!(
+            paged[2]["labels"],
+            serde_json::json!(["DUPLICATE"]),
+            "the held row"
+        );
         assert_eq!(paged[2]["duplicate_key"], "some.release.key");
         // `index` is the row's place in the QUEUE, not in the page.
         assert_eq!(paged[0]["index"], 3);

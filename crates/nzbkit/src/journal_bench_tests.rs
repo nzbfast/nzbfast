@@ -49,6 +49,7 @@ fn journal_batch_cpu_bench() {
                 "movie.bin",
                 N * 700_000,
                 &[frag("movie.bin", off, off, 700_000)],
+                None,
             );
             if !batched {
                 j.flush();
@@ -91,15 +92,26 @@ fn placement_records_batch_and_land_in_order() {
     let _ = std::fs::remove_dir_all(&dir);
     let (j, _) = Journal::open(&dir, b"<nzb/>").unwrap();
     let path = j.path.clone();
+    // Skip the header AND X5-01's generation claim, which `Journal::open`
+    // writes directly behind it - this test is about the BATCH rule, and
+    // both of those lines are written before any record exists to batch.
     let lines = |p: &std::path::Path| -> Vec<String> {
         std::fs::read_to_string(p)
             .unwrap()
             .lines()
-            .skip(1)
+            .skip(2)
             .map(str::to_string)
             .collect()
     };
-    j.record_placed(3, "<a@x>", None, "vol.rar", 100, &[frag("in.bin", 1, 2, 3)]);
+    j.record_placed(
+        3,
+        "<a@x>",
+        None,
+        "vol.rar",
+        100,
+        &[frag("in.bin", 1, 2, 3)],
+        None,
+    );
     // Queued, not landed: the file still holds only the header.
     assert!(
         lines(&path).is_empty(),
@@ -111,7 +123,15 @@ fn placement_records_batch_and_land_in_order() {
         ["S 3 100 vol.rar", "F 0 in.bin", "R 3 0:1:2:3 <a@x>"]
     );
     // An immediate line drains the queue AHEAD of itself.
-    j.record_placed(3, "<b@x>", None, "vol.rar", 100, &[frag("in.bin", 4, 5, 6)]);
+    j.record_placed(
+        3,
+        "<b@x>",
+        None,
+        "vol.rar",
+        100,
+        &[frag("in.bin", 4, 5, 6)],
+        None,
+    );
     j.record_materialized(7, "other.rar", 50);
     assert_eq!(
         lines(&path)[3..],

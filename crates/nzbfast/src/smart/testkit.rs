@@ -5,14 +5,13 @@
 
 use super::*;
 
-// The integration suites' scratch guard, included as source so both
-// halves of the tree hold the SAME type (a `tests/` module cannot be
-// imported by the lib's unit tests any other way). TODO 149: scratch()
-// used to remove only the PREVIOUS run's dir and leak its own, which is
-// what gave the §142 oversized fixture a run-long blast radius on NTFS.
-#[path = "../../tests/scratch/mod.rs"]
-mod scratch_guard;
-pub(super) use scratch_guard::ScratchDir;
+// The integration suites' scratch guard, reached through the crate's
+// single include of it (`crate::testscratch`) rather than a second
+// `#[path]` of the same file - two includes are two copies of the type
+// and two sweep latches. TODO 149: scratch() used to remove only the
+// PREVIOUS run's dir and leak its own, which is what gave the §142
+// oversized fixture a run-long blast radius on NTFS.
+pub(super) use crate::testscratch::ScratchDir;
 
 pub(super) fn scratch(tag: &str) -> ScratchDir {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -51,6 +50,40 @@ fn scratch_keeps_its_tree_when_the_test_panics() {
         "a panicking test's tree must survive its guard"
     );
     let _ = std::fs::remove_dir_all(&path);
+}
+
+/// The bytes of a genuine AppleDouble: the `0x00051607` magic, the
+/// version word, and a short body standing in for a resource fork.
+///
+/// A `._name` is only a Finder dropping if it LOOKS like one - the
+/// prefix is a convention and a payload can carry it (M4-68), so
+/// `is_finder_dropping` reads the magic and `b"resource fork"` is no
+/// longer an AppleDouble. Every test that means "the genuine article"
+/// takes its bytes from here, so the fixture and the predicate cannot
+/// drift apart.
+pub(super) fn appledouble_bytes() -> Vec<u8> {
+    let mut v = vec![0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00];
+    v.extend_from_slice(&[0u8; 16]); // filler
+    v.extend_from_slice(&[0x00, 0x02]); // entry count
+    v.extend_from_slice(b"resource fork");
+    v
+}
+
+/// The bytes of a genuine `.DS_Store`: the version word, the `Bud1`
+/// magic of the B-tree store, and a short body standing in for it.
+///
+/// Same contract as [`appledouble_bytes`], and for the same reason
+/// (M4-79): `.DS_Store` was the last name-only permanent delete in the
+/// Finder-dropping pass, so `is_finder_dropping` now reads these eight
+/// bytes and a run of zeroes at the size a real one happens to be is no
+/// longer one. Every test that means "the genuine article" takes its
+/// bytes from here, so the fixture and the predicate cannot drift apart.
+/// 6148 is what Finder writes for a folder it has merely looked at,
+/// kept because two existing prune pins are about a husk that size.
+pub(super) fn ds_store_bytes() -> Vec<u8> {
+    let mut v = vec![0x00, 0x00, 0x00, 0x01, b'B', b'u', b'd', b'1'];
+    v.resize(6148, 0);
+    v
 }
 
 /// A single emitted path component, held to the rules a Windows box

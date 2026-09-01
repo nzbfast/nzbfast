@@ -149,6 +149,49 @@ git -C "$ROOT" -c user.name=t -c user.email=t@t commit -qm add >/dev/null 2>&1
 expect "--all on a clean tree: allowed" "$ROOT" 0 --all
 rm -rf "$TMP"
 
+# 9. --all's own population gap: `git ls-files` never lists an untracked
+#    file, so a leaky file you have written but not yet `git add`ed is
+#    absent from the scan entirely - and the verdict line used to read
+#    "N public file(s) clean" regardless, which is exactly what a pass
+#    looks like for the file you were checking. --all must still exit 0
+#    (it never widens what gets SCANNED - refusing your commit over
+#    another lane's untracked scratch file in this shared checkout is
+#    the false alarm that gets a gate switched off) but it must NAME the
+#    file it left out.
+new_repo
+echo "// benchmarked on $CLEAN" > "$SRC"
+git -C "$ROOT" add crates/nzbkit/src/thing.rs
+git -C "$ROOT" -c user.name=t -c user.email=t@t commit -qm add >/dev/null 2>&1
+echo "// benchmarked on $LEAK" > "$ROOT/crates/nzbkit/src/untracked.rs"   # never git add'ed
+out=$(cd "$ROOT" && ./packaging/leak-check.sh --all 2>&1); rc=$?
+if [ $rc -ne 0 ]; then
+  bad "--all with an untracked file: expected exit 0, got $rc -- $(echo "$out" | tr '\n' ' ' | head -c 160)"
+elif printf '%s' "$out" | grep -q 'crates/nzbkit/src/untracked.rs'; then
+  ok "--all names the untracked public file it could not scan"
+else
+  bad "--all silently dropped the untracked file from its verdict: $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
+fi
+rm -rf "$TMP"
+
+# 10. A private (unexported) untracked file must NOT be reported - the
+#     warning is scoped to the same PUBLIC_MANIFEST population as the
+#     scan itself, never to every untracked file in the working tree.
+new_repo
+echo "// benchmarked on $CLEAN" > "$SRC"
+git -C "$ROOT" add crates/nzbkit/src/thing.rs
+git -C "$ROOT" -c user.name=t -c user.email=t@t commit -qm add >/dev/null 2>&1
+mkdir -p "$ROOT/research"
+echo "notes about $LEAK" > "$ROOT/research/scratch.md"   # untracked, private path
+out=$(cd "$ROOT" && ./packaging/leak-check.sh --all 2>&1); rc=$?
+if [ $rc -ne 0 ]; then
+  bad "--all with an untracked private file: expected exit 0, got $rc -- $(echo "$out" | tr '\n' ' ' | head -c 160)"
+elif printf '%s' "$out" | grep -q 'research/scratch.md'; then
+  bad "--all reported an untracked PRIVATE file, widening the population: $(printf '%s' "$out" | tr '\n' ' ' | head -c 200)"
+else
+  ok "--all stays silent about an untracked private-path file"
+fi
+rm -rf "$TMP"
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

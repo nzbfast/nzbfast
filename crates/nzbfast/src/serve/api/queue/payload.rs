@@ -53,7 +53,29 @@ pub(super) fn m_queue(
         let hit_id = |id: &str| value == "all" || value.split(',').any(|v| v.trim() == id);
         let hit = |j: &Arc<Mutex<Job>>| hit_id(&j.lock_ok().nzo_id);
         match params.get("name").map(String::as_str) {
-            Some("delete") => {
+            // `purge` is SAB's own spelling of delete-everything -
+            // `_api_queue_purge` is `_api_queue_delete`'s `value=all`
+            // branch, the same two lines, and it takes the same
+            // `search`. It had NO arm here until 31 Aug 2026, so it
+            // fell through to the payload default: a destructive verb
+            // that answered a client with the whole queue LISTING - no
+            // `status` key anywhere in it - and swept nothing. That is
+            // the GH #69 crash shape (a client deserializing
+            // `{status, nzo_ids}` gets an object it has no field for)
+            // sitting on top of a silent no-op.
+            Some(op @ ("delete" | "purge")) => {
+                // The rows this request names, resolved once: the
+                // `search` narrowing has nowhere else to live, and the
+                // set is what `nzo_ids` reports back. See
+                // `delete_targets`.
+                let targets = delete_targets(
+                    d,
+                    &value,
+                    op == "purge" || value == "all",
+                    search_param(params).as_deref(),
+                );
+                let hit_id = |id: &str| targets.contains(id);
+                let hit = |j: &Arc<Mutex<Job>>| hit_id(&j.lock_ok().nzo_id);
                 // A deleted job's prefetch sidecar must stop
                 // writing to its directory.
                 d.poke_sidecar(hit_id);
@@ -93,6 +115,10 @@ pub(super) fn m_queue(
                 // same NZB again picks up from it" - and a hold made
                 // that promise false.
                 let mut deleted_names: Vec<String> = Vec::new();
+                // The ids this request actually took out, in queue
+                // order - SAB's `nzo_ids`, and the half a bulk caller
+                // cannot reconstruct from a count. See the answer below.
+                let mut removed_ids: Vec<String> = Vec::new();
                 // See the history arm: spool copies whose fate waits on
                 // the file removal.
                 let mut nzb_by_dir = std::collections::HashMap::new();
@@ -101,6 +127,7 @@ pub(super) fn m_queue(
                 q.retain(|j| {
                     if hit(j) {
                         let mut g = j.lock_ok();
+                        removed_ids.push(g.nzo_id.clone());
                         // ...but not the backup copy: see
                         // `is_held_alternative`.
                         if !is_held_alternative(&g) {
@@ -218,7 +245,19 @@ pub(super) fn m_queue(
                     // The rationale lives on the helper, which the
                     // JSON-RPC delete variants share.
                     note_queue_idle_unless_active(d, stopped_active);
-                    json!({"status": true, "removed": count})
+                    // `nzo_ids` is SAB's own answer to a queue write -
+                    // `{"status": bool(removed), "nzo_ids": removed}` -
+                    // and it was ABSENT here until 31 Aug 2026, the
+                    // same absent-key class as GH #69's `server_stats`.
+                    // A client that batches a delete and reconciles by
+                    // the returned list got `null` and could not tell
+                    // WHICH of the ids it sent were acted on; with
+                    // `search` now narrowing the sweep, a caller cannot
+                    // even predict the set from its own request.
+                    // `removed` stays: it is ours, it is what the
+                    // dashboard's bulk toasts count, and nothing here
+                    // drops a key.
+                    json!({"status": true, "removed": count, "nzo_ids": removed_ids})
                 } else {
                     // A refusal SAYS SOMETHING. This arm answered
                     // `{"status": false, "removed": 0}` with no `error`
@@ -242,7 +281,7 @@ pub(super) fn m_queue(
                     // and every one of those cases really is this: the
                     // row finished, or another tab (or an *arr) took it
                     // between the paint and the click.
-                    json!({"status": false, "removed": 0,
+                    json!({"status": false, "removed": 0, "nzo_ids": [],
                         "error": "nothing in the queue matched that - it may have \
                                   just finished, or been removed already"})
                 }
@@ -254,10 +293,20 @@ pub(super) fn m_queue(
                 }
                 let mut n = 0;
                 let mut finishing = 0;
+                // SAB's `nzo_ids`. Its own arm echoes back every id it
+                // was HANDED - `pause_multiple_nzo` appends
+                // unconditionally, so an all-bogus request still
+                // answers `status: true` with the ids in it (see the
+                // upstream-misnomer list in
+                // `research/SAB-WRITE-ARM-SHAPES-2026-08-31.md`). This
+                // reports the rows that actually took the pause, which
+                // is the question a client asks the field.
+                let mut handled_ids: Vec<String> = Vec::new();
                 for j in d.queue.lock_ok().iter().filter(|j| hit(j)) {
                     let mut g = j.lock_ok();
                     if apply_pause(d, &mut g, op == "pause") {
                         n += 1;
+                        handled_ids.push(g.nzo_id.clone());
                     } else {
                         finishing += 1;
                     }
@@ -283,9 +332,10 @@ pub(super) fn m_queue(
                     d.note_queue_idle();
                 }
                 if n == 0 && finishing > 0 {
-                    json!({"status": false, "error": "this job is still finishing"})
+                    json!({"status": false, "nzo_ids": [],
+                           "error": "this job is still finishing"})
                 } else {
-                    json!({"status": n > 0})
+                    json!({"status": n > 0, "nzo_ids": handled_ids})
                 }
             }
             // SAB parity: mode=queue&name=switch&value=<nzo_id>
@@ -371,6 +421,25 @@ pub(super) fn m_queue(
             // `promote_file` is: the whole transaction, and every belt
             // it shares with the picker, lives in `serve::insurance`.
             Some("insure") => crate::serve::insurance::insure_arm(d, params),
+            // SAB's `mode=queue&name=delete_nzf&value=<nzo_id>
+            // &value2=<nzf_ids>` removes individual FILES from a queued
+            // job. There is no machinery for it here - a one-pass job's
+            // files are an article plan and a par2 relationship, not a
+            // list rows can be struck off - and dropping one is a
+            // feature, not a shape. What matters for compat is that the
+            // answer is SAB-SHAPED: until 31 Aug 2026 this name had no
+            // arm at all and fell through to the payload default, so a
+            // client asking to delete a file was handed the entire queue
+            // LISTING, with no `status` key in it anywhere. A statically
+            // typed client deserializing `{status, nzf_ids}` throws on
+            // that object - the GH #69 crash shape exactly. An honest
+            // refusal in the right shape is the fix; `complete_action_arm`
+            // beside it already answers an unimplemented SAB verb the
+            // same way.
+            Some("delete_nzf") => json!({
+                "status": false, "nzf_ids": [],
+                "error": "removing single files from a queued job is not supported here"
+            }),
             Some("rename") => super::super::remote::rename_arm(d, params),
             Some("sort") => super::super::remote::sort_arm(d, params),
             Some("change_complete_action") => super::super::remote::complete_action_arm(params),
@@ -382,16 +451,39 @@ pub(super) fn m_queue(
                 // client labelled it Normal. (-2, "add paused",
                 // is only meaningful on an ADD and is left
                 // exactly as it was.)
-                let prio: i32 = match params
-                    .get("value2")
-                    .and_then(|v| super::super::sabcompat::parse_priority_token(v))
-                    .unwrap_or(0)
-                {
+                //
+                // A value2 that is MISSING, or that is there and does
+                // not parse, is refused rather than read as Normal.
+                // Both were silently taken as 0 until 31 Aug 2026, so a
+                // client that typo'd the priority - or omitted it -
+                // demoted a Force job to Normal and was told the write
+                // succeeded. SAB refuses both, in two different words
+                // (`_MSG_NO_VALUE2` and `_MSG_INT_VALUE`), and they are
+                // kept apart here for the same reason: "you sent no
+                // priority" and "that is not a priority" are different
+                // things to fix.
+                let Some(raw) = params.get("value2").map(String::as_str) else {
+                    return Some(json!({"status": false, "position": -1,
+                        "error": "expects two parameters"}));
+                };
+                let Some(token) = super::super::sabcompat::parse_priority_token(raw) else {
+                    return Some(json!({"status": false, "position": -1,
+                        "error": "expects integer value"}));
+                };
+                let prio: i32 = match token {
                     SAB_DEFAULT_PRIORITY => 0,
                     p => p,
                 };
                 let mut n = 0;
                 let mut finishing = 0;
+                // SAB's `position` is the row's index in the queue after
+                // the write - `NzbQueue.__set_priority` returns it, and
+                // the arm reports the LAST id it processed. This answered
+                // a hardcoded `-1` until 31 Aug 2026, which is precisely
+                // the value SAB reserves for "incorrect job-id", so a
+                // client checking `position >= 0` read every successful
+                // priority change as a failure.
+                let mut position: i64 = -1;
                 {
                     let mut q = d.queue.lock_ok();
                     // Two passes under the one lock: write the
@@ -410,16 +502,19 @@ pub(super) fn m_queue(
                         }
                     }
                     for id in &moved {
-                        reposition_for_priority(&mut q, id);
+                        if let Some(at) = reposition_for_priority(&mut q, id) {
+                            position = at as i64;
+                        }
                     }
                 }
                 if n > 0 {
                     d.save_queue();
                 }
                 if n == 0 && finishing > 0 {
-                    json!({"status": false, "error": "this job is still finishing"})
+                    json!({"status": false, "position": -1,
+                           "error": "this job is still finishing"})
                 } else {
-                    json!({"status": n > 0, "position": -1})
+                    json!({"status": n > 0, "position": position})
                 }
             }
             _ => queue_json(d, params),
@@ -468,6 +563,22 @@ pub(super) fn m_history(
             }
             // Re-categorize: move the files to the new
             // category's folder and update the record.
+            // SAB 5.x's `mode=history&name=mark_as_completed` flips a
+            // Failed row to Completed and drops its incomplete folder.
+            // Not implemented here - a failed one-pass job's row carries
+            // the classifier verdict the retry and re-grab doors are
+            // built on, and overwriting the state would strand them -
+            // but it answers in SAB's shape rather than falling through
+            // to the history PAYLOAD, which is what it did until 31 Aug
+            // 2026. Same crash shape as `delete_nzf` above. 4.5.0, the
+            // version `SAB_VERSION` advertises, has no such verb at all
+            // and answers `{"status": false, "error": "not implemented"}`
+            // for any name it does not know - so this is also what a
+            // client calibrated against our advertised version expects.
+            Some("mark_as_completed") => json!({
+                "status": false,
+                "error": "marking a failed job completed is not supported here"
+            }),
             Some("set_cat") => {
                 let cat = params.get("value2").cloned().unwrap_or_default();
                 let cat = cat.trim().trim_matches('*').trim().to_string();
@@ -524,7 +635,7 @@ pub(super) fn m_history(
                         .collect()
                 };
                 if !busy.is_empty() {
-                    return Some(json!({"status": false,
+                    return Some(json!({"status": false, "removed": 0, "nzo_ids": [],
                             "error": format!(
                                 "{} is having its files moved right now - try again when it settles",
                                 busy.join(", "))}));
@@ -536,10 +647,12 @@ pub(super) fn m_history(
                         let g = j.lock_ok();
                         DeleteRecord {
                             nzo_id: g.nzo_id.clone(),
+                            name: g.name.clone(),
                             state: g.state,
                             out_dir: g.out_dir.clone(),
                             filed: g.filed,
                             locked: g.password_required,
+                            published_failed: crate::serve::history::publishes_as_failed(&g),
                         }
                     })
                     .collect();
@@ -547,7 +660,12 @@ pub(super) fn m_history(
                 // the "somebody else still lives here" test sees
                 // the records that survive rather than the ones
                 // about to go (see plan_history_delete).
-                let plan = plan_history_delete(&records, &value, &queue_dirs);
+                let plan = plan_history_delete(
+                    &records,
+                    &value,
+                    search_param(params).as_deref(),
+                    &queue_dirs,
+                );
                 // A doomed record whose unlock task is `finalizing`
                 // is mid-extraction/rename/move on disk right now
                 // (Codex sweep 3 Aug H1) - same refusal as `moving`
@@ -567,7 +685,7 @@ pub(super) fn m_history(
                         .collect()
                 };
                 if !busy.is_empty() {
-                    return Some(json!({"status": false,
+                    return Some(json!({"status": false, "removed": 0, "nzo_ids": [],
                             "error": format!(
                                 "{} is being unlocked or moved right now - \
                                  try again when it settles",
@@ -632,8 +750,13 @@ pub(super) fn m_history(
                     keep
                 });
                 // §129 1a: the store forgets them too, once the lock is
-                // down (below).
-                let doomed_ids: Vec<String> = doomed.keys().map(|s| (*s).to_string()).collect();
+                // down (below). Also the `nzo_ids` reported back: taken
+                // in history order from the rows that actually left, so
+                // it is the truth rather than an echo of the request.
+                let doomed_ids: Vec<String> = removed
+                    .iter()
+                    .map(|(_, j)| j.lock_ok().nzo_id.clone())
+                    .collect();
                 // A bulk sweep needs to say how much it swept:
                 // "Cleared." over a list that still has rows in
                 // it is indistinguishable from a no-op. `status`
@@ -655,7 +778,16 @@ pub(super) fn m_history(
                 // been destroyed on the strength of the delete (P2-1).
                 if !d.history_tombstone(&doomed_ids) {
                     d.history_restore(removed);
-                    return Some(json!({"status": false,
+                    // Nothing left, so `removed` is 0 and `nzo_ids` is
+                    // empty - and both keys are HERE rather than only on
+                    // the two answers below. This arm has five exits, and
+                    // an optional key is one a client cannot declare: the
+                    // pause arm one screen up carries the same `[]` on its
+                    // own refusal for the same reason, and answering three
+                    // exits with a shape the other two do not have is the
+                    // absent-key class this lane exists to close, made by
+                    // hand.
+                    return Some(json!({"status": false, "removed": 0, "nzo_ids": [],
                             "error": "the history store could not be written, so the \
                                       records were left exactly as they were - check the \
                                       permissions on the data folder"}));
@@ -797,7 +929,15 @@ pub(super) fn m_history(
                 // reporting the miss - an unknown id is diagnosable.
                 let class_sweep = matches!(value.as_str(), "all" | "completed" | "failed");
                 if count > 0 || class_sweep {
-                    json!({"status": true, "removed": count})
+                    // `removed` and `nzo_ids` are both ADDITIVE here:
+                    // SAB's `_api_history_delete` answers a bare
+                    // `report()`, so `{"status": true}` and nothing
+                    // else, and no key of its is dropped. The id list
+                    // is worth carrying anyway - it is the same
+                    // reconciliation problem the queue arm's `nzo_ids`
+                    // solves, and with `search` now narrowing a sweep a
+                    // caller cannot predict the set from its request.
+                    json!({"status": true, "removed": count, "nzo_ids": doomed_ids})
                 } else {
                     // ...and a per-id miss says WHY, for the reason the
                     // queue arm above sets out at length: with no `error`
@@ -815,7 +955,7 @@ pub(super) fn m_history(
                     // reach it, so it lives here now and every door onto
                     // this arm inherits it. Also without a plural noun:
                     // one id and a 250-id selection get the same words.
-                    json!({"status": false, "removed": 0,
+                    json!({"status": false, "removed": 0, "nzo_ids": [],
                         "error": "nothing in your history matched that - it may \
                                   have been removed already"})
                 }

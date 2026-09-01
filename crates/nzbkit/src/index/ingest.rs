@@ -331,6 +331,47 @@ pub fn quoted_name(s: &str) -> Option<String> {
 /// numbered part → (message-id, bytes).
 type ClusterFiles = HashMap<String, (u32, BTreeMap<u32, (String, u64)>)>;
 
+/// Fold one batch's parts into the parts a `files` row already holds,
+/// keeping the LARGER byte count for a part BOTH of them carry.
+///
+/// `:bytes` is a per-SERVER approximation of one article, not a
+/// property of the article, and two backbones measurably state it in
+/// two different conventions. Measured 31 Aug 2026 over one article on
+/// five providers: all five delivered the identical body (739,699
+/// octets as received, CRLF), and three stated `:bytes` 740,327 while
+/// two stated 734,624 / 734,581 - the same count with the line
+/// terminators counted as LF, 0.77% low. Over a 3,000-article slab of
+/// one group, servers on one backbone agreed on 99.8% of shared
+/// articles and servers on DIFFERENT backbones agreed on NONE of
+/// ~2,960.
+///
+/// `gapfill` re-scans an incomplete release on the SECONDARY provider
+/// by design, so a plain overwrite is last-writer-wins between two
+/// conventions: 28% of a banked 35,535-release census had moved three
+/// days later, 97.5% of them downward, 533 of them by exactly 1/129 -
+/// the pure signature of 128-character yEnc lines recounted LF instead
+/// of CRLF - and 27 of them across a `junk_score` size threshold.
+///
+/// `max` is taken rather than first-writer-wins for three measured
+/// reasons: it is monotone, so the stored number converges instead of
+/// tracking whichever server was asked last; the larger value is the
+/// better estimate of what a download actually pulls (740,327 stated
+/// against 740,170 received, where the smaller convention is 5,546
+/// octets under); and it heals a row whose stored count is 0, which is
+/// what an unparseable OVER byte field parses to. The trade is that one
+/// server over-stating a count pins it - acceptable for a field every
+/// consumer already treats as an estimate, and the safe direction for a
+/// size estimate to err in. Full write-up:
+/// `research/INDEX-FILE-BYTES-REINGEST-DRIFT-2026-08-31.md`.
+fn merge_parts(merged: &mut BTreeMap<u32, (String, u64)>, parts: BTreeMap<u32, (String, u64)>) {
+    for (n, mut v) in parts {
+        if let Some(prev) = merged.get(&n) {
+            v.1 = v.1.max(prev.1);
+        }
+        merged.insert(n, v);
+    }
+}
+
 /// One `files` row a release already holds, for a filename a batch is
 /// about to write. `bytes` and `nsegs` are the row's stored aggregate
 /// contribution, carried so the merge can subtract exactly what the
@@ -1349,9 +1390,7 @@ impl Index {
                     };
                     (eff, p.total, p.bytes)
                 });
-                for (n, v) in parts {
-                    merged.insert(n, v);
-                }
+                merge_parts(&mut merged, parts);
                 let bytes: u64 = merged.values().map(|v| v.1).sum();
                 let seg_blob = segcodec::encode(
                     &merged
@@ -1557,6 +1596,19 @@ mod tests {
         // Size fragments and version dots are not filenames.
         assert_eq!(quoted_name("Big Release 4.2GB yEnc"), None);
         assert_eq!(quoted_name("Release v1.0 done"), None);
+        // T5: this reader calls `nzb::quoted_filename` DIRECTLY, not
+        // `NzbFile::filename_hint`, so it inherits the agreeing-run pick
+        // only because the rule lives at the pick. A header on the
+        // N6-04 ambiguity class - two dotted quoted runs whose kinds
+        // disagree, so the subject is `Data` - used to index the row
+        // under the recovery-volume name, which is what release
+        // grouping and the junk scorer then read. It indexes under the
+        // payload name now, and this row is what would go red if the
+        // rule were ever moved up to `filename_hint` and forked in two.
+        assert_eq!(
+            quoted_name(r#""label.vol000+50.par2" - "Movie.mkv" yEnc"#),
+            Some("Movie.mkv".to_string())
+        );
     }
 
     #[test]
@@ -2009,6 +2061,86 @@ mod multi_server_indexing {
             parsed.files.iter().map(|f| f.segments.len()).sum::<usize>(),
             3,
             "the overlapping part must not be emitted twice"
+        );
+        teardown(&dir, ix);
+    }
+
+    /// A re-scan on a second provider must not revise the byte count of
+    /// a part already held down to that provider's own convention.
+    ///
+    /// `:bytes` is a per-server approximation of one article, and two
+    /// backbones measurably state it two ways - the same article's line
+    /// terminators counted as CRLF or as LF, ~0.77% apart (measured 31
+    /// Aug 2026 across five providers; the body they deliver is
+    /// byte-identical). `gapfill` re-scans an incomplete release on the
+    /// SECONDARY provider by design, so a plain overwrite made
+    /// `total_bytes` track whichever server was asked last: 28% of a
+    /// banked 35,535-release census had moved three days later, 97.5% of
+    /// them downward, and 27 of them across a `junk_score` size
+    /// threshold. Both directions are pinned - the smaller count must
+    /// not win, and it must not be able to win by arriving first either.
+    #[test]
+    fn a_second_provider_never_shrinks_a_part_it_already_shares() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-bytesconv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ix = Index::open(&dir.join("index.db")).unwrap();
+        let grp = "alt.binaries.teevee";
+        let subj = |n: u32| format!(r#""Show.S01E03.720p-GRP.mkv" yEnc ({n}/2)"#);
+        // The measured pair, from one real article on two backbones.
+        const CRLF: u64 = 740_327;
+        const LF: u64 = 734_624;
+        // Primary states the CRLF convention and holds part 1 only.
+        ix.ingest(grp, &[entry(&subj(1), "p@x", "s1e3.p1", CRLF)], 1_000)
+            .unwrap();
+        // Gapfill on the secondary re-states part 1 lower, and carries
+        // the part the primary never saw with an OVER byte field it
+        // could not parse - which reaches `ingest` as 0.
+        ix.ingest(
+            grp,
+            &[
+                entry(&subj(1), "p@x", "s1e3.p1", LF),
+                entry(&subj(2), "p@x", "s1e3.p2", 0),
+            ],
+            1_000,
+        )
+        .unwrap();
+        let (r, _) = ix.browse(&BrowseQuery::default()).unwrap();
+        assert_eq!(r.len(), 1, "one release, not one per server");
+        assert_eq!(
+            r[0].total_bytes, CRLF,
+            "the shared part keeps the larger count - this is the \
+             assertion a plain overwrite fails"
+        );
+        // A stored 0 is healed by the next real count rather than
+        // pinned. This is the assertion first-writer-wins fails, and it
+        // is why the merge takes the larger count rather than the first.
+        ix.ingest(grp, &[entry(&subj(2), "p@x", "s1e3.p2", LF)], 1_000)
+            .unwrap();
+        let (r, _) = ix.browse(&BrowseQuery::default()).unwrap();
+        assert_eq!(
+            r[0].total_bytes,
+            CRLF + LF,
+            "a zero count is not a floor the row can never leave"
+        );
+        // Monotone, so the stored number converges: re-stating either
+        // count in either order changes nothing. The value must not
+        // depend on which provider was asked last - which is the whole
+        // defect - nor on which was asked first.
+        ix.ingest(
+            grp,
+            &[
+                entry(&subj(1), "p@x", "s1e3.p1", CRLF),
+                entry(&subj(2), "p@x", "s1e3.p2", LF),
+            ],
+            1_000,
+        )
+        .unwrap();
+        let (r, _) = ix.browse(&BrowseQuery::default()).unwrap();
+        assert_eq!(
+            r[0].total_bytes,
+            CRLF + LF,
+            "monotone: re-stating what is already stored changes nothing"
         );
         teardown(&dir, ix);
     }

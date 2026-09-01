@@ -26,12 +26,28 @@ Test scope is resolved properly (inline `#[cfg(test)]` blocks AND
 resolver family as tools/lock-gate.py, same reason: naive path-based
 counting has already produced one wrong scorecard round.
 
+`--headroom` exists because `--list` cannot answer the question the recurring
+split chips actually ask. It sorts by SIZE, so a function at 500 of 500 ranks
+below one at 400 of 9,000, and it prints neither the limit nor which KIND of
+ceiling a target is under - and those two regimes behave OPPOSITELY when you
+split. A flat-ceiling file converts a split line for line into headroom; a
+BASELINED one does not convert at all, because the ratchet re-centres the same
+2% on the smaller number. On 31 Aug 2026 a chip paired
+`tests/e2e_norar/mod.rs` (flat, 97 free - a split bought 457 lines) with
+`tests/daemon.rs` (baselined, 181 free - no split can buy more than ~50, and
+LESS the bigger the split) as one problem, and the second half of it was not
+buildable. They were never one problem.
+
 Usage:
     tools/size-gate.py            # gate: exit 1 on any violation
     tools/size-gate.py --list     # report the largest files and functions
+    tools/size-gate.py --headroom # report what is CLOSEST to its ceiling,
+                                  #   with the limit and the ceiling KIND
     tools/size-gate.py --selftest # prove the scope resolver still works
 """
 
+import contextlib
+import io
 import os
 import re
 import sys
@@ -144,7 +160,44 @@ BASELINE_FILES = {
     # that its three helpers above are shared with four siblings, so the
     # block is three ranges rather than one; and THE ENCRYPTED ARCHIVES
     # (~400 contiguous plus scattered legs).
-    "crates/nzbfast/tests/e2e.rs": 6888,
+    # 6,280 by 31 Aug 2026. It had regrown from 6,888 to sit at 7,025
+    # against a 7,025 limit - ZERO headroom - and that is not a margin,
+    # it is a wall: a module declaration is ONE line, so the next lane to
+    # add an `e2e_*` child reddens `size-gate` AND `check` on main for
+    # everyone, exactly as `4839d3dd8` did on 30 Aug. Eighteen chips were
+    # dispatched on 31 Aug and at least eight are in the norar/repair
+    # families, so this was taken as its own claimed commit ahead of
+    # them rather than left for whichever lane happened to trip it.
+    # The seam is THE NON-RAR CONTAINERS AT THE TOP LEVEL - the first of
+    # the two the previous round read and deliberately passed over - and
+    # its subject is one question end to end: what the chase does when
+    # the outermost thing on the wire is a container the RAR reader
+    # cannot open. Thirteen tests over both formats: single file, byte-
+    # split set (`.7z.001`, `.zip.001` and the bare-numeric hjsplit
+    # shape), a store RAR wrapping a zip, the retention-cap trim and the
+    # demote that must land identically when the trim cannot happen, the
+    # damaged post that materializes and repairs on disk, the encrypted
+    # zip the chase decrypts in stream, and the zip it DECLINES. 748
+    # lines to tests/e2e_containers/, one `mod` line back.
+    # THREE RANGES RATHER THAN ONE, which is why the previous round named
+    # this seam and left it: `incompressible`, `sevenz_container` and
+    # `sevenz_store_container` are defined INSIDE the block and are
+    # reached through `super::` by e2e_chaseresume, e2e_resume, e2e_tar
+    # and e2e_zipsplit, so they stayed put - moving them would respell a
+    # path in four sibling files to buy about fifty lines. They now sit
+    # together where the block used to be, beside the other shared
+    # fixture builders.
+    # A PURE MOVE: no test body changed, and the name set was compared
+    # mechanically before and after - the only difference is the
+    # `e2e_containers::` prefix on those thirteen.
+    # THE ENTRY STAYS, and the arithmetic is unchanged from the note
+    # below: the flat ceiling is 3,000, so 3,280 lines have still to
+    # leave, and an entry's slack is 2% of ITSELF - cutting deeper buys
+    # LESS margin, not more. A subject per round. The seam left for the
+    # next round is THE ENCRYPTED ARCHIVES (~400 contiguous at what is
+    # now ~5,540 - the RAR5 store and `-hp` sidecar password probes and
+    # the probe miss - plus scattered legs around `enc_store`).
+    "crates/nzbfast/tests/e2e.rs": 6280,
     # 7165 when first measured, 7375, then 7629 after the 8 Aug burst.
     # Two concurrent sessions emptied it in turn, both on the
     # cleanup_mode_tests pattern: `trash_tests` + `out_umask_tests` to
@@ -570,6 +623,58 @@ BASELINE_FNS = {
     # the ceiling, so its entry is GONE.
 }
 
+
+# The two limit rules, factored out of main() so the REPORT and the VERDICT
+# cannot drift apart. A report that disagrees with the gate it ships inside
+# is worse than no report: it is a wrong number carrying the gate's
+# authority, which is exactly the class of defect the split chips already
+# hit by computing these by hand. Both return the same expression main()
+# used before, unchanged, plus the name of the regime it came from.
+def file_limit(path):
+    """(limit, kind) for a file. kind is 'flat' or 'baselined'."""
+    if path in BASELINE_FILES:
+        return int(BASELINE_FILES[path] * SLACK), "baselined"
+    return FILE_CEILING, "flat"
+
+
+def fn_limit(key):
+    """(limit, kind) for a `path::name` production function key."""
+    if key in BASELINE_FNS:
+        return int(BASELINE_FNS[key] * SLACK), "baselined"
+    return FN_CEILING, "flat"
+
+
+def split_gain(size, free, kind, ceiling):
+    """Headroom a split can BUY, at its very best. None means 'line for line'.
+
+    This is the whole point of the report and it is not symmetric.
+
+    FLAT: the limit is a constant, so every line removed is a line of
+    headroom gained, without bound. None.
+
+    BASELINED: the house convention on every historical entry is to ratchet
+    the baseline down to the file's new exact size in the same commit as the
+    split (daemon.rs: 11,803 -> 11,590 -> 11,517 -> 10,466 -> 10,030 ->
+    9,132). So after cutting k lines the new free is
+    `int((size-k)*SLACK) - (size-k)`, which is MAXIMISED AT k=0 and falls
+    from there - the gain is best for the smallest possible split, which is
+    the tell that splitting is not a lever at all here. Returns that maximum
+    minus what is already free, so 0 means a split buys nothing.
+
+    The one escape is driving the target under the flat ceiling outright, at
+    which point the entry is deleted and the regime changes; `to_flat` in the
+    row says how many lines that is.
+    """
+    if kind != "baselined":
+        return None
+    best = int(size * SLACK) - size
+    if size <= ceiling:
+        # Already under the flat ceiling: the gate refuses the stale entry
+        # rather than applying it, so there is nothing to model.
+        return None
+    return best - free
+
+
 CFG_TEST = re.compile(r"\s*#\[cfg\(test\)\]")
 # The `#[path = "x_tests.rs"] mod x_tests;` hook puts an attribute between
 # the cfg and the mod, and the old pattern stopped dead at it - every file
@@ -774,6 +879,159 @@ def collect():
     return files_out, fns_out
 
 
+def largest_prod_fns(fns):
+    """{path::name: (span, line)} for production fns - main()'s own reduction.
+
+    A name can appear more than once in a file (two `impl` blocks, a cfg
+    pair); main() gates the LARGEST, so the report must score the largest
+    too or it would report a margin the gate does not use.
+    """
+    out = {}
+    for p, name, line, span, is_test in fns:
+        if is_test:
+            continue
+        key = f"{p}::{name}"
+        if span > out.get(key, (0, 0))[0]:
+            out[key] = (span, line)
+    return out
+
+
+def _row(label, size, limit, kind, ceiling):
+    free = limit - size
+    return {
+        "label": label,
+        "size": size,
+        "limit": limit,
+        "free": free,
+        "kind": kind,
+        "gain": split_gain(size, free, kind, ceiling),
+        # Lines that would have to come off for a baselined target to drop
+        # under the flat ceiling, which DELETES its entry and changes the
+        # regime. None where that does not apply.
+        "to_flat": (size - ceiling) if kind == "baselined" and size > ceiling else None,
+    }
+
+
+def headroom_rows(files, fns):
+    """(file_rows, fn_rows), each sorted by free ASCENDING.
+
+    Ascending, so line 1 is the thing about to redden main. `--list` sorts
+    by SIZE, which ranks a 500-of-500 function below a 400-of-9,000 one.
+    """
+    frows = [_row(p, n, *file_limit(p), FILE_CEILING) for p, n in files]
+    nrows = []
+    for key, (span, line) in largest_prod_fns(fns).items():
+        p, name = key.rsplit("::", 1)
+        nrows.append(_row(f"{p}:{line}  {name}", span, *fn_limit(key), FN_CEILING))
+    # Deterministic: tightest first, then biggest, then by name.
+    def keyf(r):
+        return (r["free"], -r["size"], r["label"])
+
+    return sorted(frows, key=keyf), sorted(nrows, key=keyf)
+
+
+HEADROOM_LEGEND = """  The two ceilings are different IN KIND, not in degree. Read this before
+  pricing any split, and never pair a tight flat row with a tight baselined
+  one as though they were one problem.
+  flat      = the {ceiling:,}-line ceiling. A split converts LINE FOR LINE into
+              headroom: take N lines out and there are N more.
+  baselined = the limit is the recorded baseline x {slack}, and the house ratchet
+              re-centres that same 2% on the new size, so a split does NOT
+              convert. The `^` note under each such row is the MOST any split
+              can buy, and it SHRINKS as the split grows - the gain is
+              maximised by the smallest possible split, which is the tell that
+              splitting is not a lever here. {remedy}"""
+
+FILE_REMEDY = (
+    "Send new rows to a child\n              module instead (tests/daemon.rs already has 39), or drive the\n"
+    "              file under the flat ceiling outright, which deletes the entry."
+)
+FN_REMEDY = (
+    "Lift self-contained stretches out to\n              sibling functions until the body is under the flat ceiling, which\n"
+    "              deletes the entry."
+)
+
+
+def narrowest_line(frows, nrows):
+    """The tightest file and the tightest production fn, as one line.
+
+    The gate is PASS/FAIL, so its clean line said nothing about how close
+    anything was - and this class recurred five times in the four days to
+    31 Aug 2026, twice reddening main outright, every instance found by a
+    human running `--list` and doing the subtraction by hand. Nobody runs
+    `--list` on a push; everybody runs the gate. So the number rides on the
+    line the gate ALREADY prints.
+
+    It is deliberately NOT a warn tier. A refusal at some threshold is a
+    real judgement with a real trade - a gate red for a reason nobody can
+    act on gets loosened until it means nothing, and a warning nobody must
+    act on decays the same way - and that decision is not this patch's to
+    make. This is a number on a line that was already there.
+    """
+    bits = []
+    for tag, rows in (("file", frows), ("fn", nrows)):
+        if not rows:
+            continue
+        r = rows[0]
+        # The fn label is column-padded for the table; collapse it inline.
+        label = " ".join(r["label"].split())
+        bits.append(f"{tag} {label} {r['free']:,} free of {r['limit']:,}")
+    if not bits:
+        return None
+    return "  narrowest: " + "; ".join(bits) + "  (`--headroom` for the rest)"
+
+
+def print_headroom(title, rows, top, ceiling, remedy):
+    print(f"=== {title} (headroom ascending) ===")
+    print("     free      size     limit  used  ceiling")
+    shown = rows[:top]
+    # A baselined target is the one this report exists to distinguish, and it
+    # does NOT reliably rank near the top: its free is up to 2% of a large
+    # size, so on 31 Aug 2026 neither baselined FILE was in the tightest
+    # twelve while every flat row above them was under 100 lines. Cutting
+    # them off at the fold would hide exactly the class the reader came for.
+    cut = [r for r in rows[top:] if r["kind"] == "baselined"]
+    for r in shown + cut:
+        # FLOOR, never round: 2,990 of 3,000 rounds to 100% and reads as
+        # "at the limit" when there are ten lines left. Only an exact 100%
+        # may print 100.
+        used = int(100 * r["size"] / r["limit"]) if r["limit"] else 0
+        print(
+            f"  {r['free']:7,}  {r['size']:8,}  {r['limit']:8,}  {used:3d}%  "
+            f"{r['kind']:<9}  {r['label']}"
+        )
+        if r["kind"] == "baselined":
+            gain = "buys nothing" if not r["gain"] else f"buys at most +{r['gain']:,}, and less the bigger it is"
+            flat = (
+                f"; {r['to_flat']:,} lines takes it under the {ceiling:,} ceiling and deletes the entry"
+                if r["to_flat"]
+                else ""
+            )
+            print(f"             ^ a split+ratchet {gain}{flat}")
+    if cut:
+        print(f"  ({len(cut)} baselined row(s) shown from below the fold - see the legend)")
+    print(HEADROOM_LEGEND.format(ceiling=ceiling, slack=SLACK, remedy=remedy))
+
+
+def report_headroom(top=25):
+    files, fns = collect()
+    frows, nrows = headroom_rows(files, fns)
+    # Failing to find is failing: an inert scanner shows a zero rather than
+    # a clean-looking report. Both corpora are in the thousands on this tree.
+    if not frows or not nrows:
+        print(
+            f"size-gate: --headroom reached {len(frows)} file(s) and {len(nrows)} production "
+            "fn(s) - run it from the repo root; a report over nothing is not a report.",
+            file=sys.stderr,
+        )
+        return 1
+    print_headroom("files closest to their ceiling", frows, top, FILE_CEILING, FILE_REMEDY)
+    print()
+    print_headroom("production fns closest to their ceiling", nrows, top, FN_CEILING, FN_REMEDY)
+    print(f"\n  ({len(frows):,} files, {len(nrows):,} production fns scored)")
+    return 0
+
+
 # (name, fn name, expected is_test, source). The BRACE-LESS cases are the
 # ones that motivated the fix in test_line_mask: each of them scores
 # is_test=True against the brace-only scanner this gate shipped with, which
@@ -848,6 +1106,267 @@ SELFTEST_NOISE = [
 ]
 
 
+# Floors for the --headroom real-tree pin below. Comfortably under the tree
+# as measured 31 Aug 2026 (775 files, 6,674 production fns) and enormously
+# over zero: what this refuses is a report that has quietly stopped reaching
+# anything, which reads as a clean tree forever.
+HEADROOM_FILE_FLOOR = 500
+HEADROOM_FN_FLOOR = 4000
+
+# Fixture corpus for the headroom row builder: (path, raw lines) plus the
+# baselines to score it against. Sizes are chosen so both regimes appear and
+# so ordering is unambiguous.
+HEADROOM_FIXTURE_FILES = [
+    ("crates/a/flat_tight.rs", 2990),  # flat, 10 free
+    ("crates/a/flat_roomy.rs", 100),  # flat, 2,900 free
+    ("crates/a/based.rs", 9184),  # baselined 9,132 -> limit 9,314, 130 free
+]
+HEADROOM_FIXTURE_BASE = {"crates/a/based.rs": 9132}
+
+# Number of assertions in selftest_headroom(). Printed on a green run so a
+# case deleted to quiet a mutation shows up in the output - the count is the
+# only thing that can report an arm removed rather than fixed.
+HEADROOM_CASES = 27
+
+# Same convention, for selftest_argv() below.
+ARGV_CASES = 6
+
+
+def selftest_headroom():
+    """Pin the --headroom report: the arithmetic, the asymmetry, the counts.
+
+    The arithmetic cases are deliberately written against LITERAL expected
+    numbers rather than against the module's own expressions - a pin that
+    recomputes what it is pinning proves nothing.
+    """
+    bad = 0
+    ran = 0
+
+    def check(ok, msg):
+        """One assertion. Counted whether it passes or fails, so HEADROOM_CASES
+        below can refuse a case that was DELETED rather than fixed."""
+        nonlocal bad, ran
+        ran += 1
+        if not ok:
+            print(f"  selftest FAIL: {msg}", file=sys.stderr)
+            bad += 1
+
+    def fail(msg):
+        nonlocal bad, ran
+        ran += 1
+        print(f"  selftest FAIL: {msg}", file=sys.stderr)
+        bad += 1
+
+    # 1. The two limit rules, both regimes, both tables.
+    saved_f, saved_n = dict(BASELINE_FILES), dict(BASELINE_FNS)
+    try:
+        BASELINE_FILES.clear()
+        BASELINE_FILES.update({"crates/a/based.rs": 9132})
+        BASELINE_FNS.clear()
+        BASELINE_FNS.update({"crates/a/x.rs::big": 700})
+        check(
+            file_limit("crates/a/flat.rs") == (3000, "flat"),
+            f"file_limit on an unlisted file gave {file_limit('crates/a/flat.rs')}, wanted (3000, 'flat')",
+        )
+        check(
+            file_limit("crates/a/based.rs") == (9314, "baselined"),
+            f"file_limit on a baselined file gave {file_limit('crates/a/based.rs')}, wanted (9314, 'baselined')",
+        )
+        check(
+            fn_limit("crates/a/x.rs::small") == (500, "flat"),
+            f"fn_limit on an unlisted fn gave {fn_limit('crates/a/x.rs::small')}, wanted (500, 'flat')",
+        )
+        check(
+            fn_limit("crates/a/x.rs::big") == (714, "baselined"),
+            f"fn_limit on a baselined fn gave {fn_limit('crates/a/x.rs::big')}, wanted (714, 'baselined')",
+        )
+
+        # 2. THE ASYMMETRY, which is the whole reason this mode exists.
+        # Flat converts line for line, so there is no bound to model.
+        check(
+            split_gain(2990, 10, "flat", FILE_CEILING) is None,
+            "split_gain on a flat target must be None (line for line), not a number",
+        )
+        # Baselined: size 9,184 with 130 free can reach int(9184*1.02)-9184 =
+        # 183 by ratcheting alone, so a split buys at most 53.
+        check(
+            split_gain(9184, 130, "baselined", FILE_CEILING) == 53,
+            f"split_gain(9184, 130, baselined) gave "
+            f"{split_gain(9184, 130, 'baselined', FILE_CEILING)}, wanted 53",
+        )
+        # ...and it SHRINKS as the split grows. This is the falsifiable form
+        # of the finding: a bigger split is a WORSE outcome, which is why
+        # splitting a baselined target is not a lever at all. Each split is
+        # modelled by ratcheting the baseline to the post-split size, which
+        # is what every historical entry in BASELINE_FILES actually did.
+        gains = [int((9184 - k) * SLACK) - (9184 - k) for k in (0, 500, 1000, 2000)]
+        check(
+            gains[0] > gains[1] > gains[2] > gains[3],
+            f"the split-gain curve must FALL as the split grows; measured {gains}",
+        )
+        # A baselined target already under the flat ceiling has a stale entry
+        # the gate refuses outright, so there is nothing to model.
+        check(
+            split_gain(100, 2, "baselined", FILE_CEILING) is None,
+            "split_gain on a baselined target under the flat ceiling must be None",
+        )
+
+        # 3. The row builder, over a fixture corpus with EXACT counts and
+        # EXACT order - ascending by free, so line 1 is the urgent one.
+        BASELINE_FILES.clear()
+        BASELINE_FILES.update(HEADROOM_FIXTURE_BASE)
+        BASELINE_FNS.clear()
+        fixture_fns = [
+            ("crates/a/x.rs", "tight", 10, 497, False),
+            ("crates/a/x.rs", "roomy", 90, 20, False),
+            ("crates/a/x.rs", "a_test", 200, 900, True),  # test fns are not gated
+            # The same name twice: main() gates the LARGEST, so the report
+            # must score the largest too or it reports a margin nothing uses.
+            ("crates/a/y.rs", "dup", 10, 100, False),
+            ("crates/a/y.rs", "dup", 400, 480, False),
+        ]
+        frows, nrows = headroom_rows(HEADROOM_FIXTURE_FILES, fixture_fns)
+        check(len(frows) == 3, f"headroom_rows built {len(frows)} file rows over a 3-file fixture")
+        check(
+            [r["label"] for r in frows]
+            == ["crates/a/flat_tight.rs", "crates/a/based.rs", "crates/a/flat_roomy.rs"],
+            f"file rows are not sorted by free ascending: {[r['label'] for r in frows]}",
+        )
+        check(
+            [(r["free"], r["kind"]) for r in frows] == [(10, "flat"), (130, "baselined"), (2900, "flat")],
+            f"file row free/kind wrong: {[(r['free'], r['kind']) for r in frows]}",
+        )
+        check(frows[1]["to_flat"] == 6184, f"to_flat on the baselined row is {frows[1]['to_flat']}, wanted 6184")
+        check(len(nrows) == 3, f"headroom_rows built {len(nrows)} fn rows over a fixture with 3 production fns")
+        check(
+            nrows[0]["free"] == 3 and "tight" in nrows[0]["label"],
+            f"tightest fn row is {nrows[0]['label']} at {nrows[0]['free']} free, wanted tight at 3",
+        )
+        dup = [r for r in nrows if "dup" in r["label"]]
+        check(
+            len(dup) == 1 and dup[0]["size"] == 480,
+            f"a duplicated fn name must score its LARGEST span; got {[r['size'] for r in dup]}",
+        )
+        check(
+            not any("a_test" in r["label"] for r in nrows),
+            "a test fn reached the headroom report - only production fns are gated",
+        )
+
+        # 4. A baselined row BELOW the fold is still printed. It does not
+        # reliably rank near the top (its free is up to 2% of a large size -
+        # on 31 Aug 2026 neither baselined FILE was in the tightest twelve),
+        # so cutting it off at the fold hides the class the reader came for.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_headroom("t", frows, 1, FILE_CEILING, FILE_REMEDY)
+        text = buf.getvalue()
+        check("crates/a/based.rs" in text, "a baselined row below the fold was dropped from the report")
+        check("flat_roomy" not in text, "a FLAT row below the fold was printed - only baselined rows are rescued")
+        check("buys at most +53" in text, "the baselined row printed no split-gain note")
+
+        # 5a. The narrowest line the GATE itself prints. This is the only
+        # margin most lanes ever see - nobody runs --list on a push.
+        line = narrowest_line(frows, nrows)
+        check(
+            line is not None and "crates/a/flat_tight.rs 10 free of 3,000" in line,
+            f"narrowest_line did not name the tightest file: {line!r}",
+        )
+        check(
+            line is not None and "fn crates/a/x.rs:10 tight 3 free of 500" in line,
+            f"narrowest_line did not name the tightest production fn: {line!r}",
+        )
+        check(narrowest_line([], []) is None, "narrowest_line over nothing must be None, not a line about nothing")
+
+        # 5. used% must FLOOR: 2,990 of 3,000 is 99, never 100. Rounded up it
+        # reads as "at the limit" with ten lines still to spend.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_headroom("t", [frows[0]], 5, FILE_CEILING, FILE_REMEDY)
+        check("100%" not in buf.getvalue(), "used% rounded 2,990 of 3,000 up to 100 - it must floor")
+    finally:
+        BASELINE_FILES.clear()
+        BASELINE_FILES.update(saved_f)
+        BASELINE_FNS.clear()
+        BASELINE_FNS.update(saved_n)
+
+    # 6. The real tree. A report that has quietly stopped reaching anything
+    # reads as a clean tree forever, so floor what it reaches and require
+    # every baselined entry to appear as a row of its own.
+    try:
+        files, fns = collect()
+    except OSError as e:
+        fail(f"could not read the tree for the headroom pin ({e}) - run from the repo root")
+        return bad
+    frows, nrows = headroom_rows(files, fns)
+    check(
+        len(frows) >= HEADROOM_FILE_FLOOR,
+        f"--headroom reached {len(frows)} files, floor is {HEADROOM_FILE_FLOOR} - run from the repo root",
+    )
+    check(
+        len(nrows) >= HEADROOM_FN_FLOOR,
+        f"--headroom reached {len(nrows)} production fns, floor is {HEADROOM_FN_FLOOR}",
+    )
+    # A floor of zero is an assertion about nothing, which is how a floor
+    # stops being a floor. Found by mutation: lowering HEADROOM_FILE_FLOOR to
+    # 0 was the one arm-mutation the rest of this selftest could not see.
+    check(
+        HEADROOM_FILE_FLOOR > 0 and HEADROOM_FN_FLOOR > 0,
+        f"the headroom floors must be positive; they are "
+        f"{HEADROOM_FILE_FLOOR} and {HEADROOM_FN_FLOOR}",
+    )
+    labelled = {r["label"] for r in frows if r["kind"] == "baselined"}
+    check(
+        labelled == set(BASELINE_FILES),
+        f"baselined file rows {sorted(labelled)} do not match BASELINE_FILES {sorted(BASELINE_FILES)}",
+    )
+    # The case count itself, so an arm DELETED to quiet a mutation is a
+    # failure rather than a quieter green.
+    if ran != HEADROOM_CASES:
+        print(
+            f"  selftest FAIL: headroom ran {ran} cases, HEADROOM_CASES says {HEADROOM_CASES} - "
+            "a case was added or deleted without moving the count",
+            file=sys.stderr,
+        )
+        bad += 1
+    return bad
+
+
+def selftest_argv():
+    """Pin argument recognition: an unknown flag must be a REFUSAL, never a
+    silent skip that falls through to the ordinary clean verdict about a
+    request nobody honoured. Reproduced 31 Aug 2026 against origin/main:
+    `tools/size-gate.py --this-flag-does-not-exist` printed the clean gate
+    line at exit 0."""
+    bad = 0
+    ran = 0
+
+    def check(ok, msg):
+        nonlocal bad, ran
+        ran += 1
+        if not ok:
+            print(f"  selftest FAIL: {msg}", file=sys.stderr)
+            bad += 1
+
+    check(
+        unrecognised_argv(["--this-flag-does-not-exist"]) == "--this-flag-does-not-exist",
+        "an unknown flag must be reported, not silently ignored",
+    )
+    check(unrecognised_argv([]) is None, "no args must not be treated as unrecognised")
+    check(unrecognised_argv(["--list"]) is None, "--list must still be recognised")
+    check(unrecognised_argv(["--headroom"]) is None, "--headroom must still be recognised")
+    check(unrecognised_argv(["--headroom=10"]) is None, "--headroom=N must still be recognised")
+    check(unrecognised_argv(["--selftest"]) is None, "--selftest must still be recognised")
+
+    if ran != ARGV_CASES:
+        print(
+            f"  selftest FAIL: argv ran {ran} cases, ARGV_CASES says {ARGV_CASES} - "
+            "a case was added or deleted without moving the count",
+            file=sys.stderr,
+        )
+        bad += 1
+    return bad
+
+
 def selftest():
     bad = 0
     for name, fn_name, want_test, src in SELFTEST:
@@ -881,10 +1400,15 @@ def selftest():
             file=sys.stderr,
         )
         bad += 1
+    bad += selftest_headroom()
+    bad += selftest_argv()
     if bad:
         print(f"\nsize-gate: {bad} selftest case(s) failed - the gate is not doing its job.", file=sys.stderr)
         return 1
-    print(f"size-gate: selftest ok ({len(SELFTEST)} scope cases, {len(SELFTEST_NOISE)} tokenizer cases)")
+    print(
+        f"size-gate: selftest ok ({len(SELFTEST)} scope cases, {len(SELFTEST_NOISE)} tokenizer cases, "
+        f"{HEADROOM_CASES} headroom cases, {ARGV_CASES} argv cases)"
+    )
     return 0
 
 
@@ -912,9 +1436,51 @@ def _brace_only_mask(clean_lines):
     return mask
 
 
+KNOWN_FLAGS = {"--selftest", "--headroom", "--list"}
+
+
+def unrecognised_argv(argv):
+    """First arg outside the known set (bare, or `--headroom=N`), or None."""
+    for a in argv:
+        if a in KNOWN_FLAGS or a.startswith("--headroom="):
+            continue
+        return a
+    return None
+
+
 def main():
     if "--selftest" in sys.argv:
         return selftest()
+
+    # An unrecognised flag is a REFUSAL naming it, never a silent skip - a
+    # stale checkout running a flag this script has not learned yet must not
+    # read as a clean verdict about a request nobody honoured. Reproduced
+    # 31 Aug 2026: `--this-flag-does-not-exist` fell through every check
+    # below and printed the ordinary clean gate at exit 0.
+    bad_arg = unrecognised_argv(sys.argv[1:])
+    if bad_arg is not None:
+        print(
+            f"size-gate: unrecognised argument {bad_arg!r} - known flags are "
+            "--list, --headroom[=N], --selftest, or no args for the gate. "
+            "A stale checkout may be missing a flag this script now supports "
+            "- merge origin/main.",
+            file=sys.stderr,
+        )
+        return 1
+
+    for a in sys.argv[1:]:
+        # `--headroom=N` for a longer or shorter fold; the default 25 matches
+        # --list's. A junk N is a refusal rather than a silent default - a
+        # report that quietly ignores what was asked for is how a reader ends
+        # up trusting a number nobody produced.
+        if a == "--headroom":
+            return report_headroom()
+        if a.startswith("--headroom="):
+            n = a.split("=", 1)[1]
+            if not n.isdigit() or int(n) < 1:
+                print(f"size-gate: --headroom={n} is not a positive count", file=sys.stderr)
+                return 1
+            return report_headroom(int(n))
 
     files, fns = collect()
 
@@ -930,15 +1496,21 @@ def main():
         test = [f for f in fns if f[4]]
         for p, name, line, span, _ in sorted(test, key=lambda x: -x[3])[:10]:
             print(f"  {span:7,}  {p}:{line}  {name}")
+        # At the FOOT on purpose: three handoffs and two chip queues pipe
+        # this mode through `head -4` / `head -6`, so nothing may move above
+        # the first rows.
+        print(
+            "\n  (this mode sorts by SIZE and prints no limit - to price a split, use\n"
+            "   --headroom, which sorts by what is CLOSEST to its ceiling and says\n"
+            "   which KIND of ceiling that is. The two kinds do not split alike.)"
+        )
         return 0
 
     errors = []
 
     seen_files = {p: n for p, n in files}
     for p, n in sorted(files):
-        limit = FILE_CEILING
-        if p in BASELINE_FILES:
-            limit = int(BASELINE_FILES[p] * SLACK)
+        limit, _kind = file_limit(p)
         if n > limit:
             errors.append(
                 f"file {p} is {n:,} raw lines (limit {limit:,})"
@@ -953,17 +1525,9 @@ def main():
                 "delete its baseline entry (the list only shrinks)"
             )
 
-    prod_fns = {}
-    for p, name, line, span, is_test in fns:
-        if is_test:
-            continue
-        key = f"{p}::{name}"
-        if span > prod_fns.get(key, (0, 0))[0]:
-            prod_fns[key] = (span, line)
+    prod_fns = largest_prod_fns(fns)
     for key, (span, line) in sorted(prod_fns.items()):
-        limit = FN_CEILING
-        if key in BASELINE_FNS:
-            limit = int(BASELINE_FNS[key] * SLACK)
+        limit, _kind = fn_limit(key)
         if span > limit:
             p, name = key.rsplit("::", 1)
             errors.append(
@@ -986,6 +1550,9 @@ def main():
             f"size-gate: clean ({len(files)} files, {len(prod_fns)} production fns; "
             f"{n_files} file + {n_fns} fn baseline entries still to burn down)"
         )
+        line = narrowest_line(*headroom_rows(files, fns))
+        if line:
+            print(line)
         return 0
 
     print(f"size-gate: {len(errors)} violation(s):\n", file=sys.stderr)

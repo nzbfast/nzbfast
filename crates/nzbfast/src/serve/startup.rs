@@ -1062,6 +1062,9 @@ fn build_daemon(
         out_root: std::sync::RwLock::new(out_root.clone()),
         move_completed: std::sync::RwLock::new(None),
         move_completed_cats: std::sync::RwLock::new(Vec::new()),
+        // TODO 317: opt-in and OFF by default. See `Daemon::write_through`.
+        write_through: AtomicBool::new(false),
+        write_through_cats: Mutex::new(Vec::new()),
         spool: spool.clone(),
         cfg_path: config.clone(),
         cats: Mutex::new(DEFAULT_CATS.iter().map(|s| s.to_string()).collect()),

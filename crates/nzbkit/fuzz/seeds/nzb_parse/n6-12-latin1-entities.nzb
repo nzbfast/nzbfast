@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <head><meta type="title">gesch&auml;ndeten &amp; more</meta></head>
+  <file subject="&quot;Gru&szlig;.Datei.f&uuml;r.alle.mkv&quot; yEnc (1/1)" poster="Po&eacute;t &lt;p@news.example&gt;" date="1">
+    <groups><group>alt.binaries.t&#101;st</group></groups>
+    <segments><segment bytes="10" number="1">a&#46;b@news.example</segment></segments>
+  </file>
+</nzb>

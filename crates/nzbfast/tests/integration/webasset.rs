@@ -356,3 +356,43 @@ fn the_manual_is_served_from_its_build_time_member() {
     let (head, _) = http_raw(port, "/manual/zz", "");
     assert!(head.starts_with("HTTP/1.1 404"), "{head}");
 }
+
+/// An *arr whose download-client Test refuses a category hands the user
+/// a link built from OUR host and port - `/config/categories/`, because
+/// it thinks it is talking to SABnzbd. Measured 31 Aug 2026: we answered
+/// 404, so the first button a stuck user presses gave them a dead link.
+///
+/// Both spellings are pinned. The client sends the trailing slash, and
+/// the router's normalizer is what makes the two one route - so a change
+/// that moved this arm above the normalizer would pass the bare spelling
+/// and still 404 the one that is actually sent.
+///
+/// The Location is pinned exactly, not merely tested for being a
+/// redirect: `#settings/categories` is the Categories card's own deep
+/// link (`data-sk="categories"` in web/dashboard.html), and a redirect
+/// to a hash the page does not honour lands the user at Getting started
+/// with no sign anything went wrong - which is the same dead end one
+/// step further in.
+#[test]
+fn the_sab_category_settings_link_lands_on_our_categories_card() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-catlink-{}", std::process::id()));
+    let dir = scratch::ScratchDir::attach(&dir);
+    std::fs::write(dir.join("config.json"), "{\"servers\":[]}").unwrap();
+    let daemon = serve(&dir);
+    let port = daemon.port;
+
+    for path in ["/config/categories", "/config/categories/"] {
+        let (head, body) = http_raw(port, path, "");
+        let first = head.lines().next().unwrap_or_default();
+        assert!(
+            first.contains(" 302 "),
+            "{path} should redirect, got: {first}"
+        );
+        assert_eq!(
+            header(&head, "Location"),
+            Some("/#settings/categories"),
+            "{path} must land on the Categories card, head: {head}"
+        );
+        assert!(body.is_empty(), "{path} redirect should carry no body");
+    }
+}

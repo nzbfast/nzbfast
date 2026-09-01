@@ -302,8 +302,9 @@ fn an_ordinary_unpack_failure_carries_no_reason() {
     // rung runs AFTER a repair, which is `try_unrar_spent_why` again.
     assert_eq!(crate::rarfix::try_rar_rr_repair_why(&dir, None), Err(None));
     // Its hinted twin is the same function with the PAR2 verdict in
-    // hand, and an empty hint must not change the answer - the two
-    // `get/settle.rs` callers take one arm each.
+    // hand, and an empty hint must not change the answer. The two
+    // settle-side callers take one arm each: the hinted one in
+    // `get/settle/repair.rs`, the plain one in `get/settle/noset.rs`.
     assert_eq!(
         crate::rarfix::try_rar_rr_repair_hinted_why(&dir, None, None),
         Err(None)

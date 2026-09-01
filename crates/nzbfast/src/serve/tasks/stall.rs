@@ -1170,6 +1170,227 @@ fn partial_gone_defer(
     ))
 }
 
+/// What one sustained watchdog window measured about the active job, and
+/// the two facts the deferring arms gate on beside it.
+///
+/// A struct rather than loose parameters: [`outage_defer`] and
+/// [`windowed_gone_defer`] read overlapping subsets of six values, and
+/// one value makes it unrepresentable to hand them a window and an
+/// elapsed time taken on different ticks.
+struct Windowed {
+    /// Bytes the whole fleet moved across the window.
+    total: u64,
+    /// What the window actually spans, in seconds - never the configured
+    /// length, which the caller's `span < window * 0.8` bail only bounds
+    /// from below.
+    span: f64,
+    /// Articles asked for inside this window, and refused inside it.
+    /// Deltas and never run totals, for the reason the caller states: a
+    /// job that fetched half a release and only then hit a dead patch
+    /// still holds the queue, and cumulative counts would let its early
+    /// successes mask that forever.
+    tried_delta: u64,
+    missing_delta: u64,
+    /// Seconds since the ACTIVE job started, which is what the warmup is
+    /// measured against.
+    elapsed: u64,
+    /// How many times this job has already been deferred.
+    defer_count: u32,
+}
+
+/// Wedged behind a dead server: defer and move on.
+///
+/// "A wholly stalled job is the pool's retry logic's problem"
+/// (the bail in [`spawn_slow_job_watchdog`]) is true of a job
+/// whose articles are 430ing their
+/// way through a refusal ladder - that is real progress with
+/// no bytes to show for it. It is NOT true when a configured
+/// server has been granting no connection at all for the
+/// whole window: the pool is waiting on a socket, the retry
+/// logic has nothing to retry, and the whole QUEUE sits
+/// behind one job that cannot move. That case reached that
+/// `total == 0` bail and stopped there, which is how
+/// two soak jobs held the queue for 25 minutes (11->12 Aug).
+///
+/// Deferring is cheap and reversible: the journal keeps every
+/// landed article, `pick_job` runs a deferred job whenever
+/// nothing else is available, and if the whole queue is
+/// deferred it comes straight back. `others_waiting` is the
+/// point - with nothing else to run, sitting here is right.
+///
+/// Split out of [`spawn_slow_job_watchdog`] under the size gate's
+/// 500-line function ceiling (31 Aug 2026), body verbatim, into the same
+/// `-> Option<String>` shape [`early_gone_defer`] and
+/// [`partial_gone_defer`] already have: `Some(reason)` means defer and
+/// the caller fires it.
+fn outage_defer(
+    d: &Arc<Daemon>,
+    live: &nzbkit::pool::LiveStats,
+    m: &Windowed,
+    warmup: u64,
+) -> Option<String> {
+    if m.total == 0
+        && d.auto_defer.load(Ordering::Relaxed)
+        && m.elapsed >= warmup
+        && m.defer_count < 3
+        && d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
+        && others_waiting(d)
+        // TODO 308: THIS job's gauges, never the hub's.
+        && let Some(o) = outages_in(live)
+            .into_iter()
+            .find(|o| o.secs >= m.span as u64 && o.secs >= server_down_secs())
+    {
+        let span = m.span;
+        return Some(format!(
+            "{} has had no usable connection for {}s ({}) and nothing \
+             has arrived for {:.0}s - the articles this job still needs \
+             are only on that server",
+            o.host, o.secs, o.kind, span
+        ));
+    }
+    None
+}
+
+/// The post is gone: servers healthy, every answer a 430.
+///
+/// [`outage_defer`] covers a server that grants no
+/// CONNECTION. This is the other shape of a zero-byte window,
+/// and since TODO 306 it is the SLOWEST of the three arms
+/// that reach it: `early_gone_defer` takes the same verdict
+/// off the run and `partial_gone_defer` off a flatline
+/// inside the window, both with no warmup. It is not
+/// redundant, because both twins ask for something this one
+/// does not - every server having ANSWERED a refusal itself
+/// ([`fleet_answered`]). A fleet with a server that is up
+/// and has simply never been asked stands both of them down
+/// forever, and that fleet is this arm's territory ALONE -
+/// the whole of it, which `fleet_answered`'s own doc
+/// comment now argues at length after this comment claimed
+/// a second shape for nine days and had none.
+/// `e2e_qprog::an_unprobed_server_leaves_the_windowed_arm_to_speak`
+/// drives it end to end.
+/// and the `total == 0` bail in [`spawn_slow_job_watchdog`]
+/// sends it to the pool's
+/// retry logic on the reasoning that articles "430ing their
+/// way through a refusal ladder" are real progress. They are,
+/// right up until every one of them is a refusal - then the
+/// ladder has nothing left to climb and the queue sits behind
+/// a post no configured server carries.
+///
+/// Measured 14 Aug 2026: two 21-day-old teevee releases whose
+/// articles are all taken down held the queue for 10+ minutes
+/// each, at 0.0 MB/s, while other jobs waited. The engine had
+/// already PROVED it - the prefetch lane logged "post is
+/// gone: not one of the 14087 article(s) is on any server" -
+/// but that verdict died with the sidecar and the main job
+/// started over from scratch.
+///
+/// Separating the two shapes is the miss counter, not the
+/// clock: a wedged server answers nothing, so `missing_delta`
+/// stays 0 and this arm cannot fire on it. Zero bytes plus
+/// refusals means the answers arrived and every one was "no
+/// such article".
+///
+/// Deferring, not failing: this says "unservable right now",
+/// which a provider outage or a still-propagating post also
+/// looks like. `pick_job` runs a deferred job when nothing
+/// else is available, the journal keeps every landed article,
+/// and the give-up breaker and post-download health verdict
+/// remain the things that decide a job is finally dead.
+///
+/// Split out of [`spawn_slow_job_watchdog`] under the size gate's
+/// 500-line function ceiling (31 Aug 2026), body verbatim, into the same
+/// `-> Option<String>` shape as its two twins.
+fn windowed_gone_defer(
+    d: &Arc<Daemon>,
+    m: &Windowed,
+    warmup: u64,
+    gone_min_misses: u64,
+) -> Option<String> {
+    if m.total == 0
+        && m.missing_delta >= gone_min_misses
+        && m.tried_delta > 0
+        && d.auto_defer.load(Ordering::Relaxed)
+        && m.elapsed >= warmup
+        && m.defer_count < 3
+        && d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
+        && others_waiting(d)
+    {
+        let (missing_delta, span) = (m.missing_delta, m.span);
+        return Some(format!(
+            "every one of the {missing_delta} article(s) answered in the \
+             last {span:.0}s came back missing and not a byte arrived - \
+             no configured server carries this post right now"
+        ));
+    }
+    None
+}
+
+/// Which hosts a prefetch sidecar should run on, and whether it is
+/// BORROWING from busy servers rather than claiming idle ones.
+///
+/// Split out of [`spawn_slow_job_watchdog`] under the size gate's
+/// 500-line function ceiling (31 Aug 2026), body verbatim. It decides
+/// the fleet and nothing else: every gate that decides whether to
+/// prefetch at all (the setting, the pause, the quota, the one-sidecar
+/// rule, a hand-over in progress) stays at the call site, where the
+/// facts they read live.
+fn idle_prefetch_fleet(
+    live: &nzbkit::pool::LiveStats,
+    deltas: &[(String, u64)],
+    total: u64,
+    refusal_noted: &mut bool,
+) -> (Vec<String>, bool) {
+    // A server that refused to authenticate (bad
+    // credential, or at its connection/IP cap) moved no
+    // bytes, so by the byte test alone it reads as idle
+    // capacity - and a sidecar whose whole fleet is
+    // refused servers prefetches nothing while the
+    // queued job it claimed sits blocked behind it.
+    let refused: std::collections::HashSet<String> = live
+        .servers
+        .iter()
+        .filter(|s| s.refusal.lock_ok().is_some())
+        .map(|s| s.host.clone())
+        .collect();
+    let mut any_idle = false;
+    let idle: Vec<String> = deltas
+        .iter()
+        .filter(|(_, b)| (*b as f64) < total as f64 * 0.01)
+        .inspect(|_| any_idle = true)
+        .filter(|(h, _)| !refused.contains(h))
+        .map(|(h, _)| h.clone())
+        .collect();
+    // No healthy idle server (they all refused auth, or
+    // every server is busy on the active job): borrow a
+    // bounded 1-2 connection slice of the healthy BUSY
+    // servers instead, so the next job's tail-overlap
+    // still engages (the 31 Jul soak measured
+    // 49 s line-idle of a 144 s queue without it). The
+    // per-host cap lives on the sidecar hub - see
+    // spawn_sidecar for the budget accounting.
+    let (fleet, borrow) = if idle.is_empty() {
+        let busy: Vec<String> = deltas
+            .iter()
+            .filter(|(_, b)| (*b as f64) >= total as f64 * 0.01)
+            .filter(|(h, _)| !refused.contains(h))
+            .map(|(h, _)| h.clone())
+            .collect();
+        (busy, true)
+    } else {
+        (idle, false)
+    };
+    if borrow && any_idle && !*refusal_noted {
+        *refusal_noted = true;
+        info!(
+            target: "prefetch",
+            "every idle server refused to authenticate ({}) - borrowing from the busy server(s) instead",
+            refused.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    (fleet, borrow)
+}
+
 /// Slow-job watchdog (auto-defer + idle-server prefetch): a queue
 /// shouldn't sit behind one job whose articles live only on one slow
 /// server. Over a rolling window of per-server byte deltas:
@@ -1433,103 +1654,21 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                     .as_ref()
                     .and_then(|c| c.tail_pending())
                     .is_some_and(|p| p > 0);
-            // ---- Wedged behind a dead server: defer and move on.
-            //
-            // "A wholly stalled job is the pool's retry logic's problem"
-            // (below) is true of a job whose articles are 430ing their
-            // way through a refusal ladder - that is real progress with
-            // no bytes to show for it. It is NOT true when a configured
-            // server has been granting no connection at all for the
-            // whole window: the pool is waiting on a socket, the retry
-            // logic has nothing to retry, and the whole QUEUE sits
-            // behind one job that cannot move. That case reached the
-            // `total == 0` bail below and stopped there, which is how
-            // two soak jobs held the queue for 25 minutes (11->12 Aug).
-            //
-            // Deferring is cheap and reversible: the journal keeps every
-            // landed article, `pick_job` runs a deferred job whenever
-            // nothing else is available, and if the whole queue is
-            // deferred it comes straight back. `others_waiting` is the
-            // point - with nothing else to run, sitting here is right.
-            if total == 0
-                && d.auto_defer.load(Ordering::Relaxed)
-                && now.duration_since(t0).as_secs() >= warmup
-                && defer_count < 3
-                && d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
-                && others_waiting(&d)
-                // TODO 308: THIS job's gauges, never the hub's.
-                && let Some(o) = outages_in(&w.pool_live)
-                    .into_iter()
-                    .find(|o| o.secs >= span as u64 && o.secs >= server_down_secs())
-            {
-                let reason = format!(
-                    "{} has had no usable connection for {}s ({}) and nothing \
-                     has arrived for {:.0}s - the articles this job still needs \
-                     are only on that server",
-                    o.host, o.secs, o.kind, span
-                );
+            // One value for the arms below, so none of them can be
+            // handed a window and an elapsed time from different ticks.
+            let measured = Windowed {
+                total,
+                span,
+                tried_delta,
+                missing_delta,
+                elapsed: now.duration_since(t0).as_secs(),
+                defer_count,
+            };
+            if let Some(reason) = outage_defer(&d, &w.pool_live, &measured, warmup) {
                 fire_defer(&job, &reason, cost(), &w, &mut win);
                 continue;
             }
-            // ---- The post is gone: servers healthy, every answer a 430.
-            //
-            // The outage arm above covers a server that grants no
-            // CONNECTION. This is the other shape of a zero-byte window,
-            // and since TODO 306 it is the SLOWEST of the three arms
-            // that reach it: `early_gone_defer` takes the same verdict
-            // off the run and `partial_gone_defer` off a flatline
-            // inside the window, both with no warmup. It is not
-            // redundant, because both twins ask for something this one
-            // does not - every server having ANSWERED a refusal itself
-            // ([`fleet_answered`]). A fleet with a server that is up
-            // and has simply never been asked stands both of them down
-            // forever, and that fleet is this arm's territory ALONE -
-            // the whole of it, which `fleet_answered`'s own doc
-            // comment now argues at length after this comment claimed
-            // a second shape for nine days and had none.
-            // `e2e_qprog::an_unprobed_server_leaves_the_windowed_arm_to_speak`
-            // drives it end to end.
-            // and the `total == 0` bail below sends it to the pool's
-            // retry logic on the reasoning that articles "430ing their
-            // way through a refusal ladder" are real progress. They are,
-            // right up until every one of them is a refusal - then the
-            // ladder has nothing left to climb and the queue sits behind
-            // a post no configured server carries.
-            //
-            // Measured 14 Aug 2026: two 21-day-old teevee releases whose
-            // articles are all taken down held the queue for 10+ minutes
-            // each, at 0.0 MB/s, while other jobs waited. The engine had
-            // already PROVED it - the prefetch lane logged "post is
-            // gone: not one of the 14087 article(s) is on any server" -
-            // but that verdict died with the sidecar and the main job
-            // started over from scratch.
-            //
-            // Separating the two shapes is the miss counter, not the
-            // clock: a wedged server answers nothing, so `missing_delta`
-            // stays 0 and this arm cannot fire on it. Zero bytes plus
-            // refusals means the answers arrived and every one was "no
-            // such article".
-            //
-            // Deferring, not failing: this says "unservable right now",
-            // which a provider outage or a still-propagating post also
-            // looks like. `pick_job` runs a deferred job when nothing
-            // else is available, the journal keeps every landed article,
-            // and the give-up breaker and post-download health verdict
-            // remain the things that decide a job is finally dead.
-            if total == 0
-                && missing_delta >= gone_min_misses
-                && tried_delta > 0
-                && d.auto_defer.load(Ordering::Relaxed)
-                && now.duration_since(t0).as_secs() >= warmup
-                && defer_count < 3
-                && d.sidecar.lock_ok().as_ref().is_none_or(|s| s.borrowed)
-                && others_waiting(&d)
-            {
-                let reason = format!(
-                    "every one of the {missing_delta} article(s) answered in the \
-                     last {span:.0}s came back missing and not a byte arrived - \
-                     no configured server carries this post right now"
-                );
+            if let Some(reason) = windowed_gone_defer(&d, &measured, warmup, gone_min_misses) {
                 fire_defer(&job, &reason, cost(), &w, &mut win);
                 continue;
             }
@@ -1564,54 +1703,8 @@ pub(in crate::serve) fn spawn_slow_job_watchdog(
                 && d.sidecar.lock_ok().is_none()
                 && !handing_over
             {
-                // A server that refused to authenticate (bad
-                // credential, or at its connection/IP cap) moved no
-                // bytes, so by the byte test alone it reads as idle
-                // capacity - and a sidecar whose whole fleet is
-                // refused servers prefetches nothing while the
-                // queued job it claimed sits blocked behind it.
-                let refused: std::collections::HashSet<String> = w
-                    .pool_live
-                    .servers
-                    .iter()
-                    .filter(|s| s.refusal.lock_ok().is_some())
-                    .map(|s| s.host.clone())
-                    .collect();
-                let mut any_idle = false;
-                let idle: Vec<String> = deltas
-                    .iter()
-                    .filter(|(_, b)| (*b as f64) < total as f64 * 0.01)
-                    .inspect(|_| any_idle = true)
-                    .filter(|(h, _)| !refused.contains(h))
-                    .map(|(h, _)| h.clone())
-                    .collect();
-                // No healthy idle server (they all refused auth, or
-                // every server is busy on the active job): borrow a
-                // bounded 1-2 connection slice of the healthy BUSY
-                // servers instead, so the next job's tail-overlap
-                // still engages (the 31 Jul soak measured
-                // 49 s line-idle of a 144 s queue without it). The
-                // per-host cap lives on the sidecar hub - see
-                // spawn_sidecar for the budget accounting.
-                let (fleet, borrow) = if idle.is_empty() {
-                    let busy: Vec<String> = deltas
-                        .iter()
-                        .filter(|(_, b)| (*b as f64) >= total as f64 * 0.01)
-                        .filter(|(h, _)| !refused.contains(h))
-                        .map(|(h, _)| h.clone())
-                        .collect();
-                    (busy, true)
-                } else {
-                    (idle, false)
-                };
-                if borrow && any_idle && !refusal_noted {
-                    refusal_noted = true;
-                    info!(
-                        target: "prefetch",
-                        "every idle server refused to authenticate ({}) - borrowing from the busy server(s) instead",
-                        refused.iter().cloned().collect::<Vec<_>>().join(", ")
-                    );
-                }
+                let (fleet, borrow) =
+                    idle_prefetch_fleet(&w.pool_live, &deltas, total, &mut refusal_noted);
                 if !fleet.is_empty() {
                     // Same ordering as pick_job, minus: deferred jobs
                     // (their articles live on the BUSY server - the
@@ -1724,6 +1817,12 @@ mod requeue_cost_tests {
                 "vol.part01.rar",
                 n as u64 * len,
                 &[Frag::identity("vol.part01.rar", i as u64 * len, len)],
+                // No payload on disk behind these records, so there is
+                // no honest X5-02 commitment to record. Nothing here
+                // runs a restore - these helpers weigh `placement_bytes`
+                // - so `None` costs the assertions nothing and is the
+                // truthful value.
+                None,
             );
         }
         j.flush();
@@ -1743,6 +1842,12 @@ mod requeue_cost_tests {
                 &name,
                 len,
                 &[Frag::identity(&name, 0, len)],
+                // No payload on disk behind these records, so there is
+                // no honest X5-02 commitment to record. Nothing here
+                // runs a restore - these helpers weigh `placement_bytes`
+                // - so `None` costs the assertions nothing and is the
+                // truthful value.
+                None,
             );
         }
         j.flush();

@@ -400,6 +400,10 @@ class EngineService : Service() {
                 val gen = liveGen.incrementAndGet()
                 current = client
                 watchMetered()
+                // The first snapshot of THIS generation reopens the
+                // metered question - see [applyMeteredPolicy]'s call
+                // below for why nothing else does.
+                var firstSnapshot = true
                 while (isActive) {
                     // The token check, BEFORE the request: a wake from
                     // [POLL_MS] after the generation was retired must not
@@ -413,6 +417,28 @@ class EngineService : Service() {
                         break
                     }
                     render(snap)
+                    // PAUSE-ON-METERED, RE-ASKED ONCE PER GENERATION.
+                    // [meteredAction] refuses the pause edge while
+                    // `enginePaused` is null - never observed - so that
+                    // a queue the user left paused before the service
+                    // started is not adopted. Android hands a fresh
+                    // default-network callback the CURRENT capabilities
+                    // immediately, which is before any snapshot has
+                    // rendered, so on a service that starts on cellular
+                    // that first (and, with the network unchanged,
+                    // ONLY) decision was NONE and pause-on-metered never
+                    // engaged at all. [render] learns `enginePaused`
+                    // here and nothing re-ran the rule.
+                    //
+                    // Per GENERATION and not just at startup: the
+                    // callback outlives the client it was registered
+                    // beside ([watchMetered] returns early when one is
+                    // already registered), so a reconnect onto the same
+                    // metered network generates no new decision either.
+                    if (firstSnapshot) {
+                        firstSnapshot = false
+                        applyMeteredPolicy()
+                    }
                     exportFinished(client, snap)
                     checkIdle(snap)
                     delay(POLL_MS)
@@ -647,6 +673,22 @@ class EngineService : Service() {
     private fun applyMeteredAction(client: NzbfastClient, action: MeteredAction) {
         when (action) {
             MeteredAction.PAUSE -> {
+                // THE DAEMON FIRST. Both mutations used to be recorded
+                // BEFORE the call and the call's own answer thrown away
+                // inside `runCatching`, so a transport failure, an auth
+                // failure or a plain `status:false` still took ownership
+                // of a pause that never happened and announced the hold
+                // while the download carried on over cellular. Nothing
+                // retried it: the next snapshot clears the speculative
+                // latch and the rule is only re-asked per generation or
+                // per network event.
+                //
+                // Not committing on failure is also what keeps the
+                // RESUME arm honest - it is gated on the latch, which is
+                // how it knows whose pause it is giving back, so a latch
+                // taken for a pause that did not happen would resume
+                // somebody else's.
+                if (!runCatching { client.pauseAll() }.getOrDefault(false)) return
                 pausedForMetered = true
                 // The persisted twin moves with the latch, in both
                 // arms and in [render]'s clear: the daemon keeps its
@@ -655,14 +697,18 @@ class EngineService : Service() {
                 // [Settings.meteredHold].
                 Settings.setMeteredHold(this, true)
                 enginePaused = true
-                runCatching { client.pauseAll() }
                 post("nzbfast", METERED_TEXT, null)
             }
             MeteredAction.RESUME -> {
+                // Same order, and here the cost of the old one was
+                // sharper: ownership was released BEFORE the call, so a
+                // failed resume left the daemon paused with nobody
+                // responsible for it. Keeping the latch on failure means
+                // the next network or setting event tries again.
+                if (!runCatching { client.resumeAll() }.getOrDefault(false)) return
                 pausedForMetered = false
                 Settings.setMeteredHold(this, false)
                 enginePaused = false
-                runCatching { client.resumeAll() }
             }
             MeteredAction.NONE -> Unit
         }

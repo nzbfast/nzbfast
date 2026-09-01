@@ -186,15 +186,13 @@ mod tests {
     /// `serve` (logscrub_tests) rather than a tempfile crate: these
     /// tests share a process with ~1750 others and a name keyed on the
     /// pid plus the case is what keeps them out of each other's files.
-    fn scratch(tag: &str) -> std::path::PathBuf {
+    fn scratch(tag: &str) -> crate::testscratch::ScratchDir {
         let d =
             std::env::temp_dir().join(format!("nzbfast-linecarry-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::testscratch::ScratchDir::attach(&d)
     }
 
-    fn store(tag: &str) -> (std::path::PathBuf, LineCarry) {
+    fn store(tag: &str) -> (crate::testscratch::ScratchDir, LineCarry) {
         let dir = scratch(tag);
         let path = dir.join("linecarry.json");
         (dir, LineCarry::load(path))

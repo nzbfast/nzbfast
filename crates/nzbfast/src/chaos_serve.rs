@@ -118,6 +118,20 @@ pub struct Cli {
     /// end-to-end fixture; --files 0 serves only these.
     #[arg(long)]
     pub media: Vec<PathBuf>,
+    /// Pack the whole corpus into a multi-volume RAR set of this
+    /// volume size ("15M") with an external `rar` binary (RAR_BIN to
+    /// override) and serve the VOLUMES instead of the loose files -
+    /// the shape most real Usenet posts take, where a client sees only
+    /// `name.partNN.rar` and the payload exists only after an unpack.
+    /// Packing happens BEFORE --par2-redundancy, so the recovery
+    /// volumes protect the RAR set rather than the payload, which is
+    /// also what a real post does.
+    #[arg(long)]
+    pub rar_volume_size: Option<String>,
+    /// Base name for that set (default: the --nzb file stem, which is
+    /// what a real post uses - the release name names both).
+    #[arg(long)]
+    pub rar_name: Option<String>,
     /// PEM cert chain; with --tls-key, every server serves implicit TLS
     /// (the port-563 shape) through the chaos TLS front and the tls*
     /// fault profiles work. Mint a pair the way mockserve documents
@@ -159,6 +173,9 @@ pub struct Opts {
     miss_delay_ms: Option<u64>,
     accept_cap: Option<u64>,
     media: Vec<PathBuf>,
+    /// Volume size in bytes for the RAR set, if one is asked for.
+    rar_volume_size: Option<u64>,
+    rar_name: Option<String>,
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
     tls_alt_cert: Option<PathBuf>,
@@ -193,6 +210,11 @@ impl Cli {
             miss_delay_ms: cli.miss_delay_ms,
             accept_cap: cli.accept_cap,
             media: cli.media,
+            rar_volume_size: match &cli.rar_volume_size {
+                Some(v) => Some(size(v, "--rar-volume-size")?),
+                None => None,
+            },
+            rar_name: cli.rar_name,
             tls_cert: cli.tls_cert,
             tls_key: cli.tls_key,
             tls_alt_cert: cli.tls_alt_cert,
@@ -392,19 +414,93 @@ fn write_nzb(path: &Path, files: &[CorpusFile], date: u64) -> Result<()> {
     Ok(())
 }
 
+/// Run external `rar a -v<size>` over the corpus files and REPLACE them
+/// with the resulting volumes, so a client sees only `name.partNN.rar`
+/// and the payload exists only after an unpack.
+///
+/// Store (`-m0`) rather than compress, and that is the realistic
+/// setting rather than the cheap one: a real media post packs an
+/// already-compressed H.264 file, so a real packer stores it, and store
+/// is the shape nzbfast's in-stream extraction is built around. A
+/// compressed set is a different code path and is not what this fixture
+/// claims to model.
+///
+/// `-ep` strips paths, so the archive members carry bare file names the
+/// way a real post's do. Volume digit width is left to `rar`, which
+/// pads to the set SIZE exactly as a real post does - measured, 3
+/// volumes give `.part1.rar` and 11 give `.part01.rar`.
+fn pack_rar(
+    volume_size: u64,
+    base: &str,
+    payloads: Vec<(String, Vec<u8>, String)>,
+    seed: u64,
+) -> Result<Vec<(String, Vec<u8>, String)>> {
+    let bin = std::env::var("RAR_BIN").unwrap_or_else(|_| "rar".into());
+    let dir = std::env::temp_dir().join(format!("chaosserv-rar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    for (name, data, _) in &payloads {
+        std::fs::write(dir.join(name), data)?;
+    }
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.current_dir(&dir)
+        .arg("a")
+        .arg("-m0")
+        .arg("-ep")
+        .arg("-idq")
+        .arg(format!("-v{volume_size}b"))
+        .arg(format!("{base}.rar"));
+    for (name, _, _) in &payloads {
+        cmd.arg(name);
+    }
+    let st = cmd
+        .status()
+        .with_context(|| format!("run {bin} a (set RAR_BIN to the binary)"))?;
+    if !st.success() {
+        bail!("{bin} a failed with {st}");
+    }
+    let mut vols: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rar"))
+        .collect();
+    // Byte order is volume order here, and only because `rar` pads to
+    // the set size: a mixed `part9`/`part10` set would sort wrong, and
+    // `rar` never emits one. A set that packed to nothing is a silent
+    // fixture failure - the corpus would simply be empty and the run
+    // would look like a clean serve - so it is refused rather than
+    // served.
+    vols.sort();
+    if vols.is_empty() {
+        bail!("{bin} produced no .rar volumes in {}", dir.display());
+    }
+    let mut out = Vec::with_capacity(vols.len());
+    for (i, vol) in vols.iter().enumerate() {
+        let name = vol
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow!("non-utf8 rar volume name"))?
+            .to_string();
+        let data = std::fs::read(vol)?;
+        out.push((name, data, format!("chr{seed}r{i}")));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(out)
+}
+
 /// Run external `par2 create` over the corpus files and article-ize the
 /// resulting volumes into the same corpus.
 fn add_par2(
     redundancy: u32,
-    payloads: &[(String, Vec<u8>)],
+    payloads: &[(String, Vec<u8>, String)],
     article_size: usize,
     articles: &mut HashMap<String, Vec<u8>>,
     corpus: &mut Vec<CorpusFile>,
 ) -> Result<()> {
     let bin = std::env::var("PAR2_BIN").unwrap_or_else(|_| "par2".into());
-    let dir = std::env::temp_dir().join(format!("chaosserv-par2-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-chaosserv-par2-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    for (name, data) in payloads {
+    for (name, data, _) in payloads {
         std::fs::write(dir.join(name), data)?;
     }
     let mut cmd = std::process::Command::new(&bin);
@@ -413,7 +509,7 @@ fn add_par2(
         .arg(format!("-r{redundancy}"))
         .arg("-qq")
         .arg("chaos.par2");
-    for (name, _) in payloads {
+    for (name, _, _) in payloads {
         cmd.arg(name);
     }
     let st = cmd
@@ -1295,7 +1391,11 @@ pub async fn run(opts: Opts) -> Result<()> {
     let per_file = (opts.size / opts.files.max(1) as u64) as usize;
     let mut articles: HashMap<String, Vec<u8>> = HashMap::new();
     let mut corpus: Vec<CorpusFile> = Vec::new();
-    let mut payloads: Vec<(String, Vec<u8>)> = Vec::new();
+    // (name, bytes, message-id prefix). Article-izing is DEFERRED to
+    // one loop below so --rar-volume-size can replace the whole set
+    // first; the prefixes carried here are the ones the loose path
+    // always used, so an unpacked run mints byte-identical ids.
+    let mut payloads: Vec<(String, Vec<u8>, String)> = Vec::new();
     say(&format!(
         "generating corpus: {} files x {:.1} MB, {} B articles, seed {}",
         opts.files,
@@ -1306,18 +1406,7 @@ pub async fn run(opts: Opts) -> Result<()> {
     for i in 0..opts.files {
         let name = format!("chaos-{:02}.bin", i + 1);
         let data = corpus_data(per_file, opts.seed.wrapping_add(i as u64));
-        let segs = make_file_articles(
-            &name,
-            &data,
-            opts.article_size,
-            &format!("chs{}s{i}", opts.seed),
-            &mut articles,
-        );
-        corpus.push(CorpusFile {
-            name: name.clone(),
-            segs,
-        });
-        payloads.push((name, data));
+        payloads.push((name, data, format!("chs{}s{i}", opts.seed)));
     }
     for (i, path) in opts.media.iter().enumerate() {
         let name = path
@@ -1332,18 +1421,38 @@ pub async fn run(opts: Opts) -> Result<()> {
             name,
             data.len() as f64 / 1e6
         ));
-        let segs = make_file_articles(
-            &name,
-            &data,
-            opts.article_size,
-            &format!("chm{}m{i}", opts.seed),
-            &mut articles,
-        );
+        payloads.push((name, data, format!("chm{}m{i}", opts.seed)));
+    }
+    // Pack BEFORE par2, so the recovery volumes protect the RAR set
+    // rather than a payload no client ever sees on the wire - which is
+    // the order a real post is built in.
+    if let Some(vsz) = opts.rar_volume_size {
+        let base = match &opts.rar_name {
+            Some(n) => n.clone(),
+            None => opts
+                .nzb
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or("chaos")
+                .to_string(),
+        };
+        let before = payloads.len();
+        payloads = pack_rar(vsz, &base, payloads, opts.seed)?;
+        say(&format!(
+            "rar: packed {} file(s) into {} volume(s) of {:.1} MB as {}.partNN.rar \
+             (store) - the client sees only the volumes",
+            before,
+            payloads.len(),
+            vsz as f64 / 1e6,
+            base
+        ));
+    }
+    for (name, data, prefix) in &payloads {
+        let segs = make_file_articles(name, data, opts.article_size, prefix, &mut articles);
         corpus.push(CorpusFile {
             name: name.clone(),
             segs,
         });
-        payloads.push((name, data));
     }
     if let Some(r) = opts.par2_redundancy {
         say(&format!(
@@ -1577,5 +1686,91 @@ pub async fn run(opts: Opts) -> Result<()> {
             }
             last = (sf, st, af);
         }
+    }
+}
+
+#[cfg(test)]
+mod rar_fixture_tests {
+    use super::*;
+
+    /// `rar` is not on every box (no CI runner has one), so every test
+    /// that packs opens with this - the same discipline
+    /// `tools/par2-gate.py` enforces for the external `par2` binary.
+    fn have_rar() -> bool {
+        let bin = std::env::var("RAR_BIN").unwrap_or_else(|_| "rar".into());
+        std::process::Command::new(&bin)
+            .arg("-?")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    /// The volumes REPLACE the payload rather than joining it.
+    ///
+    /// This is the property the whole fixture rests on and it fails
+    /// silently if it is ever loosened: a `pack_rar` that APPENDED
+    /// would post the payload AND the volumes, so a client would see a
+    /// ready-made media file beside an archive of the same file, import
+    /// the loose one, and certify an unpack that never happened. The
+    /// run would look exactly like a pass. Measured against the same
+    /// hazard one step on, `--par2-redundancy` runs over whatever this
+    /// returns, so an appending version would also point the recovery
+    /// set at bytes no real post carries.
+    #[test]
+    fn packing_replaces_the_payload_with_the_volumes() {
+        if !have_rar() {
+            eprintln!("skipping: no `rar` binary (set RAR_BIN)");
+            return;
+        }
+        let payloads = vec![
+            (
+                "alpha.mp4".to_string(),
+                vec![7u8; 900_000],
+                "pfx-a".to_string(),
+            ),
+            (
+                "beta.mp4".to_string(),
+                vec![9u8; 900_000],
+                "pfx-b".to_string(),
+            ),
+        ];
+        let out = pack_rar(400_000, "Some.Release-CERT", payloads, 4242).unwrap();
+
+        assert!(
+            out.len() >= 2,
+            "a volume size well under the payload must split: {:?}",
+            out.iter().map(|(n, _, _)| n).collect::<Vec<_>>()
+        );
+        for (name, data, _) in &out {
+            assert!(name.ends_with(".rar"), "not a volume: {name}");
+            assert!(
+                name.starts_with("Some.Release-CERT."),
+                "wrong set name: {name}"
+            );
+            assert!(!data.is_empty(), "empty volume: {name}");
+        }
+        // The load-bearing half: neither loose payload survives into the
+        // corpus. Named individually so a failure says which leaked.
+        for leaked in ["alpha.mp4", "beta.mp4"] {
+            assert!(
+                !out.iter().any(|(n, _, _)| n == leaked),
+                "{leaked} reached the corpus beside the volumes - a client \
+                 would import it without ever unpacking: {:?}",
+                out.iter().map(|(n, _, _)| n).collect::<Vec<_>>()
+            );
+        }
+        // Every volume needs its own message-id prefix, or two volumes
+        // mint the same article ids and the second is served as the
+        // first - a corrupt set that reads as a clean one.
+        let mut prefixes: Vec<&str> = out.iter().map(|(_, _, p)| p.as_str()).collect();
+        prefixes.sort_unstable();
+        let before = prefixes.len();
+        prefixes.dedup();
+        assert_eq!(
+            before,
+            prefixes.len(),
+            "duplicate message-id prefixes: {prefixes:?}"
+        );
     }
 }

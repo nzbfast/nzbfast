@@ -312,6 +312,102 @@ impl MemBudget {
         }
     }
 
+    /// What [`Self::with_total`] would DO to a figure a PERSON supplied:
+    /// `None` when it is taken as asked, `Some(actual)` when a clamp
+    /// moved it.
+    ///
+    /// Split out from the warning below so the arithmetic is pinnable
+    /// without capturing a log, and it answers BOTH clamps in one place:
+    /// the [`Self::MIN`] floor, and the 32-bit [`Self::ADDRESS_SPACE_CEIL`]
+    /// whose own comment already calls the silence a defect - "it just
+    /// made the knob lie, silently, on the one platform where memory is
+    /// scarce".
+    pub fn limit_clamp(requested: u64) -> Option<u64> {
+        let actual = Self::with_total(requested).total;
+        (actual != requested).then_some(actual)
+    }
+
+    /// The budget a number a PERSON supplied becomes, with the clamp
+    /// said out loud.
+    ///
+    /// USE THIS AT EVERY BOUNDARY WHERE A HUMAN FIGURE ARRIVES, and
+    /// `with_total` only where the caller chose the number itself.
+    /// There are three such boundaries - `--mem-limit`, the `mem_limit`
+    /// setting, and an embedded host's `mem_limit_bytes` - and until
+    /// 31 Aug 2026 every one of them clamped in SILENCE.
+    ///
+    /// What the silence cost, measured rather than argued: `--mem-limit`
+    /// parses DECIMAL (`sizes::parse_size`, 1e6 per `M`), so `8M`, `32M`
+    /// and `64M` are 8,000,000 / 32,000,000 / 64,000,000 - all three
+    /// BELOW the 67,108,864-byte floor and therefore all three the
+    /// identical budget. `e2e_chaserepair`'s paged leg was written `8M`
+    /// meaning something tight, got the floor, and sat exactly on the
+    /// backpressure park mark; it was FLAKY for two days and was found
+    /// by a person noticing, not by a job. Note that even `64M` floors -
+    /// it is 64 million, not 64 MiB - so spelling the sites `64M` would
+    /// NOT have made the number honest, which is why the fix is here and
+    /// not in the fixtures.
+    ///
+    /// `source` names the knob, because this is one function serving
+    /// three of them and "your memory limit" is not something a person
+    /// can act on.
+    pub fn from_user_limit(requested: u64, source: &str) -> MemBudget {
+        let budget = Self::with_total(requested);
+        if let Some(actual) = Self::limit_clamp(requested) {
+            let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
+            // Both clamps get their own sentence. "Below the floor" is
+            // wrong for the 32-bit ceiling, and a message that names the
+            // wrong end sends the reader to raise a number that is
+            // already too big.
+            let why = if requested < Self::MIN {
+                format!(
+                    "that is under the {} byte ({:.0} MiB) floor, so anything smaller changes nothing",
+                    Self::MIN,
+                    mib(Self::MIN),
+                )
+            } else {
+                "that is more than a 32-bit process can address".to_string()
+            };
+            tracing::warn!(
+                target: "mem",
+                "{source} asked for {requested} bytes ({:.1} MiB) - {why}. Running with {actual} bytes ({:.1} MiB).",
+                mib(requested),
+                mib(actual),
+            );
+        }
+        budget
+    }
+
+    /// The largest total this target can hold, whatever is asked for:
+    /// [`Self::ADDRESS_SPACE_CEIL`] on 32-bit, `u64::MAX` on 64-bit
+    /// (where [`Self::with_total`] clamps nothing at the top).
+    ///
+    /// EXPOSED BECAUSE THE CEILING IS OTHERWISE INVISIBLE TO ANYTHING
+    /// THAT DOES NOT RUN ON 32-BIT, and that invisibility cost ten days
+    /// of red nightly. `armv7-cross` failed every night from 28 Aug
+    /// 2026 on one assertion - a test picking `with_total(4 GiB)` and
+    /// asserting its `holds_cap` clears a 1 GB threshold, which is true
+    /// on every box this fleet owns and false by ARITHMETIC on armv7:
+    /// the clamp here makes the budget 1 GiB, so 45% of it is
+    /// 483,183,810 bytes and the threshold is unreachable. The product
+    /// was right and the test could not have known, because the number
+    /// it needed was a private const behind a `cfg` nobody compiles.
+    /// A caller that has to hold to a budget TIER on every target asks
+    /// this, and gets an answer on the target it is compiled for.
+    ///
+    /// Not a statement about physical RAM, and never a floor: it is the
+    /// ceiling the clamp applies, so the real budget is at or under it.
+    pub const fn max_total() -> u64 {
+        #[cfg(target_pointer_width = "32")]
+        {
+            Self::ADDRESS_SPACE_CEIL
+        }
+        #[cfg(not(target_pointer_width = "32"))]
+        {
+            u64::MAX
+        }
+    }
+
     /// No-op on 64-bit; clamps to [`Self::ADDRESS_SPACE_CEIL`] on 32-bit.
     fn fit_address_space(total: u64) -> u64 {
         #[cfg(target_pointer_width = "32")]
@@ -1126,6 +1222,57 @@ mod tests {
         assert_eq!(MemBudget::with_total(512 << 20).total, 512 << 20);
     }
 
+    /// The same ceiling asked PORTABLY, which is the half the test above
+    /// cannot give you: that one is `#[cfg(target_pointer_width =
+    /// "32")]`, so on every box this fleet owns it compiles to nothing
+    /// and the clamp is invisible.
+    ///
+    /// THAT INVISIBILITY IS NOT THEORETICAL. `armv7-cross` was red in
+    /// nightly every night from 28 Aug 2026 on ONE assertion, in
+    /// `nzbfast`'s `serve::requeue::pause_cost_tests`: a test that built
+    /// `with_total(4 GiB)` and asserted the resulting `holds_cap` clears
+    /// a 1 GB product threshold. True on every 64-bit target, and false
+    /// on armv7 by ARITHMETIC rather than by accident - the clamp makes
+    /// that budget 1 GiB, so 45% of it is 483,183,810 bytes, under half
+    /// the threshold. The product was right; the test could not have
+    /// known, because the number it needed was a private const behind a
+    /// `cfg` nobody here compiles. Nothing reported the red for ten
+    /// days, and nobody could have seen it without qemu.
+    ///
+    /// So this asserts what a caller may rely on ON WHATEVER TARGET IT
+    /// IS COMPILED FOR: no budget ever exceeds [`MemBudget::max_total`],
+    /// and no tier ever exceeds its own budget. The 64-bit arm is worth
+    /// having in its own right - it drives the widest budget expressible,
+    /// which is where `holds_cap`'s `try_from` belt would show if it ever
+    /// went back to wrapping.
+    #[test]
+    fn no_budget_exceeds_what_this_target_can_address() {
+        for asked in [MemBudget::MIN, 4u64 << 30, 64u64 << 30, u64::MAX] {
+            let b = MemBudget::with_total(asked);
+            assert!(
+                b.total <= MemBudget::max_total(),
+                "with_total({asked}) kept {} over this target's {} ceiling",
+                b.total,
+                MemBudget::max_total()
+            );
+            assert!(b.total <= asked.max(MemBudget::MIN));
+            // Saturating, never wrapping: a tier wider than the budget
+            // it came out of is the defect the `try_from` belt is for.
+            assert!(b.holds_cap() as u64 <= b.total);
+            assert!(b.partials_cap() as u64 <= b.total);
+        }
+        // The exact figure the nightly failure printed, DERIVED from the
+        // ceiling rather than quoted, so moving the ceiling moves this
+        // with it instead of leaving a frozen number behind.
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            MemBudget::with_total(4 << 30).holds_cap() as u64,
+            MemBudget::max_total() / 100 * 45,
+            "the 4 GiB budget the requeue screen test asks for IS the \
+             ceiling here, so its holds cap is 45% of the ceiling"
+        );
+    }
+
     /// The `NZBFAST_HOLDS_CAP` bench override takes `--mem-limit`'s
     /// DECIMAL units, and the override itself is reduce-only (asserted
     /// at the call site by `min(natural)`) so no budget invariant moves.
@@ -1211,6 +1358,102 @@ mod tests {
         // pull it below the 256 MB auto floor, never below MIN).
         let a = MemBudget::auto();
         assert!(a.total >= MemBudget::MIN && a.total <= 16 << 30);
+    }
+
+    /// The three `--mem-limit` spellings that mean nothing distinct,
+    /// pinned as ARITHMETIC so the fixture family cannot drift back into
+    /// believing they do.
+    ///
+    /// `sizes::parse_size` is DECIMAL, so `8M`/`32M`/`64M` are the three
+    /// literals below and every one of them is under the floor - `64M`
+    /// included, which is the half that surprises: it is 64 million, not
+    /// 64 MiB. Twelve fixtures under `crates/nzbfast/tests/` pick one of
+    /// the three and therefore share one configuration (cap 28.8 MiB,
+    /// park mark 21.6 MiB), which is how `e2e_chaserepair`'s paged leg
+    /// came to sit on the park mark and flake for two days.
+    #[test]
+    fn a_user_limit_reports_the_clamp_it_used_to_make_in_silence() {
+        // The three decimal spellings, and what each one really becomes.
+        for &decimal in &[8_000_000u64, 32_000_000, 64_000_000] {
+            assert_eq!(
+                MemBudget::limit_clamp(decimal),
+                Some(MemBudget::MIN),
+                "{decimal} is below the floor, so the clamp must be REPORTED"
+            );
+            assert_eq!(
+                MemBudget::from_user_limit(decimal, "test").total,
+                MemBudget::MIN
+            );
+        }
+        // 64 MiB exactly is the first figure taken as asked - the
+        // boundary, so a floor that moves has to move this line with it.
+        assert_eq!(MemBudget::limit_clamp(MemBudget::MIN), None);
+        assert_eq!(
+            MemBudget::limit_clamp(MemBudget::MIN - 1),
+            Some(MemBudget::MIN)
+        );
+        // An ordinary figure is silent: a warning on every run is a
+        // warning nobody reads, which is the failure this is fixing.
+        assert_eq!(MemBudget::limit_clamp(110_000_000), None);
+        // 2 GB is ordinary on a 64-bit box and OVER THE CEILING on a
+        // 32-bit one, whose whole budget stops at 1 GiB - so ask the
+        // target what it can hold rather than asserting a figure that
+        // is arithmetically impossible there. This line was a flat
+        // `None` and was RED in nightly's `armv7-cross` on 31 Aug 2026
+        // (run 33376949508). It is `5dd24e2fc`'s defect and NOT a lane
+        // repeating it: this test landed at 31 Aug 02:44Z (`9134950de`)
+        // and that fix at 04:28Z, so the two were written in parallel
+        // and the fix had no log naming this one to read.
+        let two_gb = 2_000_000_000u64;
+        assert_eq!(
+            MemBudget::limit_clamp(two_gb),
+            (two_gb > MemBudget::max_total()).then_some(MemBudget::max_total()),
+            "2 GB is silent where it fits and REPORTED where it does not"
+        );
+        // The 32-bit address-space ceiling is the OTHER silent clamp,
+        // and it is the same question, so it is answered here too - its
+        // own comment already calls the silence a defect.
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(
+            MemBudget::limit_clamp(10 << 30),
+            Some(MemBudget::ADDRESS_SPACE_CEIL)
+        );
+        #[cfg(not(target_pointer_width = "32"))]
+        assert_eq!(MemBudget::limit_clamp(10 << 30), None);
+        // Whatever it reports, the budget it hands back is the one
+        // `with_total` would have: this reports, it does not decide.
+        for &v in &[1u64, 8_000_000, 110_000_000, 10 << 30] {
+            assert_eq!(
+                MemBudget::from_user_limit(v, "test").total,
+                MemBudget::with_total(v).total
+            );
+        }
+        // The rule itself, stated in terms of this target's own floor
+        // and ceiling rather than in bytes, so no line above can drift
+        // back into asserting a figure one target cannot reach. Both
+        // clamps are named here and neither is `cfg`-ed away: on a
+        // 64-bit box the ceiling arm is unreachable (`max_total()` is
+        // `u64::MAX`, so nothing is over it) and this reduces to the
+        // floor, which is worth having in its own right; on armv7 all
+        // three arms bite.
+        for &r in &[
+            1u64,
+            MemBudget::MIN - 1,
+            MemBudget::MIN,
+            110_000_000,
+            2_000_000_000,
+            10 << 30,
+            u64::MAX,
+        ] {
+            let want = if r < MemBudget::MIN {
+                Some(MemBudget::MIN)
+            } else if r > MemBudget::max_total() {
+                Some(MemBudget::max_total())
+            } else {
+                None
+            };
+            assert_eq!(MemBudget::limit_clamp(r), want, "limit_clamp({r})");
+        }
     }
 
     #[test]

@@ -333,16 +333,19 @@ env:
   # keep full debuginfo - the intended half, since the test executables
   # are what there are fifty-four of.
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
-  # The seven build-gated heavy targets (TODO 116b) are excluded by
+  # The eight build-gated heavy targets (TODO 116b) are excluded by
   # `required-features` at BUILD time, so they never enter the archive -
   # verified by listing the archive's binaries. This expression is the
   # run-stage belt if they are ever built here again, and it is where a
-  # reader learns the seven names. nextest accepts binary() predicates
-  # that match nothing.
+  # reader learns the eight names. nextest accepts binary() predicates
+  # that match nothing. Seven are ELAPSED-TIME suites; `par2gen_large_set`
+  # is heavy for the other reason, tens of megabytes of generated PAR2
+  # fixture and seconds of Reed-Solomon, and is gated the same way.
   NT_EXCLUDE: >-
     not binary(conn_tuner) and not binary(index_size_cap) and
     not binary(http_wedge) and not binary(queue_soak) and
-    not binary(daemon) and not binary(e2e) and not binary(leak_soak)
+    not binary(daemon) and not binary(e2e) and not binary(leak_soak) and
+    not binary(par2gen_large_set)
   # CLAUDE.md invariant 5. The bin suite runs product code that consults
   # this at the network boundary (identity.rs `may_call_out`), so
   # without it a push can put live xREL / TMDB requests on the wire from
@@ -1716,7 +1719,7 @@ jobs:
         # its reason.
         #
         # The heavy-tests features are for LINT SCOPE, not for running:
-        # they enrol the seven build-gated targets (TODO 116b - the
+        # they enrol the eight build-gated targets (TODO 116b - the
         # [[test]] tables in nzbkit's and nzbfast's Cargo.toml) so clippy
         # keeps linting them per push exactly as it did before the gate.
         # Clippy is check-mode and links nothing, so this costs none of
@@ -1862,10 +1865,10 @@ jobs:
       #   whole non-heavy set, and by a distance now that the rars
       #   override has taken the nzbkit fixtures down) move to
       #   nightly.yml's `long-suites`,
-      #   beside the seven heavy targets, for the same reason those are
+      #   beside the eight heavy targets, for the same reason those are
       #   there. nightly's armv7-cross job still runs them under qemu.
       #
-      #   No `--features heavy-tests`, so cargo never BUILDS the seven
+      #   No `--features heavy-tests`, so cargo never BUILDS the eight
       #   heavy targets (TODO 116b) and they never enter the archive.
       #   Verified by listing the archive's binaries: none of the seven
       #   is present. Auto-enrolment survives - a target added tomorrow
@@ -2681,9 +2684,9 @@ jobs:
   # without it nzbtray's errors masked nzbkit's, which masked
   # nzbfast's, and each round surfaced only one crate's worth.
   #
-  # The heavy-tests features enrol the seven build-gated targets (TODO
+  # The heavy-tests features enrol the eight build-gated targets (TODO
   # 116b/116f) so this step lints them. Without it they stop compiling
-  # here at all, leaving one cfg(windows) site across the seven files
+  # here at all, leaving one cfg(windows) site across the eight files
   # linted on no runner anywhere - the same hole in miniature that this
   # whole job exists to close. Check-mode links nothing, so it costs
   # none of the link time the gate saves.

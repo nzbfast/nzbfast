@@ -9,8 +9,10 @@
 //! release's?" and "which tail is a sidecar's?" for those five.
 //!
 //! What a filed episode is called - `EpisodeTitles`, `FiledTail`,
-//! `filed_bases` and the length-fitting - stays in the parent: that is
-//! the vocabulary, and the delete path reads it too.
+//! `filed_bases` and the length-fitting - is episode.rs beside this
+//! file: that is the vocabulary, and the delete path reads it too. It
+//! stayed in the parent until smart.rs ran out of headroom again and
+//! took the same TODO 106 cut this module did.
 //!
 //! Split out of smart.rs for the size gate (TODO 106); the six public
 //! doors are re-exported, so no caller spells a new path.
@@ -19,9 +21,10 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
+use super::episode::legacy_tv_path;
 use super::sample::is_sample_named;
 use super::videoext::video_ext;
-use super::{EpisodeTitles, SUBTITLE_EXTS, VIDEO_EXTS, ext_of, legacy_tv_path, nzbname, tv_path};
+use super::{EpisodeTitles, SUBTITLE_EXTS, VIDEO_EXTS, ext_of, nzbname, tv_path};
 
 /// File a completed TV job: move everything in `out_dir` into
 /// `dest_parent/[Show]/Season NN/`, renaming video files to
@@ -132,7 +135,30 @@ pub fn tv_organize(
             }
         }
         let target = dest.join(&new_name);
-        if target.exists() || !targets.insert(target.clone()) {
+        // `symlink_metadata`, and here it is a LIVENESS fix rather than
+        // the harms one the other four guards in this file are. Nothing
+        // is destroyed at this target whichever question is asked: the
+        // execute loop below claims every FILE name with `create_new`,
+        // which is EEXIST over a link of either kind, and a DIRECTORY
+        // entry gets a bare `fs::rename` that the kernel answers ENOTDIR
+        // for any symlink destination - both MEASURED on APFS, 31 Aug
+        // 2026, alongside the measurement quoted at `tv_rename`.
+        //
+        // What `exists()` cost instead was this guard's own "still
+        // filing" arm. A link at a NON-canonical target - a shared
+        // `Subs/`, a generic `.nfo`, most plausibly one onto a share
+        // that is not mounted - read as free, so the entry was planned,
+        // the `create_new` claim then failed EEXIST, and the loop broke,
+        // rolled back and abandoned the whole job. That is verbatim the
+        // outcome the second arm below was written to prevent: "aborting
+        // the whole job for one of these silently stopped every later
+        // episode of a season from filing at all". Asking about the
+        // ENTRY fires the guard here, where the job survives it.
+        //
+        // This is also the one destination in this file that is the
+        // USER'S library rather than the job's own directory, so it is
+        // the one where a link is most likely to be there at all.
+        if std::fs::symlink_metadata(&target).is_ok() || !targets.insert(target.clone()) {
             // The canonical EPISODE name colliding means the season slot
             // belongs to somebody else - usually the user's existing
             // library. Filing beside it under a raw name is what let
@@ -330,18 +356,155 @@ pub fn tv_rename(dir: &Path, stem: &str, suffix: &str, titles: &EpisodeTitles) -
         let title = titles.segment(&titled_by, &b, suffix);
         let name = format!("{b}{title}{suffix}.{ext}");
         let target = dir.join(&name);
-        if target == path || target.exists() || claimed.iter().any(|c| c == &name) {
+        // AN ENTRY AT THE NAME, AND NOT A NAME THAT RESOLVES - the
+        // question this guard has to ask, and the difference is a
+        // decision rather than a spelling. This is the canonical guard
+        // of the five in this file; the other four cite it. It was
+        // `exists()`, then `symlink_metadata` (855f7fd91), and is now
+        // the `create_new` claim below, which asks the same question
+        // `symlink_metadata` asked without leaving a gap behind it.
+        // Both moves are argued here, in that order.
+        //
+        // `Path::exists` FOLLOWS symlinks and answers false on any
+        // error, so as an occupancy test it asks whether a name
+        // RESOLVES. `rename(2)` asks a different question: it removes
+        // whatever ENTRY sits at the destination and never resolves it.
+        // Where the two disagree - a dangling link, a link onto a share
+        // that is not mounted, a link whose target is unreadable - this
+        // guard did not fire and the rename below deleted the user's
+        // link. The doc comment above already promised it "never
+        // overwrites an existing target"; `exists()` is what made that
+        // sentence false.
+        //
+        // THIS IS NOT THE X5-07 CONTAINMENT CLASS and reaching for that
+        // row here is the reflex this paragraph exists to refuse. The
+        // fingerprint is identical and the conclusion is the opposite,
+        // because the operation underneath is a rename. MEASURED on
+        // APFS, 31 Aug 2026: renaming a file over a link that points
+        // OUT of the directory leaves the entry a regular file holding
+        // the source bytes with the outside inode untouched, and over a
+        // DANGLING link nothing is created at the far end at all. X5-07
+        // needed `std::fs::copy`, which opens its destination BY NAME
+        // with `O_CREAT` and does follow. Nothing here can write
+        // outside the directory however the link points.
+        //
+        // WHAT IS AT STAKE is a directory entry the user created. The
+        // harms are not symmetric, which is what settles it: skipping
+        // costs the file its canonical name, one `mv` undoes that, and
+        // the count this function returns already says it happened -
+        // where the link's target string was the only record of where it
+        // pointed and nothing brings that back. Same argument, same
+        // measurement and the same tier reasoning as the weak tier in
+        // `unpack/published_names.rs` (X5-20 residue 1, `b71c37e33`),
+        // which is where this rule was first decided.
+        //
+        // COST: one `create_new` where there was one `stat`, and the
+        // case fold is unaffected either way - all three of `stat`,
+        // `lstat` and an `O_EXCL` create go through the same lookup and
+        // differ only at the final resolve, MEASURED on APFS.
+        //
+        // THE STATED LIMIT THIS NOTE CARRIED IS CLOSED, 31 Aug 2026,
+        // under claim `occupancy-claim-the-rest-of-the-class`. It said
+        // the guard is a check before a use, that `exists()` had the
+        // identical window, and that closing it wants a per-platform
+        // exclusive rename - "`tv_organize` above does close it,
+        // because it has a placeholder to claim the name with; this
+        // door renames in place and has none". The first two were true.
+        // The third was wrong, and it is what kept this open for as
+        // long as it was: a door that renames in place can MAKE a
+        // placeholder, which is exactly what `tv_organize` does 250
+        // lines above. Nothing distinguishes the two doors on this
+        // point.
+        //
+        // MEASURED on the sibling guard in `unpack/published_names.rs`
+        // (`20e81a631`): the `lstat` is 968 ns and the rename behind it
+        // ~112 us, so the guard covered about 1% of its own interval,
+        // and over 20,000 trials 96.8% of concurrent arrivals that got
+        // the name landed inside the unprotected part. Not a sliver of
+        // the operation - nearly all of it. The same race against the
+        // claim loses zero, at a per-trial cost inside the noise.
+        //
+        // THE CLAIM IS NOT A BELT BESIDE THE GUARD, IT IS THE GUARD, so
+        // this is a substitution and not an addition. MEASURED on APFS
+        // the same day: `create_new` answers `AlreadyExists` over a
+        // regular file, a DANGLING link, a link pointing out of the
+        // directory and a directory - the same four answers the `lstat`
+        // gave, which is the whole of what the census bought by moving
+        // off `exists()`. Nothing above is loosened; only the gap goes.
+        //
+        // PLAIN `create_new` AND NOT `disk::open_out_leaf_under(..,
+        // CreateNew)`, which is what the sibling took, and the
+        // difference is a decision rather than a spelling. That door
+        // BINDS its destination, and it is paired there with
+        // `rename_out_under`, which binds the same way - the two ask
+        // one question. This door renames with a plain `fs::rename`,
+        // which resolves the destination by path, so a bound claim
+        // beside it would ask a STRICTER question than the operation it
+        // guards: MEASURED on APFS 31 Aug 2026, the bound claim's
+        // `O_DIRECTORY|O_NOFOLLOW` open of the root answers ENOTDIR for
+        // a directory that is a symlink, where the plain `create_new`
+        // and the `fs::rename` through that same parent both succeed.
+        // A category folder symlinked onto another volume is ordinary
+        // here - this file's own rollback note names it - so pairing
+        // them would refuse those jobs outright. Binding these doors is
+        // the X5-07 containment question and is a separate lane
+        // (`disk/relpath.rs` has one open on it); it is not this one.
+        //
+        // WRITTEN OUT AT THE DOOR rather than hoisted into a helper,
+        // like `tv_organize`'s and `publish`'s. What differs between
+        // the nine doors is the DECLINE - continue, return false,
+        // return None, an `io::Error` out - and its wording, which is
+        // the whole of what a caller would have to supply anyway; and
+        // two of the nine are in `nzbkit`, which cannot see a helper
+        // here. Numbers, the per-platform alternative's price and the
+        // per-site verdicts:
+        // `research/PUBLISH-OCCUPANCY-WINDOW-2026-08-31.md`.
+        //
+        // The two cheap tests keep their place in front of it: neither
+        // is a filesystem question - one compares paths, the other is
+        // this pass's own plan dedupe - and `claimed` is not what the
+        // claim answers, since it must still refuse a second candidate
+        // for a name whose rename FAILED and left the name free.
+        if target == path || claimed.iter().any(|c| c == &name) {
+            continue;
+        }
+        if let Err(e) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+        {
+            // `AlreadyExists` is this guard's own answer and is silent,
+            // exactly as the `lstat` was: the file keeps the name it was
+            // posted with and the count this function returns says so.
+            // Anything else is the door being unusable rather than taken
+            // - a read-only volume, a parent that went away - which the
+            // rename below would have reported, so it still is.
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                warn!(
+                    target: "smart",
+                    "could not claim {}: {e}",
+                    target.display()
+                );
+            }
             continue;
         }
         claimed.push(name);
         match std::fs::rename(&path, &target) {
             Ok(()) => renamed += 1,
-            Err(e) => warn!(
-                target: "smart",
-                "rename {} → {}: {e}",
-                path.display(),
-                target.display()
-            ),
+            Err(e) => {
+                // Our own placeholder, which would otherwise be left as
+                // a zero-byte file wearing the episode's canonical name
+                // - and cleanup in this module matches by name.
+                // `tv_organize` above removes its own for the same
+                // reason.
+                let _ = std::fs::remove_file(&target);
+                warn!(
+                    target: "smart",
+                    "rename {} → {}: {e}",
+                    path.display(),
+                    target.display()
+                );
+            }
         }
     }
     renamed
@@ -377,6 +540,52 @@ fn sidecar_tail<'a>(fname: &'a str, stem: &str) -> Option<&'a str> {
     fname
         .strip_prefix(stem)
         .filter(|rest| rest.starts_with('.'))
+}
+
+/// Every subtitle sidecar in `files` that belongs to the video stem
+/// `old_stem`, paired with the tail it keeps (".en.srt").
+///
+/// Gathered before the video is renamed, for two reasons that are really
+/// one: [`sidecar_tail`] matches on the OLD stem, which the rename is
+/// about to take away, and the tails it returns are exactly what the NEW
+/// stem has to be budgeted against ([`capped_base`]).
+fn sidecars_of(files: &[PathBuf], old_stem: &str) -> Vec<(PathBuf, String)> {
+    files
+        .iter()
+        .filter(|f| SUBTITLE_EXTS.contains(&ext_of(f).as_str()))
+        .filter_map(|f| {
+            let fname = f.file_name()?.to_string_lossy().into_owned();
+            let rest = sidecar_tail(&fname, old_stem)?.to_string();
+            Some((f.clone(), rest))
+        })
+        .collect()
+}
+
+/// The ONE stem [`rename_movie`] and [`rename_nameless_video`] give to
+/// every name they compose, shortened so the LONGEST of them still fits
+/// a filesystem component.
+///
+/// Three names come off it - `{base}.{ext}`, `{base}{tail}` for each
+/// subtitle sidecar, and the job folder - and the sidecar pairing IS the
+/// shared stem: a player finds `Movie.en.srt` beside `Movie.mkv` because
+/// the two spell one stem. So neither obvious cap is available. Capping
+/// the composed names hashes different inputs, so they come back with
+/// different tags and the subtitle stops being that video's; capping the
+/// stem at 255 leaves `{base}.mkv` four bytes over and the write fails
+/// exactly as it did before. `disk::cap_shared_stem` exists for this
+/// third answer: tell it the tails, and it shortens the stem far enough
+/// that the longest of them still fits.
+///
+/// `rename_dir`'s `.2`/`.3` collision suffix is deliberately NOT in the
+/// budget. It is chosen inside `rename_dir` at the moment of the
+/// collision rather than composed here, and in the arm that has a video
+/// the extension tail has already left more room than it needs. What is
+/// given up is a folder that keeps its old name when a stem using the
+/// WHOLE budget collides - which is what every overlong name did on
+/// every one of these paths before the cap existed.
+fn capped_base(stem: &str, video_tail: &str, sidecars: &[(PathBuf, String)]) -> String {
+    let tails = std::iter::once(video_tail).chain(sidecars.iter().map(|(_, t)| t.as_str()));
+    nzbkit::disk::cap_shared_stem(stem, tails)
 }
 
 /// Does this release name say enough to be worth stamping onto a
@@ -517,11 +726,46 @@ pub fn rename_nameless_video(out_dir: &Path, base: &str) -> bool {
     if clean.is_empty() {
         return false; // nothing nameable survived sanitisation
     }
+    // Sidecars are gathered BEFORE the video moves: their tails are what
+    // the stem has to be budgeted against, and they are found by the OLD
+    // stem, which the rename below is about to take away.
+    let sidecars = sidecars_of(&files, &old_stem);
+    let clean = capped_base(&clean, &format!(".{ext}"), &sidecars);
+    let clean = clean.as_str();
     let target = out_dir.join(format!("{clean}.{ext}"));
-    if target == *video || target.exists() {
+    // An ENTRY at the name, not a name that resolves - argued in full at
+    // `tv_rename` above. This door lands in the job's own directory
+    // rather than the user's library, so the population is narrower, but
+    // the harms settle it identically: declining leaves the payload
+    // under the name it was posted with, which is exactly what this door
+    // exists to improve on and is recoverable, where the link is not.
+    //
+    // AND IT IS A CLAIM RATHER THAN A LOOK, per `tv_rename` above: the
+    // `lstat` covered about 1% of its own interval, so `create_new`
+    // asks the same four-answer question atomically. Plain, not
+    // `disk::open_out_leaf_under`, for the reason argued there - the
+    // rename below resolves its destination by path.
+    if target == *video {
+        return false;
+    }
+    if let Err(e) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
+        // Taken is this guard's own answer and is silent, as the
+        // `lstat` was. Anything else is the door being unusable, which
+        // the rename below would have reported.
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            warn!(target: "smart", "could not claim {}: {e}", target.display());
+        }
         return false;
     }
     if let Err(e) = std::fs::rename(video, &target) {
+        // Our own placeholder: a zero-byte file wearing the name this
+        // video failed to take, which the sidecar loop below would then
+        // compose its own names off and cleanup matches by name.
+        let _ = std::fs::remove_file(&target);
         warn!(
             target: "smart",
             "rename {} -> {}: {e}",
@@ -532,18 +776,25 @@ pub fn rename_nameless_video(out_dir: &Path, base: &str) -> bool {
     }
     info!(target: "smart", "de-obfuscated {} -> {}", old_name, target.display());
     // Carry subtitle sidecars along, keeping their language tail.
-    for f in &files {
-        if !SUBTITLE_EXTS.contains(&ext_of(f).as_str()) {
-            continue;
-        }
-        let Some(fname) = f.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-            continue;
-        };
-        if let Some(rest) = sidecar_tail(&fname, &old_stem) {
-            let subtarget = out_dir.join(format!("{clean}{rest}"));
-            if subtarget != *f && !subtarget.exists() {
-                let _ = std::fs::rename(f, &subtarget);
-            }
+    for (f, rest) in &sidecars {
+        let subtarget = out_dir.join(format!("{clean}{rest}"));
+        // Per `tv_rename` above: an entry, not a resolution, and taken
+        // as a CLAIM so the answer cannot go stale before the rename.
+        // A sidecar is the cheapest thing in this file to decline - it
+        // keeps the stem it arrived with beside a video that got the
+        // new one - so every failure here is silent, which is what the
+        // discarded `rename` result already said.
+        if subtarget != *f
+            && std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&subtarget)
+                .is_ok()
+            && std::fs::rename(f, &subtarget).is_err()
+        {
+            // Our own placeholder, or the next pass finds a zero-byte
+            // ".en.srt" and the media player prefers it to the real one.
+            let _ = std::fs::remove_file(&subtarget);
         }
     }
     true
@@ -584,46 +835,88 @@ pub fn rename_movie(parent: &Path, out_dir: &Path, base: &str) -> Option<PathBuf
         .iter()
         .filter(|p| video_ext(p).is_some() && !is_sample_named(p))
         .collect();
-    if videos.len() == 1 {
-        let video = videos[0];
-        // The extension it must CARRY, which for a nameless payload is
-        // the sniffed one - the rename below is what gives it that.
-        let ext = video_ext(video).unwrap_or_else(|| ext_of(video));
-        let old_name = video
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())?;
-        // Strip the trailing ".ext" to get the stem prefix subtitles share.
-        let old_stem = old_name
-            .strip_suffix(&format!(".{ext}"))
-            .unwrap_or(&old_name)
-            .to_string();
+    // The one-video arm is resolved BEFORE anything moves: the stem all
+    // three names share has to be budgeted against the longest tail it
+    // will carry, and the sidecars are found by the OLD stem that the
+    // video rename is about to take away.
+    let one = match videos.as_slice() {
+        [video] => {
+            let video: &PathBuf = video;
+            // The extension it must CARRY, which for a nameless payload is
+            // the sniffed one - the rename below is what gives it that.
+            let ext = video_ext(video).unwrap_or_else(|| ext_of(video));
+            let old_name = video
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())?;
+            // Strip the trailing ".ext" to get the stem prefix subtitles share.
+            let old_stem = old_name
+                .strip_suffix(&format!(".{ext}"))
+                .unwrap_or(&old_name)
+                .to_string();
+            let sidecars = sidecars_of(&files, &old_stem);
+            Some((video, ext, sidecars))
+        }
+        _ => None,
+    };
+    // With no video arm nothing is composed off the stem at all - the
+    // folder IS the stem - so the budget is empty and this is the plain
+    // cap.
+    let base = match &one {
+        Some((_, ext, sidecars)) => capped_base(base, &format!(".{ext}"), sidecars),
+        None => capped_base(base, "", &[]),
+    };
+    let base = base.as_str();
+    if let Some((video, ext, sidecars)) = &one {
+        let video = *video;
         let target = out_dir.join(format!("{base}.{ext}"));
-        if target != *video
-            && !target.exists()
-            && let Err(e) = std::fs::rename(video, &target)
-        {
-            warn!(
-                target: "smart",
-                "rename {} → {}: {e}",
-                video.display(),
-                target.display()
-            );
+        // An ENTRY at the name, not a name that resolves, and taken as
+        // a CLAIM rather than a look - both argued in full at
+        // `tv_rename` above. The claim's own decline is silent, as the
+        // `lstat` was; only a door that is unusable is worth a line,
+        // and that is what the rename already reported.
+        if target != *video {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)
+            {
+                Ok(_) => {
+                    if let Err(e) = std::fs::rename(video, &target) {
+                        // Our own placeholder - see `tv_rename`.
+                        let _ = std::fs::remove_file(&target);
+                        warn!(
+                            target: "smart",
+                            "rename {} → {}: {e}",
+                            video.display(),
+                            target.display()
+                        );
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => warn!(
+                    target: "smart",
+                    "could not claim {}: {e}",
+                    target.display()
+                ),
+            }
         }
         // Subtitle sidecars whose name starts with the old video stem:
         // "Stem.en.srt" → "base.en.srt", preserving the language tail.
-        for f in &files {
-            if !SUBTITLE_EXTS.contains(&ext_of(f).as_str()) {
-                continue;
-            }
-            let fname = match f.file_name() {
-                Some(n) => n.to_string_lossy().into_owned(),
-                None => continue,
-            };
-            if let Some(rest) = sidecar_tail(&fname, &old_stem) {
-                let subtarget = out_dir.join(format!("{base}{rest}"));
-                if subtarget != *f && !subtarget.exists() {
-                    let _ = std::fs::rename(f, &subtarget);
-                }
+        for (f, rest) in sidecars {
+            let subtarget = out_dir.join(format!("{base}{rest}"));
+            // Per `tv_rename` above: an entry, not a resolution, and
+            // taken as a CLAIM. Silent either way, as the discarded
+            // `rename` result already was.
+            if subtarget != *f
+                && std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&subtarget)
+                    .is_ok()
+                && std::fs::rename(f, &subtarget).is_err()
+            {
+                // Our own placeholder - see `rename_nameless_video`.
+                let _ = std::fs::remove_file(&subtarget);
             }
         }
     }

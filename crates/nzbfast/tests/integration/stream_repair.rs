@@ -80,7 +80,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::harness::{Daemon, serve};
-use nzbkit::mock::{Chaos, MockServer, make_file_articles};
+use nzbkit::mock::{BodyLog, Chaos, MockServer, make_file_articles};
 
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
@@ -196,6 +196,156 @@ fn have_par2() -> bool {
          would have looked green while proving nothing"
     );
     ok
+}
+
+/// The provider freeze all three legs run their handshake inside.
+///
+/// WHAT IT IS FOR. Every leg here asserts the same fixture invariant -
+/// the player is open and reading, and the repair has NOT run yet -
+/// and then holds the response open across par2. That ordering was
+/// established by nothing but relative speed: the provider is paced at
+/// 50 ms an article, and the test races it with a poll loop of HTTP
+/// round trips to the same daemon. On an idle box the test wins. Under
+/// load it does not, because the pacing is the mock's own wall clock
+/// and does not slow down while the daemon's HTTP does.
+///
+/// MEASURED 31 Aug 2026, eight concurrent copies of the integration
+/// binary on an 18-core box already at load 25:
+/// `an_external_repair_gets_its_target_from_a_live_range_response`
+/// failed THREE of eight at "the repair had already finished before
+/// the player was reading" - and that is the leg the 30 Aug handoff
+/// did NOT list, so the class is all three and not the two that were
+/// seen. Six concurrent copies were green 18 of 18, which is why the
+/// recipe in that handoff says eight.
+///
+/// WHY A FREEZE RATHER THAN A LONGER DEADLINE. A bigger threshold does
+/// not fix an ordering test, it moves where the ambiguity starts. The
+/// download cannot COMPLETE while the provider is not serving, so
+/// postproc cannot start, so par2 cannot run - the invariant becomes a
+/// property of the fixture rather than of how fast the box is. It is
+/// `stream_live`'s own idiom (freeze the world, land the thing at a
+/// known point in `body_log`, release), and its comment there is the
+/// argument in one line: while the world is frozen, waiting longer is
+/// free.
+///
+/// WHERE IT ARMS, and this is the part that had to be measured twice.
+/// Legs 1 and 2 arm on the DAMAGED article being asked for - the one
+/// moment each fixture already names, and late enough that the live
+/// writer certainly exists. Leg 3 cannot: the remux will not OPEN until
+/// the container's index has landed, and in Matroska that lives at the
+/// END of the file, which is why `preview_media_request` prefetches the
+/// tail before it builds a session at all. So leg 3 arms on the media
+/// file's LAST article instead. Arming leg 3 at the damaged article was
+/// tried first and hangs outright: frozen at 72% of the file, the
+/// preview answers 425 for ever and the test waits out its own bound.
+///
+/// AND WHY EVERY LEG ALSO SLOWS ITS 430. The arming point alone is not
+/// enough, which the first cut proved rather than assumed: with the
+/// freeze armed at the damaged article and nothing else changed, leg 1
+/// still failed 1 of 8 at eight-way load and leg 2 failed 1 of 8 - the
+/// freeze simply arrived after the download had finished. There is not
+/// much room to arrive in. MEASURED 31 Aug 2026 on an IDLE box: leg 3's
+/// whole job, first byte to `repair complete`, is FOUR SECONDS, and
+/// `[repair] need 1 block(s) → fetching 2 volume(s)` to `fetched 0.6 MB
+/// of recovery data` is 278 ms; leg 1 freezes with 19 of 80 articles
+/// left, which is 475 ms of provider pacing. A 25 ms poll has that much
+/// to arm in, and a loaded box takes it away.
+///
+/// `missing_delay_ms` buys the margin. The damaged article is the last
+/// thing the job waits on, so delaying its 430 holds the download short
+/// of complete for as long as the delay, while everything else lands.
+/// A real 430 IS a full round trip like any other body, which is what
+/// that knob is for; and because this mock does not echo the id, the
+/// pool asks twice, so the window is two of them rather than one.
+///
+/// WHAT LEG 2 FAILED ON, which is not the assertion below at all: its
+/// `wait_stream_live`. That poll is looking for a file postproc TAKES
+/// AWAY - this set demotes to "materializing volumes for repair" and
+/// UNLINKS `movie.mkv`, which FINDING (b) at the foot of that leg
+/// explains at length - so once the job reaches postproc there is no
+/// live file left and the poll cannot succeed however long it runs. It
+/// then spends its whole 60 s budget and fails. Reproduced here with
+/// the freeze armed too late: `[repair] materializing volumes for
+/// repair` in the daemon log, `/stream never served the head of the
+/// live file` in the test. Held short of complete, the job never
+/// reaches postproc while the poll is running.
+struct Freeze {
+    pause: Arc<AtomicBool>,
+    log: Arc<Mutex<BodyLog>>,
+    /// Every message-id in the fixture. `assert_held` holds the DISTINCT
+    /// ids asked against this, which is what tells a freeze that stopped
+    /// the world short of the end from one that arrived after the last
+    /// article was already down.
+    posted: usize,
+    armed: bool,
+}
+
+impl Freeze {
+    fn new(srv: &MockServer, posted: usize) -> Freeze {
+        Freeze {
+            pause: srv.pause.clone(),
+            log: srv.body_log.clone(),
+            posted,
+            armed: false,
+        }
+    }
+
+    /// Block until the provider has been asked for `id`, then stop it
+    /// serving.
+    fn arm(&mut self, id: &str) {
+        let (log, want) = (self.log.clone(), id.to_string());
+        crate::harness::wait_until(
+            &format!("the download to reach {want}"),
+            Duration::from_secs(180),
+            || log.lock().unwrap().contains(&want),
+        );
+        self.pause.store(true, Ordering::Release);
+        self.armed = true;
+    }
+
+    /// A GREEN RUN CANNOT TELL A WORKING FREEZE FROM AN INERT ONE, which
+    /// is the whole reason this is an assertion and not a comment. If
+    /// `pause` ever stops holding, every leg here quietly goes back to
+    /// racing the provider and nothing says so.
+    ///
+    /// Two questions, because either alone can be satisfied by a broken
+    /// freeze. IS THE WORLD STOPPED RIGHT NOW - measured by watching the
+    /// log over a window rather than by comparing against a snapshot
+    /// taken at `arm`, deliberately: the mock checks `pause` at the top
+    /// of its command loop, so a command already read still lands, and
+    /// an exact match against an arming snapshot would be asserting on
+    /// how many microseconds that took on a loaded box. That is the
+    /// wall-clock reasoning this whole struct exists to remove, and it
+    /// would have made the freeze its own flake. AND DID IT STOP THE
+    /// WORLD SHORT OF THE END - a freeze armed after the last article
+    /// was already served is perfectly stable and holds nothing back.
+    fn assert_held(&self) {
+        assert!(self.armed, "the freeze was never armed");
+        let len = || self.log.lock().unwrap().len();
+        let before = len();
+        std::thread::sleep(Duration::from_millis(300));
+        let after = len();
+        assert_eq!(
+            before,
+            after,
+            "the provider served {} more article(s) in 300 ms - the freeze is \
+             inert and this leg is racing the download again",
+            after.saturating_sub(before)
+        );
+        let asked: std::collections::HashSet<String> =
+            self.log.lock().unwrap().iter().cloned().collect();
+        assert!(
+            asked.len() < self.posted,
+            "all {} of the fixture's articles had been asked for by the time the \
+             freeze armed, so it is holding nothing back",
+            self.posted
+        );
+    }
+
+    /// Let the download finish, so postproc and par2 can run.
+    fn release(&self) {
+        self.pause.store(false, Ordering::Release);
+    }
 }
 
 /// `par2 create` over files already written into `dir`, returning the
@@ -720,19 +870,29 @@ async fn an_external_repair_gets_its_target_from_a_live_range_response() {
     // window the player has to be reading in. Unpaced, this whole job -
     // download, verify, external repair - took 300 ms and the reader
     // could not be shown to have been there at all.
+    //
+    // `missing_delay_ms` is the freeze's margin, not the player's - see
+    // `Freeze`. It holds the job short of complete while the freeze
+    // arms, which pacing alone does not.
     let chaos = Chaos {
         missing: ["<mv-61@mock>".to_string()].into(),
+        missing_delay_ms: 6_000,
         delay_ms: 50,
         ..Default::default()
     };
+    let posted = articles.len();
     let srv = MockServer::start(articles, chaos).await;
     let cfg = write_config(&dir, &srv);
     let out = dir.join("complete");
     let d = serve(&dir, |port| daemon_cmd(&cfg, &out, port)).await;
     let port = d.port;
 
-    let held = tokio::task::spawn_blocking(move || {
+    let mut freeze = Freeze::new(&srv, posted);
+    let (held, freeze) = tokio::task::spawn_blocking(move || {
         add_nzb(port, "Stream.Repair.2026", &xml);
+        // Freeze the provider on the damaged article, so the handshake
+        // below cannot lose a race with the download - see `Freeze`.
+        freeze.arm("<mv-61@mock>");
         wait_stream_live(port);
         // The response under test: the whole file, consumed at playback
         // pace. A bare `GET /stream` is only ever served from the live
@@ -746,7 +906,7 @@ async fn an_external_repair_gets_its_target_from_a_live_range_response() {
             "the held range response is not a 206:\n{status}"
         );
         held.wait_reading(Duration::from_secs(60));
-        held
+        (held, freeze)
     })
     .await
     .unwrap();
@@ -755,6 +915,7 @@ async fn an_external_repair_gets_its_target_from_a_live_range_response() {
     // near done at the moment the external repair starts. Without them
     // the player could have come and gone before par2 was ever spawned,
     // and the test would pass having proved nothing.
+    freeze.assert_held();
     assert!(
         !held.finished(),
         "the response ended before the repair: {}",
@@ -764,6 +925,7 @@ async fn an_external_repair_gets_its_target_from_a_live_range_response() {
         !d.log().contains("repair complete"),
         "the repair had already finished before the player was reading"
     );
+    freeze.release();
     wait_log(&d, "repair complete", Duration::from_secs(180));
     assert!(
         held.body_len() < SIZE,
@@ -923,19 +1085,27 @@ async fn an_external_repair_of_a_volume_set_still_admits_the_child() {
         .find(|k| k.starts_with("<v2-8@mock"))
         .expect("the third volume has at least 8 articles")
         .clone();
+    // `missing_delay_ms`: the freeze's margin - see `Freeze`.
     let chaos = Chaos {
-        missing: [victim].into(),
+        missing: [victim.clone()].into(),
+        missing_delay_ms: 6_000,
         delay_ms: 50,
         ..Default::default()
     };
+    let posted = articles.len();
     let srv = MockServer::start(articles, chaos).await;
     let cfg = write_config(&dir, &srv);
     let out = dir.join("complete");
     let d = serve(&dir, |port| daemon_cmd(&cfg, &out, port)).await;
     let port = d.port;
 
-    let held = tokio::task::spawn_blocking(move || {
+    // What this leg fails ON under load is not the assertion below but
+    // `wait_stream_live` itself - see `Freeze`, WHAT LEG 2 FAILED ON.
+    let mut freeze = Freeze::new(&srv, posted);
+    let damaged = victim;
+    let (held, freeze) = tokio::task::spawn_blocking(move || {
         add_nzb(port, "Stream.Repair.Vols.2026", &xml);
+        freeze.arm(&damaged);
         wait_stream_live(port);
         let held = Held::open(port, "bytes=0-");
         let status = held.wait_headers(Duration::from_secs(60));
@@ -944,11 +1114,12 @@ async fn an_external_repair_of_a_volume_set_still_admits_the_child() {
             "the held range response is not a 206:\n{status}"
         );
         held.wait_reading(Duration::from_secs(60));
-        held
+        (held, freeze)
     })
     .await
     .unwrap();
 
+    freeze.assert_held();
     assert!(
         !held.finished(),
         "the response ended before the repair: {}",
@@ -958,6 +1129,7 @@ async fn an_external_repair_of_a_volume_set_still_admits_the_child() {
         !d.log().contains("repair complete"),
         "the repair had already finished before the player was reading"
     );
+    freeze.release();
     wait_log(&d, "repair complete", Duration::from_secs(240));
 
     held.release();
@@ -1242,18 +1414,28 @@ async fn a_live_preview_remux_follows_an_external_repair() {
     // Paced exactly as leg 1's provider is, and for the same reason:
     // unpaced, the whole job is over before a client can be shown to
     // have been there.
+    //
+    // `missing_delay_ms`: the freeze's margin - see `Freeze`, which also
+    // says why THIS leg alone arms on the tail article rather than on
+    // the damaged one.
     let chaos = Chaos {
         missing: [format!("<pv-{}@mock>", hole + 1)].into(),
+        missing_delay_ms: 6_000,
         delay_ms: 50,
         ..Default::default()
     };
+    let posted = articles.len();
     let srv = MockServer::start(articles, chaos).await;
     let cfg = write_config(&dir, &srv);
     let out = dir.join("complete");
     let d = serve(&dir, |port| daemon_cmd(&cfg, &out, port)).await;
     let port = d.port;
 
-    let held = tokio::task::spawn_blocking(move || {
+    let mut freeze = Freeze::new(&srv, posted);
+    // The LAST article of the media file, not the damaged one - see
+    // `Freeze`, WHERE IT ARMS.
+    let tail_article = format!("<pv-{}@mock>", inner.len().div_ceil(ART));
+    let (held, freeze) = tokio::task::spawn_blocking(move || {
         add_nzb(port, "Preview.Repair.2026", &xml);
         // The endpoint is gated at `metadata-only` as well as at `off`,
         // and metadata-only is the default: without this every request
@@ -1262,6 +1444,11 @@ async fn a_live_preview_remux_follows_an_external_repair() {
             port,
             "/api?mode=config&name=preview&value=full&apikey=sekrit&output=json",
         );
+        // Freeze once the container's index is on its way: everything
+        // below is a poll loop of HTTP round trips against the same
+        // daemon the download is running in, and this is the leg that
+        // lost that race first - see `Freeze`.
+        freeze.arm(&tail_article);
         // There has to be a live media writer before there is anything
         // to preview, and `open_live_media` answers 404 - not 425 -
         // until there is.
@@ -1282,7 +1469,7 @@ async fn a_live_preview_remux_follows_an_external_repair() {
                     "the live preview did not take the remux route:\n{status}"
                 );
                 held.wait_reading(Duration::from_secs(60));
-                return held;
+                return (held, freeze);
             }
             assert!(
                 status.starts_with("HTTP/1.1 425") || status.starts_with("HTTP/1.1 404"),
@@ -1302,6 +1489,7 @@ async fn a_live_preview_remux_follows_an_external_repair() {
 
     // The fixture's teeth, leg 1's to the letter: the response is open,
     // reading, and nowhere near the damaged span when the repair runs.
+    freeze.assert_held();
     assert!(
         !held.finished(),
         "the remux ended before the repair: {}",
@@ -1311,6 +1499,7 @@ async fn a_live_preview_remux_follows_an_external_repair() {
         !d.log().contains("repair complete"),
         "the repair had already finished before the player was reading"
     );
+    freeze.release();
     wait_log(&d, "repair complete", Duration::from_secs(240));
     // And - the sharp form, in the coordinates the verdict is taken in -
     // the frame this leg ends by looking for has NOT been served yet. A

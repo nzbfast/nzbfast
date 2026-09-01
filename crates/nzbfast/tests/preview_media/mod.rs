@@ -328,5 +328,4 @@ async fn preview_media_remuxes_matroska_into_fragmented_mp4() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

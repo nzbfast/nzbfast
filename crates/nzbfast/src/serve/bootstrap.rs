@@ -75,6 +75,50 @@ pub(super) fn legacy_rename_punctuation(
 /// Tying it to the config also stops it being stranded when the download
 /// directory is repointed from the dashboard.
 ///
+/// What is at the new spool path, as the three answers `spool_dir` has
+/// to tell apart. Its own function so the classification can be pinned
+/// directly: it is the whole of the 31 Aug 2026 rename-occupancy
+/// decision for this file, and driving it through `spool_dir` cannot
+/// separate `Absent` from `Unusable` - both end up returning `old`, one
+/// by declining and one by attempting a migration that fails.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum NewSpool {
+    /// A readable directory with something in it: a completed migration.
+    Live,
+    /// A readable EMPTY directory: a placeholder, not a migration.
+    Placeholder,
+    /// No entry at all: the ordinary pre-migration state.
+    Absent,
+    /// An entry that is not a directory this process can read.
+    Unusable,
+}
+
+/// Classify `new`, by whether `read_dir` can actually READ it.
+///
+/// `read_dir` is what decides, and that is the point rather than an
+/// implementation detail. The obvious spelling - classify by whether the
+/// path exists - is what the census found wrong, and the obvious FIX is
+/// wrong too. `Path::exists` follows symlinks and answers false on any
+/// error, so a `.spool` symlinked onto a volume that is not mounted came
+/// out `Absent` and a link resolving to a FILE came out occupied; but
+/// asking `symlink_metadata` outright makes the first one occupied as
+/// well, which sends the user's live queue at `old` off to
+/// `legacy-spool/` inside a path nothing can create, logs it as "unused;
+/// safe to delete", and hands the daemon a spool it cannot write. Only a
+/// directory this process can read is a spool. `symlink_metadata` is
+/// used for ONE thing here: separating "no entry at all", which migrates,
+/// from "an entry we do not understand", which declines.
+pub(super) fn new_spool_state(new: &std::path::Path) -> NewSpool {
+    match std::fs::read_dir(new) {
+        Ok(mut rd) => match rd.next() {
+            Some(_) => NewSpool::Live,
+            None => NewSpool::Placeholder,
+        },
+        Err(_) if std::fs::symlink_metadata(new).is_ok() => NewSpool::Unusable,
+        Err(_) => NewSpool::Absent,
+    }
+}
+
 /// An existing spool migrates once, on the first launch after the move.
 /// Config and downloads are routinely on different filesystems - separate
 /// volume mounts are the norm under Docker - so this cannot be a rename.
@@ -93,10 +137,17 @@ pub(super) fn legacy_rename_punctuation(
 /// stale queue that had been copied before the failure. Both restarts were
 /// self-consistent and both were wrong.
 ///
-/// That is also why `new.exists()` is now trustworthy as "already migrated":
-/// the new path only ever appears via the final rename, so it cannot be a
-/// half-copy. An EMPTY `new` is the one exception, and it is not a migration
-/// at all - see the `remove_dir` below.
+/// That is also why a populated `new` is trustworthy as "already
+/// migrated": the new path only ever appears via the final rename, so it
+/// cannot be a half-copy. An EMPTY `new` is one exception and is not a
+/// migration at all; an entry at `new` that is not a readable directory
+/// is the other, and declines. Both are classified in the body.
+///
+/// The `old.exists()` at the top is deliberately NOT the entry question
+/// the body asks: it tests a SOURCE, and "there is a leftover spool to
+/// migrate" is exactly a question about whether the path resolves to
+/// something this daemon can read. A link there that dangles has no
+/// state to move, and doing nothing is the right answer to it.
 pub(super) fn spool_dir(config: &std::path::Path, out_root: &std::path::Path) -> PathBuf {
     let new = config.with_file_name(".spool");
     let old = out_root.join(".spool");
@@ -117,22 +168,53 @@ pub(super) fn spool_dir(config: &std::path::Path, out_root: &std::path::Path) ->
     // daemon on the empty `new`, which then SAVES that empty queue over it.
     // An unreadable `new` is treated as occupied, which is the safe way to
     // be wrong: it declines to migrate rather than moving live state aside.
-    let new_is_empty = match std::fs::read_dir(&new) {
-        Ok(mut rd) => rd.next().is_none(),
-        Err(_) if new.exists() => false,
-        Err(_) => true,
-    };
-    if new.exists() && !new_is_empty {
-        // A real, migrated spool. Whatever is still at `old` is the residue
-        // of that move, and it is sitting in the user's download folder.
-        retire_legacy_spool(&old, &new);
-        return new;
-    }
-    // Empty placeholder: drop it so the migration below can publish into
-    // its place. A failure here is not fatal - the rename simply lands on
-    // an existing empty directory, or the migration declines.
-    if new.exists() {
-        let _ = std::fs::remove_dir(&new);
+    //
+    // THAT LAST SENTENCE WAS THE INTENT AND NOT THE CODE, until the 31 Aug
+    // 2026 rename-occupancy census. `read_dir` failing was classified with
+    // `new.exists()`, which FOLLOWS symlinks and answers false on ANY
+    // error, so the two states it has to separate both came out wrong. A
+    // `.spool` symlinked onto a volume that is not mounted read as ABSENT
+    // and fell into the migration, where the publishing rename answers
+    // ENOTDIR (a directory onto a symlink, MEASURED on APFS 31 Aug 2026)
+    // and the run ends in "could not move daemon state". A `.spool` link
+    // that resolves to a FILE, or a directory `read_dir` cannot open, read
+    // as OCCUPIED and took the branch below: the user's live queue at `old`
+    // was retired into a path nothing can create, and the log then called
+    // it "unused; safe to delete" while the daemon ran on a spool path that
+    // cannot hold anything. That is the exact failure this comment already
+    // named, reached from the other side.
+    //
+    // So the classification is three-way and `read_dir` is what decides it.
+    // Only a directory this process can actually read is a spool; an entry
+    // that is anything else is neither absent nor migrated, and the answer
+    // the comment above asks for is to decline - keep running on `old`,
+    // retire nothing, move nothing.
+    match new_spool_state(&new) {
+        NewSpool::Live => {
+            // A real, migrated spool. Whatever is still at `old` is the
+            // residue of that move, and it is sitting in the user's
+            // download folder.
+            retire_legacy_spool(&old, &new);
+            return new;
+        }
+        NewSpool::Unusable => {
+            warn!(
+                target: "spool",
+                "{} is not a directory this daemon can read, so the daemon \
+                 state in the download folder is left exactly where it is \
+                 and {} keeps being used (nothing was moved or retired)",
+                new.display(),
+                old.display()
+            );
+            return old;
+        }
+        // Empty placeholder: drop it so the migration below can publish
+        // into its place. A failure here is not fatal - the rename simply
+        // lands on an existing empty directory, or the migration declines.
+        NewSpool::Placeholder => {
+            let _ = std::fs::remove_dir(&new);
+        }
+        NewSpool::Absent => {}
     }
     // Beside `new`, so the publishing rename is same-filesystem and atomic.
     let staging = config.with_file_name(".spool.migrating");
@@ -1222,7 +1304,9 @@ pub(super) fn apply_saved_settings(opts: &mut ServeOpts, path: &std::path::Path)
     }
     if let Some(v) = n("mem_limit") {
         opts.mem_budget = if v > 0 {
-            nzbkit::mem::MemBudget::with_total(v)
+            // A figure a person typed into Settings, so the clamp is
+            // reported rather than silent (`MemBudget::from_user_limit`).
+            nzbkit::mem::MemBudget::from_user_limit(v, "the mem_limit setting")
         } else {
             nzbkit::mem::MemBudget::auto()
         };

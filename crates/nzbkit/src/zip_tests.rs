@@ -6,11 +6,9 @@ fn write(dir: &Path, name: &str, head: &[u8]) -> PathBuf {
     p
 }
 
-fn tmp(tag: &str) -> PathBuf {
+fn tmp(tag: &str) -> crate::testscratch::ScratchDir {
     let d = std::env::temp_dir().join(format!("nzbkit-zip-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    crate::testscratch::ScratchDir::attach(&d)
 }
 
 const PK: &[u8] = b"PK\x03\x04rest of a local file header";
@@ -37,6 +35,24 @@ fn final_files_are_never_containers() {
     );
     assert!(!is_container(&d.join("comic.cbz")));
     assert!(!name_is_zip_shaped("comic.cbz"));
+}
+
+/// T6: `Path::extension()` answers `Some("")` on `comic.cbz.` and
+/// `Some("cbz ")` on `comic.cbz ` - neither matches the deny list, so
+/// both used to read as "not a payload file" and earned the zip chase,
+/// which is exactly the data loss `final_files_are_never_containers`
+/// exists to prevent. The RAR-family twin is pinned in
+/// `extract::mod_tests::a_trailing_dot_or_space_does_not_defeat_is_final_name`.
+#[test]
+fn a_trailing_dot_or_space_does_not_defeat_final_file_names() {
+    let d = tmp("final-trailing");
+    for n in ["comic.cbz.", "comic.cbz..", "comic.cbz ", "comic.CBZ"] {
+        write(&d, n, PK);
+    }
+    assert!(
+        scan(&d).is_empty(),
+        "payload names with a trailing dot, space or bare case change must never be unpacked"
+    );
 }
 
 #[test]
@@ -214,7 +230,10 @@ fn payload(n: usize, seed: u8) -> Vec<u8> {
 }
 
 /// Write a container to disk and open it.
-fn open_bytes(tag: &str, bytes: &[u8]) -> (PathBuf, Result<Archive, ZipError>) {
+fn open_bytes(
+    tag: &str,
+    bytes: &[u8],
+) -> (crate::testscratch::ScratchDir, Result<Archive, ZipError>) {
     let d = tmp(tag);
     let p = write(&d, "c.zip", bytes);
     let a = Archive::open(&[p]);
@@ -235,12 +254,11 @@ fn stored_and_deflated_entries_round_trip() {
         Spec::stored("a.bin", &a_data),
         Spec::deflated("b.bin", &b_data),
     ]);
-    let (d, ar) = open_bytes("rd-ok", &z);
+    let (_d, ar) = open_bytes("rd-ok", &z);
     let ar = ar.unwrap();
     assert_eq!(ar.entries().len(), 2);
     assert_eq!(extract(&ar, 0).unwrap(), a_data);
     assert_eq!(extract(&ar, 1).unwrap(), b_data);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The CRC is the only thing standing between a damaged-before-posting
@@ -253,10 +271,9 @@ fn a_wrong_stored_crc_is_an_error_not_output() {
         crc_override: Some(0xDEAD_BEEF),
         ..Spec::stored("a.bin", &data)
     }]);
-    let (d, ar) = open_bytes("rd-crc", &z);
+    let (_d, ar) = open_bytes("rd-crc", &z);
     let ar = ar.unwrap();
     assert!(matches!(extract(&ar, 0), Err(ZipError::BadCrc { .. })));
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// Declined shapes must name what they hit: "not supported" with no
@@ -270,19 +287,18 @@ fn declined_methods_and_encryption_say_which() {
         method: 93,
         ..Spec::stored("a.bin", &data)
     }]);
-    let (d, ar) = open_bytes("rd-zstd", &z);
+    let (_d, ar) = open_bytes("rd-zstd", &z);
     let e = extract(&ar.unwrap(), 0).unwrap_err();
     assert!(
         matches!(&e, ZipError::Unsupported(m) if m.contains("zstd")),
         "{e}"
     );
-    std::fs::remove_dir_all(&d).unwrap();
 
     let z = fixtures::zip_of(&[Spec {
         flags: 0x0001,
         ..Spec::stored("a.bin", &data)
     }]);
-    let (d, ar) = open_bytes("rd-enc", &z);
+    let (_d, ar) = open_bytes("rd-enc", &z);
     let ar = ar.unwrap();
     assert!(ar.entries()[0].is_encrypted());
     let e = extract(&ar, 0).unwrap_err();
@@ -290,7 +306,6 @@ fn declined_methods_and_encryption_say_which() {
         matches!(&e, ZipError::Unsupported(m) if m.contains("password")),
         "{e}"
     );
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// bzip2 (method 12) decodes on the disk path too. The chase and the
@@ -301,9 +316,8 @@ fn bzip2_entries_decode_on_the_disk_path() {
     // Compressible: bzip2 EXPANDS random bytes.
     let data: Vec<u8> = (0..90_000u32).map(|i| (i / 613 % 241) as u8).collect();
     let z = fixtures::zip_of(&[Spec::bzip2("a.bin", &data)]);
-    let (d, ar) = open_bytes("rd-bz-ok", &z);
+    let (_d, ar) = open_bytes("rd-bz-ok", &z);
     assert_eq!(extract(&ar.unwrap(), 0).unwrap(), data);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// lzma (method 14) decodes on the disk path too - same decoder
@@ -313,9 +327,8 @@ fn bzip2_entries_decode_on_the_disk_path() {
 fn lzma_entries_decode_on_the_disk_path() {
     let data: Vec<u8> = (0..90_000u32).map(|i| (i / 613 % 241) as u8).collect();
     let z = fixtures::zip_of(&[Spec::lzma("a.bin", &data)]);
-    let (d, ar) = open_bytes("rd-lzma-ok", &z);
+    let (_d, ar) = open_bytes("rd-lzma-ok", &z);
     assert_eq!(extract(&ar.unwrap(), 0).unwrap(), data);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// A symlink entry stores its TARGET as payload; materializing one
@@ -326,9 +339,8 @@ fn symlink_entries_are_identifiable() {
         external: 0xA1FF_0000,
         ..Spec::stored("link", b"/etc/passwd")
     }]);
-    let (d, ar) = open_bytes("rd-link", &z);
+    let (_d, ar) = open_bytes("rd-link", &z);
     assert!(ar.unwrap().entries()[0].is_symlink());
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 #[test]
@@ -338,11 +350,10 @@ fn zip64_sizes_are_read_from_the_extra_field() {
         zip64: true,
         ..Spec::stored("big.bin", &data)
     }]);
-    let (d, ar) = open_bytes("rd-z64", &z);
+    let (_d, ar) = open_bytes("rd-z64", &z);
     let ar = ar.unwrap();
     assert_eq!(ar.entries()[0].uncompressed_size, data.len() as u64);
     assert_eq!(extract(&ar, 0).unwrap(), data);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// A stored entry can contain the end-of-central-directory signature.
@@ -353,11 +364,10 @@ fn an_eocd_signature_inside_payload_does_not_win() {
     data.extend_from_slice(b"PK\x05\x06");
     data.extend_from_slice(&[0u8; 40]);
     let z = fixtures::zip_of(&[Spec::stored("a.bin", &data)]);
-    let (d, ar) = open_bytes("rd-sig", &z);
+    let (_d, ar) = open_bytes("rd-sig", &z);
     let ar = ar.unwrap();
     assert_eq!(ar.entries().len(), 1);
     assert_eq!(extract(&ar, 0).unwrap(), data);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// Build a 22-byte end-of-central-directory record that describes
@@ -406,16 +416,15 @@ fn a_forged_eocd_in_the_comment_never_wins() {
     let b = payload(1_500, 7);
     let specs = [Spec::stored("a.bin", &a), Spec::stored("b.bin", &b)];
     let good = fixtures::zip_of(&specs);
-    let (d, ar) = open_bytes("rd-forge-clean", &good);
+    let (_d, ar) = open_bytes("rd-forge-clean", &good);
     assert_eq!(
         ar.unwrap().entries().len(),
         2,
         "the untouched archive still opens"
     );
-    std::fs::remove_dir_all(&d).unwrap();
     for (tag, stretch) in [("short", false), ("stretched", true)] {
         let z = fixtures::zip_of_with_comment(&specs, &forged_eocd(&good, stretch));
-        let (d, ar) = open_bytes(&format!("rd-forge-{tag}"), &z);
+        let (_d, ar) = open_bytes(&format!("rd-forge-{tag}"), &z);
         match ar {
             Err(_) => {}
             Ok(a) => panic!(
@@ -423,7 +432,6 @@ fn a_forged_eocd_in_the_comment_never_wins() {
                 a.entries().len()
             ),
         }
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }
 
@@ -444,12 +452,11 @@ fn a_zip_behind_a_prepended_stub_opens_and_extracts() {
     for stub in [1usize, 511, 200_000] {
         let mut with = payload(stub, 77);
         with.extend_from_slice(&z);
-        let (d, ar) = open_bytes(&format!("rd-stub-{stub}"), &with);
+        let (_d, ar) = open_bytes(&format!("rd-stub-{stub}"), &with);
         let ar = ar.unwrap_or_else(|e| panic!("stub {stub}: {e}"));
         assert_eq!(ar.entries().len(), 2, "stub {stub}");
         assert_eq!(extract(&ar, 0).unwrap(), a, "stub {stub}");
         assert_eq!(extract(&ar, 1).unwrap(), b, "stub {stub}");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }
 
@@ -494,7 +501,6 @@ fn a_stubbed_zip_is_recognised_and_a_bare_one_is_not() {
     planted.extend_from_slice(b"PK\x05\x06");
     planted.extend_from_slice(&[0u8; 18]);
     assert_eq!(stubbed_archive(&write(&d, "planted.exe", &planted)), None);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The one shape that DOES satisfy the geometry and must still be
@@ -554,7 +560,6 @@ fn a_launcher_in_front_of_a_jar_is_the_deliverable_not_packaging() {
         stubbed_archive(&write(&d, "rel.exe", &with)),
         Some(Stubbed::Packaging { base: 4_096 })
     );
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The prepended stub and zip64 in the SAME archive - each covered
@@ -573,7 +578,7 @@ fn a_zip64_archive_behind_a_prepended_stub_opens_and_extracts() {
         for stub in [1usize, 511, 200_000] {
             let mut with = payload(stub, 77);
             with.extend_from_slice(&z);
-            let (d, ar) = open_bytes(&format!("rd-z64-stub-{stub}"), &with);
+            let (_d, ar) = open_bytes(&format!("rd-z64-stub-{stub}"), &with);
             let ar = ar.unwrap_or_else(|e| panic!("{name} stub {stub}: {e}"));
             assert_eq!(ar.entries().len(), 1, "{name} stub {stub}");
             let e = &ar.entries()[0];
@@ -581,7 +586,6 @@ fn a_zip64_archive_behind_a_prepended_stub_opens_and_extracts() {
             ar.read_entry_to(e, &mut out)
                 .unwrap_or_else(|err| panic!("{name} stub {stub}: {err}"));
             assert_eq!(out.len() as u64, e.uncompressed_size, "{name} stub {stub}");
-            std::fs::remove_dir_all(&d).unwrap();
         }
     }
 }
@@ -625,16 +629,14 @@ fn a_saturated_zip64_archive_behind_a_prepended_stub_opens_and_extracts() {
     out.extend_from_slice(&0u16.to_le_bytes()); // comment length
 
     // Unstubbed first: the fixture itself has to be a legal archive.
-    let (d0, ar) = open_bytes("rd-z64sat", &out);
+    let (_d0, ar) = open_bytes("rd-z64sat", &out);
     assert_eq!(extract(&ar.unwrap(), 0).unwrap(), a);
-    std::fs::remove_dir_all(&d0).unwrap();
     for stub in [1usize, 511, 200_000] {
         let mut with = payload(stub, 77);
         with.extend_from_slice(&out);
-        let (d, ar) = open_bytes(&format!("rd-z64sat-{stub}"), &with);
+        let (_d, ar) = open_bytes(&format!("rd-z64sat-{stub}"), &with);
         let ar = ar.unwrap_or_else(|e| panic!("stub {stub}: {e}"));
         assert_eq!(extract(&ar, 0).unwrap(), a, "stub {stub}");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }
 
@@ -711,11 +713,10 @@ fn a_zip64_record_with_an_extensible_data_sector_opens() {
         for sector in [0usize, 8, 64, 1000] {
             let out = splice_zip64_end_record(&z, &payload(sector, 66), saturate);
             let tag = format!("sec{sector}-sat{saturate}");
-            let (d, ar) = open_bytes(&format!("rd-z64sec-{tag}"), &out);
+            let (_d, ar) = open_bytes(&format!("rd-z64sec-{tag}"), &out);
             let ar = ar.unwrap_or_else(|e| panic!("{tag}: {e}"));
             assert_eq!(ar.entries().len(), 1, "{tag}");
             assert_eq!(extract(&ar, 0).unwrap(), a, "{tag}");
-            std::fs::remove_dir_all(&d).unwrap();
         }
     }
 }
@@ -758,11 +759,10 @@ fn a_prefixed_zip64_record_with_an_extensible_data_sector_opens() {
                 let mut with = payload(stub, 77);
                 with.extend_from_slice(&out);
                 let tag = format!("sec{sector}-sat{saturate}-stub{stub}");
-                let (d, ar) = open_bytes(&format!("rd-z64sec-stub-{tag}"), &with);
+                let (_d, ar) = open_bytes(&format!("rd-z64sec-stub-{tag}"), &with);
                 let ar = ar.unwrap_or_else(|e| panic!("{tag}: {e}"));
                 assert_eq!(ar.entries().len(), 1, "{tag}");
                 assert_eq!(extract(&ar, 0).unwrap(), a, "{tag}");
-                std::fs::remove_dir_all(&d).unwrap();
             }
         }
     }
@@ -807,10 +807,9 @@ fn a_planted_end_record_inside_the_sector_is_not_the_record() {
                 let mut with = payload(stub, 77);
                 with.extend_from_slice(&out);
                 let tag = format!("reaches{reaches}-sat{saturate}-stub{stub}");
-                let (d, ar) = open_bytes(&format!("rd-z64plant-{tag}"), &with);
+                let (_d, ar) = open_bytes(&format!("rd-z64plant-{tag}"), &with);
                 let ar = ar.unwrap_or_else(|e| panic!("{tag}: {e}"));
                 assert_eq!(extract(&ar, 0).unwrap(), a, "{tag}");
-                std::fs::remove_dir_all(&d).unwrap();
             }
         }
     }
@@ -827,7 +826,7 @@ fn a_sector_past_the_probe_bound_is_refused_by_name() {
     let out = splice_zip64_end_record(&z, &payload(8_192, 66), false);
     let mut with = payload(511, 77);
     with.extend_from_slice(&out);
-    let (d, ar) = open_bytes("rd-z64sec-huge", &with);
+    let (_d, ar) = open_bytes("rd-z64sec-huge", &with);
     match ar {
         Err(ZipError::Malformed(m)) => assert!(
             m.contains("does not start at the beginning of the file"),
@@ -836,7 +835,6 @@ fn a_sector_past_the_probe_bound_is_refused_by_name() {
         Err(e) => panic!("expected the shape to be named, got {e}"),
         Ok(_) => panic!("a sector past the bound opened"),
     }
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The other prepended-stub shape, and the one the libarchive
@@ -862,11 +860,10 @@ fn a_stub_whose_offsets_were_already_fixed_up_still_opens() {
     let rec = cd_off + stub;
     let local = rd_u32(&with[rec + 42..]) as usize + stub;
     with[rec + 42..rec + 46].copy_from_slice(&(local as u32).to_le_bytes());
-    let (d, ar) = open_bytes("rd-stub-absolute", &with);
+    let (_d, ar) = open_bytes("rd-stub-absolute", &with);
     let ar = ar.unwrap();
     assert_eq!(ar.entries().len(), 1);
     assert_eq!(extract(&ar, 0).unwrap(), a);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The shift is inferred from arithmetic, so it is a candidate and
@@ -890,7 +887,7 @@ fn an_implied_shift_with_no_directory_under_it_declines_by_name() {
     let eocd = with.len() - 22;
     let cd_size = rd_u32(&with[eocd + 12..]);
     with[eocd + 12..eocd + 16].copy_from_slice(&(cd_size + 8).to_le_bytes());
-    let (d, ar) = open_bytes("rd-stub-nodir", &with);
+    let (_d, ar) = open_bytes("rd-stub-nodir", &with);
     match ar {
         Err(ZipError::Malformed(m)) => assert!(
             m.contains("does not start at the beginning of the file"),
@@ -902,7 +899,6 @@ fn an_implied_shift_with_no_directory_under_it_declines_by_name() {
             a.entries().len()
         ),
     }
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// Junk appended after the record is tolerated today and must stay
@@ -914,9 +910,8 @@ fn appended_junk_after_the_record_still_opens() {
     let b = payload(600, 4);
     let mut z = fixtures::zip_of(&[Spec::stored("a.bin", &a), Spec::stored("b.bin", &b)]);
     z.extend_from_slice(&payload(520, 99));
-    let (d, ar) = open_bytes("rd-junk", &z);
+    let (_d, ar) = open_bytes("rd-junk", &z);
     assert_eq!(ar.unwrap().entries().len(), 2);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// Once the 32-bit fields saturate, the zip64 end record is the
@@ -961,12 +956,11 @@ fn a_zip64_end_record_supplies_the_directory_geometry() {
     z.extend_from_slice(&u32::MAX.to_le_bytes());
     z.extend_from_slice(&u32::MAX.to_le_bytes());
     z.extend_from_slice(&0u16.to_le_bytes());
-    let (d, ar) = open_bytes("rd-z64-end", &z);
+    let (_d, ar) = open_bytes("rd-z64-end", &z);
     let ar = ar.unwrap();
     assert_eq!(ar.entries().len(), 2);
     assert_eq!(extract(&ar, 0).unwrap(), a);
     assert_eq!(extract(&ar, 1).unwrap(), b);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The sibling shape, and the one REAL writers actually emit: a
@@ -1004,12 +998,11 @@ fn an_unsaturated_zip64_end_record_is_a_legal_anchor() {
     // Nothing saturates: the 32-bit copies all fit, which is exactly
     // what makes this the shape the saturation branch never sees.
     z.extend_from_slice(&good[real_at..]);
-    let (d, ar) = open_bytes("rd-z64-unsat", &z);
+    let (_d, ar) = open_bytes("rd-z64-unsat", &z);
     let ar = ar.unwrap_or_else(|e| panic!("a legal Info-ZIP-shaped archive was refused: {e}"));
     assert_eq!(ar.entries().len(), 2);
     assert_eq!(extract(&ar, 0).unwrap(), a);
     assert_eq!(extract(&ar, 1).unwrap(), b);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 #[test]
@@ -1018,11 +1011,10 @@ fn a_directory_entry_is_flagged_and_not_payload() {
         Spec::stored("Pack/", b""),
         Spec::stored("Pack/a.bin", b"hello"),
     ]);
-    let (d, ar) = open_bytes("rd-dir", &z);
+    let (_d, ar) = open_bytes("rd-dir", &z);
     let ar = ar.unwrap();
     assert!(ar.entries()[0].is_dir);
     assert!(!ar.entries()[1].is_dir);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// Truncation and junk must be refused, never panic - this parser
@@ -1056,7 +1048,6 @@ fn malformed_containers_are_refused_without_panicking() {
         let p = write(&d, "c.zip", &bytes);
         let r = Archive::open(&[p]);
         assert!(r.is_err(), "{tag} should not open");
-        std::fs::remove_dir_all(&d).unwrap();
     }
     // Every byte-prefix of a healthy container: open may succeed or
     // fail, extraction may fail, but nothing may panic.
@@ -1069,7 +1060,6 @@ fn malformed_containers_are_refused_without_panicking() {
                 let _ = a.read_entry_to(e, &mut sink);
             }
         }
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }
 
@@ -1086,7 +1076,6 @@ fn a_byte_split_set_reads_across_parts() {
     let p3 = write(&d, "c.zip.003", &z[cut * 2..]);
     let ar = Archive::open(&[p1, p2, p3]).unwrap();
     assert_eq!(extract(&ar, 0).unwrap(), data);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// Interop: read archives produced by a REAL zip writer (Python's
@@ -1189,7 +1178,7 @@ fn zipcrypto_entries_round_trip() {
             ..Spec::deflated("b.bin", &b_data)
         },
     ]);
-    let (d, ar) = open_bytes("zc-ok", &z);
+    let (_d, ar) = open_bytes("zc-ok", &z);
     let ar = ar.unwrap();
     assert!(ar.entries()[0].is_encrypted());
     assert_eq!(extract_pw(&ar, 0, Some("s3cret")).unwrap(), a_data);
@@ -1203,7 +1192,6 @@ fn zipcrypto_entries_round_trip() {
         matches!(&e, ZipError::Unsupported(m) if m.contains("password-protected")),
         "{e}"
     );
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// WinZip AE round-trips at every strength and both vendor
@@ -1223,7 +1211,7 @@ fn ae_entries_round_trip_verify_and_authenticate() {
             }),
             ..Spec::deflated("a.bin", &data)
         }]);
-        let (d, ar) = open_bytes(&format!("ae-{strength}-{ver}"), &z);
+        let (_d, ar) = open_bytes(&format!("ae-{strength}-{ver}"), &z);
         let ar = ar.unwrap();
         let e = &ar.entries()[0];
         assert!(e.is_encrypted(), "s{strength} v{ver}");
@@ -1239,7 +1227,6 @@ fn ae_entries_round_trip_verify_and_authenticate() {
             extract_pw(&ar, 0, Some("wrong")),
             Err(ZipError::WrongPassword { .. })
         ));
-        std::fs::remove_dir_all(&d).unwrap();
     }
     // Tamper: the verifier accepts (password is right), the HMAC
     // must refuse - never publish unauthenticated plaintext.
@@ -1252,13 +1239,12 @@ fn ae_entries_round_trip_verify_and_authenticate() {
         tamper: true,
         ..Spec::stored("a.bin", &data)
     }]);
-    let (d, ar) = open_bytes("ae-tamper", &z);
+    let (_d, ar) = open_bytes("ae-tamper", &z);
     let e = extract_pw(&ar.unwrap(), 0, Some("hunter2")).unwrap_err();
     assert!(
         matches!(&e, ZipError::Io(err) if err.to_string().contains("authentication failed")),
         "{e}"
     );
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The candidate probe the extraction ladder sweeps a passwords file
@@ -1298,7 +1284,6 @@ fn password_opens_answers_from_the_entry_verifier() {
         // this to decide whether it holds the key, and "None opens
         // it" would make every locked container look unlocked.
         assert!(!password_opens(&parts, None), "{tag}");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }
 
@@ -1318,7 +1303,6 @@ fn a_plain_container_needs_no_password_and_any_password_opens_it() {
     assert!(!needs_password(&parts));
     assert!(password_opens(&parts, None));
     assert!(password_opens(&parts, Some("anything")));
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// An entry whose declared size disagrees with what actually decodes
@@ -1335,9 +1319,8 @@ fn a_size_that_disagrees_with_the_data_is_refused() {
         .expect("central directory");
     let orig = u32::from_le_bytes([z[cd + 24], z[cd + 25], z[cd + 26], z[cd + 27]]);
     z[cd + 24..cd + 28].copy_from_slice(&(orig - 1).to_le_bytes());
-    let (d, ar) = open_bytes("rd-size", &z);
+    let (_d, ar) = open_bytes("rd-size", &z);
     assert!(extract(&ar.unwrap(), 0).is_err());
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The `LZMA_DICT_MAX` boundary, pinned in BOTH directions.
@@ -1413,7 +1396,7 @@ fn the_lzma_oom_seed_leaves_by_the_ordinary_error_path() {
     ))
     .expect("committed fuzz seed");
     assert_eq!(bytes.len(), 139);
-    let (d, ar) = open_bytes("rd-lzma-oom-seed", &bytes);
+    let (_d, ar) = open_bytes("rd-lzma-oom-seed", &bytes);
     let ar = ar.expect("the central directory itself is well-formed");
     for i in 0..ar.entries().len() {
         // No unwrap: a clean Err is the whole assertion. A panic or an
@@ -1423,7 +1406,6 @@ fn the_lzma_oom_seed_leaves_by_the_ordinary_error_path() {
             "a 2.9 GiB claim behind 84 compressed bytes must not decode"
         );
     }
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// The two committed fixtures for §162 item 3, byte-for-byte what
@@ -1466,9 +1448,8 @@ fn the_committed_prefixed_sector_fixtures_keep_their_meaning() {
             b"PK\x06\x06",
             "{name}: the locator's pointer resolves, so the prefix is gone"
         );
-        let (d, ar) = open_bytes(&format!("rd-z64sec-fx-{name}"), &blob);
+        let (_d, ar) = open_bytes(&format!("rd-z64sec-fx-{name}"), &blob);
         let ar = ar.unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(extract(&ar, 0).unwrap(), a, "{name}");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

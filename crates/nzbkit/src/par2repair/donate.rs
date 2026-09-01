@@ -210,7 +210,7 @@ fn ambiguous_names(set: &Par2Set) -> std::collections::HashSet<String> {
         std::collections::HashMap::new();
     let mut bad = std::collections::HashSet::new();
     for f in &set.files {
-        let key = crate::disk::sanitize_filename(&f.name).to_lowercase();
+        let key = crate::disk::sanitize_out_name(&f.name).to_lowercase();
         let facts = (f.length, f.md5_16k, f.md5);
         match seen.get(&key) {
             Some(prev) if *prev != facts => {
@@ -299,7 +299,7 @@ pub fn donate_whole_files(set: &Par2Set, donors: &[PathBuf], out_dir: &Path) -> 
         if f.length == 0 {
             continue;
         }
-        let name = crate::disk::sanitize_filename(&f.name);
+        let name = crate::disk::sanitize_out_name(&f.name);
         // Two members disagreeing under one name identify neither: see
         // `ambiguous_names`. Skipped on BOTH arms, so an ambiguous name
         // is neither copied nor reported already-placed - reporting it
@@ -307,7 +307,7 @@ pub fn donate_whole_files(set: &Par2Set, donors: &[PathBuf], out_dir: &Path) -> 
         if ambiguous.contains(&name.to_lowercase()) {
             continue;
         }
-        let dest = out_dir.join(&name);
+        let dest = crate::disk::join_out_name(out_dir, &name);
         // Already here and already right (a re-run, or the fetch of a
         // previous attempt): report it, copy nothing.
         if std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == f.length)
@@ -324,7 +324,17 @@ pub fn donate_whole_files(set: &Par2Set, donors: &[PathBuf], out_dir: &Path) -> 
         // A destination that exists and is NOT the member is left
         // alone: an in-progress fetch owns that inode, and overwriting
         // it is how a donation turns into corruption.
-        if dest.exists() {
+        //
+        // `symlink_metadata`, because the question is whether an ENTRY
+        // is at the name. `Path::exists` follows symlinks and answers
+        // false on any error, so a link at a member's name read as free
+        // and the `fs::rename` at the foot of this loop deleted it -
+        // rename removes whatever entry is at its destination and never
+        // resolves it. Argued in full at `tv_rename` in
+        // `nzbfast/src/smart/filing.rs`; here declining costs one
+        // donation and the member is fetched from the wire instead,
+        // which is the outcome this function is an optimisation over.
+        if std::fs::symlink_metadata(&dest).is_ok() {
             continue;
         }
         for (ci, (p, len)) in cands.iter().enumerate() {
@@ -371,7 +381,42 @@ pub fn donate_whole_files(set: &Par2Set, donors: &[PathBuf], out_dir: &Path) -> 
             // condemn - and hashed AS IT IS COPIED, so what earns the
             // rename is this copy and not the screen above it, which
             // read the donor at an earlier instant. See `copy_verified`.
-            let tmp = out_dir.join(format!(".{name}.donating"));
+            // Beside the DESTINATION, not a flat join of the whole name:
+            // a tree-preserved member ("VIDEO_TS/x.vob") needs its
+            // parent created first, and the temp must live in that same
+            // directory for the rename to stay atomic.
+            if crate::disk::create_out_dirs(out_dir, &name).is_err() {
+                break;
+            }
+            let leaf = dest
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "member".into());
+            // That leaf is a `sanitize_out_name` result and is routinely
+            // AT the 255-byte component cap - capping is what produced
+            // it - so decorating it raw gives a temp name no filesystem
+            // will create, and this member falls through to needing
+            // recovery blocks with a perfectly good donor sitting beside
+            // it. Silently, which is what makes it worth a line: the
+            // `copy_verified` error arm below just breaks out of the
+            // candidate loop.
+            //
+            // Held back at the STEM rather than capped on the composed
+            // name: this name is nobody's identity key (it is created
+            // beside the destination, renamed away, and removed on every
+            // failure arm), so what matters is that it stays
+            // RECOGNISABLE as a donation temp - and capping the composed
+            // name truncates the `.donating` marker off exactly the names
+            // that needed shortening, where `unit_tests.rs` recognises a
+            // leftover by that suffix.
+            //
+            // ONE closure spells the decoration and the reserve is that
+            // same closure over an empty stem, so the two cannot drift.
+            // The leading `.` costs a byte on the same component as the
+            // tail does, and is inside the closure for that reason.
+            let decorate = |stem: &str| format!(".{stem}.donating");
+            let leaf = crate::disk::cap_shared_stem(&leaf, [decorate("").as_str()]);
+            let tmp = dest.with_file_name(decorate(&leaf));
             let _ = std::fs::remove_file(&tmp);
             match copy_verified(p, &tmp, f.md5) {
                 Ok(true) => {}
@@ -389,8 +434,55 @@ pub fn donate_whole_files(set: &Par2Set, donors: &[PathBuf], out_dir: &Path) -> 
                     break;
                 }
             }
+            // THE COMMIT, and the claim that decides it. The
+            // `symlink_metadata` at the head of this member's loop
+            // STAYS and is not the decision: it is an early-out that
+            // keeps a whole-file MD5 of every candidate off the disk
+            // when the name is plainly taken, and it sits minutes of
+            // hashing away from this rename - by far the widest of the
+            // nine windows the 31 Aug census left open. A name found
+            // free by looking is not a name held.
+            //
+            // MEASURED on the sibling guard in `nzbfast`'s
+            // `unpack::published_names::publish`: the `lstat` covered
+            // about 1% of its own interval and 96.8% of concurrent
+            // arrivals that got the name landed inside the gap.
+            // `create_new` answers `AlreadyExists` over a regular file,
+            // a dangling link, a link out of the directory and a
+            // directory - the same four answers - so this asks the same
+            // question the early-out asks, at the instant it decides.
+            // Claimed HERE and not up there because an unplaced member
+            // would leak the placeholder at its own name, and a
+            // zero-byte file of the wrong length is exactly what the
+            // verify condemns - the header's own reason for copying via
+            // a temporary.
+            //
+            // Plain `create_new` and not `disk::open_out_leaf_under`,
+            // per `tv_rename` in `nzbfast/src/smart/filing.rs`: the
+            // rename below resolves its destination by path.
+            //
+            // A claim that fails takes the same arm as a rename that
+            // fails - the in-progress fetch this loop refuses to
+            // overwrite owns the inode either way, so the member goes
+            // to the wire, which is the outcome this whole function is
+            // an optimisation over.
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dest)
+                .is_err()
+            {
+                let _ = std::fs::remove_file(&tmp);
+                break;
+            }
             if std::fs::rename(&tmp, &dest).is_err() {
                 let _ = std::fs::remove_file(&tmp);
+                // Our own placeholder: a zero-byte file at a member's
+                // name is a length no verify accepts, and the next run's
+                // early-out reads it as the name being taken - so one
+                // failed rename would cost the member both its donation
+                // and, until something removes the stub, its refetch.
+                let _ = std::fs::remove_file(&dest);
                 break;
             }
             taken[ci] = true;

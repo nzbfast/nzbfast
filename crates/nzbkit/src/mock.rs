@@ -26,6 +26,21 @@ pub struct Chaos {
     pub missing: HashSet<String>,
     /// Ids whose decoded payload gets a byte flipped (yEnc CRC fails).
     pub corrupt: HashSet<String>,
+    /// Ids whose payload is damaged on their FIRST request and served
+    /// INTACT on every one after it - the `stall`/`missing_once` shape
+    /// for a corrupt body.
+    ///
+    /// The fault this models is the commoner of the two real ones and
+    /// the only one a second ask can fix: a broken cache node behind a
+    /// load balancer, where a fraction of requests are answered badly
+    /// and a re-ask usually lands somewhere healthy. `corrupt` is the
+    /// other one, a damaged article in the spool, which answers the same
+    /// bad bytes forever. `corrupt_every` sits between them - a
+    /// deterministic fraction of everything, so a re-ask is clean with
+    /// probability (N-1)/N, which is right for a rate and useless for a
+    /// pin. Nothing here could model transient corruption at all until
+    /// 31 Aug 2026 (`research/CORRUPT-BODY-NO-SECOND-ASK-2026-08-31.md`).
+    pub corrupt_once: HashSet<String>,
     /// Ids whose body is cut off mid-payload (connection then closed).
     pub truncate: HashSet<String>,
     /// Ids that hang after the status line (stall detection). Each id
@@ -175,6 +190,28 @@ pub struct Chaos {
     /// This is `pause`'s argument (no wall-clock races) applied to the
     /// dial rather than to the command loop.
     pub outage: bool,
+    /// TODO 315: after this many REFUSALS have been sent across all
+    /// connections, this server stops granting sessions for good - the
+    /// answering connection is hung up and every further accept is
+    /// refused, exactly as [`Chaos::outage`] does. 0 = off.
+    ///
+    /// The one fault shape none of the levers above can build, and the
+    /// only one that can wedge a pool whose last backbone HAS answered.
+    /// A hold ([`crate::pool::PoolConfig::recheck_430`]) is taken only
+    /// where a group's own 430 was the last evidence the article
+    /// needed, so a server that never connects cannot produce one - it
+    /// has to refuse first and go away after. `outage` alone begins
+    /// before the run and `refuse_connect_ms` is measured from the
+    /// mock's start; both are windows the client dials INTO. This is the
+    /// window it falls into, triggered by the client's own progress
+    /// rather than by a clock, so a rig gets the ordering with no poll
+    /// and no wall-clock race.
+    ///
+    /// It counts REFUSALS and not bodies, which is what separates it
+    /// from [`Chaos::drop_after`] and [`Chaos::brownout_after`]: a
+    /// wholly absent post serves nothing, so a body-triggered fault
+    /// never arms on one.
+    pub dark_after_refusals: u64,
     /// Ids whose FIRST request hangs BEFORE the status line (the
     /// dead-air shape a flat read timeout waits full length on, and the
     /// adaptive TTFB budget cuts short). Retries succeed, like `stall`.
@@ -290,6 +327,75 @@ pub struct Chaos {
     /// trained-to-floor adaptive budget expires attempt after attempt
     /// on an article that a wider budget serves fine.
     pub slow_ttfb: HashMap<String, u64>,
+    /// The same dead air as `slow_ttfb`, held open until the TEST
+    /// releases it ([`Hold`]) rather than until a wall clock runs out.
+    ///
+    /// This is [`Chaos::outage`]'s argument applied to the BODY path
+    /// rather than to the dial, and it exists because an ORDERING test
+    /// that asks "did the client do X while article A was still
+    /// outstanding" cannot answer that from a clock. With `slow_ttfb`
+    /// the article is answered at `arrival + ms` whatever else is
+    /// happening, so on a loaded box a client that did the right thing
+    /// LATE is indistinguishable on the wire from one that did the
+    /// wrong thing - the window it was supposed to act inside has
+    /// already closed. See [`BodyLog`], which says the same thing about
+    /// upper bounds: a starved mock or a starved daemon inflates them,
+    /// and only a lower bound holds by construction. A held article
+    /// turns the window into one the TEST closes, so no amount of load
+    /// can close it early.
+    pub hold: Option<Hold>,
+}
+
+/// The fire-once fault sets, as one value.
+///
+/// ONE VALUE, built once in [`MockServer::start_bound`] and never
+/// re-assembled, because every one of them is
+/// `Arc<Mutex<HashSet<String>>>` and every consumer of them was a
+/// positional argument list. Any two swapped compiled clean and
+/// injected the WRONG FAULT: a test that meant to exercise a mid-body
+/// stall exercises a missing article instead, passes, and reports
+/// nothing. `serve_article`'s own doc already records what that class
+/// costs - a client sailed untouched through three fault profiles and
+/// scored walls nothing can reach, and a green leg is not a result.
+/// Not a hypothetical either: until 31 Aug 2026 the per-connection
+/// clone block in `start_bound` listed the four as `stall_once,
+/// missing_once, stall_pre_once, gap_once` and the `serve_conn` call
+/// seventy lines below it as `stall_once, stall_pre_once, gap_once,
+/// missing_once` - two different orders of the same four identical
+/// types in one file, and nothing anywhere could tell a correct one
+/// from a transposed one.
+///
+/// Do NOT explode this back out into positional parameters, and do not
+/// re-assemble it field by field at a call site - a hand-built copy
+/// puts the swap straight back, just louder.
+///
+/// SEPARATE FROM [`Chaos`] rather than folded into it, and the seam is
+/// real rather than tidy. `Chaos` is the per-server CONFIGURATION and
+/// is cloned per connection (each socket mutates its own copy - see
+/// `wan_conn_bps` and `slow_conn` in `start_bound`), and its
+/// corresponding fields are bare `HashSet<String>`. These are the
+/// server-wide fire-once STATE, shared by every connection through the
+/// `Arc`, which is exactly what makes "only its FIRST request" true
+/// across reconnects. Cloning a `FaultSets` shares those sets; cloning
+/// a `Chaos` does not.
+///
+/// The `Chaos` field each one is seeded from is named at that field, in
+/// the one place the mapping is written - and it is written with named
+/// struct fields on both sides, so a mistake there is a visible
+/// name-to-name error rather than a silent permutation.
+#[derive(Clone)]
+struct FaultSets {
+    /// `Chaos::stall`: hangs after the status line, first request only.
+    stall_once: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// `Chaos::stall_pre`: hangs BEFORE the status line, first only.
+    stall_pre_once: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// `Chaos::gap`: dead air mid-payload, first request only.
+    gap_once: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// `Chaos::missing_once`: 430 on the first request, served after.
+    missing_once: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// `Chaos::corrupt_once`: a damaged body on the first request, an
+    /// intact one after - the transient corruption a second ask fixes.
+    corrupt_once: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 /// Bandwidth shaping for the BODY/ARTICLE path - the model the
@@ -585,6 +691,31 @@ fn vanished(chaos: &Chaos, served: &AtomicU64) -> bool {
     chaos.vanish_after > 0 && served.load(Ordering::Relaxed) >= chaos.vanish_after
 }
 
+/// TODO 315: this refusal is the one that takes the server dark. Flips
+/// the same flag [`MockServer::begin_outage`] does, so every later
+/// accept is refused too, and tells the caller to hang up the
+/// connection that just answered - a backbone cannot both have gone
+/// away and still be holding the socket it answered on.
+///
+/// The count is checked AFTER the increment, so `dark_after_refusals:
+/// n` means the nth refusal is still sent and is the last thing this
+/// server ever does. A rig that wants every article refused once by a
+/// two-server fleet sets it to the article count.
+fn dark_now(
+    chaos: &Chaos,
+    refused: &AtomicU64,
+    outage: &Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
+    if chaos.dark_after_refusals == 0 {
+        return false;
+    }
+    if refused.fetch_add(1, Ordering::AcqRel) + 1 < chaos.dark_after_refusals {
+        return false;
+    }
+    outage.store(true, Ordering::Release);
+    true
+}
+
 /// The brownout arm, with its heal instant (`Chaos::brownout_heal_ms`):
 /// active once `brownout_after` bodies have been served, until the heal
 /// instant (0 = never heals).
@@ -756,6 +887,29 @@ pub struct MockServer {
     /// reading (and thus logging/serving) commands at its next loop turn.
     /// Lets ordering tests freeze the world, land a queue reorder at a
     /// known point in `body_log`, and then release - no wall-clock races.
+    ///
+    /// THE FREEZE HAS A RESIDUE AND IT IS NOT ZERO, which "at its next
+    /// loop turn" above is easy to read as. This flag is tested at the
+    /// TOP of the command loop, so a connection already blocked in
+    /// `read_line` has PASSED the gate: it will serve the next command
+    /// the client sends it, whenever that comes, and park after. The
+    /// bound is exactly ONE PER CONNECTION for the life of the freeze -
+    /// not one per window, and not necessarily promptly, since it is
+    /// spent whenever the client next has something to ask.
+    ///
+    /// So an assertion that the world is fully stopped must either
+    /// bound TOTAL growth since arming by the connection count, or
+    /// watch a window WITHOUT comparing against a snapshot taken at
+    /// arming time. Both live shapes are in the tree and both are
+    /// correct: `job_files.rs` takes the first (its client keeps
+    /// issuing commands, so a window there tolerates a residue of the
+    /// same order as the signal), `stream_repair.rs`'s
+    /// `Freeze::assert_held` the second.
+    ///
+    /// Written down because two lanes measured it independently inside
+    /// one week (31 Aug 2026) - one reasoning to it, one meeting it as a
+    /// red assertion at exactly +2 on a 2-connection config, seconds
+    /// after arming, with the freeze working perfectly.
     pub pause: Arc<std::sync::atomic::AtomicBool>,
     /// The test-held hard outage - see [`Chaos::outage`] and
     /// [`MockServer::outage_control`].
@@ -793,6 +947,49 @@ impl OutageControl {
     /// episode without rebuilding the server.
     pub fn begin_outage(&self) {
         self.0.store(true, Ordering::Release);
+    }
+}
+
+/// A test-held gate on named articles' answers - see [`Chaos::hold`].
+///
+/// Constructed by the TEST and cloned into [`Chaos`], so it needs no
+/// plumbing through the server: the gate and the id set travel together
+/// in the chaos profile every connection already has, and the test keeps
+/// its own clone to release with.
+#[derive(Clone)]
+pub struct Hold {
+    ids: Arc<HashSet<String>>,
+    shut: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Hold {
+    /// Hold these ids (WITH angle brackets, as everywhere else here)
+    /// from the moment the server starts.
+    pub fn on<I: IntoIterator<Item = String>>(ids: I) -> Hold {
+        Hold {
+            ids: Arc::new(ids.into_iter().collect()),
+            shut: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        }
+    }
+
+    /// Answer them: every parked request returns at its next turn, and
+    /// every later request for a held id is served normally.
+    ///
+    /// ONE-SHOT on purpose - there is no way to shut the gate again.
+    /// [`OutageControl`] is settable as well as clearable so a rig can
+    /// open a second outage episode, and nothing has ever wanted that
+    /// (`begin_outage` has no caller in this tree); an uncalled item is
+    /// one nobody has held to the rule. Add the setter with the rig that
+    /// needs it.
+    pub fn release(&self) {
+        self.shut.store(false, Ordering::Release);
+    }
+
+    /// Whether `id` is held AND the gate is still shut - i.e. whether
+    /// this server has provably NOT answered it. The fact an ordering
+    /// test asserts on, in place of a duration.
+    pub fn is_holding(&self, id: &str) -> bool {
+        self.shut.load(Ordering::Acquire) && self.ids.contains(id)
     }
 }
 
@@ -849,16 +1046,21 @@ impl MockServer {
         let plane2 = plane.clone();
         let served = Arc::new(AtomicU64::new(0));
         let served2 = served.clone();
+        // TODO 315: refusals sent, server-wide, for `dark_after_refusals`.
+        let refused = Arc::new(AtomicU64::new(0));
+        let refused2 = refused.clone();
         let body_log: Arc<std::sync::Mutex<BodyLog>> = Default::default();
         let body_log2 = body_log.clone();
-        let stall_once: Arc<std::sync::Mutex<HashSet<String>>> =
-            Arc::new(std::sync::Mutex::new(chaos.stall.clone()));
-        let stall_pre_once: Arc<std::sync::Mutex<HashSet<String>>> =
-            Arc::new(std::sync::Mutex::new(chaos.stall_pre.clone()));
-        let gap_once: Arc<std::sync::Mutex<HashSet<String>>> =
-            Arc::new(std::sync::Mutex::new(chaos.gap.clone()));
-        let missing_once: Arc<std::sync::Mutex<HashSet<String>>> =
-            Arc::new(std::sync::Mutex::new(chaos.missing_once.clone()));
+        // The fire-once sets as ONE value: see [`FaultSets`]. This
+        // is the only place the `Chaos` field -> set mapping is
+        // written, and it is written with named fields on both sides.
+        let faults = FaultSets {
+            stall_once: Arc::new(std::sync::Mutex::new(chaos.stall.clone())),
+            stall_pre_once: Arc::new(std::sync::Mutex::new(chaos.stall_pre.clone())),
+            gap_once: Arc::new(std::sync::Mutex::new(chaos.gap.clone())),
+            missing_once: Arc::new(std::sync::Mutex::new(chaos.missing_once.clone())),
+            corrupt_once: Arc::new(std::sync::Mutex::new(chaos.corrupt_once.clone())),
+        };
         let pause: Arc<std::sync::atomic::AtomicBool> = Default::default();
         let pause2 = pause.clone();
         let outage = Arc::new(std::sync::atomic::AtomicBool::new(chaos.outage));
@@ -896,11 +1098,9 @@ impl MockServer {
                     chaos.throttle.per_conn_bps = bps;
                 }
                 let served = served2.clone();
+                let refused = refused2.clone();
                 let body_log = body_log2.clone();
-                let stall_once = stall_once.clone();
-                let missing_once = missing_once.clone();
-                let stall_pre_once = stall_pre_once.clone();
-                let gap_once = gap_once.clone();
+                let faults = faults.clone();
                 let pause = pause2.clone();
                 let outage = outage2.clone();
                 let counters = counters.clone();
@@ -974,13 +1174,12 @@ impl MockServer {
                         chaos.clone(),
                         served,
                         body_log,
-                        stall_once,
-                        stall_pre_once,
-                        gap_once,
-                        missing_once,
+                        faults,
                         pause,
                         counters,
                         ts.clone(),
+                        refused,
+                        outage.clone(),
                     )
                     .await;
                     ts.active.fetch_sub(1, Ordering::Relaxed);
@@ -1022,6 +1221,20 @@ impl MockServer {
         let n = a.len();
         a.clear();
         n
+    }
+
+    /// Every article this server currently holds, message-id (with
+    /// angle brackets) to yEnc body - the ones it was started with AND
+    /// the ones POSTED to it since.
+    ///
+    /// A snapshot by clone, because a caller reading a live post's
+    /// output would otherwise hold the same lock the POST arm takes to
+    /// insert. Its one use is the assertion no other view can make:
+    /// that a posted article's own bytes carry no real filename, which
+    /// has to be judged on what the SERVER holds rather than on what
+    /// the poster believes it sent.
+    pub fn stored_articles(&self) -> HashMap<String, Vec<u8>> {
+        self.articles.lock_ok().clone()
     }
 
     /// Re-provision the line LIVE (TODO 112 rig 2): from the next 64 KB
@@ -1275,11 +1488,10 @@ async fn serve_article(
     chaos: &Chaos,
     served: &Arc<AtomicU64>,
     body_log: &Arc<std::sync::Mutex<BodyLog>>,
-    stall_once: &Arc<std::sync::Mutex<HashSet<String>>>,
-    stall_pre_once: &Arc<std::sync::Mutex<HashSet<String>>>,
-    gap_once: &Arc<std::sync::Mutex<HashSet<String>>>,
-    missing_once: &Arc<std::sync::Mutex<HashSet<String>>>,
+    faults: &FaultSets,
     throttle: &Arc<ThrottleState>,
+    refused: &AtomicU64,
+    outage: &Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<Served> {
     // Stamped HERE, before every chaos sleep below, so the record is
     // the request's ARRIVAL and not its answer's departure - see
@@ -1322,21 +1534,69 @@ async fn serve_article(
     if vanished(chaos, served) {
         refuse_delay(chaos).await;
         w.write_all(refusal(chaos, id).as_bytes()).await?;
-        return Ok(Served::Skip);
+        // TODO 315: every refusal arm, not just the `missing` one - a
+        // rig picks which arm its absent post takes, and a fault wired
+        // to one of the four would arm on some rigs and not others.
+        return Ok(if dark_now(chaos, refused, outage) {
+            // Flushed BEFORE the hangup, and it is load-bearing: the
+            // command loop's own `flush` is at the foot of the loop
+            // body, which a `Hangup` returns past - so without this the
+            // refusal that triggers the dark stays in the buffer and is
+            // lost. A rig sizing `dark_after_refusals` to its article
+            // count would then be one refusal short of the ladder it
+            // meant to build, and would wedge for a reason that is not
+            // the one under test.
+            w.flush().await?;
+            Served::Hangup
+        } else {
+            Served::Skip
+        });
     }
     if chaos.missing.contains(id) {
         refuse_delay(chaos).await;
         w.write_all(refusal(chaos, id).as_bytes()).await?;
-        return Ok(Served::Skip);
+        // TODO 315: every refusal arm, not just the `missing` one - a
+        // rig picks which arm its absent post takes, and a fault wired
+        // to one of the four would arm on some rigs and not others.
+        return Ok(if dark_now(chaos, refused, outage) {
+            // Flushed BEFORE the hangup, and it is load-bearing: the
+            // command loop's own `flush` is at the foot of the loop
+            // body, which a `Hangup` returns past - so without this the
+            // refusal that triggers the dark stays in the buffer and is
+            // lost. A rig sizing `dark_after_refusals` to its article
+            // count would then be one refusal short of the ladder it
+            // meant to build, and would wedge for a reason that is not
+            // the one under test.
+            w.flush().await?;
+            Served::Hangup
+        } else {
+            Served::Skip
+        });
     }
     // TODO 315: refused ONCE, served ever after. Same wire bytes as the
     // permanent arm above and the same `echo_missing_id` shape, because
     // that is the point - a client cannot tell the two apart from the
     // response, only from asking again later.
-    if missing_once.lock_ok().remove(id) {
+    if faults.missing_once.lock_ok().remove(id) {
         refuse_delay(chaos).await;
         w.write_all(refusal(chaos, id).as_bytes()).await?;
-        return Ok(Served::Skip);
+        // TODO 315: every refusal arm, not just the `missing` one - a
+        // rig picks which arm its absent post takes, and a fault wired
+        // to one of the four would arm on some rigs and not others.
+        return Ok(if dark_now(chaos, refused, outage) {
+            // Flushed BEFORE the hangup, and it is load-bearing: the
+            // command loop's own `flush` is at the foot of the loop
+            // body, which a `Hangup` returns past - so without this the
+            // refusal that triggers the dark stays in the buffer and is
+            // lost. A rig sizing `dark_after_refusals` to its article
+            // count would then be one refusal short of the ladder it
+            // meant to build, and would wedge for a reason that is not
+            // the one under test.
+            w.flush().await?;
+            Served::Hangup
+        } else {
+            Served::Skip
+        });
     }
     // Split-brain: the index knows the requested id (no 430),
     // but the storage backend hands back a different article's
@@ -1346,7 +1606,23 @@ async fn serve_article(
     let Some(article) = articles.lock_ok().get(stored).cloned() else {
         refuse_delay(chaos).await;
         w.write_all(refusal(chaos, id).as_bytes()).await?;
-        return Ok(Served::Skip);
+        // TODO 315: every refusal arm, not just the `missing` one - a
+        // rig picks which arm its absent post takes, and a fault wired
+        // to one of the four would arm on some rigs and not others.
+        return Ok(if dark_now(chaos, refused, outage) {
+            // Flushed BEFORE the hangup, and it is load-bearing: the
+            // command loop's own `flush` is at the foot of the loop
+            // body, which a `Hangup` returns past - so without this the
+            // refusal that triggers the dark stays in the buffer and is
+            // lost. A rig sizing `dark_after_refusals` to its article
+            // count would then be one refusal short of the ladder it
+            // meant to build, and would wedge for a reason that is not
+            // the one under test.
+            w.flush().await?;
+            Served::Hangup
+        } else {
+            Served::Skip
+        });
     };
     if chaos.delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(chaos.delay_ms)).await;
@@ -1362,11 +1638,20 @@ async fn serve_article(
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         return Ok(Served::Hangup);
     }
-    if stall_pre_once.lock_ok().remove(id) {
+    if faults.stall_pre_once.lock_ok().remove(id) {
         // Dead air: no status, no bytes - the client sees pure
         // silence until its pre-byte bound fires.
         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         return Ok(Served::Hangup);
+    }
+    if let Some(hold) = &chaos.hold {
+        // Dead air with no wall clock behind it: this request parks
+        // until the TEST releases the gate. Placed beside `slow_ttfb`
+        // because it IS that shape - silence before the status line, on
+        // every request - and the difference is only who ends it.
+        while hold.is_holding(id) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
     }
     if let Some(ms) = chaos.slow_ttfb.get(id) {
         // Cold storage: dead air, then a normal answer - on
@@ -1380,7 +1665,7 @@ async fn serve_article(
     };
     w.write_all(format!("{status} 0 {id}\r\n").as_bytes())
         .await?;
-    if stall_once.lock_ok().remove(id) {
+    if faults.stall_once.lock_ok().remove(id) {
         // Status sent, body never comes - the client's per-response
         // timeout must fire; the NEXT request for this id succeeds.
         w.flush().await?;
@@ -1390,6 +1675,7 @@ async fn serve_article(
     let mut body = article;
     if chaos.corrupt.contains(id)
         || (chaos.corrupt_every > 0 && nth.is_multiple_of(chaos.corrupt_every))
+        || faults.corrupt_once.lock_ok().remove(id)
     {
         // Flip a byte in the middle of the payload region.
         let mid = body.len() / 2;
@@ -1411,7 +1697,7 @@ async fn serve_article(
         w.write_all(&wire).await?;
         return Ok(Served::Hangup); // cut the connection mid-body
     }
-    if gap_once.lock_ok().remove(id) {
+    if faults.gap_once.lock_ok().remove(id) {
         // Starved share: half the body, a silence, then the rest -
         // paced like any other body on either side of the gap.
         let (head, tail) = wire.split_at(wire.len() / 2);
@@ -1460,13 +1746,12 @@ async fn serve_conn(
     chaos: Chaos,
     served: Arc<AtomicU64>,
     body_log: Arc<std::sync::Mutex<BodyLog>>,
-    stall_once: Arc<std::sync::Mutex<HashSet<String>>>,
-    stall_pre_once: Arc<std::sync::Mutex<HashSet<String>>>,
-    gap_once: Arc<std::sync::Mutex<HashSet<String>>>,
-    missing_once: Arc<std::sync::Mutex<HashSet<String>>>,
+    faults: FaultSets,
     pause: Arc<std::sync::atomic::AtomicBool>,
     counters: Arc<Counters>,
     throttle: Arc<ThrottleState>,
+    refused: Arc<AtomicU64>,
+    outage: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<()> {
     sock.set_nodelay(true)?;
     // This connection's slot on the per-socket ceiling.
@@ -1720,11 +2005,10 @@ async fn serve_conn(
                 &chaos,
                 &served,
                 &body_log,
-                &stall_once,
-                &stall_pre_once,
-                &gap_once,
-                &missing_once,
+                &faults,
                 &throttle,
+                &refused,
+                &outage,
             )
             .await?
             {
@@ -1752,11 +2036,10 @@ async fn serve_conn(
                 &chaos,
                 &served,
                 &body_log,
-                &stall_once,
-                &stall_pre_once,
-                &gap_once,
-                &missing_once,
+                &faults,
                 &throttle,
+                &refused,
+                &outage,
             )
             .await?
             {
@@ -1840,11 +2123,70 @@ pub fn make_file_articles(
 ) -> Vec<(String, u64, u32)> {
     let total = data.len().div_ceil(art_size).max(1) as u32;
     let mut segs = Vec::new();
+    // `chunks` over an empty slice yields nothing, but a 0-byte file is
+    // still one article on the wire (a lone `=ybegin size=0` part - the
+    // VIDEO_TS placeholder shape posters who ship empties produce), and
+    // `total` above already says 1. Emit that single empty part rather
+    // than a segment-less file the NZB would then lie about.
+    if data.is_empty() {
+        let article = crate::yenc::encode(name, 0, Some((1, 1)), 1, &[]);
+        let id = format!("{idtag}-1@mock");
+        segs.push((id.clone(), article.len() as u64, 1));
+        out.insert(format!("<{id}>"), article);
+        return segs;
+    }
     for (i, chunk) in data.chunks(art_size.max(1)).enumerate() {
         let part = i as u32 + 1;
         let begin = (i * art_size) as u64 + 1;
         let article =
             crate::yenc::encode(name, data.len() as u64, Some((part, total)), begin, chunk);
+        let id = format!("{idtag}-{part}@mock");
+        segs.push((id.clone(), article.len() as u64, part));
+        out.insert(format!("<{id}>"), article);
+    }
+    segs
+}
+
+/// [`make_file_articles`] with the Tensai75 body-encryption applied: each
+/// chunk is XChaCha20-Poly1305-encrypted per its session-wide
+/// segmentIndex (`seg_base` + part - 1) before yEnc encoding, and an
+/// `=yencryption` control line carrying the session salt and the
+/// segment's tag is inserted after `=ybegin`. This is our OWN encoder
+/// half - the draft has no reference implementation, so the e2e fixtures
+/// have nothing else to post (see `crate::yencrypt`). The 0-byte-file
+/// arm is deliberately absent: encrypting an empty payload is legal but
+/// no fixture needs it yet, and `data.chunks` over empty yields nothing,
+/// so an empty `data` here is a caller bug surfaced by the assert.
+pub fn make_file_articles_encrypted(
+    name: &str,
+    data: &[u8],
+    art_size: usize,
+    idtag: &str,
+    key: &[u8; 32],
+    salt: &[u8; 16],
+    seg_base: u32,
+    out: &mut HashMap<String, Vec<u8>>,
+) -> Vec<(String, u64, u32)> {
+    assert!(!data.is_empty(), "encrypted fixture files carry payload");
+    let total = data.len().div_ceil(art_size.max(1)) as u32;
+    let mut segs = Vec::new();
+    for (i, chunk) in data.chunks(art_size.max(1)).enumerate() {
+        let part = i as u32 + 1;
+        let begin = (i * art_size) as u64 + 1;
+        let seg_index = seg_base + i as u32;
+        let mut ct = chunk.to_vec();
+        let tag = crate::yencrypt::encrypt_segment(key, seg_index, &mut ct);
+        let mut article =
+            crate::yenc::encode(name, data.len() as u64, Some((part, total)), begin, &ct);
+        // Insert the control line directly after the `=ybegin` line (the
+        // draft's stated position). The encoder always frames CRLF, so
+        // the first `\n` ends `=ybegin`.
+        let nl = article
+            .iter()
+            .position(|&b| b == b'\n')
+            .expect("yenc::encode always emits a framed =ybegin line");
+        let line = format!("{}\r\n", crate::yencrypt::control_line(salt, &tag));
+        article.splice(nl + 1..nl + 1, line.into_bytes());
         let id = format!("{idtag}-{part}@mock");
         segs.push((id.clone(), article.len() as u64, part));
         out.insert(format!("<{id}>"), article);

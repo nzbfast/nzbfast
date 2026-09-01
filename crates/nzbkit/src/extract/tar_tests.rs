@@ -113,12 +113,12 @@ fn tar_nested_in_store_rar_extracts_one_pass() {
     }
 }
 
-/// Entry names with directory components land FLAT (the established
-/// one-pass semantic that RAR, 7z and zip inners all keep), directory
-/// members produce nothing, and a zero-byte member still lands as an
-/// empty file.
+/// Entry names with a provably safe directory component keep their
+/// TREE (RAR, 7z and zip inners do the same since the relpath-preserve
+/// ruling), directory members produce nothing, and a zero-byte member
+/// still lands as an empty file.
 #[test]
-fn tar_entries_land_flat_and_empty_files_land() {
+fn tar_entries_keep_their_tree_and_empty_files_land() {
     let a = payload(50_000, 194);
     let arch = tar_of(&[
         Spec::dir("Pack/"),
@@ -131,11 +131,11 @@ fn tar_entries_land_flat_and_empty_files_land() {
     feed(&ex, 0, "release.tar", &arch, 7000, 80);
     let rep = ex.finish().unwrap();
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-    assert_eq!(std::fs::read(dir.join("Pack_a.bin")).unwrap(), a);
+    assert_eq!(std::fs::read(dir.join("Pack").join("a.bin")).unwrap(), a);
     assert_eq!(std::fs::read(dir.join("empty.txt")).unwrap(), b"");
     assert_eq!(
         dir_files(&dir),
-        vec!["Pack_a.bin".to_string(), "empty.txt".to_string()]
+        vec!["Pack".to_string(), "empty.txt".to_string()]
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -157,7 +157,8 @@ fn tar_long_names_reach_disk() {
         pax: vec![("path".to_string(), long.clone())],
         ..Spec::file(&long[..100], &data)
     }]);
-    let flat = long.replace('/', "_");
+    // The path is provably safe, so the long name keeps its tree.
+    let rel: std::path::PathBuf = long.split('/').collect();
     for (tag, arch) in [("gnu", gnu), ("pax", pax)] {
         let dir = tmpdir(&format!("tar-longname-{tag}"));
         let ex = Arc::new(Extractor::new(&dir, 1, true));
@@ -165,8 +166,7 @@ fn tar_long_names_reach_disk() {
         feed(&ex, 0, "release.tar", &arch, 7000, 81);
         let rep = ex.finish().unwrap();
         assert!(rep.fallbacks.is_empty(), "{tag}: {:?}", rep.fallbacks);
-        assert_eq!(dir_files(&dir), vec![flat.clone()], "{tag}");
-        assert_eq!(std::fs::read(dir.join(&flat)).unwrap(), data, "{tag}");
+        assert_eq!(std::fs::read(dir.join(&rel)).unwrap(), data, "{tag}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -54,6 +54,7 @@ fn work(id: &str) -> Work {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,

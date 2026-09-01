@@ -493,6 +493,100 @@ echo "// benchmarked on $LEAK" > "$SRC"        # a leak in the worktree, uncommi
 push_expect "branch deletion: nothing to scan" 0 origin :doomed
 rm -rf "$TMP"
 
+# ---------------------------------------------------- claims ledger half
+#
+# The hook runs TWO checks over one commit set, and they are deliberately
+# independent. `research/CLAIMS.jsonl` is the cross-machine LOCK and is
+# append-only by convention only; measured 31 Aug 2026 over all 13,285
+# commits reachable from origin/main, SIX commits destroyed a record and
+# FOUR records are still absent. `tools/claims-drop-gate.py` refuses that
+# at the last moment it is still local.
+#
+# Case 17 is the one that earns its keep. The hook used to open with three
+# lines that `exit 0`'d the WHOLE hook when leak-check.sh was missing, and
+# the claims check added below them silently inherited that precondition:
+# a real `git push` of a real record drop was ACCEPTED at exit 0. Found by
+# driving a push in a fixture without the leak checker, not by reading the
+# hook. Each check now tests its own availability; these cases pin that
+# neither can be switched off by the other going missing.
+GATE=$REPO/tools/claims-drop-gate.py
+if [ ! -x "$GATE" ]; then
+  echo "no tools/claims-drop-gate.py here - claims hook cases skipped"
+else
+echo
+echo ".githooks/pre-push refuses a commit that destroys a ledger record"
+
+LEDGER=research/CLAIMS.jsonl
+seed_ledger() {
+  cp "$GATE" "$ROOT/tools/claims-drop-gate.py"
+  chmod +x "$ROOT/tools/claims-drop-gate.py"
+  printf '%s\n%s\n' \
+    '{"ev":"CLAIM","id":"mine","ts":"2026-01-01T00:00:00Z"}' \
+    '{"ev":"CLAIM","id":"theirs","ts":"2026-01-02T00:00:00Z"}' \
+    > "$ROOT/$LEDGER"
+  git -C "$ROOT" add -A >/dev/null 2>&1
+  git -C "$ROOT" commit -qm "seed ledger" --no-verify >/dev/null 2>&1
+  git -C "$ROOT" push -q --no-verify origin main >/dev/null 2>&1
+  git -C "$ROOT" fetch -q origin >/dev/null 2>&1
+}
+drop_theirs() {
+  printf '%s\n' '{"ev":"CLAIM","id":"mine","ts":"2026-01-01T00:00:00Z"}' \
+    > "$ROOT/$LEDGER"
+}
+
+# 15. The defect itself: a resolution that keeps only your own append.
+new_push_repo
+seed_ledger
+drop_theirs
+commit "$ROOT" "claims: close mine"
+push_expect "a commit destroying another lane's record: refused" 1 origin main
+rm -rf "$TMP"
+
+# 16. The waiver, which must be a REASON and not just the token.
+new_push_repo
+seed_ledger
+drop_theirs
+git -C "$ROOT" add -A >/dev/null 2>&1
+git -C "$ROOT" commit -q --no-verify -m "claims: close mine
+
+claims-drop-gate: theirs was a malformed hand-typed record" >/dev/null 2>&1
+push_expect "a destroyed record with a waiver trailer: allowed" 0 origin main
+rm -rf "$TMP"
+
+# 17. THE COUPLING. No leak checker in the fixture at all: the claims
+#     check must still fire. This case was RED before the hook was
+#     restructured on 31 Aug 2026.
+new_push_repo
+seed_ledger
+rm -f "$ROOT/packaging/leak-check.sh"
+drop_theirs
+commit "$ROOT" "claims: close mine"
+push_expect "record drop refused with no leak checker present" 1 origin main
+rm -rf "$TMP"
+
+# 18. And the mirror, so the decoupling is pinned in both directions: no
+#     claims gate present, and a leak must still be refused.
+new_push_repo
+seed_ledger
+rm -f "$ROOT/tools/claims-drop-gate.py"
+echo "// benchmarked on $LEAK" > "$SRC"
+commit "$ROOT" leak
+push_expect "leak refused with no claims gate present" 1 origin main
+rm -rf "$TMP"
+
+# 19. An ordinary append is not a drop - the control, without which every
+#     case above is satisfied by a hook that refuses everything.
+new_push_repo
+seed_ledger
+printf '%s\n%s\n%s\n' \
+  '{"ev":"CLAIM","id":"mine","ts":"2026-01-01T00:00:00Z"}' \
+  '{"ev":"CLAIM","id":"theirs","ts":"2026-01-02T00:00:00Z"}' \
+  '{"ev":"DONE","id":"mine","ts":"2026-01-03T00:00:00Z"}' > "$ROOT/$LEDGER"
+commit "$ROOT" "claims: done mine"
+push_expect "an ordinary ledger append: allowed" 0 origin main
+rm -rf "$TMP"
+fi
+
 echo
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

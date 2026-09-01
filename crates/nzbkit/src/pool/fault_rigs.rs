@@ -689,6 +689,7 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -765,6 +766,7 @@ async fn early_fanout_arms_at_the_tail_latch_not_the_pending_floor() {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -914,6 +916,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -951,6 +954,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -986,6 +990,7 @@ async fn hedge_races_a_straggler_at_the_adaptive_bound() {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -1076,6 +1081,7 @@ fn bound_guard_straggler(shared: &Arc<Shared>, id: &str, tried_fail: u32, age: D
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -1461,6 +1467,7 @@ async fn suspect_dup_races_a_pre_byte_stall_at_once() {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -2551,5 +2558,263 @@ async fn a_shed_for_a_spent_prepaid_block_quits_its_session() {
     assert!(
         !segs.is_empty(),
         "the fixture must actually have articles to leave unfetched"
+    );
+}
+
+/// TODO 315, the late re-ask's own wedge: A LAST BACKBONE THAT ANSWERS
+/// AND THEN GOES AWAY.
+///
+/// [`Shared::take_recheck`] buys one more question of the group whose
+/// 430 was the last evidence an article needed, and pays for it by
+/// clearing that group's `tried_430` bit so `next_work` cannot call the
+/// article live-unanimous while the re-ask waits. That leaves the
+/// article retirable ONLY by the group holding it - and dispatchable
+/// only by that group as well, because every other server's bit is set
+/// and the pickup gate steps them all past it. Nothing bounded how long
+/// that took, so a group that answered once and then stopped granting
+/// sessions kept the article, and therefore the whole run, alive for
+/// ever. `pool/gates.rs` states the shape in writing: "an item nothing
+/// can serve rotates in the queue forever and deadlocks the run."
+///
+/// THE RIG IS THE INCIDENT'S ORDER, which is the part that cannot be
+/// skipped: a hold is taken only where the group's OWN refusal was the
+/// last evidence, so a backbone that never connects can never produce
+/// one - it has to answer first and go away after.
+/// [`crate::mock::Chaos::dark_after_refusals`] triggers on the client's
+/// own progress rather than a clock, so the ordering needs no poll and
+/// no wall-clock race. The fill LEVEL makes B the last refuser by
+/// construction: level 1 takes queued work only once every live level-0
+/// server has 430'd it, so the article walks A then B and the hold is
+/// always B's.
+///
+/// ONE ARTICLE, and that is a correction rather than a simplification.
+/// The first cut ran sixteen and proved something else: a held item is
+/// requeued at the queue MIDPOINT, so B spent the back half of its
+/// refusal budget on RE-ASKS and seven articles never got B's first
+/// refusal at all - they wedged with `tried_430` naming A alone, which
+/// is the plain live-mask deadlock `participation_mask`'s own header
+/// describes and has nothing to do with this hold. The control arm
+/// timed out for the wrong reason and the rig proved nothing. With one
+/// article there is no second question: the only thing that can hold
+/// the run open is the hold.
+///
+/// `outage_budget: None` is not decoration either - it is the shipped
+/// `server_outage_mins = 0` setting, and it is what keeps B's parked
+/// worker ALIVE after it goes dark (`outage_budget_blown` and
+/// `ladder_exhausted` are both false for the life of the run, so the
+/// elected prober never publishes `CapEpisode::Dead`). B therefore
+/// never leaves `live_mask`, which is the one condition that could have
+/// retired the hold for free - and under that setting the wedge is
+/// PERMANENT rather than merely long.
+///
+/// BOTH ARMS ARE ASSERTED and the control is the proof of the rig: with
+/// the window off the run does not finish, and it can only be the hold
+/// holding it, because an unheld article here is live-unanimous the
+/// instant B answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_re_ask_cannot_outlive_its_window_when_the_backbone_goes_dark() {
+    let id = "<dark0@rig>";
+
+    let leg = |hold_ms: u64| async move {
+        let absent: std::collections::HashSet<String> = [id.to_string()].into_iter().collect();
+        // A: the level-0 primary. Refuses, fast, and is never the last
+        // refuser, so it never takes a hold.
+        let a = crate::mock::MockServer::start(
+            Default::default(),
+            crate::mock::Chaos {
+                missing: absent.clone(),
+                echo_missing_id: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        // B: the level-1 backbone. Answers exactly one refusal - the
+        // one that makes the article live-unanimous and buys the hold -
+        // and that refusal takes it dark for good.
+        let b = crate::mock::MockServer::start(
+            Default::default(),
+            crate::mock::Chaos {
+                missing: absent,
+                echo_missing_id: true,
+                dark_after_refusals: 1,
+                ..Default::default()
+            },
+        )
+        .await;
+        let cfg = |level: u32| {
+            let mut sc = if level == 0 {
+                a.server_config()
+            } else {
+                b.server_config()
+            };
+            sc.connections = 1;
+            sc.level = level;
+            (
+                sc,
+                PoolConfig {
+                    connections: 1,
+                    ramp_delay: Duration::from_millis(0),
+                    // Explicit rather than inherited: this rig is ABOUT
+                    // the mechanism, so an env kill switch in somebody's
+                    // shell must not quietly turn it into a test of
+                    // nothing.
+                    recheck_430: true,
+                    recheck_430_hold: Duration::from_millis(hold_ms),
+                    // See the doc comment: this is what keeps B's worker
+                    // alive once it stops accepting.
+                    outage_budget: None,
+                    connect_backoff: Duration::from_millis(20),
+                    ..Default::default()
+                },
+            )
+        };
+        let servers = vec![cfg(0), cfg(1)];
+        let reqs = vec![ArticleReq {
+            id: id.into(),
+            age_days: 0,
+            part: 0,
+            file: u32::MAX,
+        }];
+        let (tx, mut rx) = mpsc::channel(8);
+        let fetch = tokio::spawn(async move { fetch_all_multi(&servers, reqs, tx).await });
+        let collect = tokio::spawn(async move {
+            let mut got = Vec::new();
+            while let Some(o) = rx.recv().await {
+                got.push(matches!(o, FetchOutcome::Missing { .. }));
+            }
+            got
+        });
+        let finished = tokio::time::timeout(Duration::from_secs(15), fetch).await;
+        // The mocks must outlive the leg.
+        drop((a, b));
+        match finished {
+            Ok(j) => {
+                let _ = j.unwrap();
+                Some(collect.await.unwrap())
+            }
+            Err(_) => None,
+        }
+    };
+
+    // The bound off: the pre-30-Aug shape. The hold is taken, B is dark,
+    // and nothing anywhere can retire it.
+    assert!(
+        leg(0).await.is_none(),
+        "with the window off a held re-ask should keep the run alive for ever - if this \
+         leg finished, the rig stopped building the wedge it is the control for (B must \
+         be the LAST refuser and must really go dark) and the arm below proves nothing"
+    );
+
+    // The bound on. Comfortably above the window, so the assertion is
+    // about the mechanism and not about how loaded the box is.
+    let got = leg(1_000)
+        .await
+        .expect("a bounded hold must let the run finish");
+    assert_eq!(
+        got,
+        vec![true],
+        "the article owes exactly one outcome once its hold expires, and it is the \
+         Missing the two refusals in hand already justified"
+    );
+}
+
+/// TODO 315: THE WINDOW MUST NOT COST THE MECHANISM ITS VALUE. The
+/// rig above proves the hold ends; this one proves it still happens.
+///
+/// Same fleet and the same shipped window, against the fault the late
+/// re-ask exists for - [`crate::mock::Chaos::missing_once`], a refusal
+/// that was never true, measured at 231 of 250 refused articles served
+/// on the very next pass off the same account nine minutes later. The
+/// re-ask is dispatched as soon as the article comes back round, which
+/// on a healthy fleet is far inside the window, so the article must
+/// come back DONE and not Missing.
+///
+/// Deliberately run at the SHIPPED [`RECHECK_430_HOLD`] rather than at
+/// a rig-sized one: a window shortened below the delay to its own
+/// re-ask turns this mechanism off while leaving every other test
+/// green, and this is the one assertion that would notice.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bounded_hold_still_recovers_the_refusal_that_was_never_true() {
+    let data: Vec<u8> = (0..40_000u32).map(|i| i as u8).collect();
+    let mut articles = std::collections::HashMap::new();
+    let segs = crate::mock::make_file_articles("once.bin", &data, 40_000, "om", &mut articles);
+    // Bracketed: `make_file_articles` keys the article map `<id>` and
+    // returns the bare id, and every `Chaos` id set is the wire form.
+    // The bare form still "works" on a server holding no articles - the
+    // not-found arm refuses it - which is exactly how a first cut of
+    // this rig read as a permanent absence and never exercised the
+    // re-ask at all.
+    let real = format!("<{}>", segs[0].0);
+
+    let a = crate::mock::MockServer::start(
+        Default::default(),
+        crate::mock::Chaos {
+            missing: [real.clone()].into_iter().collect(),
+            echo_missing_id: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    // B holds the article and refuses it exactly once - the shape
+    // nothing on the wire can tell from a permanent absence.
+    let b = crate::mock::MockServer::start(
+        articles,
+        crate::mock::Chaos {
+            missing_once: [real.clone()].into_iter().collect(),
+            echo_missing_id: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let cfg = |level: u32| {
+        let mut sc = if level == 0 {
+            a.server_config()
+        } else {
+            b.server_config()
+        };
+        sc.connections = 1;
+        sc.level = level;
+        (
+            sc,
+            PoolConfig {
+                connections: 1,
+                ramp_delay: Duration::from_millis(0),
+                recheck_430: true,
+                ..Default::default()
+            },
+        )
+    };
+    let servers = vec![cfg(0), cfg(1)];
+    let reqs = vec![ArticleReq {
+        id: real.as_str().into(),
+        age_days: 0,
+        part: 0,
+        file: u32::MAX,
+    }];
+    let (tx, mut rx) = mpsc::channel(8);
+    let fetch = tokio::spawn(async move { fetch_all_multi(&servers, reqs, tx).await });
+    let collect = tokio::spawn(async move {
+        let mut done = 0usize;
+        let mut missing = 0usize;
+        while let Some(o) = rx.recv().await {
+            match o {
+                FetchOutcome::Done { .. } => done += 1,
+                FetchOutcome::Missing { .. } => missing += 1,
+                FetchOutcome::Failed { .. } => {}
+            }
+        }
+        (done, missing)
+    });
+    tokio::time::timeout(Duration::from_secs(30), fetch)
+        .await
+        .expect("the healthy-backbone leg hung")
+        .unwrap();
+    let (done, missing) = collect.await.unwrap();
+    assert_eq!(
+        (done, missing),
+        (1, 0),
+        "the shipped window has to leave the late re-ask room to happen - a Missing here \
+         means the bound retired the hold before the backbone was asked again, which is \
+         the mechanism switched off rather than bounded"
     );
 }

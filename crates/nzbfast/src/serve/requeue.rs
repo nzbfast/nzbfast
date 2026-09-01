@@ -436,12 +436,10 @@ mod pause_cost_tests {
         nzbkit::mem::MemBudget::with_total(nzbkit::mem::MemBudget::MIN)
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    fn scratch(name: &str) -> crate::testscratch::ScratchDir {
         let dir =
             std::env::temp_dir().join(format!("nzbfast-pausecost-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testscratch::ScratchDir::attach(&dir)
     }
 
     /// Put `id` on the wire having fetched `done` bytes of `total`.
@@ -504,6 +502,12 @@ mod pause_cost_tests {
                 "vol.part01.rar",
                 n as u64 * len,
                 &[Frag::identity("vol.part01.rar", i as u64 * len, len)],
+                // No payload on disk behind these records, so there is
+                // no honest X5-02 commitment to record. Nothing here
+                // runs a restore - these helpers weigh `placement_bytes`
+                // - so `None` costs the assertions nothing and is the
+                // truthful value.
+                None,
             );
         }
         j.flush();
@@ -596,23 +600,60 @@ mod pause_cost_tests {
 
     /// The same screen at a PRODUCTION budget, which is the threshold
     /// every real box actually runs: `budget()` above is
-    /// `MemBudget::MIN`, so its `holds_cap` is ~30 MB and every existing
+    /// `MemBudget::MIN`, so its `holds_cap` is ~30 MB and every other
     /// test in this module only ever exercises the 1 GB floor. On a
     /// 16 GB machine the default budget is 4 GB and the cap is ~1.93 GB,
     /// so `cap.max(REFETCH_FLOOR_BYTES)` is the CAP and the constant is
     /// dead weight - which is exactly why two sweeps read the `max` as a
     /// bug. Dropping `cap` from it leaves `refetch > 1 GB`, which a
     /// healthy store set with a 1.93 GB held-span backlog clears, and
-    /// the "free at the cap" assertion below is what dies when somebody
-    /// does it. [`requeue_cost`] carries the derivation.
+    /// the "free at the screen" assertion below is what dies when
+    /// somebody does it. [`requeue_cost`] carries the derivation.
+    ///
+    /// WHICH ARM OF THAT `max` BINDS IS A PROPERTY OF THE TARGET, and
+    /// this test asserted the 64-bit answer unconditionally for its
+    /// first two days. That took `armv7-cross` red in nightly from
+    /// 28 Aug 2026, deterministically, on both attempts and in both
+    /// test binaries nextest built for it - the only failing test in
+    /// 8,094 - and nothing reported it, so it sat there. The cause is arithmetic and not a
+    /// `usize` narrowing: [`nzbkit::mem::MemBudget::with_total`] clamps
+    /// every budget to [`nzbkit::mem::MemBudget::max_total`], which is
+    /// 1 GiB on a 32-bit target for the two address-space reasons its
+    /// own comment carries, so the 4 GiB asked for below IS 1 GiB there
+    /// and 45% of it is 483,183,810 bytes - under half the floor. The
+    /// cap arm does not exist on armv7 and no bigger number reaches it.
+    ///
+    /// So the fixture drives the SCREEN, which is what this test is
+    /// named for and is well defined on both targets, and each target
+    /// pins which arm it is getting. Deliberately not one portable
+    /// assertion: `cap.max(FLOOR) >= FLOOR` is true whatever the 45%
+    /// becomes, so it would pass with the cap arm dropped entirely,
+    /// which is the exact edit this test exists to refuse. And
+    /// deliberately not `#[cfg]`-ed off the target where it failed -
+    /// that would leave armv7's own screen pinned by nothing, on the one
+    /// platform where the floor is the whole of it.
     #[test]
     fn at_a_production_budget_the_screen_is_the_held_span_cap() {
+        // membudget-ceiling-gate: with_total() clamps any input safely on
+        // every target, so the literal itself needs no guard; the 32-bit
+        // split lives in the two cfg-gated asserts below, which read the
+        // clamped result via `cap` rather than trusting this figure raw.
         let big = nzbkit::mem::MemBudget::with_total(4u64 << 30);
         let cap = big.holds_cap() as u64;
+        let screen = cap.max(REFETCH_FLOOR_BYTES);
+        #[cfg(target_pointer_width = "64")]
         assert!(
             cap > REFETCH_FLOOR_BYTES,
             "45% of a 4 GB budget must be over a gigabyte, or this test \
              pins the floor a second time instead of the cap: cap={cap}"
+        );
+        #[cfg(not(target_pointer_width = "64"))]
+        assert!(
+            cap < REFETCH_FLOOR_BYTES,
+            "a narrower target clamps every budget to \
+             MemBudget::max_total(), so 45% of one cannot reach the \
+             floor - if it now can, the ceiling moved and this arm is \
+             the wrong one to be taking: cap={cap}"
         );
         let dir = scratch("prodscreen");
         let d = crate::serve::testutil::test_daemon(&dir);
@@ -621,23 +662,91 @@ mod pause_cost_tests {
         let (j, _) = nzbkit::journal::Journal::open(&dir, b"<nzb/>").unwrap();
         j.flush();
         d.note_wire_owner("SABnzbd_nzo_nzbfast1", &dir);
-        // Nearly two gigabytes on the wire - miles past the 1 GB floor -
-        // and still free, because the cap is what binds here.
-        on_the_wire(&d, "SABnzbd_nzo_nzbfast1", cap, 8_000_000_000);
+        // At the screen exactly - nearly two gigabytes of wire on a
+        // 64-bit box, the bare floor on a 32-bit one - and still free.
+        on_the_wire(&d, "SABnzbd_nzo_nzbfast1", screen, 8_000_000_000);
         assert!(
             d.pause_cost_under(big).is_empty(),
-            "at the held-span cap there is nothing a rerun cannot shield"
+            "at the screen there is nothing a rerun cannot shield"
         );
-        // One byte past the cap it prices, and prices as a refetch.
-        on_the_wire(&d, "SABnzbd_nzo_nzbfast1", cap + 1, 8_000_000_000);
+        // One byte past it it prices, and prices as a refetch.
+        on_the_wire(&d, "SABnzbd_nzo_nzbfast1", screen + 1, 8_000_000_000);
         let (_, cost) = only(
             d.pause_cost_under(big),
-            "past the held-span cap an unshielded set costs a refetch",
+            "past the screen an unshielded set costs a refetch",
         );
         let RequeueCost::Refetch { refetch } = cost else {
             panic!("a journal shielding no placed payload is the Refetch arm");
         };
-        assert_eq!(refetch, cap + 1);
+        assert_eq!(refetch, screen + 1);
+    }
+
+    /// armv7's production screen, pinned FROM A 64-BIT BOX - which is
+    /// the whole reason this test exists rather than being left to the
+    /// nightly qemu job.
+    ///
+    /// A 1 GiB budget is the one figure both targets agree on to the
+    /// byte: it sits exactly ON the 32-bit
+    /// [`nzbkit::mem::MemBudget::max_total`] ceiling and is untouched on
+    /// 64-bit, so `holds_cap` here is 483,183,810 on EVERY target - the
+    /// same number `armv7-cross` printed for ten nights - and the screen
+    /// is the 1 GB floor either way. That makes this a faithful host-run
+    /// of what a 32-bit install actually gets, and the one thing above
+    /// that a 64-bit box otherwise cannot execute.
+    ///
+    /// The floor arm is what binds on EVERY armv7 install, not a corner:
+    /// 45% of the largest budget the target can address is under half of
+    /// `REFETCH_FLOOR_BYTES`, so `cap` can never win that `max` there.
+    /// That is the constant doing exactly the job [`requeue_cost`]
+    /// describes - "it only binds on a box under ~8 GB of RAM" - and it
+    /// stays SOUND, because the floor it screens on is the larger of the
+    /// two, so `refetch > FLOOR` still implies `refetch > cap`.
+    #[test]
+    fn a_32_bit_sized_budget_screens_on_the_floor_and_still_implies_the_cap() {
+        let small = nzbkit::mem::MemBudget::with_total(1u64 << 30);
+        assert_eq!(
+            small.total,
+            1 << 30,
+            "a 1 GiB budget is at the 32-bit ceiling and under every \
+             other one, so no target may clamp it"
+        );
+        let cap = small.holds_cap() as u64;
+        assert_eq!(cap, 483_183_810, "45% of a gigabyte, on every target");
+        assert!(
+            cap < REFETCH_FLOOR_BYTES,
+            "the floor is what screens a 32-bit install"
+        );
+        let dir = scratch("armv7screen");
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let (j, _) = nzbkit::journal::Journal::open(&dir, b"<nzb/>").unwrap();
+        j.flush();
+        d.note_wire_owner("SABnzbd_nzo_nzbfast1", &dir);
+        // Past the cap and under the floor: free, because the screen
+        // takes the LARGER of the two and the floor is it here.
+        on_the_wire(
+            &d,
+            "SABnzbd_nzo_nzbfast1",
+            REFETCH_FLOOR_BYTES,
+            8_000_000_000,
+        );
+        assert!(
+            d.pause_cost_under(small).is_empty(),
+            "over the held-span cap but under the floor is still free"
+        );
+        on_the_wire(
+            &d,
+            "SABnzbd_nzo_nzbfast1",
+            REFETCH_FLOOR_BYTES + 1,
+            8_000_000_000,
+        );
+        let (_, cost) = only(
+            d.pause_cost_under(small),
+            "past the floor an unshielded set costs a refetch",
+        );
+        let RequeueCost::Refetch { refetch } = cost else {
+            panic!("a journal shielding no placed payload is the Refetch arm");
+        };
+        assert_eq!(refetch, REFETCH_FLOOR_BYTES + 1);
     }
 
     /// A job that is not on the wire has nothing in flight to lose, and

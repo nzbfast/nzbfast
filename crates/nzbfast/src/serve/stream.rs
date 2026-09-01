@@ -35,7 +35,9 @@ pub(super) fn write_strm(
     token: &str,
 ) -> Result<()> {
     std::fs::create_dir_all(out_dir)?;
-    let path = out_dir.join(nzbkit::disk::sanitize_filename(&format!("{name}.strm")));
+    let path = out_dir.join(nzbkit::disk::sanitize_filename_capped(&format!(
+        "{name}.strm"
+    )));
     std::fs::write(
         &path,
         format!("{scheme}://{authority}/stream/{nzo_id}?t={token}\n"),

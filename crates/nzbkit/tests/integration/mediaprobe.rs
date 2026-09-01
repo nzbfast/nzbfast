@@ -227,7 +227,6 @@ fn a_live_writer_with_a_hole_probes_partially_then_completely() {
     assert!(info.complete, "warnings: {:?}", info.warnings);
     assert_eq!(info.playback, PlaybackPath::Native);
     assert_eq!(info.video[0].codec, "h264");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The wire shape the dashboard panel codes against. Field names and

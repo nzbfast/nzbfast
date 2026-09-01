@@ -186,7 +186,6 @@ async fn the_carry_probe_answers_a_silent_host_and_keeps_nothing() {
     .unwrap();
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A switched-off server is refused, and the opt-in gets through.
@@ -335,7 +334,6 @@ async fn a_switched_off_server_is_refused_and_the_opt_in_gets_through() {
     .unwrap();
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// What one tee'd connection may carry, and the reason the tee paces at
@@ -851,5 +849,4 @@ async fn the_rungs_run_for_real_against_a_supply_a_real_download_built() {
         "the carry probe wrote to the config - it must report and touch nothing"
     );
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }

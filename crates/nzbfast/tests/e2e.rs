@@ -8,26 +8,74 @@
 
 mod scratch;
 
+// The one non-repeating payload generator, shared with the `daemon`
+// binary (sibling dir, the `harness`/`scratch` pattern). Reach for it
+// rather than writing an eighth private copy - its header says why,
+// and `payload` below says when a fixture needs it.
+mod payloads;
+
+// The forward guard on the trap `payloads` exists to escape: a repair
+// that completed having rebuilt nothing from parity. e2e-only, unlike
+// its three bare-named siblings, because `run_get_win` and `Fixture`
+// are.
+mod adoptguard;
+
 // The shared daemon launcher. `e2e_qprog` is the only child that needs
 // it - every other suite here drives the `get` CLI, which has no queue.
 mod harness;
+
+// The one `get` command spelling and the KILLABLE child the crash rows
+// need (`run_get_spawn`). A sibling dir that makes this file SHORTER
+// than it was without it - the dial constants and the `Command` builder
+// went with it - which is the trade the size-gate baseline note asks
+// for before a new top-level module.
+mod e2e_getrun;
+pub use e2e_getrun::{GET_CONNS, GET_WINDOW, GetRun, run_get_spawn, run_get_spawn_sub};
 
 // §123 chip-6 surfaces (bytes-skew and friends) - a sibling-dir child
 // so this file stays inside its size-gate baseline.
 mod e2e_chaserepair;
 mod e2e_chaseresume;
 mod e2e_chip6;
+// The non-RAR containers at the TOP level - a 7z or zip posted as the
+// release itself, clean, split, over the cap, damaged and encrypted
+// (sibling dir, size gate).
+mod e2e_containers;
 mod e2e_drop;
+// Zero-length FileDescs (VIDEO_TS placeholders) - case 3 of the no-RAR
+// deobfuscation family (sibling dir, size gate).
+mod e2e_emptydesc;
 mod e2e_faults;
 mod e2e_holdstrace;
+mod e2e_integrity;
+// X5-24 (30 Aug 2026 ruling): the RESIDUAL half of the late-set pass -
+// whether a recovery set the stream never activated may KEEP a member
+// it rebuilt from parity alone (sibling dir, size gate). The other half
+// of the same row is `e2e_residual`.
+mod e2e_lateset;
 // TODO 311: a post that ships one recovery set PER FILE (GH #63) -
 // sibling dir, size gate.
 mod e2e_multiset;
+// The no-RAR deobfuscation matrix rows (bare files, real names only in
+// the PAR2 FileDescs) - sibling dir, size gate. Rows recorded in
+// research/NORAR-DEOBF-MATRIX-2026-08-29.md.
+mod e2e_norar;
+mod e2e_norar3;
+mod e2e_norarpar2;
+mod e2e_pathidentity;
+// The checksum-sidecar DIALECT rows (M4-35/M4-36) - split out of
+// e2e_norar when two lanes' growth crossed its size-gate ceiling.
+mod e2e_norarsfv;
 // Round A of the 26 Aug 2026 recovery research: the queue-progress axis
 // on the fault matrix above - a broken post at the HEAD of a real
 // daemon queue, with healthy jobs behind it (sibling dir, size gate).
 mod e2e_qprog;
+mod e2e_relpath;
 mod e2e_repair;
+// X5-24 (30 Aug 2026 ruling): residual assignment after a TOTAL loss -
+// the one file a fully obfuscated post lost whole, against the one
+// recovery set nothing claimed (sibling dir, size gate).
+mod e2e_residual;
 mod e2e_resume;
 mod e2e_sample;
 // A post whose PAR2 files do not announce themselves: the sniffed
@@ -37,15 +85,66 @@ mod e2e_sniffedpar2;
 mod e2e_split;
 mod e2e_tar;
 mod e2e_vouch;
+mod e2e_wave5_cost;
+// yEnc encryption, both Tensai75 draft standards (NZBFAST_YENC_CRYPT=1):
+// our own encoder halves post body-, control- and combined-encrypted
+// fixtures, the real get path decrypts while assembling - sibling dir,
+// size gate. Design memo + declared conventions:
+// research/YENC-ENCRYPTION-DESIGN-2026-08-31.md.
+mod e2e_yencrypt;
 mod e2e_zipsplit;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use adoptguard::refuse_a_solve_that_solved_nothing;
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 use nzbkit::rar::fixtures;
 
+/// The suite's everyday filler. **It is one periodic sequence, and two
+/// seeds are the SAME sequence shifted** - so a fixture that damages it
+/// and then reaches the repair engine's adoption scan can green without
+/// its recovery data ever being read.
+///
+/// Measured exactly (30 Aug 2026,
+/// `research/E2E-PARITY-BUDGET-CENSUS-2026-08-30.md`): the byte at `i`
+/// is `37i + seed + (i >> 9)` mod 256, and `37 * 512 == 0` mod 256, so
+/// `payload(_, s + d)[i] == payload(_, s)[i + 512 * d]` for every `i`,
+/// with no exceptions. Two consequences to hold in mind before using
+/// this in a fixture with damage:
+///  * SELF-PERIOD 131,072 (`d = 256`). Any file over 128 KiB carries
+///    every block of its first `len - 131072` bytes a second time, so
+///    the sliding scan can heal a hole out of the same file.
+///  * CROSS-SEED. Two files `d` seeds apart share `len - 512 * d` bytes
+///    verbatim - 99.7% for adjacent seeds at 180 KB.
+///
+/// Fine wherever nothing is damaged, and fine where the damage is well
+/// inside the posted parity. Where a fixture's verdict turns on WHICH
+/// mechanism healed it, or on damage the parity cannot cover, use
+/// `payloads::unique_payload` instead - the sibling module both this
+/// binary and `daemon` reach, whose header carries the measurement and
+/// the seven private copies it replaced. Do NOT change this function:
+/// 150-odd fixtures' PAR2 sets and MD5s are built on its bytes.
+///
+/// **NO SOURCE GATE HOLDS THIS, and that is a decision rather than an
+/// oversight** (31 Aug 2026, follow-up 13c.1;
+/// `research/PAYLOAD-TRAP-GATE-DECISION-2026-08-31.md` has the
+/// measurement). Three screens were measured over the whole test tree:
+/// a call to this plus a damage field is 59 tests, plus `add_par2` is
+/// 22, plus a file at or over the 131,072-byte period is 17 - against a
+/// defect population the census swept to ZERO, so even the sharpest is
+/// 17 waivers and nothing enforced. Replayed over the tree where the
+/// class was live it is 20 hits for 3 of the 4 real defects: the fourth
+/// damaged its bytes by patching the wire directly rather than through
+/// a `Chaos` field, and no screen keyed on how a fixture spells damage
+/// can see it. What separates a defect from a sound fixture here is
+/// what the fixture ASSERTS, which no scanner reads.
+///
+/// The guard that DOES hold it is
+/// [`adoptguard::refuse_a_solve_that_solved_nothing`], which fires on
+/// the mechanism - a repair that completed having rebuilt nothing from
+/// parity - and so has no proxy to be wrong about.
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
         .map(|i| {
@@ -138,6 +237,15 @@ impl Fixture {
         data: &[u8],
         art_size: usize,
     ) {
+        // A tree FileDesc name ("VIDEO_TS/VTS_01_1.VOB") stages into a
+        // subdirectory, so par2 create records the path - the
+        // relpath-preserve fixtures lean on this; flat names see no
+        // change.
+        if let Some(parent) = std::path::Path::new(real_name).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(self.dir.join(parent)).unwrap();
+        }
         std::fs::write(self.dir.join(real_name), data).unwrap();
         let tag = format!("{}-{}", posted_name.replace('.', "_"), self.nzb_files.len());
         let segs = make_file_articles(posted_name, data, art_size, &tag, &mut self.articles);
@@ -334,15 +442,6 @@ fn run_get(config: &Path, nzb: &Path, out: &Path, extra_env: &[(&str, &str)]) ->
     run_get_args(config, nzb, out, extra_env, &[])
 }
 
-/// The fetch pipeline every `run_get` leg dials: `GET_CONNS` sockets per
-/// SERVER (`--connections` is a per-server ceiling - `get/fleet.rs`) each
-/// holding `GET_WINDOW` pipelined requests. Named rather than typed twice
-/// because `rotated_ladder_does_not_fetch_every_article_twice` derives
-/// its BODY bounds from exactly these numbers (TODO 286), and a dial
-/// moved here with a bound left behind would silently widen it.
-const GET_CONNS: u32 = 4;
-const GET_WINDOW: u32 = 3;
-
 fn run_get_args(
     config: &Path,
     nzb: &Path,
@@ -361,36 +460,25 @@ fn run_get_win(
     extra_args: &[&str],
     window: u32,
 ) -> (String, bool) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
-    // The daemon mints an API key on a genuinely first run (see
-    // serve::first_run_apikey). These suites drive it keyless on purpose,
-    // so they take the same deliberate opt-out an operator would.
-    cmd.env("NZBFAST_OPEN", "1");
-    for a in extra_args {
-        cmd.arg(a);
-    }
-    cmd.arg("--config")
-        .arg(config)
-        .arg("get")
-        .arg(nzb)
-        .arg("--out")
-        .arg(out)
-        .arg("--connections")
-        .arg(GET_CONNS.to_string())
-        .arg("--window")
-        .arg(window.to_string())
-        .arg("--decoders")
-        .arg("4");
-    for (k, v) in extra_env {
-        cmd.env(k, v);
-    }
-    let out = cmd.output().expect("run nzbfast");
+    let mut cmd = e2e_getrun::get_cmd(config, nzb, out, extra_env, extra_args, GET_CONNS, window);
+    // `output_under_test` rather than a bare `Command::output`: cargo
+    // removes and re-links the uplifted binary on every invocation, so
+    // a spawn can answer NotFound for a file that is there before and
+    // after - the measurement is in that function's own header, and
+    // `fault_contract` is the leg that was seen failing this way.
+    let child = harness::output_under_test(&mut cmd);
+    // stdout and stderr are separate pipes with no shared clock - joined
+    // bare this reads as one chronology and is not (measured 31 Aug 2026:
+    // a PASSING run's stderr held earlier events than its stdout tail, so
+    // the join ended on a failure-shaped block for a green test). Label
+    // the seam; copy the comment along with the string if you copy this.
     let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
     );
-    (text, out.status.success())
+    refuse_a_solve_that_solved_nothing(&text, out);
+    (text, child.status.success())
 }
 
 /// A store-mode 3-volume RAR release of one inner file + par2 over the
@@ -475,9 +563,9 @@ async fn clean_store_rar_one_pass() {
 /// whose NZB file order is unrelated to volume order (the obfuscated-
 /// remux norm - the live 143-volume case arrived effectively randomly).
 /// Volume 0 is LAST in the NZB, so chain resolution can close nothing
-/// until the end; under a tight --mem-limit the whole set used to demote
-/// with "held-bytes cap" and unpack post-download. The arithmetic gate
-/// places every volume off its own headers: one-pass, ~1x payload disk.
+/// until the end; the ~50 MB pile beat the 28.8 MiB holds cap of the
+/// 64 MiB floor and demoted (`--mem-limit 64M`; `32M` to 31 Aug 2026 was
+/// the SAME budget). The gate places each volume off its own headers.
 #[tokio::test(flavor = "multi_thread")]
 async fn obfuscated_uniform_store_set_one_pass_shuffled_order() {
     if !have_par2() {
@@ -574,7 +662,7 @@ async fn obfuscated_uniform_store_set_one_pass_shuffled_order() {
     let out = fx.dir.join("out");
 
     let (log, ok) = tokio::task::spawn_blocking(move || {
-        run_get_args(&cfg, &nzb, &out, &[], &["--mem-limit", "32M"])
+        run_get_args(&cfg, &nzb, &out, &[], &["--mem-limit", "64M"])
     })
     .await
     .unwrap();
@@ -3084,20 +3172,10 @@ async fn kill9_resume_completes_without_refetching_everything() {
         let out = out.clone();
         let served = served.clone();
         tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
-                .arg("--config")
-                .arg(&cfg)
-                .arg("get")
-                .arg(&nzb)
-                .arg("--out")
-                .arg(&out)
-                .arg("--connections")
-                .arg("2")
-                .arg("--window")
-                .arg("2")
-                .spawn()
-                .unwrap();
+            // Paced at 2/2 rather than GET_CONNS/GET_WINDOW - see the
+            // fixture comment above: an unpaced fleet can finish before
+            // the poll loop below ever sees the kill threshold.
+            let run = run_get_spawn(&cfg, &nzb, &out, &[], &[], 2, 2);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let journal = out.join(".nzbfast.journal");
             while served.load(std::sync::atomic::Ordering::Relaxed) < total_articles * 2 / 5
@@ -3108,8 +3186,7 @@ async fn kill9_resume_completes_without_refetching_everything() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            child.kill().unwrap(); // SIGKILL
-            let _ = child.wait();
+            run.kill9();
         })
         .await
         .unwrap();
@@ -3220,20 +3297,10 @@ async fn kill9_resume_direct_extract_refetches_little() {
         let out = out.clone();
         let served = served.clone();
         tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
-                .arg("--config")
-                .arg(&cfg)
-                .arg("get")
-                .arg(&nzb)
-                .arg("--out")
-                .arg(&out)
-                .arg("--connections")
-                .arg("2")
-                .arg("--window")
-                .arg("2")
-                .spawn()
-                .unwrap();
+            // Paced at 2/2 rather than GET_CONNS/GET_WINDOW - see the
+            // fixture comment above: an unpaced machine can serve 40% of
+            // the articles before the client has journaled anything.
+            let run = run_get_spawn(&cfg, &nzb, &out, &[], &[], 2, 2);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let journal = out.join(".nzbfast.journal");
             while served.load(std::sync::atomic::Ordering::Relaxed) < total_articles * 2 / 5
@@ -3245,8 +3312,7 @@ async fn kill9_resume_direct_extract_refetches_little() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            child.kill().unwrap(); // SIGKILL
-            let _ = child.wait();
+            run.kill9();
         })
         .await
         .unwrap();
@@ -3264,6 +3330,19 @@ async fn kill9_resume_direct_extract_refetches_little() {
         placed_run1 > 0,
         "no placement records after kill - direct-extracted articles not journaled:\n{journal_txt}"
     );
+    // Every `R` needs its `H` content commitment, or the resume cannot
+    // authenticate the record and refetches the article anyway. Only a
+    // real journal can show this: the seam that decides it is the decode
+    // loop's, where the wire CRC is absent for a delegated check, a post
+    // with no pcrc32, the bare-LF fallback and every clamped article.
+    let ids = |p: &str| -> std::collections::HashSet<&str> {
+        journal_txt
+            .lines()
+            .filter_map(|l| l.strip_prefix(p)?.rsplit_once(' ').map(|(_, i)| i))
+            .collect()
+    };
+    let owed: Vec<&str> = ids("R ").difference(&ids("H ")).copied().collect();
+    assert!(owed.is_empty(), "placements with no commitment: {owed:?}");
 
     // Run 2: restore instead of refetch, verify, re-extract.
     let (log, ok) = {
@@ -3356,22 +3435,12 @@ async fn kill9_resume_instream_encrypted_refetches_little() {
     {
         let (cfg, nzb, out, served) = (cfg.clone(), nzb.clone(), out.clone(), served.clone());
         tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
-                .arg("--config")
-                .arg(&cfg)
-                .arg("get")
-                .arg(&nzb)
-                .arg("--out")
-                .arg(&out)
-                .arg("--password")
-                .arg("hunter2")
-                .arg("--connections")
-                .arg("2")
-                .arg("--window")
-                .arg("2")
-                .spawn()
-                .unwrap();
+            // `--password` is a `get`-subcommand argument, not a global
+            // one, so this goes through `run_get_spawn_sub` (whose
+            // `sub_args` land after the subcommand's own flags) rather
+            // than `run_get_spawn` - see `e2e_resume::kill9_run1`'s
+            // identical note.
+            let run = run_get_spawn_sub(&cfg, &nzb, &out, &[], &["--password", "hunter2"], 2, 2);
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             let journal = out.join(".nzbfast.journal");
             while served.load(std::sync::atomic::Ordering::Relaxed) < total_articles * 3 / 5
@@ -3383,8 +3452,7 @@ async fn kill9_resume_instream_encrypted_refetches_little() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            child.kill().unwrap();
-            let _ = child.wait();
+            run.kill9();
         })
         .await
         .unwrap();
@@ -3411,8 +3479,10 @@ async fn kill9_resume_instream_encrypted_refetches_little() {
     let (log, ok) = {
         let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
         tokio::task::spawn_blocking(move || {
-            let o = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
+            // Same `--password`-is-subcommand-local reason as run 1
+            // above; routed through `harness::output_under_test`.
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+            cmd.env("NZBFAST_OPEN", "1")
                 .arg("--config")
                 .arg(&cfg)
                 .arg("get")
@@ -3424,12 +3494,14 @@ async fn kill9_resume_instream_encrypted_refetches_little() {
                 .arg("--connections")
                 .arg("4")
                 .arg("--window")
-                .arg("3")
-                .output()
-                .unwrap();
+                .arg("3");
+            let o = harness::output_under_test(&mut cmd);
             (
+                // stdout/stderr are separate pipes with no shared clock -
+                // label the seam so a bare join can't be misread as one
+                // chronology. Copy the comment along with the string.
                 format!(
-                    "{}{}",
+                    "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
                     String::from_utf8_lossy(&o.stdout),
                     String::from_utf8_lossy(&o.stderr)
                 ),
@@ -4143,8 +4215,11 @@ async fn lean_verify_catches_corruption_at_the_block_layer() {
             .arg("--connections")
             .arg("4");
         let o = cmd.output().expect("run nzbfast");
+        // stdout/stderr are separate pipes with no shared clock - label
+        // the seam so a bare join can't be misread as one chronology.
+        // Copy the comment along with the string.
         let text = format!(
-            "{}{}",
+            "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
             String::from_utf8_lossy(&o.stdout),
             String::from_utf8_lossy(&o.stderr)
         );
@@ -4482,10 +4557,14 @@ async fn nested_inner_par2_repairs_poster_damaged_layer() {
         log.contains("nested fallback"),
         "no nested demotion:\n{log}"
     );
-    // The nested pass ran the INNER recovery set on disk.
+    // The INNER recovery set healed the damage - by whichever door got
+    // there first. Since 30 Aug 2026 (F12, latesets.rs) a set that
+    // lands on disk without activating is applied at settle, so the
+    // nested pass may correctly find nothing left to repair.
     assert!(
-        log.contains("[par2] nested set: repaired"),
-        "inner par2 did not repair:\n{log}"
+        log.contains("[par2] nested set: repaired")
+            || log.contains("never activated in-stream was applied"),
+        "no repair pass healed the poster-damaged inner layer:\n{log}"
     );
     let got = std::fs::read(fx.dir.join("out/show.mkv")).expect("payload extracted");
     assert_eq!(got, show, "payload bytes differ after inner par2 repair");
@@ -4628,10 +4707,14 @@ async fn nested_inner_par2_repairs_data_damaged_store_layer() {
         log.contains("stored CRC"),
         "demotion did not come from the CRC gate:\n{log}"
     );
-    // The nested pass ran the INNER recovery set on disk.
+    // The INNER recovery set healed the damage - by whichever door got
+    // there first. Since 30 Aug 2026 (F12, latesets.rs) a set that
+    // lands on disk without activating is applied at settle, so the
+    // nested pass may correctly find nothing left to repair.
     assert!(
-        log.contains("[par2] nested set: repaired"),
-        "inner par2 did not repair:\n{log}"
+        log.contains("[par2] nested set: repaired")
+            || log.contains("never activated in-stream was applied"),
+        "no repair pass healed the poster-damaged inner layer:\n{log}"
     );
     let got = std::fs::read(fx.dir.join("out/show.mkv")).expect("payload extracted");
     assert_eq!(got, show, "payload bytes differ after inner par2 repair");
@@ -4822,6 +4905,84 @@ async fn par_only_post_reconstructs_bare_payload() {
         data,
         "recreated payload differs"
     );
+}
+
+/// M4-23: the par-only post whose ONE recovery set names TWO files.
+///
+/// The two par-only tests above each cover exactly ONE file - one thing
+/// to recreate and no assignment to get wrong - so their green says
+/// nothing about how N recreated files are named, ordered or counted.
+///
+/// The lengths DIFFER on purpose - equal ones let a file-to-descriptor
+/// mix-up produce byte-exact output anyway on any path that recreates
+/// by index rather than by name. And both payloads are block-DISJOINT
+/// rather than `payload(n, seed)`, one periodic sequence a change of
+/// seed merely SHIFTS: two of its outputs share PAR2 blocks verbatim,
+/// so the adoption scan can satisfy a repair the set's own Reed-Solomon
+/// never ran (`payloads::unique_payload`).
+#[tokio::test(flavor = "multi_thread")]
+async fn par_only_post_reconstructs_two_files_from_one_set() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("paronlymulti");
+    let a = payloads::unique_payload(180_000, 74);
+    let b = payloads::unique_payload(96_000, 75);
+    // On disk for `par2 create` only - never added as articles, so the
+    // post carries no payload slot for either. One set over BOTH. 4 KB
+    // blocks: 100% redundancy over default-sized (tiny) blocks costs
+    // minutes of RS time for no extra coverage.
+    std::fs::write(fx.dir.join("a.bin"), &a).unwrap();
+    std::fs::write(fx.dir.join("b.bin"), &b).unwrap();
+    assert!(
+        fx.add_par2_opts(100, Some(4096), &["a.bin", "b.bin"], 30_000),
+        "par2 create failed"
+    );
+    assert!(
+        fx.nzb_files.iter().all(|(n, _)| n.ends_with(".par2")),
+        "NZB must carry only par2 files"
+    );
+    // And gone before the job: left on disk they are donors the adoption
+    // scan could satisfy the repair from, greening this either way.
+    for n in ["a.bin", "b.bin"] {
+        std::fs::remove_file(fx.dir.join(n)).unwrap();
+    }
+
+    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+        .await
+        .unwrap();
+    assert!(ok, "get failed:\n{log}");
+    assert!(log.contains("repair complete"), "no repair ran:\n{log}");
+    assert!(
+        log.contains("recreated from parity"),
+        "the mapped one-pass path did not run:\n{log}"
+    );
+    assert!(
+        !log.contains("outside the PAR2 set"),
+        "a file the recovery set covers was called uncovered:\n{log}"
+    );
+    for (n, want) in [("a.bin", &a), ("b.bin", &b)] {
+        // Damage is charged once per FILE, not once per SET, or the
+        // fetch plan asks for too little parity.
+        assert!(
+            log.contains(&format!("✘ {n} - file missing entirely")),
+            "{n} was not charged as missing:\n{log}"
+        );
+        // And each lands under its OWN FileDesc name - not just the
+        // first, and not swapped.
+        assert_eq!(
+            &std::fs::read(fx.dir.join("out").join(n))
+                .unwrap_or_else(|e| panic!("{n} not recreated ({e}):\n{log}")),
+            want,
+            "recreated {n} differs"
+        );
+    }
 }
 
 /// The par-only shape as it is actually POSTED: the NZB still carries the
@@ -5330,160 +5491,6 @@ async fn compressed_set_wholly_missing_volume_joins_chase_one_pass() {
     }
 }
 
-/// The CLI flow of the same par-only case: `nzbfast extract <dir>` on a
-/// directory holding ONLY the par2 set (the data file deleted). The
-/// offline pipeline must recreate the rar from recovery blocks and then
-/// extract it. rc=0.
-#[test]
-fn extract_local_par_only_dir_recreates_and_extracts() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("nzbfast-e2e-paronly-cli-{}", std::process::id()));
-    let _scratch = scratch::ScratchDir::attach(&dir);
-    let movie = payload(220_000, 73);
-    let rar = fixtures::rar5_volume(&[("movie.mkv", 220_000, &movie, false, false)]);
-    std::fs::write(dir.join("r.rar"), &rar).unwrap();
-    let st = Command::new("par2")
-        .arg("create")
-        .arg("-s4096")
-        .arg("-r100")
-        .arg("-q")
-        .arg("cliset")
-        .arg("r.rar")
-        .current_dir(&dir)
-        .status()
-        .expect("run par2");
-    assert!(st.success(), "par2 create failed");
-    std::fs::remove_file(dir.join("r.rar")).unwrap();
-
-    let o = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-        .env("NZBFAST_OPEN", "1")
-        .arg("extract")
-        .arg(&dir)
-        .output()
-        .expect("run nzbfast extract");
-    let log = format!(
-        "{}{}",
-        String::from_utf8_lossy(&o.stdout),
-        String::from_utf8_lossy(&o.stderr)
-    );
-    assert!(o.status.success(), "extract failed:\n{log}");
-    assert_eq!(
-        std::fs::read(dir.join("movie.mkv")).expect("payload extracted"),
-        movie,
-        "payload bytes differ after CLI reconstruction"
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// TODO 37 step 1: a POSTED single-file `.7z` - no RAR around it, the
-/// shape 3.3% of releases actually use. The chase now takes it at depth
-/// 0, so its payload streams out while the archive downloads and the
-/// `.7z` itself never touches disk. Before this, the badge said
-/// `7z · unpacked after download` and the archive sat on disk waiting
-/// for the post-pass.
-#[tokio::test(flavor = "multi_thread")]
-async fn top_level_7z_extracts_one_pass() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("top7z");
-    // Incompressible, like real payload: LZMA2 leaves it ~1:1, so the
-    // posted archive is genuinely article-sized rather than a stub.
-    let movie = incompressible(900_000, 41);
-    let arch = sevenz_container(&[("movie.mkv", &movie)]);
-    fx.add_file("release.7z", &arch, 60_000);
-    assert!(fx.add_par2(10, &["release.7z"], 60_000));
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(log.contains("clean download"), "no clean verdict:\n{log}");
-    assert!(log.contains("extracted 1 file(s) in-stream"), "{log}");
-    // The chase's byte count, which read "(0.0 MB)" here too until the
-    // zip work surfaced it on a live post (31 Jul).
-    assert!(
-        !log.contains("in-stream (0.0 MB)"),
-        "the in-stream summary lost its byte count:\n{log}"
-    );
-    assert!(
-        log.contains("7z · one-pass"),
-        "badge still says on-disk:\n{log}"
-    );
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
-        movie,
-        "extracted bytes differ"
-    );
-    assert!(
-        !fx.dir.join("out/release.7z").exists(),
-        "the archive must not touch disk"
-    );
-}
-
-/// The same shape, damaged. A chased slot cannot take a mapped repair
-/// (its bytes are in RAM, not a file par2 can patch), so the ladder must
-/// materialize it first - which is the pre-TODO-37 end state - repair it
-/// on disk, and let the 7z post-pass unpack it. The failure this pins is
-/// silent and total: without the chased slot in the materialize sweep,
-/// par2 finds no `release.7z` at all and calls the whole file missing.
-#[tokio::test(flavor = "multi_thread")]
-async fn damaged_top_level_7z_materializes_repairs_and_unpacks() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("top7zdmg");
-    let movie = incompressible(900_000, 42);
-    let arch = sevenz_container(&[("movie.mkv", &movie)]);
-    fx.add_file("release.7z", &arch, 60_000);
-    assert!(fx.add_par2(30, &["release.7z"], 60_000));
-    // Two mid-archive articles vanish: enough damage to need repair,
-    // well inside the 30% redundancy.
-    let victims: Vec<String> = ["-3@mock>", "-5@mock>"]
-        .iter()
-        .map(|suffix| {
-            fx.articles
-                .keys()
-                .find(|k| k.contains("release_7z") && k.ends_with(suffix))
-                .unwrap_or_else(|| panic!("no {suffix} article: {:?}", fx.articles.len()))
-                .clone()
-        })
-        .collect();
-    let chaos = Chaos {
-        missing: victims.into_iter().collect(),
-        ..Default::default()
-    };
-    let srv = MockServer::start(fx.articles.clone(), chaos).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(
-        !log.contains("file missing entirely"),
-        "par2 could not see the chased archive:\n{log}"
-    );
-    assert!(log.contains("materializing volumes for repair"), "{log}");
-    assert!(log.contains("repair complete"), "no repair:\n{log}");
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("payload after repair"),
-        movie,
-        "payload differs after repair + post-pass"
-    );
-}
-
 /// Payload LZMA2 cannot shrink (xorshift), so a 7z fixture's posted size
 /// tracks its content size.
 fn incompressible(n: usize, seed: u64) -> Vec<u8> {
@@ -5508,95 +5515,6 @@ fn sevenz_container(entries: &[(&str, &[u8])]) -> Vec<u8> {
     w.finish().unwrap().into_inner()
 }
 
-/// TODO 37 step 2: an archive several times the retention cap streams
-/// anyway. The chase drops the prefix the decoder has already read past
-/// out of RAM and into the archive's own path as it goes, so what bounds
-/// it is the live window rather than the whole file; on success that
-/// partial spill is removed and the payload is the only thing left.
-///
-/// `--mem-limit 64M` floors the budget, which puts the extractor's
-/// held-span ceiling at ~29 MB against a ~36 MB archive. Before
-/// trimming, a job like this could only demote.
-#[tokio::test(flavor = "multi_thread")]
-async fn top_level_7z_over_the_cap_trims_and_still_streams() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("top7ztrim");
-    // Store-codec 7z over incompressible payload - the shape the census
-    // says dominates (already-compressed video), and the one where
-    // decode keeps up with arrival so the trim watermark advances.
-    let movie = incompressible(36 << 20, 43);
-    let arch = sevenz_store_container(&[("movie.mkv", &movie)]);
-    assert!(arch.len() > 36 << 20, "fixture too small: {}", arch.len());
-    fx.add_file("release.7z", &arch, 700_000);
-    // PAR2 stays on for this one: verifying a slot whose prefix has been
-    // trimmed out from under it is the interaction most likely to break.
-    assert!(fx.add_par2(5, &["release.7z"], 700_000));
-    // A server that delivers at a plausible rate rather than at memcpy
-    // speed. Trimming releases what the decoder has already READ, so a
-    // mock that hands over 40 MB in 0.3 s is testing the case trimming
-    // cannot help (arrivals outrunning decode, which correctly demotes),
-    // not the case it exists for.
-    //
-    // 150ms rather than 60: this margin is what keeps the trim path the
-    // branch that actually runs below. At 60 the suite's own parallel
-    // load was enough to let arrivals outrun decode.
-    let chaos = Chaos {
-        delay_ms: 150,
-        ..Default::default()
-    };
-    let srv = MockServer::start(fx.articles.clone(), chaos).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || {
-        run_get_args(&cfg, &nzb, &out, &[], &["--mem-limit", "64M"])
-    })
-    .await
-    .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    // True on either path: the payload is exact, and the archive - spilled
-    // partially or materialized whole - does not outlive the job.
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
-        movie,
-        "extracted bytes differ"
-    );
-    assert!(
-        !fx.dir.join("out/release.7z").exists(),
-        "the archive survived the job"
-    );
-    // Which path it took is a race, and the sibling test below says why
-    // asserting on the winner is a mistake - it pins its own direction
-    // with the kill switch for exactly this reason. Trimming only wins
-    // while decode keeps up with arrivals; on a machine running the rest
-    // of this suite in parallel it sometimes does not, and demoting then
-    // is the DOCUMENTED right answer rather than a regression. Asserting
-    // `!log.contains("held-bytes cap")` failed about one full-suite run
-    // in six for that reason, while passing 10/10 on its own.
-    //
-    // So: assert the trim contract when trimming happened, the demotion
-    // contract when it did not. The `delay_ms` margin above is what
-    // keeps the first branch the usual one; the second exists so a busy
-    // box reports the truth instead of a failure.
-    if log.contains("held-bytes cap") {
-        eprintln!(
-            "note: arrivals outran decode, so this run covered the demotion \
-             fallback rather than the trim path"
-        );
-        assert!(
-            log.contains("7z unpack complete"),
-            "demoted, but the disk post-pass never ran:\n{log}"
-        );
-    } else {
-        assert!(log.contains("extracted 1 file(s) in-stream"), "{log}");
-        assert!(log.contains("7z · one-pass"), "{log}");
-    }
-}
-
 /// An in-memory single-file `.7z` with the payload STORED (Copy codec).
 fn sevenz_store_container(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut w = sevenz_rust2::ArchiveWriter::new(std::io::Cursor::new(Vec::new())).unwrap();
@@ -5608,559 +5526,6 @@ fn sevenz_store_container(entries: &[(&str, &[u8])]) -> Vec<u8> {
             .unwrap();
     }
     w.finish().unwrap().into_inner()
-}
-
-/// The other half of the same story: whenever a trim cannot happen, the
-/// job must land exactly where it did before trimming existed - archive
-/// materialized, disk post-pass unpacks it, payload still right.
-///
-/// Driven through the kill switch rather than by outrunning the decoder.
-/// Arrival-beats-decode reaches the same code, but asserting on it means
-/// asserting on who won a race: under a loaded machine the chase wins,
-/// streams, and the "it demoted" assertion fails for the best possible
-/// reason. The gate pins the behaviour; the race is a field question.
-#[tokio::test(flavor = "multi_thread")]
-async fn top_level_7z_over_the_cap_demotes_cleanly_when_it_cannot_trim() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("top7znotrim");
-    let movie = incompressible(36 << 20, 44);
-    let arch = sevenz_store_container(&[("movie.mkv", &movie)]);
-    // No PAR2: this test is about where the archive ENDS UP, and the
-    // set costs more to build than the rest of the case put together.
-    // The chase-plus-PAR2 interactions have their own tests, small ones.
-    fx.add_file("release.7z", &arch, 700_000);
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || {
-        run_get_args(
-            &cfg,
-            &nzb,
-            &out,
-            &[("NZBFAST_NO_7Z_TRIM", "1")],
-            &["--mem-limit", "64M"],
-        )
-    })
-    .await
-    .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(log.contains("held-bytes cap: chase memory"), "{log}");
-    assert!(
-        log.contains("7z unpack complete"),
-        "the post-pass never ran:\n{log}"
-    );
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("payload after the disk pass"),
-        movie,
-        "the demoted archive did not reconstruct"
-    );
-}
-
-/// TODO 37 step 3: a `.7z.001` SPLIT SET posted as three files streams
-/// as one container. 7z multipart is a raw byte split, so the set is a
-/// single archive with seams in it: part 1's start header sizes the
-/// whole thing, and the continuation parts - which carry no signature
-/// whatsoever - join by name. Nothing lands on disk.
-///
-/// Before this, the parts materialized and the post-pass concatenated
-/// them into a scratch container before unpacking, which is a full extra
-/// copy of the archive on top of the download.
-#[tokio::test(flavor = "multi_thread")]
-async fn top_level_7z_split_set_extracts_one_pass() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("top7zsplit");
-    let movie = incompressible(6 << 20, 45);
-    let arch = sevenz_store_container(&[("movie.mkv", &movie)]);
-    // Exactly how `7z -v` splits: every part the split size, last one
-    // the remainder.
-    let split = arch.len().div_ceil(3);
-    let parts: Vec<&[u8]> = arch.chunks(split).collect();
-    assert_eq!(parts.len(), 3, "fixture must really split");
-    let names: Vec<String> = (1..=3).map(|i| format!("release.7z.{i:03}")).collect();
-    for (i, name) in names.iter().enumerate() {
-        fx.add_file(name, parts[i], 200_000);
-    }
-    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    assert!(fx.add_par2(5, &refs, 200_000));
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(log.contains("extracted 1 file(s) in-stream"), "{log}");
-    assert!(
-        log.contains("7z · one-pass"),
-        "the set did not stream:\n{log}"
-    );
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
-        movie,
-        "extracted bytes differ"
-    );
-    for name in &names {
-        assert!(
-            !fx.dir.join("out").join(name).exists(),
-            "{name} must not touch disk"
-        );
-    }
-}
-
-/// One-pass zip (phase 2): a POSTED store zip - the shape phase 1 sent
-/// to disk. The chase takes it at depth 0 now (the tail prefetch
-/// front-loads the central directory, which is the last thing in a
-/// zip), so its payload streams out while the archive downloads and the
-/// `.zip` itself never touches disk.
-#[tokio::test(flavor = "multi_thread")]
-async fn top_level_zip_extracts_one_pass() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("topzip");
-    // Incompressible, like real payload, STORED in the container - the
-    // dominant zip shape and the one the store fast path exists for.
-    let movie = incompressible(900_000, 46);
-    let arch =
-        nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
-    fx.add_file("release.zip", &arch, 60_000);
-    assert!(fx.add_par2(10, &["release.zip"], 60_000));
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(log.contains("clean download"), "no clean verdict:\n{log}");
-    assert!(log.contains("extracted 1 file(s) in-stream"), "{log}");
-    // The SIZE in that summary, not just the count. Every chase (7z and
-    // zip) reported "(0.0 MB)" under a correct per-file list, because
-    // the extractor's byte counter only advances on the RAR mapping
-    // path - invisible until a live 160 MB zip printed it (31 Jul).
-    assert!(
-        !log.contains("in-stream (0.0 MB)"),
-        "the in-stream summary lost its byte count:\n{log}"
-    );
-    assert!(
-        log.contains("zip · one-pass"),
-        "badge still says on-disk:\n{log}"
-    );
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
-        movie,
-        "extracted bytes differ"
-    );
-    assert!(
-        !fx.dir.join("out/release.zip").exists(),
-        "the archive must not touch disk"
-    );
-}
-
-/// A `.zip.001` byte-split set posted as three files streams as one
-/// container. Unlike 7z, no zip part carries a header that sizes the
-/// set - the cut is arbitrary and only part 1 even has a signature -
-/// so the NZB's own file list declares the part count and the geometry
-/// resolves once every part's decoded size has arrived. Nothing lands
-/// on disk.
-#[tokio::test(flavor = "multi_thread")]
-async fn top_level_zip_split_set_extracts_one_pass() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("topzipsplit");
-    let movie = incompressible(2 << 20, 49);
-    let arch =
-        nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
-    // A uniform byte split: every part the split size, last the
-    // remainder - what hjsplit and `split -b` produce.
-    let split = arch.len().div_ceil(3);
-    let parts: Vec<&[u8]> = arch.chunks(split).collect();
-    assert_eq!(parts.len(), 3, "fixture must really split");
-    let names: Vec<String> = (1..=3).map(|i| format!("release.zip.{i:03}")).collect();
-    for (i, name) in names.iter().enumerate() {
-        fx.add_file(name, parts[i], 60_000);
-    }
-    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    assert!(fx.add_par2(5, &refs, 60_000));
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(log.contains("extracted 1 file(s) in-stream"), "{log}");
-    assert!(
-        log.contains("zip · one-pass"),
-        "the set did not stream:\n{log}"
-    );
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
-        movie,
-        "extracted bytes differ"
-    );
-    for name in &names {
-        assert!(
-            !fx.dir.join("out").join(name).exists(),
-            "{name} must not touch disk"
-        );
-    }
-}
-
-/// A BARE-NUMERIC byte-split set (`release.001`, no `.zip.` infix - the
-/// hjsplit shape) streams the same way: the NZB's file list is the
-/// declaration and part 1's magic is the gate, so the ambiguity with
-/// RAR numeric volumes costs nothing. This pins the get/vrig.rs
-/// declaration path for the numeric grammar end to end.
-#[tokio::test(flavor = "multi_thread")]
-async fn top_level_bare_numeric_zip_split_extracts_one_pass() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("topnumsplit");
-    let movie = incompressible(2 << 20, 51);
-    let arch =
-        nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
-    let split = arch.len().div_ceil(3);
-    let parts: Vec<&[u8]> = arch.chunks(split).collect();
-    assert_eq!(parts.len(), 3, "fixture must really split");
-    let names: Vec<String> = (1..=3).map(|i| format!("release.{i:03}")).collect();
-    for (i, name) in names.iter().enumerate() {
-        fx.add_file(name, parts[i], 60_000);
-    }
-    let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    assert!(fx.add_par2(5, &refs, 60_000));
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(log.contains("extracted 1 file(s) in-stream"), "{log}");
-    assert!(
-        log.contains("zip · one-pass"),
-        "the set did not stream:\n{log}"
-    );
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
-        movie,
-        "extracted bytes differ"
-    );
-    for name in &names {
-        assert!(
-            !fx.dir.join("out").join(name).exists(),
-            "{name} must not touch disk"
-        );
-    }
-}
-
-/// The nested zip lift end to end: a store RAR wrapping a zip streams
-/// both layers in one pass - rc=0, the payload byte-exact, and no
-/// materialized intermediate (no inner .zip, no outer volume) touches
-/// the output directory.
-#[tokio::test(flavor = "multi_thread")]
-async fn store_rar_wrapped_zip_extracts_one_pass() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("rarzip");
-    let movie = incompressible(900_000, 50);
-    let arch =
-        nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
-    let outer = fixtures::rar5_volume(&[("inner.zip", arch.len() as u64, &arch[..], false, false)]);
-    fx.add_file("o.rar", &outer, 60_000);
-    assert!(fx.add_par2(10, &["o.rar"], 60_000));
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(
-        !log.contains("fell back") && !log.contains("nested fallback"),
-        "chase demoted:\n{log}"
-    );
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("extracted file"),
-        movie,
-        "extracted bytes differ"
-    );
-    // One pass all the way down: no outer volume, no inner zip.
-    for v in ["o.rar", "inner.zip"] {
-        assert!(
-            !fx.dir.join("out").join(v).exists(),
-            "{v} must not touch disk:\n{log}"
-        );
-    }
-}
-
-/// The same shape, damaged - the riskiest inherited seam. A chased slot
-/// cannot take a mapped repair (its bytes are in RAM, not a file par2
-/// can patch), so the ladder must materialize the zip first, repair it
-/// on disk, and let the zip step of the disk post-pass unpack it. The
-/// silent failure this pins: a chased zip missing from the materialize
-/// sweep reads back as "file missing entirely" and the repair rebuilds
-/// nothing.
-#[tokio::test(flavor = "multi_thread")]
-async fn damaged_top_level_zip_materializes_repairs_and_unpacks() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("topzipdmg");
-    let movie = incompressible(900_000, 48);
-    let arch =
-        nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)]);
-    fx.add_file("release.zip", &arch, 60_000);
-    assert!(fx.add_par2(30, &["release.zip"], 60_000));
-    // Two mid-archive articles vanish: enough damage to need repair,
-    // well inside the 30% redundancy.
-    let victims: Vec<String> = ["-3@mock>", "-5@mock>"]
-        .iter()
-        .map(|suffix| {
-            fx.articles
-                .keys()
-                .find(|k| k.contains("release_zip") && k.ends_with(suffix))
-                .unwrap_or_else(|| panic!("no {suffix} article: {:?}", fx.articles.len()))
-                .clone()
-        })
-        .collect();
-    let chaos = Chaos {
-        missing: victims.into_iter().collect(),
-        ..Default::default()
-    };
-    let srv = MockServer::start(fx.articles.clone(), chaos).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert!(
-        !log.contains("file missing entirely"),
-        "par2 could not see the chased archive:\n{log}"
-    );
-    assert!(log.contains("materializing volumes for repair"), "{log}");
-    assert!(log.contains("repair complete"), "no repair:\n{log}");
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("payload after repair"),
-        movie,
-        "payload differs after repair + post-pass"
-    );
-}
-
-/// Phase 3 end to end: an ENCRYPTED zip (WinZip AE-256) posted with its
-/// password riding the `Name{{pw}}.nzb` convention. The chase now
-/// decrypts IN STREAM, so the container never touches disk - it used to
-/// decline encrypted, materialize, and let the disk post-pass unpack it
-/// (and before that, fail the job outright with "the payload is a zip
-/// that could not be unpacked").
-#[tokio::test(flavor = "multi_thread")]
-async fn encrypted_zip_completes_with_a_braces_password() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let mut fx = Fixture::new("topzipenc");
-    let movie = incompressible(400_000, 50);
-    let arch = nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec {
-        encrypt: Some(nzbkit::zip::fixtures::Encrypt::Ae {
-            password: "s3cretpw",
-            strength: 3,
-            vendor_version: 2,
-        }),
-        ..nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)
-    }]);
-    fx.add_file("release.zip", &arch, 60_000);
-    assert!(fx.add_par2(10, &["release.zip"], 60_000));
-    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-    let cfg = fx.write_config(&[&srv]);
-    let nzb = fx.write_nzb();
-    let locked = fx.dir.join("release{{s3cretpw}}.nzb");
-    std::fs::rename(&nzb, &locked).unwrap();
-    let out = fx.dir.join("out");
-
-    let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &locked, &out, &[]))
-        .await
-        .unwrap();
-    assert!(ok, "get failed:\n{log}");
-    assert_eq!(
-        std::fs::read(fx.dir.join("out/movie.mkv")).expect("decrypted payload"),
-        movie,
-        "decrypted bytes differ"
-    );
-    // The whole point: no container on disk at any moment, and the disk
-    // post-pass never needed. Its absence from the log is what says the
-    // chase did the work rather than declining to it.
-    assert!(
-        !fx.dir.join("out/release.zip").exists(),
-        "the container must never touch disk"
-    );
-    assert!(
-        !log.contains("zip unpack complete"),
-        "the disk pass ran - the chase declined instead of decrypting:\n{log}"
-    );
-}
-
-/// Encrypted-zip PARITY against the disk reader, both schemes. The
-/// in-stream and disk paths share `zip::entry_crypto` verbatim, and this
-/// is what pins that sharing: the same post decrypted by the chase and
-/// by the phase-1 disk pass (`NZBFAST_NO_TOP_ZIP=1`) must produce
-/// byte-identical output. Correctness first - a shape that demotes to
-/// disk still works, a shape that silently mis-decrypts does not, and
-/// AE in particular has three places (LE counter from 1, partial
-/// keystream carry, HMAC at source EOF) where a divergence would show up
-/// as plausible-looking wrong bytes rather than an error.
-#[tokio::test(flavor = "multi_thread")]
-async fn encrypted_zip_one_pass_matches_the_disk_path() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    let movie = incompressible(400_000, 71);
-    let schemes: Vec<(&str, nzbkit::zip::fixtures::Encrypt)> = vec![
-        (
-            "zipcrypto",
-            nzbkit::zip::fixtures::Encrypt::ZipCrypto {
-                password: "s3cretpw",
-            },
-        ),
-        (
-            "ae256",
-            nzbkit::zip::fixtures::Encrypt::Ae {
-                password: "s3cretpw",
-                strength: 3,
-                vendor_version: 2,
-            },
-        ),
-    ];
-    for (scheme, enc) in schemes {
-        // Deflate, so the decoder stops at its own stream end and the
-        // drain that reaches the AE HMAC is actually exercised.
-        let arch = nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec {
-            encrypt: Some(enc),
-            ..nzbkit::zip::fixtures::Spec::deflated("movie.mkv", &movie)
-        }]);
-        let mut got: Vec<Vec<u8>> = Vec::new();
-        for (t, env) in [("on", &[][..]), ("off", &[("NZBFAST_NO_TOP_ZIP", "1")][..])] {
-            let mut fx = Fixture::new(&format!("zipencparity-{scheme}-{t}"));
-            fx.add_file("release.zip", &arch, 60_000);
-            assert!(fx.add_par2(10, &["release.zip"], 60_000));
-            let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-            let cfg = fx.write_config(&[&srv]);
-            let nzb = fx.write_nzb();
-            let locked = fx.dir.join("release{{s3cretpw}}.nzb");
-            std::fs::rename(&nzb, &locked).unwrap();
-            let out = fx.dir.join("out");
-            let env: Vec<(&str, &str)> = env.to_vec();
-
-            let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &locked, &out, &env))
-                .await
-                .unwrap();
-            assert!(ok, "{scheme}/{t}: get failed:\n{log}");
-            got.push(
-                std::fs::read(fx.dir.join("out/movie.mkv"))
-                    .unwrap_or_else(|e| panic!("{scheme}/{t}: no payload ({e}):\n{log}")),
-            );
-            // The one observable that must DIFFER. Not the container on
-            // disk - the disk pass unpacks it and then sweeps it, so
-            // both runs end with a clean output dir. What separates them
-            // is whether that pass ran at all.
-            assert_eq!(
-                log.contains("zip unpack complete"),
-                t == "off",
-                "{scheme}/{t}: the disk pass running is the gate's signature:\n{log}"
-            );
-        }
-        assert_eq!(got[0], movie, "{scheme}: in-stream bytes differ");
-        assert_eq!(got[0], got[1], "{scheme}: in-stream and disk paths diverge");
-    }
-}
-
-/// Demote parity: a zip the one-pass path DECLINES (here: a zstd
-/// entry, a method the tree does not carry) must land exactly where it
-/// lands today - container materialized byte-exact in the output
-/// directory, disk post-pass attempted and failing with the same
-/// method-naming message, job failed because the zip IS the payload.
-/// Run twice, gate on and gate off (`NZBFAST_NO_TOP_ZIP=1` = the
-/// phase-1 path verbatim), asserting the SAME end state; the demote
-/// marker in the log is what proves the gate-on run actually attached
-/// and declined rather than never chasing at all.
-#[tokio::test(flavor = "multi_thread")]
-async fn declined_zip_lands_exactly_like_the_gate_off_path() {
-    if !have_par2() {
-        eprintln!("skipping: par2 not installed");
-        return;
-    }
-    for (t, env) in [("on", &[][..]), ("off", &[("NZBFAST_NO_TOP_ZIP", "1")][..])] {
-        let mut fx = Fixture::new(&format!("topzipdecline-{t}"));
-        let movie = incompressible(300_000, 47);
-        let arch = nzbkit::zip::fixtures::zip_of(&[nzbkit::zip::fixtures::Spec {
-            method: 93, // zstd: declined BY NAME, in-stream and on disk
-            ..nzbkit::zip::fixtures::Spec::stored("movie.mkv", &movie)
-        }]);
-        fx.add_file("release.zip", &arch, 60_000);
-        assert!(fx.add_par2(10, &["release.zip"], 60_000));
-        let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
-        let cfg = fx.write_config(&[&srv]);
-        let nzb = fx.write_nzb();
-        let out = fx.dir.join("out");
-        let env: Vec<(&str, &str)> = env.to_vec();
-
-        let (log, ok) = tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &env))
-            .await
-            .unwrap();
-        assert!(!ok, "gate {t}: a packed payload must fail the job:\n{log}");
-        assert!(
-            log.contains("uses zstd compression"),
-            "gate {t}: the declined method must be named:\n{log}"
-        );
-        assert_eq!(
-            std::fs::read(fx.dir.join("out/release.zip")).expect("materialized container"),
-            arch,
-            "gate {t}: the container must land byte-exact"
-        );
-        assert!(
-            !fx.dir.join("out/movie.mkv").exists(),
-            "gate {t}: no payload may appear from a declined method"
-        );
-        // The runs differ in exactly one observable: with the gate on,
-        // the chase attached and DEMOTED under the zip marker; with it
-        // off, nothing ever chased.
-        let marked = log.contains("zip materialized for the disk pass");
-        assert_eq!(
-            marked,
-            t == "on",
-            "gate {t}: demote marker presence is the gate's own signature:\n{log}"
-        );
-    }
 }
 
 /// Increment A (one-pass encrypted plan, 2026-07-31): an encrypted RAR5
@@ -6480,15 +5845,27 @@ async fn corrupt_par2_index_still_fails_a_damaged_payload() {
         .find(|k| k.contains("testset_par2"))
         .cloned()
         .expect("par2 index article");
-    let data_id = fx
+    // EVERY payload article is gone - loss no parity can cover. One
+    // missing article stopped being a fair fixture on 30 Aug 2026:
+    // F11 routes a zero-file set (the corrupt index) to the set-less
+    // path, which reads the volumes' own packet copies and genuinely
+    // heals coverable loss - the right outcome, not a masking (this
+    // fixture's set heals even two whole volumes). What this test pins
+    // is the half that must never change: loss past the parity has to
+    // FAIL, however mangled the index is.
+    let data_ids: std::collections::HashSet<String> = fx
         .articles
         .keys()
-        .find(|k| k.contains("r_part2_rar"))
+        .filter(|k| k.contains("r_part"))
         .cloned()
-        .expect("payload article");
+        .collect();
+    assert!(
+        data_ids.len() > 1,
+        "fixture shape moved - expected many payload articles"
+    );
     let chaos = Chaos {
         corrupt: [par2_id].into_iter().collect(),
-        missing: [data_id].into_iter().collect(),
+        missing: data_ids,
         ..Default::default()
     };
     let srv = MockServer::start(fx.articles.clone(), chaos).await;
@@ -6501,8 +5878,11 @@ async fn corrupt_par2_index_still_fails_a_damaged_payload() {
         .unwrap();
     assert!(!ok, "a damaged payload must still fail:\n{log}");
     assert!(
-        log.contains("download incomplete"),
-        "payload loss must be reported as such:\n{log}"
+        log.contains("download incomplete")
+            || log.contains("recovery block")
+            || log.contains("unrepairable")
+            || log.contains("UNREPAIRABLE"),
+        "payload loss must be reported as loss, not silence:\n{log}"
     );
 }
 

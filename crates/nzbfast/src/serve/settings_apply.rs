@@ -406,6 +406,7 @@ pub(super) fn apply_setting_tail(
             (true, json!(m))
         }
         "move_completed_cats" => set_move_completed_cats(d, name, v)?,
+        "write_through_cats" => set_write_through_cats(d, name, v)?,
         "categories" => set_categories(d, name, v)?,
         "index_db" => {
             let p = v.trim();

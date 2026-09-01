@@ -497,10 +497,12 @@ impl FrontierBuffer {
         //
         // The sub-range below `base` is not ours to reconcile - it is on
         // disk, not in `data`. The caller spots it for itself (the
-        // `offset < base` arm of `patch_volume_span`), overwrites what
-        // the trim spilled and forces the forfeit through
-        // [`Self::mark_conflict`]; here it is simply skipped, which is
-        // why the clip is to `base` and not to `offset`.
+        // `offset < base` arm of `chase_span`), compares against the
+        // spilled copy, and only a DIFFERING delivery overwrites the
+        // file and forces the forfeit through [`Self::mark_conflict`]
+        // (an identical redelivery is a no-op); here it is simply
+        // skipped, which is why the clip is to `base` and not to
+        // `offset`.
         if offset < frontier && end > base {
             let a = offset.max(base);
             let n = (frontier.min(end) - a) as usize;

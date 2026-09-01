@@ -340,7 +340,10 @@ serve_start() { # $1 legdir
 serve_stop() { kill $SRV_PID 2>/dev/null; wait $SRV_PID 2>/dev/null; }
 
 classify() { # $1 manifest, $2 outdir, $3 rc [extra args]
-    python3 "$HERE/classify.py" "$@"
+    # CLASSIFY_EXTRA: extra classify.py flags for the whole round, e.g.
+    # CLASSIFY_EXTRA=--names-strict for the deobfuscation legs, where
+    # bytes-right-name-wrong must grade manual-intervention, not auto.
+    python3 "$HERE/classify.py" "$@" ${=CLASSIFY_EXTRA:-}
 }
 
 # ---- client legs ------------------------------------------------------

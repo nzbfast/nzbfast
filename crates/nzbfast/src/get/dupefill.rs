@@ -71,11 +71,67 @@
 //!   in-stream extraction (`Extractor::patch_volume_span`, the route
 //!   `crate::repair`'s mapped arm takes) remains a different piece of
 //!   work.
-//! * **The donor's members are matched by NAME to its own NZB.** The
-//!   recovery index states each member's digest but not which NZB file
-//!   posts it, so an OBFUSCATED donor - subjects that are hashes -
-//!   maps nothing and donates nothing. Same stated limit, for the same
-//!   reason, as §305's plan-side arm next door in `get/donor.rs`.
+//! * **The donor's members are matched by NAME to its own NZB, and by
+//!   LENGTH only when the donor posts ONE member.** The recovery index
+//!   states each member's digest but not which NZB file posts it, so on
+//!   an OBFUSCATED donor - subjects that are hashes - the name bridge
+//!   cannot cross.
+//!
+//!   [`donor_file_by_length`] lifts that for the single-member shape,
+//!   which a census of real postings measured at 712 of 718 wire-probed
+//!   obfuscated recovery sets: one payload, one hash subject, a readable
+//!   PAR2 beside it. It names that member by the sum of its segments'
+//!   encoded sizes and refuses on any ambiguity.
+//!
+//!   A MULTI-VOLUME obfuscated donor still donates nothing, and that
+//!   half is not deferred work - it is measured as unreachable by
+//!   arithmetic. 99.6% of real multi-volume sets post every body volume
+//!   at ONE identical length, so length carries no bits about WHICH
+//!   volume a file is, and the one family that could be fully dissected
+//!   shuffles posting order as well. Naming those members needs
+//!   CONTENT: the FileDesc's own `md5_16k` against each candidate's
+//!   first segment, one article per member. That is its own piece of
+//!   work with its own failure modes, and the census says so at length.
+//!
+//!   §305's plan-side arm next door in `get/donor.rs` carried the
+//!   unlifted version of this limit until later the same day, and is
+//!   now lifted off THIS function - `donor_file_by_length` is
+//!   `pub(super)` and has two callers. See its own "Two callers, one
+//!   rule" section for why it is not two functions.
+//!
+//!   THIS COMMENT SAID SOMETHING FALSE TWICE and both corrections are
+//!   worth keeping, because both false versions read plausibly and each
+//!   would send the next reader away from a real fix. It first claimed
+//!   that arm "runs BEFORE any recovery index is fetched, so it has no
+//!   FileDesc length to match a candidate against". It does fetch one:
+//!   `adopt_from_donors` probes the index itself, and its
+//!   `set.files.retain(|f| want.contains_key(&fold(&f.name)))` is this
+//!   very same name bridge with the lengths already in hand.
+//!
+//!   The correction to THAT then said the fix still needed either the
+//!   probe moved earlier or a second pass behind it, because the
+//!   `donors_offer == 0` early return is taken before the probe. True
+//!   of one path and not of the one the value is on: with
+//!   `donors_offer > 0` - a switch whose predecessor's directory still
+//!   holds files, which is what that arm is FOR - the probe already
+//!   runs, so the lift was the two name bridges gaining the entries the
+//!   hash subjects could not give them. Nothing reordered, no extra
+//!   article fetched. The `donors_offer == 0` case is the part that
+//!   really would buy an index fetch on a path that returns free today,
+//!   and it is priced and left unbought at that gate itself.
+//! * **A donor file is claimed ONCE, across every set that donor
+//!   ships.** The donor's whole recovery INDEX is read since 31 Aug
+//!   2026 - every `Par2Main` in its NZB, up to [`MAX_DONOR_MAINS`] -
+//!   rather than its largest set alone, so a donor that ships one
+//!   recovery set per file (GH #63's own shape) contributes for every
+//!   target file it holds and not just for one. What that lift had to
+//!   keep is written out at [`donor_sets`] and at
+//!   `dupedonor::match_by_content_multi`: a target file is paired with
+//!   the FIRST donor set that can serve it and never with two, or one
+//!   file's holes are asked for twice. The cost of that claim - a
+//!   second set of the SAME donor is not a fallback for a member the
+//!   first only partly served - is measured at that function's own
+//!   site.
 //! * **First bytes win, WITHIN one donor.** Where two articles offer
 //!   the same range the first to arrive is kept, so nothing a block
 //!   has already been given can be overwritten and its verdict cannot
@@ -105,16 +161,249 @@ use nzbkit::par2::Par2Set;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
-/// Ceiling on the whole pass, which sits between a job's last article
-/// and its repair. A donor that has gone unreachable must cost a
-/// bounded delay, not three timeouts per donor per file.
+/// Ceiling on ONE PASS, which sits between a job's last article and its
+/// repair. A donor that has gone unreachable must cost a bounded delay,
+/// not three timeouts per donor per file.
+///
+/// **Per PASS since 31 Aug 2026; it was per damaged SET before, so the
+/// intent above was not met on a post that ships one set per file.**
+/// The deadline was created in `fill_wanted` below, which
+/// `settle::fill_from_duplicates` calls once per set and
+/// `settle::repair`'s second entry point calls again once per declined
+/// plan, and nothing wrapped either loop. GH #63's reporter posted
+/// eighteen tracks with one set per track, which `tests/e2e_multiset`
+/// models as plain files - a `Plain` slot, so squarely in this pass's
+/// population - and on that shape an unreachable donor cost 18 x 90 s
+/// at each entry point rather than 90 s.
+///
+/// # The trade this makes, which is real in both directions
+///
+/// A shared budget means a LATER set can find it spent, where before
+/// every set got its own 90 s. What settles it is that the number of
+/// sets is the POSTER's choice, so the old cost was bounded by nothing
+/// this end controls; and that a HEALTHY donor barely touches the
+/// budget - one set's holes are a handful of articles - while a sick
+/// one spends the whole of it, so the budget is consumed almost
+/// exclusively in the case where stopping is the right answer. The
+/// starved case that remains is a donor slow enough to be productive
+/// and not fast enough to finish, on a many-set post; there PAR2
+/// covers what the pass did not reach, which is the ordinary route the
+/// pass exists to make cheaper rather than to replace.
+///
+/// [`FillPass`] is that budget. One per PASS and NOT one per job: the
+/// two entry points are separated by the materialize and repair of
+/// every damaged set, so a deadline carried across them would already
+/// be spent on arrival and the second pass would never run at all.
+///
+/// The VALUE is still the unmeasured "obviously enough" M31 chose, and
+/// it now means something different from what it meant when it was
+/// chosen. `research/DUPEFILL-CALIBRATION-2026-08-31.md` measures what
+/// it covers and what a real post needs; do not move it without the
+/// ceiling round its section 6 item (c) asks for.
 const FILL_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// Bytes of donor bodies one pass may pull. A hole is small by
+/// Bytes of donor bodies one PASS may pull. A hole is small by
 /// definition - a job whose payload is mostly gone is a dupe-promote
 /// decision, not a fill - so this is a cost ceiling and not a work
 /// estimate.
+///
+/// **Per PASS since 31 Aug 2026; it was per damaged SET per DONOR
+/// before** - `spent` was a local of `fetch_and_offer`, which runs once
+/// per donor inside each per-set call. Today `predecessor_posting`
+/// supplies at most one donor, so the per-donor half was latent; M31
+/// stage 2 (donor discovery) would have made it N x 256 MiB with the
+/// time budget above unchanged. It lives in [`FillPass`] now, beside
+/// the deadline and for the reason stated there.
+///
+/// The quantity this bounds IS reported now, and until 31 Aug 2026 it
+/// was not: [`FillReport::wire_bytes`] is the raw encoded bytes off the
+/// wire that this caps, which is NOT [`FillReport::bytes`], what
+/// `BlockHealer::offer` accepted into open blocks. An article fetched
+/// whose placement is refused, or whose block turned out already
+/// covered, costs the first and nothing of the second, so the old log
+/// line's "N article(s) fetched, X MB" read as the wire cost and was
+/// not it. A pass truncated here says so as well:
+/// [`FillReport::stopped`] carries which ceiling ended it, and
+/// `settle::note_dupefill` has an arm that is not gated on a success or
+/// refusal counter, because a pass stopped by a ceiling having healed
+/// nothing is the one case a calibration lane most needs to see.
+///
+/// The value has NOT been moved: see
+/// `research/DUPEFILL-CALIBRATION-2026-08-31.md`, which measures what
+/// the two ceilings cover and what a real post needs.
 const MAX_FILL_BYTES: usize = 256 << 20;
+
+/// Which of the two ceilings ended a pass, when one of them did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FillStop {
+    /// [`FILL_BUDGET`] was spent.
+    Time,
+    /// [`MAX_FILL_BYTES`] was spent.
+    Bytes,
+}
+
+impl FillStop {
+    /// The ceiling's name for the summary line, FORMATTED FROM THE
+    /// CONSTANT rather than spelled out: a number written twice is a
+    /// number that goes out of step, and this one is quoted at a user.
+    pub(super) fn ceiling(self) -> String {
+        match self {
+            FillStop::Time => format!("its {}s time budget", FILL_BUDGET.as_secs()),
+            FillStop::Bytes => format!("its {} MiB donor-byte budget", MAX_FILL_BYTES >> 20),
+        }
+    }
+}
+
+/// What ONE PASS carries across every recovery set it visits: the two
+/// ceilings, and the donor recovery indexes it has already paid for.
+///
+/// The whole of the 31 Aug 2026 scope fix is WHERE this is created:
+/// outside the caller's per-set loop rather than inside `fill_wanted`.
+/// See [`FILL_BUDGET`] for what creating it inside cost and for the
+/// trade sharing it makes.
+///
+/// The DISK-first arm is deliberately outside it. `fill_from_donor_dirs`
+/// asks nobody and pulls no wire byte, and it runs before the donor loop
+/// this budget bounds, so a set whose predecessor blackholed the wire
+/// still gets every block its own disk can prove. Bounding that too
+/// would spend the fix's cost on the one arm that has none.
+///
+/// # Why the donor INDEX memo lives here and not beside the wire
+///
+/// It was named `FillBudget` until 31 Aug 2026 and carried the two
+/// ceilings alone. What put a cache in it is that the answer
+/// [`donor_sets`] gives depends only on the donor NZB and the servers -
+/// never on which target set is asking - while the pass asks it once
+/// per target set. So on an N-set post the pass paid for N identical
+/// probes, and the lift that made a donor contribute EVERY one of its
+/// sets turned each of those probes from one index article into N of
+/// them: N x N round trips for N distinct answers. That is a TIME cost
+/// and the time ceiling is exactly what this type bounds, so refusing
+/// to buy the same article twice is this type's own business rather
+/// than a second concern smuggled into it.
+///
+/// An EMPTY answer is remembered too, deliberately: a donor whose index
+/// cannot be read is the case where re-probing costs the most and buys
+/// the least, and the budget is monotonic, so a probe that ran out of
+/// time cannot have more time on the next set than it had on this one.
+pub(super) struct FillPass {
+    deadline: std::time::Instant,
+    spent: usize,
+    stopped: Option<FillStop>,
+    /// Keyed by the donor NZB's path, which is what
+    /// `settle::fill_from_duplicates` iterates and hands down unchanged.
+    /// `Arc` rather than a borrow because the caller holds this `&mut`
+    /// while it spends the answer.
+    donor_sets: std::collections::HashMap<PathBuf, Arc<Vec<Par2Set>>>,
+}
+
+impl FillPass {
+    /// A fresh pass: both ceilings unspent, nothing latched, and no
+    /// donor index paid for yet.
+    pub(super) fn new() -> FillPass {
+        FillPass {
+            deadline: std::time::Instant::now() + FILL_BUDGET,
+            spent: 0,
+            stopped: None,
+            donor_sets: std::collections::HashMap::new(),
+        }
+    }
+
+    /// This donor's recovery sets, if some earlier set of this pass has
+    /// already paid for them.
+    fn donor_index(&self, donor: &Path) -> Option<Arc<Vec<Par2Set>>> {
+        self.donor_sets.get(donor).cloned()
+    }
+
+    /// Remember what a probe cost, so no later set of this pass pays
+    /// for it again. See the type's own header for why an empty answer
+    /// is worth remembering.
+    fn remember_donor_index(&mut self, donor: &Path, sets: &Arc<Vec<Par2Set>>) {
+        self.donor_sets
+            .insert(donor.to_path_buf(), Arc::clone(sets));
+    }
+
+    /// What is left of the time ceiling, zero once it is spent.
+    fn left(&self) -> std::time::Duration {
+        self.deadline
+            .saturating_duration_since(std::time::Instant::now())
+    }
+
+    /// True once the time ceiling is spent, LATCHING which ceiling
+    /// stopped the pass so the summary can name it. Called where work
+    /// is about to be refused, never as a bare query.
+    fn out_of_time(&mut self) -> bool {
+        if self.left().is_zero() {
+            self.stopped.get_or_insert(FillStop::Time);
+            return true;
+        }
+        false
+    }
+
+    /// Bytes this pass may still pull, latching the byte ceiling the
+    /// way [`FillPass::out_of_time`] latches the time one. Zero is
+    /// the refusal, so the caller must not call this when it has
+    /// already decided there is nothing to ask for.
+    fn room(&mut self) -> usize {
+        let room = MAX_FILL_BYTES.saturating_sub(self.spent);
+        if room == 0 {
+            self.stopped.get_or_insert(FillStop::Bytes);
+        }
+        room
+    }
+
+    /// Charge encoded wire bytes that came back.
+    fn charge(&mut self, n: usize) {
+        self.spent = self.spent.saturating_add(n);
+    }
+
+    /// Spend the byte ceiling outright and latch it.
+    ///
+    /// For the case where the NEXT article is known not to fit: every
+    /// later ask is the same size or larger, so the remainder can buy
+    /// nothing and holding it back would only make the pass ask again
+    /// for each of them. Kept apart from [`FillPass::charge`] because
+    /// no byte was pulled here, and `FillReport::wire_bytes` - the
+    /// figure a ceiling round reads - must stay a count of bytes that
+    /// really crossed the wire.
+    fn exhaust_bytes(&mut self) {
+        self.spent = MAX_FILL_BYTES;
+        self.stopped.get_or_insert(FillStop::Bytes);
+    }
+
+    /// Which ceiling ended the pass, if either did. `None` is the
+    /// ordinary case: the pass ran out of holes or of donors, not of
+    /// budget.
+    fn stopped(&self) -> Option<FillStop> {
+        self.stopped
+    }
+}
+
+/// Budgets in states a test cannot otherwise reach: 90 seconds and
+/// 256 MiB are both out of range for a mock, so a test that wants to
+/// see a SPENT budget has to be handed one.
+#[cfg(test)]
+impl FillPass {
+    /// A budget whose time ceiling is already gone.
+    pub(super) fn spent_time() -> FillPass {
+        let mut b = FillPass::new();
+        b.deadline = std::time::Instant::now();
+        b
+    }
+
+    /// A budget whose byte ceiling is already gone.
+    pub(super) fn spent_bytes() -> FillPass {
+        let mut b = FillPass::new();
+        b.spent = MAX_FILL_BYTES;
+        b
+    }
+
+    /// Wire bytes charged so far - what a second set of the SAME pass
+    /// arrives to find already spent.
+    pub(super) fn charged(&self) -> usize {
+        self.spent
+    }
+}
 
 /// Slack on the BLIND segment estimate, in bytes. An NZB states encoded
 /// sizes only, so a donor segment's placement is estimated until its own
@@ -131,6 +420,31 @@ const MAX_FILL_BYTES: usize = 256 << 20;
 /// arithmetic and what it measured.
 const SEG_SLACK: u64 = 1 << 20;
 
+/// The encoded-to-decoded ratio window an obfuscated donor's NZB file
+/// must sit in before its LENGTH is allowed to name a member, and the
+/// only tunable in [`donor_file_by_length`].
+///
+/// Measured, not chosen: over 369 complete real obfuscated postings
+/// whose PAR2 truth was fetched off the wire, encoded sum over FileDesc
+/// length runs `min 1.01674, median 1.03232, max 1.03276`, and the
+/// spread is CLIENT FAMILIES rather than noise - a distinct cluster at
+/// 1.0167-1.0169 against the bulk at 1.0323-1.0328, because posting
+/// tools count body-only or with-headers bytes and escape differently.
+/// This window spans every family seen with margin on both sides. The
+/// nearest decoy in those postings, the largest par2 volume, sits at
+/// 7.6% of the payload's encoded size - nowhere near it.
+///
+/// Full census, its corpus and its biases:
+/// `research/M31-OBFUSCATED-DONOR-LENGTH-CENSUS-2026-08-29.md`.
+///
+/// Do NOT widen this to make a fixture pass. A rig posting SMALL
+/// articles reads high - the yEnc header is a fixed cost per article,
+/// so 8 KiB articles measure 1.048 where the ~700 KB articles of a real
+/// post measure 1.032 - and a fixture outside the window is a fixture
+/// that is not shaped like the population, not a window that is wrong.
+const DONOR_ENC_RATIO_LO: f64 = 1.005;
+const DONOR_ENC_RATIO_HI: f64 = 1.045;
+
 /// What one pass did, for the log line and the job report.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct FillReport {
@@ -146,10 +460,32 @@ pub(super) struct FillReport {
     pub(super) bodies: usize,
     /// Donor payload bytes accepted into a block, OFF THE WIRE. Bytes
     /// read out of a donor directory are [`FillReport::local_bytes`]
-    /// and are deliberately not folded in here: this figure is what the
-    /// pass SPENT on the network, and the summary line prints it as
-    /// such.
+    /// and are deliberately not folded in here.
+    ///
+    /// This is what LANDED, not what was spent: it is
+    /// `BlockHealer::offer`'s own return, so an article that came back
+    /// and was then refused by the placement gate, or whose block
+    /// turned out already covered, adds nothing here and still cost the
+    /// wire. [`FillReport::wire_bytes`] is that cost, and the summary
+    /// line prints the two apart. Until 31 Aug 2026 it printed this one
+    /// alone, worded as though it were the wire cost.
     pub(super) bytes: u64,
+    /// Raw ENCODED bytes pulled off the wire - the quantity
+    /// [`MAX_FILL_BYTES`] actually caps.
+    ///
+    /// Reported at all only since 31 Aug 2026: it was `spent`, a local
+    /// of `fetch_and_offer` that nothing returned, which is why no
+    /// field install could say what either ceiling should be. See
+    /// `research/DUPEFILL-CALIBRATION-2026-08-31.md` section 5.
+    pub(super) wire_bytes: u64,
+    /// Which ceiling ended the pass, when one of them did.
+    ///
+    /// `None` is the ordinary case and means the pass ran out of holes
+    /// or of donors rather than of budget. `Some` means holes were
+    /// never looked for, which is a fact about THIS pass that nothing
+    /// downstream can reconstruct - repair covers them, so the outcome
+    /// is usually unchanged and the cost is invisible without this.
+    pub(super) stopped: Option<FillStop>,
     /// Blocks proved out of a donor DIRECTORY - the failed
     /// predecessor's own files - and so never asked for over the wire.
     pub(super) local: usize,
@@ -196,6 +532,11 @@ impl FillReport {
         self.rejected += other.rejected;
         self.bodies += other.bodies;
         self.bytes += other.bytes;
+        self.wire_bytes += other.wire_bytes;
+        // FIRST ceiling to bind wins, matching the latch in
+        // [`FillPass`]: the two share one budget across the pass, so
+        // whichever stopped the earliest set is what stopped the pass.
+        self.stopped = self.stopped.or(other.stopped);
         self.local += other.local;
         self.local_bytes += other.local_bytes;
         self.stitched += other.stitched;
@@ -347,6 +688,11 @@ pub(super) async fn fill_from_duplicate_postings(
     // very blocks the donor posting would be asked for.
     donor_dirs: &[PathBuf],
     cancel: Option<&crate::repair::SideCancel>,
+    // The PASS's budget, created by the caller OUTSIDE its per-set
+    // loop. See [`FILL_BUDGET`]: created here instead, it would be one
+    // per set again, which is the defect this parameter exists to
+    // close.
+    budget: &mut FillPass,
 ) -> FillReport {
     // Cheapest question first, and it is the one that answers for every
     // ordinary job: no held duplicate means no pass at all, without so
@@ -357,7 +703,10 @@ pub(super) async fn fill_from_duplicate_postings(
     let wanted = wanted_files(
         target, set_index, verifier, reports, extractor, slots, out_dir,
     );
-    fill_wanted(servers, target, &wanted, donor_nzbs, donor_dirs, cancel).await
+    fill_wanted(
+        servers, target, &wanted, donor_nzbs, donor_dirs, cancel, budget,
+    )
+    .await
 }
 
 /// The pass proper: everything from "these files have these holes" to
@@ -369,6 +718,7 @@ pub(super) async fn fill_wanted(
     donor_nzbs: &[PathBuf],
     donor_dirs: &[PathBuf],
     cancel: Option<&crate::repair::SideCancel>,
+    budget: &mut FillPass,
 ) -> FillReport {
     let mut out = FillReport::default();
     // `wanted.file` indexes `target.files` three times below and this is
@@ -389,7 +739,6 @@ pub(super) async fn fill_wanted(
         wanted.len(),
         donor_nzbs.len()
     );
-    let deadline = std::time::Instant::now() + FILL_BUDGET;
     let mut healers: std::collections::BTreeMap<usize, BlockHealer> = wanted
         .iter()
         .map(|w| {
@@ -423,12 +772,34 @@ pub(super) async fn fill_wanted(
         if healers.values().all(BlockHealer::is_satisfied) {
             break;
         }
+        // The budget is the PASS's, so on a many-set post a later set
+        // can find it already spent here and ask nobody. That is the
+        // point: an unreachable donor costs one budget, not one per
+        // set. The disk arm above has already run either way.
+        //
+        // BOTH ceilings, and the byte one is not redundant here: the
+        // next thing this loop does is fetch the donor's own recovery
+        // INDEX off the wire, which `MAX_FILL_BYTES` does not charge
+        // for, so a budget with no room left to use the answer would
+        // otherwise still pay for it once per donor per set. Caught by
+        // `a_set_arriving_on_a_spent_budget_asks_for_nothing_and_says_which_ceiling`,
+        // which saw the probe's article on the mock with `bodies` at 0.
         if cancel.is_some_and(crate::repair::SideCancel::is_cancelled)
-            || std::time::Instant::now() >= deadline
+            || budget.out_of_time()
+            || budget.room() == 0
         {
             break;
         }
-        one_donor(servers, target, donor, &mut healers, deadline, &mut out).await;
+        one_donor(
+            servers,
+            target,
+            donor,
+            &mut healers,
+            budget,
+            cancel,
+            &mut out,
+        )
+        .await;
         for (file, h) in healers.iter_mut() {
             let took = h.take_healed();
             if !took.is_empty() {
@@ -535,6 +906,12 @@ pub(super) async fn fill_wanted(
     // counted apart above and taken back out here rather than charged
     // to a posting that may have served its half perfectly.
     out.rejected = out.rejected.saturating_sub(out.stitch_refused);
+    // Carried out of the PASS's budget and into this SET's report, so
+    // `absorb` can fold it and `note_dupefill` can name the ceiling
+    // over the sum. A set that itself asked for nothing still reports
+    // the stop, which is right: what the pass did not look for is a
+    // fact about the pass and not about the set that ran last.
+    out.stopped = budget.stopped();
     out
 }
 
@@ -611,7 +988,10 @@ fn wanted_files(
             continue;
         }
         let path = extractor.slot_path(*sidx).or_else(|| {
-            let p = out_dir.join(nzbkit::disk::sanitize_filename(&slots[*sidx].hint));
+            let p = nzbkit::disk::join_out_name(
+                out_dir,
+                &nzbkit::disk::sanitize_out_name(&slots[*sidx].hint),
+            );
             p.exists().then_some(p)
         });
         let Some(path) = path.filter(|p| p.is_file()) else {
@@ -664,15 +1044,42 @@ const MAX_DONOR_FILES: usize = 4;
 ///
 /// Nothing this returns is trusted: every candidate's bytes are put to
 /// the target set's own block MD5 and CRC32 before one of them is used.
+///
+/// # The name is SANITIZED first, and that is a boundary and not tidiness
+///
+/// `Par2File::name` is whatever the FileDesc packet's bytes said, kept
+/// raw by the parser. `Path::join` DISCARDS its base when the joined
+/// spelling is absolute, and honours `..` when it is not - so a poster's
+/// `/etc/passwd` or `../../outside` walked straight out of the donor
+/// directory and the daemon opened and read what it found there. The
+/// checksums stop unproved bytes ever being WRITTEN, so this was never
+/// arbitrary exfiltration; it was still an unauthorized local read, a
+/// matching-block copy path and an existence oracle over the host.
+///
+/// It also fixes a MISS: our own output is written under the sanitized
+/// spelling (`par2repair` joins `sanitize_out_name` for exactly this
+/// reason, and `fold` below matches on the same key), so a donor file
+/// whose descriptor name needed sanitizing was never found by its raw
+/// name anyway. `sanitize_out_name` preserves a provably safe tree path
+/// (each component individually sanitized, never `..`) and flattens to
+/// one component otherwise - either way the join below cannot leave the
+/// donor directory.
 fn donor_candidates(dirs: &[PathBuf], name: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    let safe = nzbkit::disk::sanitize_out_name(name);
     for d in dirs {
         for spelling in [
-            name.to_string(),
-            format!("{name}{}", nzbkit::journal::PARTIAL_SUFFIX),
+            safe.clone(),
+            format!("{safe}{}", nzbkit::journal::PARTIAL_SUFFIX),
         ] {
-            let p = d.join(&spelling);
-            if p.is_file() && !out.contains(&p) {
+            let p = nzbkit::disk::join_out_name(d, &spelling);
+            // `symlink_metadata`, not `is_file`: the latter FOLLOWS, and
+            // the sanitized name above only guarantees the LINK is inside
+            // the donor directory - what it points at is the poster's
+            // choice again. A failed predecessor's own output is never a
+            // link, so refusing one costs nothing real.
+            let regular = std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_file());
+            if regular && !out.contains(&p) {
                 out.push(p);
             }
             if out.len() >= MAX_DONOR_FILES {
@@ -815,20 +1222,36 @@ async fn one_donor(
     target: &Par2Set,
     donor_path: &Path,
     healers: &mut std::collections::BTreeMap<usize, BlockHealer>,
-    deadline: std::time::Instant,
+    budget: &mut FillPass,
+    // §129: the owner's cancel handle, threaded all the way to the
+    // socket. The loop above checks it BETWEEN donors, which was the
+    // whole of the observation - and `predecessor_posting` supplies at
+    // most one donor, so between-donors is a check that in production
+    // never happens twice. A user who deletes a finishing job while a
+    // donor index probe or a body read is blackholed waited out the
+    // remainder of the 90-second deadline with provider traffic still
+    // going (29 Aug 2026 sweep, M7).
+    cancel: Option<&crate::repair::SideCancel>,
     out: &mut FillReport,
 ) {
     let Some(donor) = read_nzb(donor_path) else {
         return;
     };
-    let Some(set) = donor_set(servers, &donor, deadline).await else {
+    let sets = donor_sets(servers, donor_path, &donor, budget, cancel).await;
+    if sets.is_empty() {
         return;
-    };
+    }
     // The gate that decides whether this donor can help AT ALL: the two
     // sets have to agree, digest for digest, that a file is the same
     // bytes. A different encode of the same release agrees about
     // nothing and stops here, having cost one small index fetch.
-    let matches = nzbkit::dupedonor::match_by_content(target, &set);
+    //
+    // Over EVERY set the donor ships since 31 Aug 2026, as one
+    // decision: a target file is claimed by the first donor set that
+    // can serve it and never by two, which is the invariant the old
+    // largest-set-only rule held by discarding the other sets. See
+    // `dupedonor::match_by_content_multi` and `donor_sets`.
+    let matches = nzbkit::dupedonor::match_by_content_multi(target, &sets);
     if matches.is_empty() {
         info!(
             target: "repair",
@@ -848,10 +1271,21 @@ async fn one_donor(
         if want.is_empty() {
             continue;
         }
-        let Some(&fi) = by_name.get(&fold(&set.files[m.donor].name)) else {
+        let set = &sets[m.set];
+        let fi = match by_name.get(&fold(&set.files[m.donor].name)) {
+            Some(&fi) => fi,
             // An obfuscated donor: the index names the member, the NZB
-            // does not. Stated limit, see the module docs.
-            continue;
+            // posts it under a hash, so the name bridge cannot cross.
+            // Fall back to the only other thing the NZB states - the
+            // encoded size - which names a SINGLE-member set's one
+            // member and refuses everything else. See
+            // `donor_file_by_length` for why that gate is the design
+            // and not a first cut, and the module docs for what is
+            // still out of reach.
+            None => match donor_file_by_length(&donor, set, m.length) {
+                Some(fi) => fi,
+                None => continue,
+            },
         };
         let enc: Vec<u64> = donor.files[fi].segments.iter().map(|s| s.bytes).collect();
         let segs = nzbkit::dupedonor::candidate_segments(&enc, m.length, &want, SEG_SLACK);
@@ -877,48 +1311,142 @@ async fn one_donor(
     if asks.is_empty() {
         return;
     }
-    fetch_and_offer(servers, &asks, target, healers, deadline, out).await;
+    fetch_and_offer(servers, &asks, target, healers, budget, cancel, out).await;
 }
 
-/// The donor's own recovery index, off the wire. Its FileDesc packets
-/// are the only thing that can say the two postings carry the same
-/// bytes, and an NZB carries no digest at all.
-async fn donor_set(
+/// Ceiling on how many of a donor's recovery INDEXES one probe will
+/// ask for.
+///
+/// The probe's BYTES are already bounded - `preflight::MAX_PROBE_BYTES`
+/// is 8 MiB per server and it bounds the read itself - so what this
+/// bounds is the MULTIPLIER on round trips that reading every index
+/// rather than one puts on the probe: an index article is one `BODY`
+/// on one connection, and the count of `.par2` files in an NZB is the
+/// poster's choice. (It does not bound the round trips outright: one
+/// index of many articles is still read whole, exactly as it was
+/// before this ceiling existed.) A per-file post past it donates for
+/// its first [`MAX_DONOR_MAINS`] sets and no others, which is a missed
+/// donation and never a wrong one - the direction every rule in this
+/// module fails in.
+///
+/// The value is MEASURED to clear the whole observed population, and
+/// was a guess for its first hours. `research/multi-par2-set-census-probe.py`
+/// over the local index, 31 Aug 2026, 1,863,698 releases carrying a
+/// `.par2`: 137 of them carry more than one par2 FAMILY at all (1 in
+/// 13,603), and the largest carries 48. The next four are 38, 35, 31
+/// and 22, and everything else is 10 or fewer - so 64 clears the
+/// observed maximum by a third and no real post in that index reaches
+/// it. Two proxy limits come with that number and both are the census's
+/// own: a family is one `par2create` run read off FILENAMES rather than
+/// a `recovery_set_id` off the packets, and it can OVERCOUNT where
+/// volumes were renamed away from the `.volN+M` spelling. Overcounting
+/// is the safe direction here - it can only inflate the maximum this
+/// ceiling is being asked to clear.
+///
+/// It is still a ceiling on a hostile or broken NZB and not a tuning
+/// knob. The thing to read before moving it is what the probe costs in
+/// TIME against [`FILL_BUDGET`], since the memo in [`FillPass`] means
+/// the whole cost is paid once per donor per pass.
+const MAX_DONOR_MAINS: usize = 64;
+
+/// The donor's own recovery indexes, off the wire. Their FileDesc
+/// packets are the only thing that can say the two postings carry the
+/// same bytes, and an NZB carries no digest at all.
+///
+/// # EVERY set the donor ships, not just its largest
+///
+/// This answered with the LARGEST set alone until 31 Aug 2026 (TODO
+/// 311's last box), and the reason was sound as far as it went:
+/// `dupedonor::match_by_content` keeps its claim bookkeeping inside one
+/// call, so pairing per set would have let two donor sets each claim
+/// one target file and ask for its holes twice. What it cost was
+/// measured on a real daemon the same day - on a post where BOTH
+/// postings ship one recovery set per file, which is GH #63's own
+/// shape, the pass served ONE file and logged "a duplicate posting of a
+/// DIFFERENT encode" for every other, then completed off §293's
+/// repair-time adoption instead. The job finished and the run read
+/// green, so the only symptom was recovery blocks spent where the fill
+/// could have paid nothing.
+///
+/// `dupedonor::match_by_content_multi` is the claim that spans the
+/// sets, so the invariant is kept where it belongs rather than by
+/// throwing the other sets away. See its header for both halves of it.
+///
+/// # Why one probe and not one per index
+///
+/// `probe_par2_sets` accumulates the articles of every id it is given
+/// and hands `live::pick_sets` the union, and that function's whole job
+/// is to group a mixed pile of packets by recovery set id. So the N
+/// mains of a per-file post are ONE probe on ONE connection, which is
+/// the same wire shape as before with more ids in it - not N probes.
+/// A fragment carrying no whole packet is dropped by the grouping, and
+/// a set that loses packets that way simply pairs fewer members: a
+/// missed donation, never a wrong one, and every borrowed block is
+/// re-proved against the TARGET's own checksums either way.
+async fn donor_sets(
     servers: &[nzbkit::config::ServerConfig],
+    donor_path: &Path,
     donor: &Nzb,
-    deadline: std::time::Instant,
-) -> Option<Par2Set> {
-    let main = donor
+    budget: &mut FillPass,
+    cancel: Option<&crate::repair::SideCancel>,
+) -> Arc<Vec<Par2Set>> {
+    // Before the cancel check, deliberately: a hit costs nothing, asks
+    // nobody and cannot be interrupted, so refusing it would only make
+    // a cancelled pass do MORE work deciding it had none to do.
+    if let Some(hit) = budget.donor_index(donor_path) {
+        return hit;
+    }
+    let empty = Arc::new(Vec::new());
+    if cancel.is_some_and(crate::repair::SideCancel::is_cancelled) {
+        return empty;
+    }
+    let ids: Vec<String> = donor
         .files
         .iter()
-        .find(|f| f.kind() == FileKind::Par2Main)?;
-    let ids: Vec<String> = main
-        .segments
-        .iter()
-        .map(|s| format!("<{}>", s.message_id))
+        .filter(|f| f.kind() == FileKind::Par2Main)
+        .take(MAX_DONOR_MAINS)
+        .flat_map(|f| f.segments.iter().map(|s| format!("<{}>", s.message_id)))
         .collect();
     if ids.is_empty() {
-        return None;
+        return empty;
     }
-    let left = deadline.saturating_duration_since(std::time::Instant::now());
-    // The LARGEST set only, deliberately (TODO 311's last box). The
-    // probe adopts every set its accumulated articles cover; `match_by_content`
-    // pairs target members with donor members one whole `Par2Set` at a
-    // time and keeps its `taken` bookkeeping inside that one call, so
-    // running it per set would let two donor sets both claim one target
-    // member and ask for the same holes twice. `pick_sets` orders
-    // largest first, ties by set id, so the pick does not depend on
-    // which article came back first.
-    //
-    // Strictly better than what it replaces, and in the safe direction:
-    // a donor member outside the largest set is simply not borrowed
-    // from, where the old singular door answered `None` the moment the
-    // articles covered two sets and this donor contributed nothing.
-    tokio::time::timeout(left, nzbkit::preflight::probe_par2_sets(servers, &ids))
-        .await
-        .ok()
-        .flatten()
-        .and_then(|sets| sets.into_iter().next())
+    let left = budget.left();
+    let probe = nzbkit::preflight::probe_par2_sets(servers, &ids);
+    // §129: raced against cancellation, not only against the deadline. A
+    // blackholed provider makes this probe run for the whole of `left`,
+    // which is up to the pass's 90 seconds, and until 29 Aug 2026 a user
+    // deleting the job in that window was not observed at all - the only
+    // check was between donor postings, and `predecessor_posting` hands
+    // this at most one. Polled rather than notified for the reason
+    // `SideCancel::guard` polls: there is no wake-up primitive on the
+    // latch, and 250 ms is well inside a user's patience.
+    let raced = async {
+        tokio::select! {
+            r = tokio::time::timeout(left, probe) => r.ok().flatten(),
+            () = cancelled(cancel) => None,
+        }
+    };
+    let sets = raced.await;
+    // A probe that ran out the clock spent the PASS's time ceiling, and
+    // with one donor there is no next iteration of the loop above to
+    // notice. Latch it here so the summary can still name what stopped
+    // the pass; a no-op when time remains.
+    budget.out_of_time();
+    let sets = Arc::new(sets.unwrap_or_default());
+    budget.remember_donor_index(donor_path, &sets);
+    sets
+}
+
+/// Resolves when `cancel` is raised; never, when there is nothing to
+/// watch. `tokio::select!` needs a future for the arm either way.
+async fn cancelled(cancel: Option<&crate::repair::SideCancel>) {
+    let Some(c) = cancel else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !c.is_cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 /// Ask for the donor articles and offer every decoded body to the
@@ -933,10 +1461,10 @@ async fn fetch_and_offer(
     asks: &[Ask],
     target: &Par2Set,
     healers: &mut std::collections::BTreeMap<usize, BlockHealer>,
-    deadline: std::time::Instant,
+    budget: &mut FillPass,
+    cancel: Option<&crate::repair::SideCancel>,
     out: &mut FillReport,
 ) {
-    let mut spent = 0usize;
     // Per TARGET FILE, every article of that file whose placement the
     // wire has stated. Outside the server loop deliberately: a donor
     // file's geometry does not change because the next server is being
@@ -956,18 +1484,24 @@ async fn fetch_and_offer(
                     .is_some_and(|h| !h.is_empty() && !h.is_satisfied())
             })
             .collect();
-        if outstanding.is_empty() || spent >= MAX_FILL_BYTES {
+        // `room` is asked SECOND and only when there is something to
+        // ask for: it latches the byte ceiling, and a pass that has
+        // simply run out of holes has not hit a ceiling at all.
+        if outstanding.is_empty() || budget.room() == 0 {
             break;
         }
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
+        if budget.out_of_time() || cancel.is_some_and(crate::repair::SideCancel::is_cancelled) {
             break;
         }
+        let left = budget.left();
         let one = async {
             let Ok((mut conn, _)) = nzbkit::nntp::Connection::connect(server).await else {
                 return;
             };
-            for ask in &outstanding {
+            // Labelled: a dirty or spent connection must not be
+            // carried into the NEXT ask, and a bare `break` leaves only
+            // the segment loop. See the `Err` arm below.
+            'asks: for ask in &outstanding {
                 for (idx, id) in &ask.segs {
                     let Some(h) = healers.get_mut(&ask.file) else {
                         break;
@@ -1002,17 +1536,68 @@ async fn fetch_and_offer(
                     if h.is_empty() || h.is_satisfied() {
                         break;
                     }
-                    let room = MAX_FILL_BYTES.saturating_sub(spent);
+                    let room = budget.room();
                     if room == 0 {
                         break;
                     }
-                    // A donor that has gone missing here is this
-                    // server's answer, not the posting's - keep asking
-                    // for the rest and let the next server try.
-                    let Ok(Some(raw)) = conn.body_capped(id, room).await else {
-                        continue;
+                    // The NZB states this segment's ENCODED size, so
+                    // whether it fits is answerable before asking - and
+                    // asking anyway is worse than useless: `body_capped`
+                    // pulls `room` bytes over the wire and only THEN
+                    // answers `TooLarge`, so the budget's last bytes are
+                    // spent on a body that is thrown away. It also
+                    // leaves the multiline UNCONSUMED, which is the
+                    // arm below. A segment that does not fit means the
+                    // ceiling has bound: every later ask is the same
+                    // size or larger.
+                    if ask.enc.get(*idx).is_some_and(|&n| n > room as u64) {
+                        budget.exhaust_bytes();
+                        break 'asks;
+                    }
+                    // Per ARTICLE, which is the granularity that matters:
+                    // one read is bounded by the connection's own
+                    // timeout, so this stops the pass within one article
+                    // rather than at the end of the 90-second deadline.
+                    if cancel.is_some_and(crate::repair::SideCancel::is_cancelled) {
+                        break;
+                    }
+                    let raw = match conn.body_capped(id, room).await {
+                        Ok(Some(raw)) => raw,
+                        // A donor article that has gone missing here is
+                        // this server's answer, not the posting's - keep
+                        // asking for the rest and let the next server
+                        // try. That is 423/430/451 and nothing else.
+                        Ok(None) => continue,
+                        // AN ERROR IS NOT A MISSING ARTICLE and must not
+                        // be treated as one. `TooLarge` returns with the
+                        // rest of the multiline still on the wire, so the
+                        // next response on this socket would be read out
+                        // of this body's tail and filed under the wrong
+                        // id; `Timeout` and `Closed` leave nothing worth
+                        // reusing either. Until 31 Aug 2026 every one of
+                        // these was a `continue` onto the same desynced
+                        // connection. Break to the `quit` below and let
+                        // the next server have it.
+                        Err(e) => {
+                            // A cap this tight IS the byte ceiling
+                            // binding, whatever the declared size said -
+                            // and the bytes were REALLY PULLED before
+                            // the reader gave up, so they are charged to
+                            // the report as well as to the budget. The
+                            // count is `room` to within the chunk the
+                            // reader was on when it crossed the cap; an
+                            // exact figure would mean plumbing it out of
+                            // `NntpError::TooLarge`, which carries the
+                            // limit and not the length.
+                            if matches!(e, nzbkit::nntp::NntpError::TooLarge(_)) {
+                                out.wire_bytes += room as u64;
+                                budget.exhaust_bytes();
+                            }
+                            break 'asks;
+                        }
                     };
-                    spent += raw.len();
+                    budget.charge(raw.len());
+                    out.wire_bytes += raw.len() as u64;
                     out.bodies += 1;
                     let Ok(dec) = nzbkit::yenc::decode(&raw) else {
                         continue;
@@ -1048,20 +1633,6 @@ async fn fetch_and_offer(
     }
 }
 
-/// Write the proved blocks into the file they belong to, and report
-/// which ones LANDED.
-///
-/// Positioned writes into the existing file, never a rewrite: every
-/// other byte of it is what the download placed, and the settle
-/// read-back that produced this bad-block list read exactly those.
-///
-/// Returns the block indices now on disk plus the error that stopped
-/// it, rather than one or the other. A partial write is not a failed
-/// pass: each block is written at its own offset, so the ones that
-/// went down are good and the rest are holes - which is what they were
-/// when this pass started. Reporting only the error would throw away
-/// blocks that really did heal, and reporting only success would claim
-/// blocks that never landed.
 /// Complete a block a donor could only PART-serve, out of the bytes
 /// this download already has, and judge it.
 ///
@@ -1185,6 +1756,20 @@ fn stitch_from_the_targets_own_bytes(
     }
 }
 
+/// Write the proved blocks into the file they belong to, and report
+/// which ones LANDED.
+///
+/// Positioned writes into the existing file, never a rewrite: every
+/// other byte of it is what the download placed, and the settle
+/// read-back that produced this bad-block list read exactly those.
+///
+/// Returns the block indices now on disk plus the error that stopped
+/// it, rather than one or the other. A partial write is not a failed
+/// pass: each block is written at its own offset, so the ones that
+/// went down are good and the rest are holes - which is what they were
+/// when this pass started. Reporting only the error would throw away
+/// blocks that really did heal, and reporting only success would claim
+/// blocks that never landed.
 fn write_healed(
     path: &Path,
     healed: &[nzbkit::dupedonor::Healed],
@@ -1223,8 +1808,10 @@ fn read_nzb(path: &Path) -> Option<Nzb> {
     Nzb::parse(&bytes).ok()
 }
 
-/// Donor NZB data files by folded filename hint - the only bridge from
-/// a FileDesc name to the segments that carry it.
+/// Donor NZB data files by folded filename hint - the FIRST bridge from
+/// a FileDesc name to the segments that carry it, and the only one that
+/// costs nothing. [`donor_file_by_length`] is the fallback for a donor
+/// whose subjects are hashes, and it is deliberately far narrower.
 fn donor_files_by_name(donor: &Nzb) -> std::collections::HashMap<String, usize> {
     let mut out: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut dup: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1246,11 +1833,127 @@ fn donor_files_by_name(donor: &Nzb) -> std::collections::HashMap<String, usize> 
     out
 }
 
+/// The fallback bridge for an OBFUSCATED donor: name the member by the
+/// only other thing an NZB states about a file, the sum of its segments'
+/// encoded sizes.
+///
+/// Returns the donor NZB file index that carries the set's one member,
+/// or `None` - which is the answer this returns in every case it is not
+/// certain, because a wrong pairing here spends a fetch.
+///
+/// # Why this is single-member ONLY, which is the whole of its design
+///
+/// The census that licensed this asked whether length can name a
+/// member, and the answer is different for the two shapes real posts
+/// come in:
+///
+/// * **Multi-volume sets: dead, and not by a tunable margin.** 99.6% of
+///   real multi-volume sets (17,613 of 17,689 measured) post every body
+///   volume at ONE identical length - they are rar volumes of one
+///   configured size - so between same-size members the length gap is
+///   identically ZERO and there is no information to recover at any
+///   tolerance. Posting order is shuffled too in the one obfuscation
+///   family that could be fully dissected, so order does not rescue it.
+///   That is not an edge case to handle later; it is the population,
+///   and refusing it is the result.
+/// * **Single-member sets: trivial, with enormous margins.** One big
+///   payload plus a readable PAR2 is 712 of the 718 wire-probed
+///   obfuscated recovery sets in the census, and the modern
+///   one-big-file posting besides. There is one member to name and the
+///   ratio window alone separates it from every par2 decoy.
+///
+/// So the gate is `set.files.len() == 1`, and a multi-volume obfuscated
+/// donor still donates nothing. Naming ITS members needs content and
+/// not arithmetic - the FileDesc's own `md5_16k` against the first
+/// segment of each candidate, one article per member, which is the
+/// `pesto_confirm` probe one lane over and is its own piece of work.
+///
+/// # What a wrong answer costs, and why unique-or-refuse is the rule
+///
+/// A wasted fetch and nothing else: every borrowed block is judged
+/// against the TARGET set's own MD5 and CRC32 before a byte of it is
+/// written, so a mis-named file cannot corrupt the download - it can
+/// only fail to help, having spent bodies. That is why the rule refuses
+/// on ambiguity rather than picking the closest: two candidates inside
+/// the window identify neither, exactly as two files posting one name
+/// identify neither in [`donor_files_by_name`].
+///
+/// # Two callers, one rule, and why this is not two functions
+///
+/// This module's pass maps a DONOR's set onto a DONOR's NZB; §305's
+/// plan-side arm in [`super::donor`] maps THIS job's set onto THIS
+/// job's NZB. Those are two different questions about two different
+/// postings and one identical question about arithmetic - "which file
+/// of this NZB carries this set's one member" - so nothing in the body
+/// below knows or needs to know whose NZB it was handed, which is why
+/// the parameter is `nzb` and not `donor`.
+///
+/// Kept as ONE function deliberately. A copy would be a second spelling
+/// of a MEASURED constant plus a second copy of the provenance above
+/// it, and the two would part company the first time either moved -
+/// the drift class `CLAUDE.md`'s gate list keeps growing to refuse, and
+/// which its TWENTY-FOURTH entry records taking seven minutes to create
+/// for the three rate formatters. It also means the five
+/// mutation-verified tests in `dupefill_tests` cover both callers at
+/// once, rather than one caller and a lookalike.
+///
+/// # A stated limit: the window is a pure RATIO, and yEnc is not
+///
+/// Encoding costs a fixed header per ARTICLE on top of a proportional
+/// escaping cost, so a small member reads high and a big one does not.
+/// Measured on this tree's own encoder: 130 bytes per article fixed,
+/// against ~3.2% escaping, which puts a single-article member at
+///
+/// ```text
+///   2 KiB -> 1.097    8 KiB -> 1.048    32 KiB -> 1.036
+///   4 KiB -> 1.065   10 KiB -> 1.044   256 KiB -> 1.032
+/// ```
+///
+/// so a single-member donor whose payload is under about 9 KiB reads
+/// above the window and is REFUSED. That is a missed donation and never
+/// a wrong one, which is the direction this whole rule is built to fail
+/// in, and it is unreachable in practice: a payload that small has no
+/// PAR2 block worth borrowing. It is written down because the arithmetic
+/// is not obvious from the constant, and because the SAME physics is a
+/// live defect one lane over - claim `reconcile-band-and-cross-set-pairing`
+/// has `settle::repair::reconcile_obfuscated_aliases` failing complete
+/// jobs on it, its 0.9-1.2 band being a pure ratio too and a one-member
+/// par2 INDEX being 648 bytes. Do not "fix" this by widening the window;
+/// the fix, if one is ever needed here, is to subtract the per-article
+/// cost before taking the ratio.
+pub(super) fn donor_file_by_length(nzb: &Nzb, set: &Par2Set, length: u64) -> Option<usize> {
+    if set.files.len() != 1 || length == 0 {
+        return None;
+    }
+    let mut hit: Option<usize> = None;
+    for (fi, f) in nzb.files.iter().enumerate() {
+        if f.kind() != FileKind::Data || f.segments.is_empty() {
+            continue;
+        }
+        // Saturating because these are NZB-stated figures off the wire,
+        // and a hostile or broken one must degrade to "no match" rather
+        // than wrap into the window from above.
+        let enc = f
+            .segments
+            .iter()
+            .fold(0u64, |a, s| a.saturating_add(s.bytes));
+        let ratio = enc as f64 / length as f64;
+        if !(DONOR_ENC_RATIO_LO..=DONOR_ENC_RATIO_HI).contains(&ratio) {
+            continue;
+        }
+        if hit.is_some() {
+            return None;
+        }
+        hit = Some(fi);
+    }
+    hit
+}
+
 /// The name key both sides are compared on: the NZB subject and the
 /// FileDesc packet are two records of one filename written by different
 /// tools, so case and path separators are not evidence.
 fn fold(name: &str) -> String {
-    nzbkit::disk::sanitize_filename(name).to_ascii_lowercase()
+    nzbkit::disk::sanitize_out_name(name).to_ascii_lowercase()
 }
 
 #[cfg(test)]

@@ -395,6 +395,47 @@ fn a_taken_filename_is_not_overwritten() {
     );
 }
 
+/// The same promise as `a_taken_filename_is_not_overwritten` above,
+/// held to an ENTRY rather than to a name that RESOLVES. This site is
+/// what the 31 Aug 2026 census meant by "treat 12 as a floor": its guard
+/// sits twelve lines from its rename, so the proximity scan that found
+/// the other twelve never saw it, and `Path::exists` followed the link
+/// and reported free while `rename(2)` removed the entry.
+#[test]
+fn a_filename_an_entry_holds_is_not_overwritten() {
+    let root = scratch("nzb-taken-link");
+    let out = root.join("job");
+    std::fs::create_dir_all(&out).unwrap();
+    file(&out, "big.mkv", 100);
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(out.join("on-the-nas"), out.join("Taken.mkv")).unwrap();
+        let dest = rename_from_nzb(&root, &out, "Taken").unwrap();
+        assert_eq!(names(&dest), vec!["Taken.mkv", "big.mkv"]);
+        assert!(
+            std::fs::symlink_metadata(dest.join("Taken.mkv"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a dangling link is an entry: the user's link must still be a link"
+        );
+        assert_eq!(
+            std::fs::metadata(dest.join("big.mkv")).unwrap().len(),
+            100,
+            "and the payload keeps the name it arrived with"
+        );
+    }
+    // PORTABLE half: the folder still moves and the main file is still
+    // the only thing that could have been renamed, so the windows-unit
+    // shards run this door even where the link half cannot be built.
+    #[cfg(not(unix))]
+    {
+        let dest = rename_from_nzb(&root, &out, "Taken").unwrap();
+        assert_eq!(names(&dest), vec!["Taken.mkv"]);
+    }
+}
+
 #[test]
 fn an_extracted_subdirectory_is_reached_and_the_folder_still_moves() {
     let root = scratch("nzb-sub");
@@ -410,5 +451,335 @@ fn an_extracted_subdirectory_is_reached_and_the_folder_still_moves() {
         names(&dest.join("Example.Movie.2024")),
         vec!["Movie Night.mkv"],
         "renamed in place, one level down"
+    );
+}
+
+/// Every path in a subtree of `dir`, relative and sorted - the whole
+/// tree rather than one level, because "the disc is intact" is a claim
+/// about every name in it and a one-level `names()` cannot make it.
+fn tree(dir: &Path) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut queue = vec![dir.to_path_buf()];
+    while let Some(at) = queue.pop() {
+        for e in std::fs::read_dir(&at).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                queue.push(p.clone());
+            }
+            // FORWARD SLASHES, always. `to_string_lossy` on a relative
+            // path gives the platform's own separator, so every
+            // expectation below - which spells a disc tree the way the
+            // spec and the poster do, `VIDEO_TS/VTS_01_1.VOB` - failed
+            // on Windows and nowhere else. It took windows-unit shards
+            // 3 and 5 red on 31 Aug 2026 with the product behaving
+            // perfectly: the disc rows are about which NAMES survive a
+            // rename, and a separator is not a name.
+            //
+            // Normalised BEFORE the sort, which is the half that is easy
+            // to miss: `\` is 0x5C and `/` is 0x2F, so sorting raw
+            // strings orders a nested path differently on the two
+            // platforms even once the comparison is fixed.
+            v.push(
+                p.strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    v.sort();
+    v
+}
+
+/// The Blu-ray half of the disc arm, measured FAILING on origin/main:
+/// the deepest thing `main_payload` could see was `BDMV/index.bdmv` -
+/// the file a player opens FIRST - so it took the release name and the
+/// disc stopped playing over a Completed job.
+///
+/// The folder still moves. That is the whole design: a disc rip's
+/// identity belongs to the FOLDER, which is the one name in the tree
+/// nothing inside it addresses.
+#[test]
+fn a_blu_ray_tree_keeps_every_name_and_only_the_folder_moves() {
+    let root = scratch("nzb-bdmv");
+    let out = root.join("job");
+    std::fs::create_dir_all(out.join("BDMV/STREAM")).unwrap();
+    std::fs::create_dir_all(out.join("CERTIFICATE")).unwrap();
+    file(&out.join("BDMV/STREAM"), "00000.m2ts", 40_000);
+    file(&out.join("BDMV"), "index.bdmv", 900);
+    file(&out.join("BDMV"), "MovieObject.bdmv", 500);
+    file(&out.join("CERTIFICATE"), "id.bdmv", 100);
+
+    assert_eq!(
+        main_payload(&out),
+        None,
+        "a disc has no main file whose name is free to change"
+    );
+    let dest = rename_from_nzb(&root, &out, "Great.Movie.2024.BluRay").unwrap();
+    assert_eq!(dest, root.join("Great.Movie.2024.BluRay"));
+    assert_eq!(
+        tree(&dest),
+        vec![
+            "BDMV",
+            "BDMV/MovieObject.bdmv",
+            "BDMV/STREAM",
+            "BDMV/STREAM/00000.m2ts",
+            "BDMV/index.bdmv",
+            "CERTIFICATE",
+            "CERTIFICATE/id.bdmv",
+        ],
+        "index.bdmv is what a player opens first and must keep its name"
+    );
+}
+
+/// The DVD-Video half, and the worse one: `VIDEO_TS/VTS_01_1.VOB` sits
+/// at exactly root + one, so the old reach did not merely graze a
+/// structure file, it renamed the WHOLE PAYLOAD - measured on
+/// origin/main as `VIDEO_TS/Great.Movie.2024.DVD.vob`, lowercasing the
+/// extension on the way, while `VIDEO_TS.IFO` went on addressing it by
+/// its old name.
+///
+/// Not in the report that led here; found by driving the same fixture
+/// shape one disc format over.
+#[test]
+fn a_dvd_video_tree_keeps_its_vob_name() {
+    let root = scratch("nzb-dvd");
+    let out = root.join("job");
+    std::fs::create_dir_all(out.join("VIDEO_TS")).unwrap();
+    file(&out.join("VIDEO_TS"), "VTS_01_1.VOB", 40_000);
+    file(&out.join("VIDEO_TS"), "VIDEO_TS.IFO", 900);
+    file(&out.join("VIDEO_TS"), "VIDEO_TS.BUP", 900);
+
+    assert_eq!(main_payload(&out), None);
+    let dest = rename_from_nzb(&root, &out, "Great.Movie.2024.DVD").unwrap();
+    assert_eq!(
+        tree(&dest),
+        vec![
+            "VIDEO_TS",
+            "VIDEO_TS/VIDEO_TS.BUP",
+            "VIDEO_TS/VIDEO_TS.IFO",
+            "VIDEO_TS/VTS_01_1.VOB",
+        ],
+        "VIDEO_TS.IFO addresses VTS_01_1.VOB by name"
+    );
+}
+
+/// A disc wrapped in a release folder, which is the shape most posters
+/// actually use, and an AVCHD card layout four deep. Neither has a
+/// single reachable file at all under the old reach, so both were
+/// already safe by accident - pinned so that widening the reach later
+/// cannot quietly make them unsafe, which is the change the doc comment
+/// on `main_payload` forbids in words.
+#[test]
+fn a_wrapped_disc_and_an_avchd_card_are_both_declined() {
+    let root = scratch("nzb-wrapped");
+    let out = root.join("job");
+    let bd = out.join("Movie.2024.COMPLETE.BLURAY/BDMV/STREAM");
+    std::fs::create_dir_all(&bd).unwrap();
+    file(&bd, "00000.m2ts", 40_000);
+    file(&out.join("Movie.2024.COMPLETE.BLURAY"), "readme.nfo", 10);
+    assert_eq!(main_payload(&out), None);
+    drop(root);
+
+    let root = scratch("nzb-avchd");
+    let out = root.join("job");
+    let mts = out.join("PRIVATE/AVCHD/BDMV/STREAM");
+    std::fs::create_dir_all(&mts).unwrap();
+    file(&mts, "00000.MTS", 9_000);
+    assert_eq!(main_payload(&out), None);
+}
+
+/// A disc posted FLAT, with no structure directory to match on. It is
+/// already not playable as it stands, and it is exactly the shape a
+/// user re-trees by hand - so the numbers `.mpls` and `.clpi` address
+/// the stream by must survive. The `.bdmv` file is what says "disc"
+/// here; there is no directory to say it.
+#[test]
+fn a_flattened_disc_post_is_declined_on_its_structure_files() {
+    let root = scratch("nzb-flatdisc");
+    let out = root.join("job");
+    std::fs::create_dir_all(&out).unwrap();
+    file(&out, "00000.m2ts", 40_000);
+    file(&out, "index.bdmv", 900);
+    file(&out, "00000.mpls", 300);
+
+    assert_eq!(main_payload(&out), None);
+    let dest = rename_from_nzb(&root, &out, "Great.Movie.2024").unwrap();
+    assert_eq!(
+        names(&dest),
+        vec!["00000.m2ts", "00000.mpls", "index.bdmv"],
+        "a stream file is addressed by NUMBER, so its number is its name"
+    );
+}
+
+/// The other direction, and the one that keeps the disc arm from being
+/// a licence to decline: an ordinary release still renames exactly one
+/// file, and a `.sup` subtitle or an external `.eac3` track beside it -
+/// both of which are in `MEDIA_COMPANION_EXTS` and neither of which is
+/// disc structure - does not make the job look like a disc.
+#[test]
+fn a_release_with_companion_tracks_is_not_a_disc() {
+    let root = scratch("nzb-companions");
+    let out = root.join("job");
+    std::fs::create_dir_all(&out).unwrap();
+    file(&out, "Example.Movie.2024.mkv", 8_000_000);
+    file(&out, "Example.Movie.2024.sup", 40_000);
+    file(&out, "Example.Movie.2024.eac3", 90_000);
+
+    let dest = rename_from_nzb(&root, &out, "Movie Night").unwrap();
+    assert_eq!(
+        names(&dest),
+        vec![
+            "Example.Movie.2024.eac3",
+            "Example.Movie.2024.sup",
+            "Movie Night.mkv",
+        ]
+    );
+}
+
+/// A cue sheet is a NAME MAP, so both halves of the pair are refused.
+/// The data half is the failure this test was written for: it is the
+/// biggest thing in a CD rip, so it took the release name and left the
+/// sheet addressing a file that was no longer there - the M4-88 shape
+/// reached through the naming door. The sheet is refused for its own
+/// reason, measured after the first half was fixed: see the multi-disc
+/// case below.
+#[test]
+fn a_cue_rip_renames_the_folder_and_nothing_the_sheet_addresses() {
+    let root = scratch("nzb-cue-pair");
+    let out = root.join("Some.Album.2024.FLAC-GRP");
+    std::fs::create_dir_all(&out).unwrap();
+    file(&out, "Album.bin", 40_000);
+    std::fs::write(
+        out.join("Album.cue"),
+        b"REM GENRE Rock\nFILE \"Album.bin\" BINARY\n  TRACK 01 AUDIO\n",
+    )
+    .unwrap();
+    // Unrelated furniture, to prove the pair is not simply the only
+    // thing here: the job still declines to name a file.
+    file(&out, "album.nfo", 4);
+
+    let dest = rename_from_nzb(&root, &out, "My Album 2024.nzb").unwrap();
+    assert_eq!(
+        dest,
+        root.join("My Album 2024"),
+        "the folder takes the name"
+    );
+    assert_eq!(
+        names(&dest),
+        vec!["Album.bin", "Album.cue", "album.nfo"],
+        "the sheet goes on addressing the file it names"
+    );
+}
+
+/// The sheet half, and why it is refused rather than left eligible.
+/// Sparing only the data makes a SHEET the biggest thing left, and this
+/// shape came back as `CD1.bin`, `CD1.cue`, `CD2.bin`,
+/// `My Album 2024.cue` - nothing dangling, and no way left to tell which
+/// sheet is disc 2.
+#[test]
+fn a_two_disc_rip_keeps_both_sheets_numbered() {
+    let root = scratch("nzb-cue-multi");
+    let out = root.join("Some.Album.2024.FLAC-GRP");
+    std::fs::create_dir_all(&out).unwrap();
+    for disc in ["CD1", "CD2"] {
+        file(&out, &format!("{disc}.bin"), 40_000);
+        std::fs::write(
+            out.join(format!("{disc}.cue")),
+            format!("FILE \"{disc}.bin\" BINARY\n").as_bytes(),
+        )
+        .unwrap();
+    }
+
+    let dest = rename_from_nzb(&root, &out, "My Album 2024.nzb").unwrap();
+    assert_eq!(
+        names(&dest),
+        vec!["CD1.bin", "CD1.cue", "CD2.bin", "CD2.cue"],
+        "every name in a cue set is load-bearing, the numbering included"
+    );
+}
+
+/// The narrow rule, not the disc-tree one: an ordinary release that
+/// happens to ship a cue set beside the feature still gets its rename.
+/// `feature::disc_structure` declines a whole JOB and is right to for a
+/// DVD or Blu-ray tree; a loose CD rip beside a film is not one.
+#[test]
+fn a_feature_beside_a_cue_set_is_still_named() {
+    let root = scratch("nzb-cue-mixed");
+    let out = root.join("Example.Movie.2024.1080p-GRP");
+    std::fs::create_dir_all(&out).unwrap();
+    file(&out, "Example.Movie.2024.1080p-GRP.mkv", 8_000_000);
+    file(&out, "Soundtrack.bin", 40_000);
+    std::fs::write(
+        out.join("Soundtrack.cue"),
+        b"FILE \"Soundtrack.bin\" BINARY\n",
+    )
+    .unwrap();
+
+    let dest = rename_from_nzb(&root, &out, "My Movie Night 2024.nzb").unwrap();
+    assert_eq!(
+        names(&dest),
+        vec![
+            "My Movie Night 2024.mkv",
+            "Soundtrack.bin",
+            "Soundtrack.cue"
+        ],
+        "the feature takes the name and the cue set keeps both of its own"
+    );
+}
+
+/// Membership is a property of the DIRECTORY, so a cue set one level
+/// down is answered by ITS OWN sheet - the asymmetry TODO 301 records
+/// for the split-part sets, on the arm added after it.
+#[test]
+fn a_cue_set_in_a_subfolder_is_read_against_its_own_directory() {
+    let root = scratch("nzb-cue-sub");
+    let out = root.join("Some.Release.2024-GRP");
+    let extras = out.join("Extras");
+    std::fs::create_dir_all(&extras).unwrap();
+    file(&out, "Some.Release.2024-GRP.nfo", 4);
+    file(&extras, "Bonus.bin", 40_000);
+    std::fs::write(extras.join("Bonus.cue"), b"FILE \"Bonus.bin\" BINARY\n").unwrap();
+
+    let dest = rename_from_nzb(&root, &out, "My Release 2024.nzb").unwrap();
+    assert_eq!(
+        names(&dest.join("Extras")),
+        vec!["Bonus.bin", "Bonus.cue"],
+        "the parent's empty cue set must not read a subfolder's pair as payload"
+    );
+}
+
+/// The main file's occupancy guard is a CLAIM, so a name that arrives
+/// while `rename_from_nzb` is running cannot be renamed over.
+///
+/// The `symlink_metadata` this door carried until 31 Aug 2026 answers
+/// the occupancy question exactly as the `create_new` claim does; what
+/// separates them is the gap behind the answer, so this has to race.
+/// See `crate::renameclaim` for the measurement. VERIFIED red with
+/// `rename_main_file` alone reverted to the `lstat`.
+///
+/// Driven through `rename_from_nzb` because `rename_main_file` is
+/// private to `nzbname`. The job folder is ALREADY named after the
+/// base, so `rename_dir` sees `want == out_dir` and returns None -
+/// which is what keeps the directory still under the harness while the
+/// trials run, and it leaves the folder ladder (a DIRECTORY source,
+/// which `rename(2)` refuses onto any existing entry) correctly out of
+/// this claim's scope.
+#[test]
+fn a_main_file_name_created_beside_the_rename_is_never_renamed_over() {
+    let root = scratch("nzb-claim-race");
+    let base = "My Movie Night 2024";
+    let out = root.join(base);
+    std::fs::create_dir_all(&out).unwrap();
+    let target = out.join(format!("{base}.mkv"));
+    crate::renameclaim::never_renames_over_a_neighbour(
+        &target,
+        300,
+        || {
+            file(&out, "Example.Movie.2024.1080p.WEB-DL-GRP.mkv", 8_000_000);
+        },
+        || {
+            rename_from_nzb(&root, &out, base);
+        },
     );
 }

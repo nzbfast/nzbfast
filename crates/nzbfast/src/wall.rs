@@ -1983,12 +1983,81 @@ pub fn is_person_art_name(name: &str) -> bool {
         .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// The widest decoration anything in this repo composes onto an
+/// [`art_name`] result, spelled over an EMPTY stem - the house idiom for
+/// a stem reserve, so the number and the writers cannot drift.
+///
+/// It is a BACKDROP's upload staging name,
+/// `.{stem}.bd.jpg.new-{pid}-{nanos}` (`serve::api::wall::art_staging_name`),
+/// with a `u32` pid at its widest (ten digits) and `subsec_nanos`, which
+/// is under a second and so nine. Hence the leading `..`: the first dot
+/// is the staging prefix and the second opens `.bd.jpg` onto a stem that
+/// is not there.
+///
+/// The `/art/` route's lazy `thumb_` derivative (`serve::http::route_art`)
+/// is six bytes in front of `.bd.jpg`'s seven, so it is not the maximum
+/// and does not set this number. It is named here anyway, because a
+/// reserve that had forgotten it would be wrong the day the two met.
+/// `art_names_leave_room_for_every_decoration` drives the real writers
+/// and pins both.
+pub(crate) const ART_DECORATION: &str = "..bd.jpg.new-4294967295-999999999";
+
 /// Art-cache filename for a title key (safe, flat, deterministic).
+///
+/// # Why the length is decided HERE
+///
+/// Nothing bounds a title key. It is `m:{norm_title}:{year}` /
+/// `t:{norm_title}` (`nzbkit::release`), `norm_title` truncates nothing,
+/// and an obfuscated post with no recognisable furniture makes the WHOLE
+/// release stem the title - and Usenet subjects routinely carry 100-250
+/// characters. So this name used to run past what a filesystem takes: at
+/// 233..=255 bytes the live poster wrote and the staging decoration
+/// above failed, and past 255 neither could be written at all. Both
+/// surfaced as `couldn't write the art cache`, or as
+/// `republish_title_art` deleting the live art after a failed publish.
+///
+/// This is an identity key as much as a filename - the index stores it
+/// (`nzbkit::index::cards::TitleArt::poster`), `/art/` serves it, and
+/// [`drop_art`], [`drop_art_thumbs`], the enrichment lane and the fixer
+/// all RECOMPUTE it - so every reader has to get the same string out.
+/// They do, because they all come through this function; that is the
+/// whole reason the cap is here and not at any write.
+///
+/// # Why a stem reserve rather than capping the composed name
+///
+/// The rule for an identity key is normally "cap the COMPOSED name"
+/// (`nzbkit::disk::sanitize_filename_capped_for`). It is the wrong one
+/// here, for `cap_shared_stem`'s own reason: FOUR names are composed off
+/// this one stem - poster, backdrop, and the `thumb_` derivative of
+/// each - and the `/art/` route finds a thumbnail's source by STRIPPING
+/// the prefix, so the pairing IS the shared stem. Capping each composed
+/// name independently hashes different inputs, and `thumb_` + a name
+/// already at 255 is unwritable again.
+///
+/// # Why the `-` is folded to `_`
+///
+/// `cap_component` joins its hash tag on with a `-`, and a `-` is
+/// exactly what `serve::apiutil::art_name_ok` refuses - which is what
+/// makes a staging name unservable by construction, and what lets
+/// `is_art_staging_name` split on `.new-`. Both are load-bearing, so the
+/// character goes rather than the filter. The fold is total (it maps
+/// every `-`, not a known position), and it cannot merge two keys that
+/// the cap kept apart: the tag is 12 hex digits either side of it.
 pub fn art_name(key: &str, backdrop: bool) -> String {
     let safe: String = key
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
+    let safe = nzbkit::disk::cap_shared_stem(&safe, [ART_DECORATION]);
+    // Deterministic across restarts because `cap_shared_stem` is: a
+    // truncation plus a SHA-256 prefix of the whole input, no clock, no
+    // process state, no map iteration. Same key in, same name out - which
+    // is what the readers above rest on.
+    let safe = if safe.contains('-') {
+        safe.replace('-', "_")
+    } else {
+        safe
+    };
     format!("{safe}{}.jpg", if backdrop { ".bd" } else { "" })
 }
 

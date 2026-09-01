@@ -13,8 +13,8 @@ mod preview;
 
 use caps::{cap_payload, planned_servers};
 pub(in crate::serve) use controls::{
-    apply_pause, apply_priority, note_queue_idle_unless_active, reposition_for_priority,
-    stop_deleted_transfer,
+    apply_pause, apply_priority, delete_targets, note_queue_idle_unless_active,
+    reposition_for_priority, sab_search_matches, search_param, stop_deleted_transfer,
 };
 use payload::{m_history, m_queue};
 
@@ -856,6 +856,7 @@ fn m_dashboard(
     let history = if client_h != hrev {
         let q = super::super::history::HistQuery {
             failed_only: false,
+            status: None,
             category: params
                 .get("hist_category")
                 .filter(|c| !c.is_empty() && *c != "*")

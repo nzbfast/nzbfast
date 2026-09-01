@@ -30,7 +30,8 @@
 //! against its packet MD5 before its bytes are trusted
 //! ([`PacketCatalog::read_validated_slice`]).
 
-use super::{RepairError, par2};
+use super::slices::slice_fits_block;
+use super::{PacketScope, RepairError, par2};
 use crate::par2::BlockCheck;
 use md5::{Digest, Md5};
 use std::collections::{HashMap, HashSet};
@@ -124,6 +125,11 @@ struct CatFile {
 pub struct PacketCatalog {
     dir: PathBuf,
     max_bytes: u64,
+    /// How far below `dir` the listing walk looks. [`PacketScope::Flat`]
+    /// for every historical entry point; [`PacketScope::Nested`] only
+    /// where a caller has said it wants a set that publication may have
+    /// placed in a tree (see `par2repair::nested`).
+    scope: PacketScope,
     files: Vec<CatFile>,
     /// Parsed critical bodies by packet MD5 (identical duplicates across
     /// volumes share one entry). A packet whose body fails its parser has
@@ -143,7 +149,14 @@ impl PacketCatalog {
     /// Scan every packet file in `dir` now. The everyday entry point for
     /// a directory pass that will consult the catalog more than once.
     pub fn build(dir: &Path) -> Result<Self, RepairError> {
-        let mut cat = Self::build_lazy(dir)?;
+        Self::build_scoped(dir, PacketScope::Flat)
+    }
+
+    /// [`Self::build`] with the discovery scope named. Only the late-set
+    /// door asks for [`PacketScope::Nested`]; see `par2repair::nested`
+    /// for why the other walks are deliberately left flat.
+    pub fn build_scoped(dir: &Path, scope: PacketScope) -> Result<Self, RepairError> {
+        let mut cat = Self::build_lazy_scoped(dir, scope)?;
         cat.scan_rest()?;
         Ok(cat)
     }
@@ -155,15 +168,25 @@ impl PacketCatalog {
     /// [`scan_file`]: Self::scan_file
     /// [`scan_rest`]: Self::scan_rest
     pub fn build_lazy(dir: &Path) -> Result<Self, RepairError> {
-        Self::build_lazy_bounded(dir, super::MAX_PACKET_FILE_BYTES)
+        Self::build_lazy_scoped(dir, PacketScope::Flat)
+    }
+
+    /// [`Self::build_lazy`] with the discovery scope named.
+    pub fn build_lazy_scoped(dir: &Path, scope: PacketScope) -> Result<Self, RepairError> {
+        Self::build_lazy_bounded(dir, super::MAX_PACKET_FILE_BYTES, scope)
     }
 
     /// [`Self::build_lazy`] with the packet-file ceiling spelled out, so a
     /// test can exercise the bound without writing a gigabyte.
-    pub(super) fn build_lazy_bounded(dir: &Path, max_bytes: u64) -> Result<Self, RepairError> {
+    pub(super) fn build_lazy_bounded(
+        dir: &Path,
+        max_bytes: u64,
+        scope: PacketScope,
+    ) -> Result<Self, RepairError> {
         let mut cat = PacketCatalog {
             dir: dir.to_path_buf(),
             max_bytes,
+            scope,
             files: Vec::new(),
             parsed: HashMap::new(),
             nonpacket: HashMap::new(),
@@ -222,6 +245,56 @@ impl PacketCatalog {
             .flat_map(|(i, f)| f.packets.iter().flatten().map(move |o| (i, o)))
     }
 
+    /// Every destination name this catalog's FileDesc packets declare,
+    /// and the subset of those names that TWO DIFFERENT SETS claim for
+    /// different content - `super::DirContext`'s two name sets, derived
+    /// in ONE place so the entry points cannot disagree about what a
+    /// directory declares.
+    ///
+    /// A descriptor is its `(file_id, length, md5)` triple, so a name
+    /// two sets declare for the SAME file is not contested: sharing
+    /// that destination is correct. Keyed through
+    /// `super::name_identity_key`, because a case-insensitive volume
+    /// folds two spellings onto one object and an exact compare would
+    /// leave both undisambiguated - the very loss the claim loop exists
+    /// to prevent.
+    ///
+    /// TWO sets is the bar, and not "two descriptors", which is what
+    /// this walk asked before 31 Aug 2026. A single set declaring two
+    /// names that SANITIZE alike is already handled where it happens:
+    /// the claim loop sees both descriptors in the one repair, lets the
+    /// first keep the declared name and disambiguates the second. Only
+    /// a collision ACROSS sets is invisible there, because a repair
+    /// drops every foreign packet before a target is built. Firing on
+    /// the wider condition costs the first descriptor its declared name
+    /// for nothing, and `e2e_norar3`'s leading-dot twin says what that
+    /// is worth: "a payload kept, but under a name nobody declared and
+    /// no *arr will import".
+    ///
+    /// Reads only what has been SCANNED: a name lives in the critical
+    /// packets, so a caller that wants the whole directory's answer has
+    /// to hold a complete catalog ([`PacketCatalog::build_scoped`])
+    /// rather than a lazy one.
+    pub(super) fn declared_and_contested(&self, fold: bool) -> (HashSet<String>, HashSet<String>) {
+        type Who = (HashSet<([u8; 16], u64, [u8; 16])>, HashSet<[u8; 16]>);
+        let mut claims: HashMap<String, Who> = HashMap::new();
+        for (_, occ) in self.walk() {
+            if let Some(Crit::FileDesc(fid, d)) = self.crit(&occ.md5) {
+                let e = claims
+                    .entry(super::name_identity_key(fold, &d.name))
+                    .or_default();
+                e.0.insert((*fid, d.length, d.md5));
+                e.1.insert(occ.set_id);
+            }
+        }
+        let contested = claims
+            .iter()
+            .filter(|(_, (descs, sets))| descs.len() > 1 && sets.len() > 1)
+            .map(|(k, _)| k.clone())
+            .collect();
+        (claims.into_keys().collect(), contested)
+    }
+
     /// Number of files whose packets are cataloged; `..scanned_prefix()`
     /// of the sorted list is what [`walk`] currently covers when the
     /// catalog was built lazily.
@@ -242,18 +315,12 @@ impl PacketCatalog {
             .collect();
         let mut nonpacket: HashMap<PathBuf, Stamp> = HashMap::new();
         let mut files: Vec<CatFile> = Vec::new();
-        for e in std::fs::read_dir(&self.dir)? {
-            let Ok(e) = e else { continue };
-            if !e.file_type().is_ok_and(|t| t.is_file()) {
-                continue;
-            }
-            let p = e.path();
-            let Ok(md) = e.metadata() else {
-                // Historical behavior: an unstattable entry read as
-                // "oversized" and was skipped either way.
-                continue;
-            };
-            let stamp = Stamp::of(&md);
+        for cand in super::nested::walk_candidates(&self.dir, self.scope)? {
+            // An unstattable entry never reaches here: the walk drops it,
+            // which is the historical behavior (it read as "oversized"
+            // and was skipped either way).
+            let p = cand.path;
+            let stamp = Stamp::of(&cand.meta);
             if p.extension()
                 .is_some_and(|x| x.eq_ignore_ascii_case("par2"))
             {
@@ -286,11 +353,14 @@ impl PacketCatalog {
                     nonpacket.insert(p, stamp);
                     continue;
                 }
-                let mut head = [0u8; 8];
+                // Window rather than byte 0 - see
+                // `par2::head_is_packet_file` (M4-65).
+                let mut head = [0u8; par2::SNIFF_WINDOW + 8];
+                let want = crate::disk::chunk_len(stamp.len, head.len());
                 let ok = File::open(&p)
-                    .and_then(|mut f| f.read_exact(&mut head))
+                    .and_then(|mut f| f.read_exact(&mut head[..want]))
                     .is_ok();
-                if ok && &head == par2::MAGIC {
+                if ok && par2::head_is_packet_file(&head[..want]) {
                     files.push(CatFile {
                         path: p,
                         stamp,
@@ -362,7 +432,11 @@ impl PacketCatalog {
             } else {
                 if let std::collections::hash_map::Entry::Vacant(v) = parsed.entry(pkt.md5) {
                     let crit = if pkt.ptype == *par2::TYPE_MAIN {
-                        par2::parse_main(pkt.body).map(|(bsz, ids)| Crit::Main(bsz, ids))
+                        // The non-recovery ids are deliberately dropped here: repair lays
+                        // files onto the global slice index space from the
+                        // RECOVERY list and nothing else, so a verify-only
+                        // member must never reach it (see `Par2Set::nonrecovery`).
+                        par2::parse_main(pkt.body).map(|(bsz, ids, _)| Crit::Main(bsz, ids))
                     } else if pkt.ptype == *par2::TYPE_FILEDESC {
                         par2::parse_filedesc(pkt.body).map(|(fid, d)| Crit::FileDesc(fid, d))
                     } else if pkt.ptype == *par2::TYPE_IFSC {
@@ -464,6 +538,21 @@ impl PacketCatalog {
     }
 }
 
+/// One line per selection pass naming recovery slices refused for
+/// length, so a set that looks short of parity says why. Silent is the
+/// state M4-56 was found in.
+pub(super) fn warn_short_slices(refused: usize, shortest: u32, bs: usize) {
+    if refused > 0 {
+        warn!(
+            refused,
+            shortest_len = shortest,
+            block_size = bs,
+            "recovery slice packet(s) too short to carry a full block - refused; \
+             the set has less parity available than its volumes suggest"
+        );
+    }
+}
+
 /// Load the `needed` smallest selected exponents' payloads, one
 /// `block_size` buffer each. With `revalidate`, every slice is re-proven
 /// against its packet MD5 as it is read; a slice that no longer proves
@@ -495,7 +584,14 @@ pub(super) fn load_selected_recovery(
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => v.insert(cat.open_file(loc.file)?),
             };
-            let mut data = vec![0u8; bs];
+            // The packet MD5 covers the WHOLE payload, so an over-long
+            // slice ([`slice_fits_block`]) has to be read and validated
+            // whole and only then cut to the block. `>= bs` is the
+            // selection predicate at both callers, so the cut below is
+            // exact; the `.max(bs)` is the belt for a third caller that
+            // does not filter, where a short buffer would read past the
+            // packet into its neighbour.
+            let mut data = vec![0u8; (loc.len as usize).max(bs)];
             if revalidate {
                 if !cat.read_validated_slice(f, &loc, &mut data)? {
                     warn!(
@@ -509,6 +605,14 @@ pub(super) fn load_selected_recovery(
             } else {
                 crate::disk::read_exact_at(f, &mut data, loc.off)?;
             }
+            // `truncate` alone keeps the padded CAPACITY, and what is
+            // held here is `m` of these at once - the bound
+            // `reconstruct::check_repair_dim` states as `m x
+            // block_size`. Shrinking keeps that true. It costs nothing
+            // in the conforming case, where capacity already equals
+            // `bs` and both calls are no-ops.
+            data.truncate(bs);
+            data.shrink_to_fit();
             loaded.push((e, data));
         }
         match dropped {
@@ -541,11 +645,18 @@ pub(super) fn load_mapped_recovery(
     }
     cat.refresh()?;
     let mut by_exp: HashMap<u32, RecLoc> = HashMap::new();
+    let (mut refused, mut shortest) = (0usize, u32::MAX);
     for (file, occ) in cat.walk() {
         if let Kind::RecvSlic { exp, off, len } = occ.kind
             && occ.set_id == *set_id
-            && len as usize == bs
         {
+            // M4-56: over-long is usable and cut on load; short is not,
+            // and is counted rather than dropped in silence.
+            if !slice_fits_block(len as usize, bs) {
+                refused += 1;
+                shortest = shortest.min(len);
+                continue;
+            }
             by_exp.entry(exp).or_insert(RecLoc {
                 file,
                 exp,
@@ -555,6 +666,7 @@ pub(super) fn load_mapped_recovery(
             });
         }
     }
+    warn_short_slices(refused, shortest, bs);
     match load_selected_recovery(cat, &mut by_exp, n_missing, bs, true)? {
         Some(loaded) => Ok(loaded),
         None => Err(RepairError::RecoveryShort {
@@ -566,8 +678,18 @@ pub(super) fn load_mapped_recovery(
 
 /// The per-set packet walk `repair_dir_set_inner` used to run inside its
 /// file-read loop, replayed over catalog occurrences: packet-MD5 dedupe,
-/// first-packet set binding, first-seen Main/FileDesc/IFSC, recovery
-/// locators in discovery order. Feed files strictly in catalog order.
+/// first-packet set binding, CONTRADICTION-AWARE Main/FileDesc/IFSC,
+/// recovery locators in discovery order. Feed files strictly in catalog
+/// order.
+///
+/// The critical packets were first-seen-wins here exactly as they were in
+/// [`par2::Par2Set::parse`], and this is the DISK REPAIR side of the same
+/// question that side answers for live verification. Two individually
+/// valid packets that disagree about one file id, resolved by whichever
+/// arrived first, let the two halves of the product select DIFFERENT
+/// facts out of one malformed set - live verify taking the reading that
+/// reached the wire first and repair taking the one whose packet file
+/// sorts first on disk. Both now take neither (W4-10).
 pub(super) struct SetReplay {
     pub(super) set_id: Option<[u8; 16]>,
     seen: HashSet<[u8; 16]>,
@@ -575,6 +697,18 @@ pub(super) struct SetReplay {
     pub(super) descs: HashMap<[u8; 16], par2::Desc>,
     pub(super) ifscs: HashMap<[u8; 16], Vec<BlockCheck>>,
     pub(super) rec_locs: Vec<RecLoc>,
+    /// Claims two valid packets CONTRADICTED. A contradicted claim is
+    /// removed from the map beside it and latched here, so the field
+    /// reads exactly as it does when the packet was never seen at all -
+    /// which is why the three consumers in `par2repair.rs` need no
+    /// change: a missing Main is already `NoMainPacket`, a missing
+    /// FileDesc is already `Malformed`, and a missing IFSC already
+    /// routes the file to its whole-file MD5, which covers every byte.
+    /// The latch is what stops a THIRD copy of either packet re-admitting
+    /// one of the two readings and putting order back in charge.
+    main_contradicted: bool,
+    descs_contradicted: HashSet<[u8; 16]>,
+    ifscs_contradicted: HashSet<[u8; 16]>,
 }
 
 impl SetReplay {
@@ -586,6 +720,9 @@ impl SetReplay {
             descs: HashMap::new(),
             ifscs: HashMap::new(),
             rec_locs: Vec::new(),
+            main_contradicted: false,
+            descs_contradicted: HashSet::new(),
+            ifscs_contradicted: HashSet::new(),
         }
     }
 
@@ -608,15 +745,27 @@ impl SetReplay {
             }),
             Kind::Plain => match cat.crit(&occ.md5) {
                 Some(Crit::Main(bsz, ids)) => {
-                    if self.main.is_none() {
-                        self.main = Some((*bsz, ids.clone()));
+                    let claim = (*bsz, ids.clone());
+                    if self.main_contradicted {
+                    } else if let Some(cur) = &self.main {
+                        if *cur != claim {
+                            self.main = None;
+                            self.main_contradicted = true;
+                        }
+                    } else {
+                        self.main = Some(claim);
                     }
                 }
                 Some(Crit::FileDesc(fid, d)) => {
-                    self.descs.entry(*fid).or_insert_with(|| d.clone());
+                    claim_desc_or_contradict(
+                        &mut self.descs,
+                        &mut self.descs_contradicted,
+                        *fid,
+                        d,
+                    );
                 }
                 Some(Crit::Ifsc(fid, b)) => {
-                    self.ifscs.entry(*fid).or_insert_with(|| b.clone());
+                    claim_or_contradict(&mut self.ifscs, &mut self.ifscs_contradicted, *fid, b);
                 }
                 None => {}
             },
@@ -650,12 +799,79 @@ impl SetReplay {
 
     /// The historical critical-completeness test: Main present and every
     /// declared file id has both its FileDesc and its IFSC.
+    ///
+    /// DECIDED, not present: a contradicted claim counts as complete
+    /// because no further packet can settle it, and this predicate is
+    /// what stops the scan reading more `.par2` files. Treating a
+    /// contradiction as "still missing" would read every volume on disk
+    /// looking for an answer that cannot arrive, and then fail anyway.
     pub(super) fn criticals_complete(&self) -> bool {
+        if self.main_contradicted {
+            return true;
+        }
         self.main.as_ref().is_some_and(|(_, ids)| {
-            ids.iter()
-                .all(|fid| self.descs.contains_key(fid) && self.ifscs.contains_key(fid))
+            ids.iter().all(|fid| {
+                (self.descs.contains_key(fid) || self.descs_contradicted.contains(fid))
+                    && (self.ifscs.contains_key(fid) || self.ifscs_contradicted.contains(fid))
+            })
         })
     }
+}
+
+/// Admit one packet's reading of `fid`, or annihilate the claim if it
+/// disagrees with the reading already held. See [`SetReplay`] - and
+/// [`par2::Par2Set::parse`]'s `Claim`, which is this rule on the live
+/// verification side; the two are deliberately the same rule so one
+/// malformed set cannot be taken two ways by the two halves.
+fn claim_or_contradict<T: Clone + PartialEq>(
+    held: &mut HashMap<[u8; 16], T>,
+    contradicted: &mut HashSet<[u8; 16]>,
+    fid: [u8; 16],
+    offered: &T,
+) {
+    if contradicted.contains(&fid) {
+        return;
+    }
+    match held.entry(fid) {
+        std::collections::hash_map::Entry::Occupied(e) => {
+            if e.get() != offered {
+                e.remove();
+                contradicted.insert(fid);
+            }
+        }
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(offered.clone());
+        }
+    }
+}
+
+/// [`claim_or_contradict`] with M4-38's tiebreak, for FileDesc packets
+/// only: a descriptor that BINDS `fid` outranks one that merely carries
+/// a copy of it, so the two are not a contradiction at all and the
+/// honest member does not leave the set over a packet anyone can write.
+/// [`par2::Par2Set::parse`]'s `Claim::offer_desc` is the same rule on
+/// the live verification side, and carries the argument for it at
+/// length; the two are deliberately the same rule so one hostile set
+/// cannot be taken two ways by the two halves.
+fn claim_desc_or_contradict(
+    held: &mut HashMap<[u8; 16], par2::Desc>,
+    contradicted: &mut HashSet<[u8; 16]>,
+    fid: [u8; 16],
+    offered: &par2::Desc,
+) {
+    if !contradicted.contains(&fid)
+        && let Some(cur) = held.get(&fid)
+        && cur != offered
+    {
+        let new_binds = par2::filedesc_id(offered) == fid;
+        if new_binds != (par2::filedesc_id(cur) == fid) {
+            if new_binds {
+                held.insert(fid, offered.clone());
+            }
+            return;
+        }
+    }
+    claim_or_contradict(held, contradicted, fid, offered);
 }
 
 /// RAII release for the scan's transient read gauge: the buffer's bytes

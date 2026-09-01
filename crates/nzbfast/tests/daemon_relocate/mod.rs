@@ -229,7 +229,6 @@ async fn a_relocating_job_cannot_be_started_into_its_destination() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The fixture the two gap cases below share: one slow single-file job,
@@ -245,7 +244,6 @@ async fn a_relocating_job_cannot_be_started_into_its_destination() {
 /// Field order is drop order and matters: `d` kills the child before
 /// `_scratch` takes the directory out from under it.
 struct Rig {
-    dir: PathBuf,
     out_root: PathBuf,
     xml: String,
     d: Daemon,
@@ -317,7 +315,6 @@ async fn relocate_rig(tag: &str, vars: &[(&str, &str)]) -> Rig {
     })
     .await;
     Rig {
-        dir,
         out_root,
         xml,
         d,
@@ -509,7 +506,6 @@ async fn a_recategorize_inside_the_pick_to_start_gap_cannot_start_the_job() {
     .unwrap();
 
     let _log = rig.d.stop();
-    let _ = std::fs::remove_dir_all(&rig.dir);
 }
 
 /// Codex F-06, the rename front: the label and the directory of one
@@ -623,5 +619,4 @@ async fn a_rename_holds_its_fence_until_the_new_label_lands() {
     .unwrap();
 
     let _log = rig.d.stop();
-    let _ = std::fs::remove_dir_all(&rig.dir);
 }

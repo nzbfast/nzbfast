@@ -24,6 +24,17 @@ rand_file() {
     [ "$(fsize "$1")" = "$2" ] || die "short read generating $1"
 }
 
+# passed_file <dir> <leg-name> - the TEST PASSED marker, written where
+# the DEEPEST layer is built so it only lands when the whole chain ran
+# (an inner archive left unopened in the output directory cannot fake
+# it). Presence is the human pass signal; the manifest checksums stay
+# the grading truth. Leaves the filename in $_pf for the archive line.
+passed_file() {
+    _pf="TEST PASSED - $2.txt"
+    printf 'TEST PASSED\r\n\r\nCapability test %s.\r\nSeeing this file means your client completed the full chain of this test.\r\nFull grading lives in the published manifest.\r\n' \
+        "$2" > "$1/$_pf"
+}
+
 # poison <file> - overwrite 64 bytes at the 3/5 point with fresh random
 # bytes (post-generation damage; always after any PAR2/RR covering it).
 poison() {

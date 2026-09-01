@@ -158,7 +158,6 @@ fn a_completed_history_row_stops_a_watched_nzb_being_ingested_again() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The control: with nothing in history, the same file is ingested and
@@ -182,7 +181,6 @@ fn a_watched_nzb_with_no_history_is_still_ingested() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A FAILED row must NOT suppress the file: a takedown that later
@@ -211,7 +209,6 @@ fn a_failed_history_row_still_lets_the_file_be_retried() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §129 2c: with `watch_recursive` on, a file dropped in a subfolder is
@@ -276,7 +273,6 @@ fn recursive_watch_uses_the_first_subfolder_as_the_category() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The control for the test above: with the switch OFF (the default) a
@@ -314,7 +310,6 @@ fn subfolders_are_not_scanned_unless_recursive_is_on() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §129 2c: with `watch_move_rejected` on, a complete-but-unusable file
@@ -367,7 +362,6 @@ fn a_rejected_file_is_quarantined_with_a_note_when_the_switch_is_on() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// One GET against our own daemon. The `/api` answers here carry a
@@ -459,5 +453,4 @@ fn a_watch_folder_pickup_reaches_the_dashboard_as_a_lifecycle_event() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }

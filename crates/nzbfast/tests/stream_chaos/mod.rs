@@ -919,7 +919,6 @@ async fn stream_runway_wait_is_time_capped_on_slow_lines() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The last `max` bytes of the daemon log, cut on a CHAR BOUNDARY.
@@ -1028,7 +1027,6 @@ async fn stream_zero_fills_terminally_missing_articles() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same hole met AFTER the fetch run has drained and detached: no
@@ -1094,5 +1092,4 @@ async fn stream_zero_fills_after_the_run_detaches() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -125,6 +125,14 @@ pub(super) fn queue_walk(
             phase.is_some(),
             j.total_bytes,
             j.downloaded_bytes,
+            // The early start's live byte count, and only on the row it
+            // is actually holding - `ctx.sc` is one snapshot for the
+            // whole payload (see `SlotCtx`), so every other row gets 0
+            // and no row can pair its own state with a fresh read.
+            ctx.sc
+                .as_ref()
+                .filter(|(id, _)| *id == j.nzo_id)
+                .map_or(0, |(_, b)| *b),
         );
         // The queue's own sizeleft, summed here from the row's own
         // remainder - see `remaining_bytes` above. Counted for EVERY

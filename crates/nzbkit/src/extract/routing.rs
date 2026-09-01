@@ -234,11 +234,26 @@ impl Extractor {
                     // `written()` lags the commitment. Latch at enqueue
                     // or a racing sibling span latches plaintext-once
                     // over it (instream_decrypt_allowed rule 2).
-                    if encrypted
-                        && crypto.is_none()
-                        && let Some(k) = w.path.file_name()
-                    {
-                        let k = k.to_string_lossy();
+                    //
+                    // KEYED ON THE out_dir-RELATIVE NAME, never the bare
+                    // file name (read-only sweep finding 4, 31 Aug 2026).
+                    // Its own sibling map `crypto_files` was moved onto
+                    // `out_name_of` by the 30 Aug sweep and carries the
+                    // argument in full; this latch and
+                    // `resumed_plaintext` were left behind. Two things
+                    // it costs: `seed_resumed_routes` inserts the
+                    // JOURNAL's names, which are `sanitize_out_name`'s
+                    // tree form, so after a resume every encrypted
+                    // member carrying a directory missed this lookup
+                    // entirely - and two encrypted members sharing a
+                    // basename in different directories collapsed onto
+                    // one latch. No basename fallback for old journals:
+                    // the whole chain (`E`/`K`/`P` records, `crypto_files`,
+                    // the Placed frags) agrees on this one spelling, and
+                    // a second accepted spelling is how they parted in
+                    // the first place.
+                    if encrypted && crypto.is_none() {
+                        let k = out_name_of(&inner.out_dir, &w.path);
                         // TODO 158 item 2: an output the journal says
                         // is plaintext-once, with `D` records still
                         // live for it, cannot take the ciphertext
@@ -248,13 +263,13 @@ impl Extractor {
                         // could not re-establish plaintext-once (see
                         // `instream_decrypt_allowed`), so refuse: no
                         // byte lands, the records stay true.
-                        if inner.resumed_plaintext.contains_key(k.as_ref()) {
+                        if inner.resumed_plaintext.contains_key(k.as_str()) {
                             return Err(io::Error::other(format!(
                                 "{k}: resumed as plaintext-once and cannot re-latch it, \
                                  refusing to write ciphertext over plaintext"
                             )));
                         }
-                        inner.ciphertext_files.insert(k.into_owned());
+                        inner.ciphertext_files.insert(k);
                     }
                     match sink.as_mut() {
                         Some((jobs, _)) => jobs.push(WriteJob {
@@ -272,7 +287,10 @@ impl Extractor {
                             match &crypto {
                                 Some(cs) if repair => cs.patch(&w, base + piece_off, part)?,
                                 Some(cs) => cs.ingest(&w, base + piece_off, part)?,
-                                None => w.write_at(base + piece_off, part)?,
+                                // Repair keeps the plain door; see the
+                                // job loop in mod.rs for both halves.
+                                None if repair => w.write_at(base + piece_off, part)?,
+                                None => w.write_article_at(base + piece_off, part)?,
                             }
                             // A drained held span landing in an inner
                             // file: report it, so the article that
@@ -294,12 +312,18 @@ impl Extractor {
                                 inner.late_placements.push(LatePlacement {
                                     slot,
                                     frag: Frag {
-                                        file: w
-                                            .path
-                                            .file_name()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .into_owned(),
+                                        // The out_dir-RELATIVE name, as
+                                        // the Placed arm in `mod.rs` and
+                                        // the chase and deliver arms all
+                                        // record it. Basename until the
+                                        // read-only sweep's finding 5
+                                        // (31 Aug 2026): restore joins
+                                        // this onto out_dir, so an
+                                        // encrypted refeed of a payload
+                                        // living at `VIDEO_TS/x.vob`
+                                        // journaled `x.vob` and the
+                                        // replay opened the wrong path.
+                                        file: out_name_of(&inner.out_dir, &w.path),
                                         file_off: base + piece_off,
                                         vol_off: offset + span_off,
                                         len,
@@ -449,7 +473,7 @@ impl Extractor {
             // A §94 A map-mode replay preclaimed its SOURCE files under a
             // volume slot of this group (Codex F-03); the child's claims
             // are its own, so the grant moves to the routed slot.
-            let ck = name_collision_key(inner.fold_names, &sanitize_filename(&key));
+            let ck = name_collision_key(inner.fold_names, &sanitize_out_name(&key));
             if let Some(&pre) = inner.preclaimed.get(&ck)
                 && inner.groups[&gk].slots.contains(&pre)
             {
@@ -505,17 +529,16 @@ impl Extractor {
                 }
             }
             None => {
-                if let Some(w) = inner.inner_writers.get(sanitize_filename(key).as_str()) {
+                if let Some(w) = inner.inner_writers.get(sanitize_out_name(key).as_str()) {
                     return Ok(w.clone());
                 }
             }
         }
         let key = key.to_string();
-        let fname = sanitize_filename(&key);
+        let fname = sanitize_out_name(&key);
         let gkey = inner.slots[slot].group.clone();
         let mut out = fname;
         Self::claim_name(inner, slot, &mut out);
-        let path = self.out_dir.join(&out);
         // `total` is the entry's declared `unpacked_size` - an untrusted
         // header vint. It stays the writer's `size` (resume truncation and
         // the reported extracted size both depend on it) but it does NOT
@@ -526,7 +549,7 @@ impl Extractor {
         let budget = inner.limits.budget.clone();
         let w = Arc::new(
             if self.resume {
-                let w = FileWriter::create_resume_capped(&path, total, cap)?;
+                let w = FileWriter::create_resume_under(&self.out_dir, &out, total, cap)?;
                 // Rule 2's counter half, restored: the bytes a prior
                 // run left under this output are wire-domain, and the
                 // gate must see them (TODO 158 item 2). The latch half
@@ -536,7 +559,7 @@ impl Extractor {
                 }
                 w
             } else {
-                FileWriter::create_capped(&path, total, cap)?
+                FileWriter::create_under(&self.out_dir, &out, total, cap)?
             }
             .with_budget(budget),
         );
@@ -566,7 +589,7 @@ impl Extractor {
         }
         inner
             .inner_writers
-            .get(&sanitize_filename(entry_name))
+            .get(&sanitize_out_name(entry_name))
             .cloned()
             .map(Dest::Writer)
     }
@@ -592,8 +615,11 @@ impl Extractor {
         };
         for out in outs {
             if let Some(w) = inner.inner_writers.remove(&out) {
-                w.abandon();
-                let _ = std::fs::remove_file(&w.path);
+                // `abandon_close`: close the shared handle before the
+                // unlink so no surviving Arc clone pins the unlinked
+                // inode - see the method's own doc for the incident.
+                let gone = w.abandon_close();
+                let _ = std::fs::remove_file(&gone);
                 inner
                     .names_taken
                     .lock_ok()
@@ -686,10 +712,21 @@ impl Extractor {
         } else {
             None
         };
+        // Matrix row M4-90: the byte-0 arms carried NO name rule beyond
+        // `payload_name` (`.cbr`/`.cb7`), while the zip and tar arms have
+        // always carried one - so a `Movie.mkv` whose first bytes are a
+        // real RAR was unpacked and the named file vanished, measured on
+        // origin/main. `archive_sniff_eligible_name` is that missing rule;
+        // the reasoning, and why an obfuscated post still sniffs (M4-75),
+        // is written out at the predicate - including why it subsumes the
+        // `payload_name` test beside it rather than replacing it. The SFX
+        // arm above keeps its own name question and is deliberately ahead
+        // of this one.
         let (is_rar, rar_base) = match sfx {
             Some((off, crate::sfx::SfxFamily::Rar)) => (true, off as u64),
             _ => (
                 !payload_name
+                    && archive_sniff_eligible_name(&inner.slots[slot].name)
                     && (data.starts_with(b"Rar!\x1a\x07\x01\x00")
                         || data.starts_with(b"Rar!\x1a\x07\x00")),
                 0,
@@ -744,7 +781,14 @@ impl Extractor {
                 self.split_park_span(inner, slot, offset, data)?;
                 return Ok(Sniffed::Parked);
             }
-        } else if !payload_name && self.try_attach_sevenz(inner, slot, data, sevenz_base)? {
+        } else if !payload_name
+            // M4-90's other half, and the reason both rows are one lane:
+            // this arm had no name rule either. `sevenz_base > 0` is the
+            // SFX result, which asked `is_sfx_name` already and must not
+            // be asked a second, different name question here.
+            && (sevenz_base > 0 || archive_sniff_eligible_name(&inner.slots[slot].name))
+            && self.try_attach_sevenz(inner, slot, data, sevenz_base)?
+        {
             // Phase 3: a .7z gets the tail-prefetch chase -
             // this span (and everything held) feeds its
             // frontier buffer. Only the FORMAT is known

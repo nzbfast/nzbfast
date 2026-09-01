@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file subject="&quot;brackets.bin&quot; yEnc (1/3)" poster="p@news.example" date="1">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="10" number="1">&lt;a@news.example&gt;</segment>
+      <segment bytes="10" number="2">b@news.example</segment>
+      <segment bytes="10" number="3">&lt;c@news.example</segment>
+    </segments>
+  </file>
+</nzb>

@@ -356,7 +356,6 @@ async fn a_bomb_on_the_native_pass_reaches_the_job_message() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The route a user is actually on: no switches at all.
@@ -446,7 +445,6 @@ async fn a_bomb_on_the_default_chase_route_reaches_the_job_message() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Rung two: the free-space preflight in front of the unrar spawn, on
@@ -525,7 +523,6 @@ async fn a_bomb_in_the_unrar_preflight_reaches_the_job_message() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same rung reached by the OTHER chooser: `NZBFAST_NO_NATIVE_UNRAR`,
@@ -590,7 +587,6 @@ async fn a_bomb_in_the_unrar_preflight_reaches_it_by_the_env_route_too() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The fifth route of the 22 Aug repro, and the last one that reaches
@@ -751,7 +747,6 @@ async fn a_bomb_after_a_par2_repair_reaches_the_job_message() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// What the roomy legs of the recovery-record rung are told the disk
@@ -1037,7 +1032,6 @@ async fn a_bomb_on_the_recovery_record_rung_reaches_the_job_message() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The route, on the refusing leg: rung one failed and did NOT fail for
@@ -1151,7 +1145,7 @@ fn assert_third_rung_refused(log: &str) {
 /// sentence, and the message the job carries is this rung's or nothing.
 ///
 /// Verified red against dropping the `reextract_failed = Some(why)` at
-/// `get/settle.rs`'s no-set arm, and the failure is the exact wrong
+/// `get/settle/noset.rs`'s no-set arm, and the failure is the exact wrong
 /// blame TODO §249 is about: the console names the disk while the job
 /// reads "the articles did not decode".
 #[tokio::test(flavor = "multi_thread")]
@@ -1246,7 +1240,6 @@ async fn a_bomb_on_the_no_set_arms_recovery_records_reaches_the_job_message() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The route, on the no-set leg: no PAR2 set ever activated, the
@@ -1349,7 +1342,7 @@ fn assert_no_set_rung_refused(log: &str) {
 ///
 /// Verified red BOTH ways, because this exit has two carriers and either
 /// one dropping it puts the wrong blame on the job: against dropping the
-/// `reextract_failed = Some(why)` at `get/settle.rs`'s PAR2-exhausted
+/// `reextract_failed = Some(why)` at `get/settle/noset.rs`'s PAR2-exhausted
 /// arm, and against `.map_err(|_| None)` on the rung's own last line.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bomb_on_the_hinted_rungs_second_pass_reaches_the_job_message() {
@@ -1502,7 +1495,6 @@ async fn a_bomb_on_the_hinted_rungs_second_pass_reaches_the_job_message() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The route, on the hinted leg: PAR2 ran out, the hint really did skip

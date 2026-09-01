@@ -388,6 +388,39 @@ pub(crate) fn reextract_dir_outcome(
     }
 }
 
+mod volbase;
+// TODO 311's index-name rule, out of the way of a file at its ceiling.
+// One function and its two bounds; `recovery_candidates` is its only
+// caller and there is nothing about the split for anyone else to know.
+use volbase::index_bases_on_disk;
+
+mod volcount;
+// L2 of the wave-4 matrix read: how far a recovery volume's NAME may be
+// believed about its own block count, out of the way of the same
+// ceiling. One function and the same single caller.
+use volcount::credited_blocks;
+
+mod mappedplan;
+// The mapped route's gate, moved out on 31 Aug 2026 to keep the split
+// that bought `try_mapped_repair` its margin from spending this file's.
+// One subject and one caller ([`try_mapped_repair`]); there is nothing
+// about the split for anyone else to know.
+use mappedplan::{MappedPlan, plan_mapped_repair};
+
+mod nativepass;
+// The native Reed-Solomon pass, out here for the same reason. One caller
+// ([`fetch_and_repair`]), which binds it as a closure so its own three
+// call sites read as they did when the body lived there.
+use nativepass::native_repair_pass;
+
+mod volpayload;
+// L1 / M4-28's P1: the payload posted under a recovery VOLUME's name,
+// which no slot-indexed rescue in `get/settle.rs` can reach. Its own
+// file because the subject is self-contained (a screen, a fetch and a
+// content proof) and because this one is at its ceiling; one caller,
+// [`fetch_and_repair`], at the one moment the module header argues for.
+use volpayload::rescue_payload_posted_as_volume;
+
 mod sidefetch;
 // The side-fetch driver, its consumer and the two small helpers that
 // price a volume moved out whole (§129 residue 2). Re-exported rather
@@ -401,47 +434,726 @@ pub(crate) use sidefetch::{
     fetch_volumes, side_pool_servers, vol_count_from_name, volume_prealloc_cap, volume_reqs,
 };
 
-/// Why a PAR2 repair could not complete, when the reason is arithmetic
-/// about the RECOVERY SET rather than a bad byte anywhere.
-///
-/// The one class of repair failure whose numbers belong in the job's
-/// own fail message and not just the console: the user is owed which of
-/// the two halves of the post let them down, because the answers are
-/// opposite. `Blocks` means the poster shipped too little parity for
-/// the damage and no provider could have helped. `Unservable` means the
-/// parity is declared, is the right size, and this provider will not
-/// hand it over - the payload may be all but perfect (99.8% on the
-/// §282 incident), and an alternate source is the whole remedy.
-///
-/// Both spellings carry "repair could not complete", so both classify
-/// [`crate::failkind::FailKind::Unrepairable`]: transient enough for
-/// the one automatic retry, and hinting `search` rather than `retry`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RepairShortfall {
-    /// The NZB does not declare enough recovery blocks to cover the
-    /// damage, whatever the provider does.
-    Blocks { needed: usize, have: usize },
-    /// §282 item 4: the volumes are declared and the source will not
-    /// serve them. Carries the measured yield that said so.
-    Unservable(VolumeYield),
-}
+mod gridrefute;
+// The fourth arm of [`shortfall_is_final`], and the only one that is not
+// about finding more parity: it asks whether the arithmetic was ever
+// true, by taking the FileDesc whole-file MD5 of the members the live
+// grid names damaged. Out here because this file was the NARROWEST in
+// the repo when it landed; one caller, the chain in
+// [`shortfall_is_final`], and its pins stay beside the other three arms'
+// in `shortfall_gate_tests` because what they pin is the CHAIN.
+use gridrefute::whole_file_md5_refutes_the_grid;
 
-impl RepairShortfall {
-    /// The clause the job's fail message states this shortfall in, put
-    /// after "verification failed and PAR2 repair could not complete".
-    pub(crate) fn clause(&self) -> String {
-        match self {
-            RepairShortfall::Blocks { needed, have } => {
-                format!("{needed} recovery block(s) needed but the NZB only carries {have}")
-            }
-            RepairShortfall::Unservable(y) => format!(
-                "the recovery data for this post could not be fetched from your \
-                 provider ({}). The payload is not the problem here, so a different \
-                 source for the same release is what would fix it",
-                y.describe()
+mod shortfall;
+// The shortfall verdict and the two helpers that shape one: the type is
+// the whole of what `get::tail` turns into a user's fail message, and it
+// carries its own reasoning at length (why `have` is a PER-SET figure and
+// has to keep saying so). Out of line for the size gate, re-exported
+// rather than re-pathed so `use super::*` importers and every existing
+// call site stay valid.
+pub(crate) use shortfall::{
+    RepairShortfall, blocks_over_set, scope_to_post, skipped_samples_clause,
+};
+
+mod extpar2;
+// The external par2cmdline rung moved out whole: the decision to take
+// it, the invocation it builds, the run itself and the clear-up after.
+// Out here because this file was the NARROWEST in the repo when it
+// landed - 10 of the flat 3,000-line ceiling, with no `BASELINE_FILES`
+// entry to absorb it - and because the subject's call graph is closed:
+// its only ties back to this file are prose. Re-exported rather than
+// re-pathed so every existing call site and every `use super::*`
+// importer (`nativepass`, `repair_tests`, `shortfall_gate_tests`) reads
+// exactly as it did. `donor_extra_args` is deliberately NOT re-exported:
+// its one caller is `par2cmdline_invocation` beside it, and an unused
+// re-export is a warning.
+use extpar2::{
+    NarrowedNeed, NativeVerdict, adoption_narrowed_need, native_shortfall, par2cmdline_invocation,
+    publish_external_coverage,
+};
+pub(crate) use extpar2::{adopted_clause, run_external_par2};
+// `repair_tests` is the only thing outside `extpar2` that names these
+// two, so they are imported under the same cfg it is: an import no
+// production build reads is a warning, and this crate is built at
+// `-D warnings`.
+#[cfg(test)]
+use extpar2::{dir_entry_names, purge_par2_backups};
+
+/// Delete source files a repair report PROVED spent (byte-identical to
+/// a verified target, or its damaged twin - the spent_donors rules in
+/// par2repair.rs). The disk-fallback path has always swept these; the
+/// in-stream path left them lingering in finished jobs (finding F9's
+/// residue).
+pub(crate) fn sweep_spent_sources(spent: &[PathBuf]) {
+    // Sorted and deduped first, since X5-10 (31 Aug 2026): the callers
+    // that DEFER this - `fetch_and_repair` through `settle_with_set`,
+    // and the late-set pass's own fixpoint - accumulate one list across
+    // several sets, and two sets can prove the SAME donor spent. Without
+    // the dedupe the second unlink fails with ENOENT and warns "could
+    // not remove spent source" about a file this pass had just removed
+    // correctly. `settle`'s own disk-fallback sweep has always done
+    // exactly this, for exactly this reason.
+    let mut spent: Vec<&Path> = spent.iter().map(PathBuf::as_path).collect();
+    spent.sort_unstable();
+    spent.dedup();
+    // Through the SAME parked delete every other sweep on this tail uses
+    // (§64): `remove_swept_file` honours `cleanup_recoverable`, so a file
+    // this pass judged spent goes to the Trash when the user asked for
+    // recoverable cleanup and is only hard-unlinked when they did not.
+    // This path shipped as a bare `remove_file` (30 Aug 2026 sweep) while
+    // its own sibling - the disk-fallback sweep in `get/tail.rs` - was
+    // already recoverable, so which of the two ran decided whether the
+    // user could get the file back. `proven_spent` is a per-byte proof
+    // and not an infallible one; the recoverable path is what makes a
+    // wrong verdict survivable.
+    let recoverable = crate::smart::cleanup_recoverable();
+    let staging = spent
+        .first()
+        .and_then(|p| p.parent())
+        .and_then(crate::smart::trash_staging_dir);
+    let mut swept = 0usize;
+    for p in spent {
+        match crate::smart::remove_swept_file(p, recoverable, staging.as_deref()) {
+            Ok(_) => swept += 1,
+            Err(e) => warn!(
+                target: "repair",
+                "could not remove spent source {}: {e}",
+                p.display()
             ),
         }
     }
+    if swept > 0 {
+        info!(
+            target: "repair",
+            "removed {swept} spent source file(s) the repair adopted from{}",
+            if recoverable { " (to the Trash)" } else { "" }
+        );
+    }
+}
+
+/// Is a recovery-block shortfall FINAL, or is there something for the
+/// adoption scan to read first? §293: with a donor directory the
+/// arithmetic is never final - the scan can stand in for recovery
+/// blocks the NZB never declared, and only `repair_dir` can say how
+/// many it finds. The SAME reasoning covers the job's own directory
+/// (findings F7/F9, capability corpus 30 Aug 2026): an obfuscated post
+/// whose damaged-head or split-posted file never got claimed leaves
+/// the bytes sitting in out_dir under a hash name - measured 1984/1986
+/// blocks adoptable on the damaged-head leg and 993/994 on the
+/// split-join leg. Bailing on the declared-parity arithmetic alone
+/// failed posts that were byte-complete on disk. So the arithmetic is
+/// final only when there is nothing anywhere for adoption to read; a
+/// fall-through that still comes up short reports the (post-adoption)
+/// shortfall from the native verdict exactly as before.
+///
+/// THE THIRD ARM ([`repeated_block_donor_possible`]) IS ABOUT CLAIMED
+/// FILES, and it exists because sweep item 13 took a shape OUT of the
+/// two above. Before the twin tier (30 Aug 2026) a damaged
+/// identical-head twin stayed unclaimed and sat in out_dir under its
+/// posted hash, so it was an adoption candidate and this fell through;
+/// the tier now claims it on per-block evidence and the extractor
+/// renames it to the set's own name - and that file lands at the length
+/// its descriptor declares (damage from this pipeline is a HOLE, never a
+/// shift), so it is held out by the length screen
+/// [`adoption_candidates_present`] applies to a declared name. The engine
+/// has an arm for exactly that file - `repair_dir_set_inner`'s
+/// last-resort escalation appends every IDENTIFIED DAMAGED target as a
+/// scan candidate once damage exceeds the recovery on disk - and this
+/// gate is the only thing standing between the get path and it.
+///
+/// THE FOURTH ARM ([`whole_file_md5_refutes_the_grid`]) IS NOT A SCAN AT
+/// ALL, and it is here because `needed` is somebody's WORD. Every arm
+/// above asks whether more parity can be found; this one asks whether
+/// the arithmetic was ever true. `needed` comes from the live block
+/// grid, which is the set's own IFSC entries applied to the bytes on
+/// disk, and `verify_pass1` - the thing that answers `clean` from a
+/// FileDesc whole-file MD5 - runs only AFTER this returns. So a set
+/// whose entries lie about blocks of a byte-exact file fails the job on
+/// arithmetic the strongest evidence it carries would contradict
+/// (M4-69's mirror direction; measured 31 Aug 2026, half the IFSC CRC32
+/// entries forged over byte-exact bytes reports `1000/2000 blocks bad`
+/// against 400 carried and the job ENDS, with the payload byte-exact in
+/// the output directory).
+fn shortfall_is_final(
+    needed: usize,
+    have: usize,
+    donor_dirs: &[PathBuf],
+    out_dir: &Path,
+    set: &nzbkit::par2::Par2Set,
+    // The live grid's own damage claim, by FileDesc name - sanitized and
+    // lowercased, the key every coverage test on this path uses. The
+    // fourth arm's population, and the ONLY thing that keeps its cost
+    // proportional to the damage rather than to the download.
+    damaged: &[String],
+) -> bool {
+    // ONE chain, in cost order and evaluated lazily, so each arm both
+    // decides and names itself. Written as a chain rather than as bools
+    // ANDed into a guard because that shape put the cheap tests in front
+    // of the dear ones TWICE - once to decide and once to phrase - and a
+    // clause that only ever short-circuits another is a clause no
+    // mutation can kill (measured: dropping it changed no verdict and no
+    // log line).
+    //
+    // THE LAST TWO ARMS ARE COMPLEMENTS, not rivals, and landed within
+    // hours of each other from two lanes. `in_set_harvest_possible`
+    // (M4-01) is about a file that did NOT land - the split-and-join
+    // shape, where the join's every block is already on disk next door -
+    // and its own header names its stated limit: a beneficiary that
+    // landed at its declared length and is merely DAMAGED is counted as
+    // a source rather than as something to rescue.
+    // `repeated_block_donor_possible` (follow-up 13a) is exactly that
+    // limit, which is why it runs after: the twin tier now CLAIMS a
+    // damaged identical-head twin and renames it, so every member is
+    // landed, the M4-01 arm correctly declines on `landed.all()`, and
+    // the blocks the two share are still there to lift across. Both
+    // count against the SHORTFALL rather than merely detecting, and both
+    // lanes were driven to that by the same fixture.
+    let scanning = if !donor_dirs.is_empty() {
+        "the failed predecessor's files as donors"
+    } else if adoption_candidates_present(out_dir, set) {
+        "the job's own unclaimed files for their blocks"
+    } else if in_set_harvest_possible(out_dir, set, needed.saturating_sub(have)) {
+        "the set's own landed files for blocks the missing ones share"
+    } else if repeated_block_donor_possible(out_dir, set, needed.saturating_sub(have)) {
+        "the set's own files for the blocks it declares twice"
+    } else if whole_file_md5_refutes_the_grid(out_dir, set, damaged) {
+        "the set's own files against the whole-file MD5s their descriptors carry"
+    } else {
+        warn!(
+            target: "repair",
+            "unrepairable: {needed} blocks needed, only {have} recovery blocks in the NZB"
+        );
+        return true;
+    };
+    info!(
+        target: "repair",
+        "recovery short ({needed} blocks needed, {have} in the NZB) - \
+         scanning {scanning} before giving up"
+    );
+    false
+}
+
+/// Could the IN-SET harvest stand in for recovery blocks the NZB never
+/// declared? The other half of the question [`adoption_candidates_present`]
+/// asks, for bytes that gate cannot see by construction (M4-01, 30 Aug
+/// 2026).
+///
+/// One set may name a file AND the pieces it was split into -
+/// `Rawsplit.mkv.001`, `Rawsplit.mkv.002` AND `Rawsplit.mkv`. The halves
+/// land under their own FileDescs, so they are DECLARED names and the
+/// sibling gate skips them on purpose; the join is then a wholly missing
+/// file whose every block is already on disk next door. `par2repair`'s
+/// in-set harvest reads exactly those blocks, but only if the repair is
+/// allowed to run at all - and the declared-parity arithmetic on its own
+/// failed a post that was byte-complete on disk.
+///
+/// The signature comes out of packets already parsed plus one `stat` per
+/// declared name: slices of a file that did NOT land at its declared
+/// length whose block checksums a landed file also declares. `shortfall`
+/// is what the harvest would have to cover, and COUNTING rather than
+/// merely detecting is what keeps this honest: measured 30 Aug 2026, an
+/// ordinary three-volume RAR set with one volume lost already shares a
+/// handful of blocks between the lost volume and a landed one (padding,
+/// repeated headers), so a bare does-any-duplicate-exist test falls
+/// through on posts no harvest could ever save and turns every one of
+/// them into a wasted repair pass.
+///
+/// Permissive within that bound, on the same terms as its sibling: the
+/// count is an upper bound (some of those blocks are already present
+/// where they belong), so a false yes costs one repair pass that ends in
+/// the same honest post-adoption shortfall verdict with better numbers.
+/// A file that is ABSENT and byte-identical to a landed one is left out
+/// of the count: the harvest declines to materialize a duplicate
+/// descriptor, which is `land_duplicate_filedescs`' capped job (W4-14),
+/// so counting it would buy a repair pass that finds nothing.
+///
+/// One STATED limit: a beneficiary that landed at the right length and is
+/// merely DAMAGED is counted as a source rather than as something to
+/// rescue, so this gate does not open for it. `repair_dir`'s own
+/// escalation already scans identified damaged targets, and widening the
+/// rule here would put every set with a shared padding block back through
+/// a pointless repair.
+fn in_set_harvest_possible(out_dir: &Path, set: &nzbkit::par2::Par2Set, shortfall: usize) -> bool {
+    if shortfall == 0 {
+        return false;
+    }
+    let landed: Vec<bool> = set
+        .files
+        .iter()
+        .map(|f| {
+            std::fs::metadata(out_dir.join(nzbkit::disk::sanitize_out_name(&f.name)))
+                .is_ok_and(|m| m.is_file() && m.len() == f.length)
+        })
+        .collect();
+    if !landed.iter().any(|&l| l) || landed.iter().all(|&l| l) {
+        return false;
+    }
+    // Counted over SLICES of the unlanded files, not over distinct
+    // checksums: what the harvest can stand in for is one missing slice
+    // per slice it finds a source for, and a payload with repeated block
+    // content (the e2e fixtures' own generator makes 1000 slices out of
+    // 631 distinct blocks) would otherwise price its own rescue short.
+    let sources: std::collections::HashSet<(u32, [u8; 16])> = set
+        .files
+        .iter()
+        .zip(&landed)
+        .filter(|&(_, &l)| l)
+        .flat_map(|(f, _)| f.blocks.iter().map(|b| (b.crc32, b.md5)))
+        .collect();
+    // A file that is ABSENT and is a byte-for-byte clone of a landed one
+    // is a duplicate descriptor, whose materialization is capped by
+    // `land_duplicate_filedescs` (W4-14). The harvest declines those, so
+    // counting them here would open a repair pass that finds nothing.
+    let clones: std::collections::HashSet<(u64, [u8; 16])> = set
+        .files
+        .iter()
+        .zip(&landed)
+        .filter(|&(_, &l)| l)
+        .map(|(f, _)| (f.length, f.md5))
+        .collect();
+    let reachable = set
+        .files
+        .iter()
+        .zip(&landed)
+        .filter(|&(f, &l)| !l && !clones.contains(&(f.length, f.md5)))
+        .flat_map(|(f, _)| f.blocks.iter())
+        .filter(|b| sources.contains(&(b.crc32, b.md5)))
+        .count();
+    reachable >= shortfall
+}
+
+/// Could the sliding scan donate a block between files the repair has
+/// already IDENTIFIED - the case [`in_set_harvest_possible`] above names
+/// as its own stated limit, and the shape sweep item 13 created?
+/// Answered off the set's OWN block checksums, with no disk read at all:
+/// two blocks that declare the same (MD5, CRC32) are the same bytes, so
+/// a missing one can be served by whichever copy survived.
+///
+/// THE TWO ARE COMPLEMENTS and the chain in [`shortfall_is_final`] says
+/// why at length. The short version: that one is about a file that did
+/// NOT land, and declines outright once every member has
+/// (`landed.iter().all()`), which is exactly what the twin tier now
+/// produces - it CLAIMS a damaged identical-head twin and the extractor
+/// renames it, so every member is landed at its declared length and the
+/// blocks the twins share are still there to lift across.
+///
+/// MEASURED, both directions, 30 Aug 2026 (follow-up 13a; the probe is
+/// `research/TWIN-INPLACE-ADOPTION-2026-08-30.md`). Three two-file sets
+/// built from INDEPENDENT xorshift payloads - never `e2e.rs::payload`,
+/// whose seeds correlate at 84% of offsets and are what made a fixture
+/// look repairable on parity it never had (follow-up 13c) - sharing a
+/// head of 40000 / 16384 / 262144 bytes at block sizes 2000 / 65536 /
+/// 65536, each damaged in both members and posted short of parity. The
+/// blocks the repair actually adopted were 20 / 0 / 4; the count this
+/// predicate reports is 20 / 0 / 4. The identity is not luck - donation
+/// between identified targets IS "a missing block whose content the set
+/// declares somewhere else", and the middle row is the one to read: a
+/// 16 KiB shared head is what the twin tier GUARANTEES, and at any
+/// block size above it that guarantee is worth exactly nothing.
+///
+/// THE COUNT IS AN UPPER BOUND AND IS COMPARED AGAINST THE GAP, which
+/// is the second half of the narrowing and was not in the first cut.
+/// Aligned donation can supply at most one block per repeat, so a set
+/// that repeats 38 blocks can never close a 376-block shortfall - and
+/// asking it to try buys the whole recovery fetch for an answer that is
+/// arithmetically settled. Measured on
+/// `e2e::wholly_missing_volume_with_insufficient_recovery_fails_unchanged`,
+/// which is exactly that set (775 needed, 399 declared, 38 repeats) and
+/// which the countless first cut sent to a pointless fetch. The bound is
+/// the honest one to state: it is an upper bound on the ALIGNED
+/// donation this predicate is about, never a promise that the scan will
+/// find that many.
+///
+/// WHAT IT COSTS WHEN IT SAYS YES: one adoption scan of the files this
+/// job has just written - and it was one FULL recovery-volume fetch, of
+/// everything the NZB declares, until follow-up 13a-1 put the scan in
+/// front of the fetch hours after this predicate landed (repriced
+/// 31 Aug 2026 alongside the length screen in
+/// [`adoption_candidates_present`]; the scan is 0.4-3.4 s per GB of
+/// payload against 50-150 MB per GB of metered parity). That is still a
+/// cost worth a predicate rather than a plain permissive arm, and it is
+/// no longer the reason this one is narrow. WHAT IT COSTS WHEN IT SAYS
+/// NO: nothing, and that is the measurement that makes it affordable.
+/// Duplicate-block census over real data at real block sizes, same day:
+/// a compressed 12.5 MB three-volume set reports 0 duplicated blocks at
+/// every one of 4096 / 16384 / 384000 / 768000, and 196 MB of
+/// uncompressed real binaries reports 0 at 384000, 1 in 11967 at 16384,
+/// and 169 in 47862 (0.35%, of which 166 are all-zero blocks) at 4096.
+/// So on the ordinary post this arm is silent and the verdict is the
+/// one it always was.
+///
+/// A SECOND LIMIT, on the other side: this asks whether donation is
+/// POSSIBLE, never whether it will pay. A set that repeats a block but
+/// whose only damage is a member missing outright buys a fetch that
+/// finds nothing - the escalation scans identified DAMAGED targets, and
+/// an intact one is not a candidate at any tier. Which member is
+/// damaged is not a question this frame can answer (`needed` is a
+/// total), and the census that would make it sharp is the read this
+/// predicate exists to avoid. It is bounded twice over by what is
+/// already here: the gap comparison holds the guess to a shortfall the
+/// repeats could actually close, and the census above measures zero on
+/// every real corpus at every real block size, so the case does not
+/// arise on an ordinary post at all.
+///
+/// STATED LIMIT: aligned donation only. The scan SLIDES, so it can also
+/// lift a block out of a candidate at an offset no block grid names,
+/// and no census of declared checksums can see that. It is out of scope
+/// here rather than overlooked: the get path writes every article at
+/// its declared yEnc offset (`get/workers.rs` - `off` is `begin - 1`),
+/// so a missing article leaves a HOLE where its bytes belong and never
+/// shifts what follows - so DAMAGE cannot produce a file shifted inside
+/// itself, and this arm may ignore that shape.
+///
+/// A POSTING CAN, and this paragraph said it could not until follow-up
+/// 13a-4 measured it (31 Aug 2026). Both halves of the old sentence
+/// were wrong, and they were wrong in the direction that made the
+/// blind spot look empty: a poster who splices bytes into the MIDDLE of
+/// a payload the recovery set was built over lands a file that verifies
+/// its head - IDENTIFIED, not unidentified - with the rest of its
+/// content shifted inside itself, which is exactly what
+/// `par2repair::repair_dir_set_inner`'s last-resort escalation is for.
+/// Driven end to end in `e2e_norar::shiftname`. It is still not THIS
+/// arm's business, which is the only part that survives unchanged: the
+/// blocks are the member's OWN, so no declared repeat is involved and
+/// this census would report nothing whatever it looked at.
+/// [`adoption_candidates_present`] is what answers it, and until
+/// 13a-4 it did not - it excluded the file on the verified head.
+fn repeated_block_donor_possible(out_dir: &Path, set: &nzbkit::par2::Par2Set, gap: usize) -> bool {
+    if gap == 0 {
+        return false;
+    }
+    // Nothing to scan: the escalation reads FILES, so a set whose
+    // members never reached disk has no donor whatever it declares.
+    //
+    // ASKED THE WAY THE ENGINE ASKS IT, `join_out_name` onto `out_dir` -
+    // par2repair's own present-set gate and its `Target` paths are both
+    // built that way, on the rule that a FileDesc name is relative to
+    // the JOB. This compared `read_dir` BASENAMES until the 31 Aug 2026
+    // sweep's finding 3, and `sanitize_out_name` preserves a tree, so a
+    // disc post naming `VIDEO_TS/VTS_01_1.VOB` showed the walk one
+    // DIRECTORY entry, matched nothing, and answered a false no with
+    // every member one level down. The escalation never ran.
+    let any_member = set.files.iter().any(|f| {
+        let p = nzbkit::disk::join_out_name(out_dir, &nzbkit::disk::sanitize_out_name(&f.name));
+        std::fs::metadata(&p).is_ok_and(|m| m.is_file() && m.len() > 0)
+    });
+    if !any_member {
+        return false;
+    }
+    // The census itself. Already-parsed data, so this is a hash-set walk
+    // over the blocks and never a read - a 30 GB set at 384 KB blocks is
+    // ~78,000 sixteen-byte keys. A file with no IFSC packet contributes
+    // nothing and correctly cannot argue for a fetch.
+    let mut seen: std::collections::HashSet<([u8; 16], u32)> = std::collections::HashSet::new();
+    let mut repeated = 0usize;
+    for f in &set.files {
+        for b in &f.blocks {
+            if !seen.insert((b.md5, b.crc32)) {
+                repeated += 1;
+                if repeated >= gap {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Does the output directory hold at least one file the adoption scan
+/// could read blocks out of - a regular file that is neither recovery
+/// data nor one of this set's own files? The gate that decides
+/// whether a recovery-block shortfall is FINAL (findings F7/F9): an
+/// obfuscated post's unclaimed hash-named files carry the missing
+/// bytes, and `repair_dir`'s sliding scan is what ties them to the
+/// damage - but only if the repair is allowed to run at all. Permissive
+/// on purpose: a false yes costs one repair pass that ends in the same
+/// honest (post-adoption) shortfall verdict with better numbers; a
+/// false no is the F7/F9 class back again.
+///
+/// A DECLARED NAME IS NOT ONE OF THIS SET'S FILES, and until follow-up
+/// 13a-3 (31 Aug 2026) this gate treated the two as the same thing. The
+/// engine's own exclusion - `par2repair::adopt::adoption_candidates` -
+/// skips a target only when it is IDENTIFIED: it exists AND at least
+/// one of its blocks verified. `repair_dir_set_inner` names the gap in
+/// its own words ("missing, renamed, SHIFTED - nothing on disk
+/// verifies"). So a file wearing a name the set declares whose content
+/// answers to none of it is an ordinary adoption candidate TO THE
+/// ENGINE, and this gate excluding it by name alone was the only thing
+/// between the get path and a repair that works. It is not a corner:
+/// `nzbkit::live::nametier` already prints "arrived under the name
+/// {:?} but carries none of that file's bytes" and leaves the slot out
+/// of the set, so the product had ALREADY established the file is not
+/// the set's - and this gate then asked its name.
+///
+/// MEASURED (`e2e_norar::shiftname`, 31 Aug 2026): a 200,000-byte
+/// member posted with 3,000 bytes of furniture in front of it lands
+/// under its own honest name, verifies not one of its 100 blocks, and
+/// against the 10 recovery blocks the NZB carries this gate called
+/// 100-over-10 FINAL - with all 100 of those blocks sitting in that
+/// same file. Let through, the scan lifts every one of them and the
+/// file comes back byte-exact.
+///
+/// THE PRICE OF ASKING, which is why the question is asked in this
+/// order and no other. The cheap walk runs FIRST and unchanged, so the
+/// F7/F9 hash-named case costs exactly what it always did. Only when
+/// nothing cheaper has answered is a declared name asked at all, and
+/// only one whose ON-DISK LENGTH is not the descriptor's: a full-length
+/// file is not a shifted one, and probing every heavily damaged member
+/// of an unrepairable post is the read this exclusion existed to avoid.
+/// The probe itself is [`nzbkit::live::declared_block_evidence`] - the
+/// live name tier's own strong-evidence test, one copy of the rule,
+/// strided and bounded by both probe count and bytes. What it is asked
+/// for is `read > 0`: were there BYTES HERE TO READ. A member whose
+/// every article failed answers `(0, 0)`, which is silence and not
+/// evidence of anything, and it stays excluded - `settle_binding`'s
+/// rule, and the reason that door returns a pair rather than a boolean.
+///
+/// IT IS NOT ASKED WHETHER A BLOCK MATCHED, and it was until follow-up
+/// 13a-4 (31 Aug 2026). That rule - `read > 0 && hit == 0`, let through
+/// only on a POSITIVE DENIAL - reads a matched block as "this file is
+/// the set's own file, so the scan has nothing to find here". PAST THE
+/// LENGTH SCREEN THAT INFERENCE CANNOT HOLD: a file whose on-disk
+/// length is not its descriptor's can never be INTACT, whatever
+/// verifies inside it, so a hit there does not say "leave it alone", it
+/// says IDENTIFIED AND DAMAGED - which is the exact state
+/// `repair_dir_set_inner`'s last-resort escalation puts BACK into the
+/// scan ("a mid-file insertion leaves a file half-verified with the
+/// rest of its content byte-shifted inside itself; only a scan of that
+/// file can find it"). So `hit` carried no information at this seam and
+/// was excluding, by itself, the one shape the escalation exists for.
+/// 13a-3 fixed "excluded by NAME"; this is "excluded by ANY HIT", which
+/// was still narrower than the engine's own test.
+///
+/// MEASURED (`e2e_norar::shiftname`, 31 Aug 2026), and the shape is
+/// REACHABLE ON THIS PIPELINE rather than argued for: a 200,000-byte
+/// member posted with 3,000 bytes of furniture inserted at its
+/// MIDPOINT lands 203,000 bytes long, verify prices it `50/100 blocks
+/// bad`, and 50-over-10 was called FINAL with all 50 of those blocks
+/// sitting whole at +3,000 in that same file. Let through, the
+/// escalation lifts every one of them and the file comes back
+/// byte-exact - `0 block(s) rebuilt across 1 file(s), 50 block(s)
+/// adopted from Half.vob`.
+///
+/// IT COSTS NO I/O THAT THE OLD RULE DID NOT ALSO PAY. The probe walk
+/// is identical either way: a file with a hit stops at that block under
+/// both rules, and a file with none walks its 32-probe / 64 MB bound
+/// under both. What changed is only the verdict, and only for a
+/// declared name AT A WRONG LENGTH - so the ordinary failing job, whose
+/// every member lands at the length its descriptor declares (damage
+/// from this pipeline is a HOLE, never a shift), is excluded on the
+/// length screen at zero reads exactly as before. There is a cheaper
+/// form available and it is deliberately NOT taken here: asked only for
+/// `read > 0`, the probe could stop at the first block it SUCCEEDS in
+/// reading rather than at the first that matches, which would save the
+/// walk on a wrong-length file that matches nothing. That means a
+/// second `stop_early` shape in `twintier::probe_blocks`, which the
+/// twin tier shares, for a saving on a file that is already anomalous.
+///
+/// WHAT IS NOT ESTABLISHED, stated rather than left to be found: HOW
+/// OFTEN a real poster does this. The get path writes every article at
+/// its declared yEnc offset (`get/workers.rs` - `off` is `begin - 1`),
+/// so a shift cannot come from damage and has to be POSTED, and nothing
+/// in `research/`, in the capability corpus list or in the wave-4
+/// matrix describes a posted mid-file insertion - F7 and F9 measured
+/// shifted bytes in UNCLAIMED hash-named files, not in a declared name.
+/// What carries it instead is that the engine's escalation is PARITY
+/// code: par2cmdline has its own target scan for this shape, and
+/// `nzbkit`'s
+/// `integration::par2repair_parity::mid_file_insertion_escalates_to_target_scan`
+/// pins the two engines agreeing on it. The reference implementation
+/// having carried a scan for it for twenty years is the evidence that
+/// it happens; this gate was the only thing keeping our own copy of
+/// that scan off the get path.
+///
+/// STATED LIMIT: a shifted file at EXACTLY the declared length is not
+/// reached, because the length screen holds it out before the probe. It
+/// needs a poster to have both prefixed and truncated to the byte.
+///
+/// THE SCREEN WAS PRICED AGAINST A COST THAT NO LONGER EXISTS, and was
+/// REPRICED on 31 Aug 2026 rather than left standing on the old
+/// arithmetic (`research/ADOPTION-GATE-NAME-VS-IDENTIFIED-2026-08-31.md`,
+/// R-1). When it was written, a false yes here bought every recovery
+/// volume the NZB declares; follow-up 13a-1 (`e5e5faaef`) landed hours
+/// later and put the adoption scan in FRONT of the fetch, so a false
+/// yes now costs one scan of files this job has just written - 0.4-3.4 s
+/// per GB of payload against the 50-150 MB per GB of metered recovery
+/// data it used to spend. [`adoption_narrowed_need`]'s header says so
+/// from the other side and names this gate as one of three kept
+/// deliberately: they "are now asked only to be cheap, because the
+/// engine gets the last word". Measured on that lane's own rig (512 MB
+/// in four 128 MB members, real `par2 create -s786432`, 768 KB blocks,
+/// this dev Mac under other lanes' load):
+///
+/// * DROPPING THE SCREEN IS CHEAP ON THE ORDINARY FAILING JOB, so that
+///   is NOT why it stays. Four full-length truthful members cost 4
+///   probes, 3.15 MB, 5.8-6.5 ms - block 0 of each hits and it is
+///   excluded. Head-clustered damage costs more, because the probe
+///   walks until a block survives: per member, 40% -> 13 probes /
+///   10.2 MB, 90% -> 27 probes / 21.2 MB.
+/// * WHAT IT STAYS FOR IS A FALSE-YES SHAPE THIS PIPELINE PRODUCES. A
+///   member landing full length with every one of the 32 strided probe
+///   positions a hole reads blocks, matches none, and is a POSITIVE
+///   DENIAL. Measured threshold: between 98.0% and 98.5% head damage,
+///   which the ordinary "only the last article survived" post reaches.
+///   Without the screen the rig's four such members cost 116 probes /
+///   91.2 MB / 0.16 s AND then an engine scan of 0.72-1.71 s, for the
+///   verdict the arithmetic had already given. The screen holds that
+///   out for nothing.
+/// * A WHOLLY FAILED MEMBER IS NOT THAT SHAPE, checked rather than
+///   assumed: it is ABSENT from `out_dir`, never full length and
+///   zeroed. Verified end to end on `e2e_norar` - corrupt all 50
+///   articles of a member and no file is written at all; corrupt 49 of
+///   50 and it lands at its declared 200,000 bytes.
+/// * NOTHING IN THIS TREE EVIDENCES THE SHAPE THE LIMIT COSTS. The
+///   engine's OWN account of a shifted set is a MID-FILE INSERTION
+///   (`nzbkit::par2repair`'s module note), which leaves the file LONGER
+///   than its descriptor - so the screen lets that one through. It was
+///   the HIT RULE that then held it out, which is the defect follow-up
+///   13a-4 fixed above; the screen never touched it, and this bullet
+///   said the screen's limit was cheap because the hit rule was
+///   catching that shape. It was catching it and dropping it.
+///
+/// A THIRD OPTION WAS DERIVED AND NOT TAKEN, written down so the next
+/// lane does not re-derive it: read an all-zero NON-MATCHING block as
+/// SILENCE rather than as denial - `settle_binding`'s rule at BLOCK
+/// granularity, where the `(read, hit)` pair above applies it at FILE
+/// granularity.
+/// That kills the false-yes shape above (every probed block is a hole,
+/// so there was nothing to deny with) and would let the screen go. It
+/// costs the block reads above on every failing job, it changes
+/// `twintier::probe_blocks`, which the twin tier shares, and it buys a
+/// shape nothing has evidenced. `md5_16k` was the other candidate and
+/// is WORSE on its own: a head-damaged truthful member fails it, which
+/// is far commoner than either shape here.
+///
+/// The other stated cost is a real one and is the permissive trade this
+/// gate has always made: a foreign payload posted under a set member's
+/// name (W4-18) is indistinguishable from a shifted one to any ALIGNED
+/// probe - only the sliding scan can tell them apart, and that is the
+/// scan being reached for - so such a job pays one adoption scan before
+/// reporting the same honest shortfall. Follow-up 13a-1 is what took
+/// that from every declared recovery volume down to the scan.
+/// THE WALK REACHES A TREE, and it is the ENGINE's own walk it borrows
+/// to do it (`par2repair::source_candidate_files`). This block argued
+/// the top-level walk was DELIBERATE, and it was right to: this gate
+/// predicts what `par2repair::adopt::adoption_candidates` finds, and
+/// THAT walk had no recursion, so answering true on a tree bought a
+/// whole adoption scan for a verdict the arithmetic had already given.
+/// Wave-4 row X6-02 ended that on 31 Aug 2026 and the two halves landed
+/// HOURS APART, so for those hours this answered NO where the engine
+/// would have found a candidate - and that NO is not a wasted scan, it
+/// is one arm of [`shortfall_is_final`]: when every arm declines,
+/// `fetch_and_repair` takes the give-up branch and can `return
+/// Ok(false)` WITHOUT reaching [`adoption_narrowed_need`], whose native
+/// probe is the thing that would now find the bytes.
+///
+/// It is not the one-line symmetry it looks like, which is why the
+/// engine lane left it: the name test compared a BASENAME against
+/// `sanitize_out_name`, and that carries a DIRECTORY under the relpath
+/// ruling - so a tree candidate would read as undeclared and return
+/// true for the wrong reason, on a file the set declares. It asks
+/// `disk::out_name_of` now, exactly as `adopt::is_somebodys_payload`
+/// does, and the dot screen stays on the LEAF so it goes on meaning
+/// "a hidden file". A predicate that walks a different set from the
+/// walk it predicts is worse than no predicate; the two share one
+/// function so they cannot part again. Its sibling
+/// [`repeated_block_donor_possible`] resolves a set MEMBER through
+/// `join_out_name` and has seen a tree since the same day; all three
+/// now ask the directory one question.
+///
+/// AND THE RECOVERY SCREEN IS THE ENGINE'S OWN PREDICATE, not a second
+/// spelling of it (31 Aug 2026). This screened a `.par2` name on the
+/// EXTENSION ALONE, which is a NAME deciding what a file IS - exactly
+/// the rule wave-4 row M4-52 ended at the engine, where
+/// `par2repair::is_recovery_by_name_and_content` opens the file and
+/// lets the packet magic decide. The row's own composition is what the
+/// divergence costs: an obfuscated post whose payload carries a yEnc
+/// `name=` of `<hash>.par2`, so the in-stream set never claims it and
+/// the inner set naming `movie.mkv` never activated. If the only
+/// undeclared files in the directory are that payload and the real
+/// recovery volumes, EVERY entry hit the extension screen, this
+/// answered NO, and that NO is an arm of [`shortfall_is_final`] -
+/// `fetch_and_repair` then takes the give-up branch and can `return
+/// Ok(false)` without ever reaching [`adoption_narrowed_need`], whose
+/// native probe is the thing that would have found the bytes sitting in
+/// the same directory. Same defect as the walk above, one screen over,
+/// and the same fix: the predicate is SHARED, so the two cannot part
+/// again. Writing a second copy here is what M4-52 cost in the first
+/// place - it was live at two seams and fixable at one.
+///
+/// WHAT THE READ COSTS, measured rather than asserted, because this
+/// gate exists to avoid buying a scan for a verdict the arithmetic
+/// already gave and a screen that opens files is not free by
+/// inspection. One `open` plus an 8-byte `read`, asked only of names
+/// carrying the extension and only after the free dot test: 8.1-10.7 us
+/// per file on this box's APFS volume, so 0.24-0.32 ms for a set with
+/// 30 recovery volumes. That is 4-6x the `read_dir` + `metadata` walk
+/// this rides on (41-73 us for the same 30) and about 0.02-0.04% of the
+/// 0.72-1.71 s adoption scan a wrong YES buys - and the engine pays the
+/// identical reads moments later on the same warm inodes. The shape is
+/// metadata plus one cache line, never file DATA, so a cold spinning
+/// disk or a network share scales it by seek latency and not by set
+/// size.
+///
+/// THE DOT HALF IS DELIBERATELY LEFT NARROWER THAN THE ENGINE, which
+/// has no dot screen at all. It is not the same divergence: this gate
+/// predicts the engine's OUTCOME, not its candidate list, and the
+/// dotted files a download directory really holds are the ones we did
+/// NOT write - the daemon's own `.nzbfast.journal` and `.nzbfast-*`
+/// scratch (`nzbkit::disk::hide_from_user` makes the leading dot the
+/// internal-name convention) and the OS's `.DS_Store` furniture. The
+/// engine would take those as candidates and slide-scan them to no
+/// effect, so skipping them predicts the right answer cheaply, where
+/// skipping a `.par2` payload predicted the wrong one. What makes it
+/// SOUND is a property of a different function, and it is pinned rather
+/// than assumed: `nzbkit::disk::sanitize_out_name` maps a leading dot
+/// to `_` (row M4-66), so no name this job can publish reaches disk
+/// wearing one. `get::latesets`'
+/// `the_dot_skip_is_sound_only_while_nothing_we_publish_can_be_dotted`
+/// is the interlock that goes red if that ever stops holding, and its
+/// note carries the fix for this seam too: skip the names WE write,
+/// never every dotted name.
+pub(crate) fn adoption_candidates_present(out_dir: &Path, set: &nzbkit::par2::Par2Set) -> bool {
+    let declared: std::collections::HashMap<String, &nzbkit::par2::Par2File> = set
+        .files
+        .iter()
+        .map(|f| (nzbkit::disk::sanitize_out_name(&f.name).to_lowercase(), f))
+        .collect();
+    let Ok(files) = nzbkit::par2repair::source_candidate_files(out_dir) else {
+        return false;
+    };
+    // Deferred, never decided in the walk: the expensive question is
+    // asked only of the files nothing cheaper spoke for, and only once
+    // the whole directory has failed to produce an ordinary candidate.
+    let mut wearing_a_declared_name: Vec<(PathBuf, u64, &nzbkit::par2::Par2File)> = Vec::new();
+    for (p, len) in files {
+        // The declared name is the JOB-relative one, the way the engine
+        // resolves a target; the dot screen is about a hidden FILE, so
+        // it stays on the leaf and means what it always meant.
+        let name = nzbkit::disk::out_name_of(out_dir, &p);
+        let leaf = p.file_name().unwrap_or_default().to_string_lossy();
+        // The dot test is free and runs first; the recovery test opens
+        // the file, so it is asked only of what survives. Both are
+        // argued in the header - the second is the engine's own.
+        if leaf.starts_with('.') || nzbkit::par2repair::is_recovery_by_name_and_content(&p) {
+            continue;
+        }
+        match declared.get(&name.to_lowercase()) {
+            Some(f) => wearing_a_declared_name.push((p, len, f)),
+            None => return true,
+        }
+    }
+    let bs = set.block_size as usize;
+    wearing_a_declared_name.into_iter().any(|(p, len, f)| {
+        if len == f.length {
+            return false;
+        }
+        // `hit` is deliberately unread - see the header. Past the
+        // length screen a match cannot mean intact, only identified
+        // and damaged, which is what the engine's escalation scans.
+        let (read, _) = nzbkit::live::declared_block_evidence(&p, f, bs);
+        read > 0
+    })
 }
 
 /// Candidate recovery volumes of the NZB: (file idx, declared slices,
@@ -449,8 +1161,14 @@ impl RepairShortfall {
 /// `sniffed_vols` are file indexes classified as recovery data by the
 /// in-stream magic sniff (issue #14) - subject-line classification cannot
 /// see them, but their deferred bytes are just as fetchable.
+///
+/// `out_dir` is read for this set's own PAR2 indexes and nothing else -
+/// see [`index_bases_on_disk`]. A directory that does not exist, or
+/// holds no index of this set, leaves every verdict below exactly where
+/// it was.
 pub(crate) fn recovery_candidates(
     nzb: &Nzb,
+    out_dir: &Path,
     set: &nzbkit::par2::Par2Set,
     already_fetched: &[usize],
     sniffed_vols: &[usize],
@@ -483,6 +1201,9 @@ pub(crate) fn recovery_candidates(
     // `e2e_multiset` - is that a per-file-set post cannot repair at all.
     let mut vols: Vec<(usize, usize, u64)> = Vec::new();
     let mut affine: Vec<bool> = Vec::new();
+    // Kept whatever the affine filter decides - see the sniff paragraph
+    // in the loop below. Parallel to `vols` and `affine`.
+    let mut sniffed: Vec<bool> = Vec::new();
     // `track01.bin` -> `track01`, and the full name too: par2cmdline
     // writes `track01.bin.vol00+01.par2` by default and
     // `track01.vol00+01.par2` when given an explicit base.
@@ -545,37 +1266,102 @@ pub(crate) fn recovery_candidates(
     // its last extension - both of which are in `stems` - and the only
     // guard available at this altitude is a second prefix tier, which
     // would restore the very collision above.
-    let base_is_affine = |lower: &str| {
-        nzbkit::nzb::par2_vol_suffix(lower)
-            .is_some_and(|at| stems.iter().any(|st| st.as_str() == &lower[..at]))
+    //
+    // The offset comes off the file's OWN classification rather than
+    // from a second call to the public `par2_vol_suffix`, which is the
+    // raw-subject rule whatever the kind was decided under (T2, 31 Aug
+    // 2026). At THIS site the two cannot currently disagree - the
+    // isolated rule accepts a strict subset of the raw one, and the
+    // loop below only ever asks about a file `kind()` already called a
+    // volume, so an isolated `Some` implies the same raw `Some` - but
+    // it is the same rule written a second time, which is what put
+    // N6-04 and N6-05 live in two places apiece. `SubjectClass` is
+    // where it lives now.
+    // THE INDEX BASES JOIN THE STEMS AS A UNION, 31 Aug 2026, and both
+    // halves of that are the decision rather than the default. They are
+    // a union because the two answer the same question from opposite
+    // ends and neither subsumes the other: a base read off an index of
+    // THIS set is proof (the bytes carry the set id), where a stem is a
+    // guess about what a poster called the volume, and a post whose
+    // index never reached disk still has nothing but the stem. And they
+    // are a union rather than a replacement because the index rule can
+    // only ever ADD - so no volume this function reached yesterday
+    // becomes unreachable by a name it still matches.
+    //
+    // WHAT IT COLLECTS is the shape the stems provably cannot see, and
+    // it is the shape the pin
+    // `e2e_multiset::a_release_named_multi_set_post_never_greens_over_a_holed_file`
+    // exists for: `par2 create cd1.par2 track01.bin` names the volumes
+    // after the RELEASE and the FileDesc after the PAYLOAD, so every
+    // stem here is `track01.bin` and every volume base is `cd1` - no
+    // stem matches anything, the none-affine fallback fires by design,
+    // and each of the three sets is handed all three sets' parity.
+    // Re-measured on this tree 31 Aug 2026 through this very function:
+    // six candidates in, all six back. With `cd1.par2` on disk, `cd1`
+    // is affine by proof, the filter arms, and the other two sets'
+    // volumes are not bought.
+    //
+    // WHAT IT DOES NOT COVER, stated rather than left to be found: a
+    // volume renamed away from BOTH its own index base and this set's
+    // payload names. Nothing on disk or in the NZB ties such a name to
+    // a set, and the only thing that could is the per-candidate article
+    // probe - priced at 2.7x to 5.3x the purchase it guards and refused
+    // (`research/VOLUME-ATTRIBUTION-PRICE-2026-08-31.md`). Where this
+    // set's index IS resolvable and such a volume exists it is now
+    // filtered out where the fallback used to hand it back; that is the
+    // same residual trade the stems arm already states two paragraphs
+    // up, and it is bounded the same way - the escalation re-asks, so
+    // the cost is wire and not an unrepaired job.
+    let index_bases = index_bases_on_disk(out_dir, set);
+    let base_is_affine = |class: &nzbkit::nzb::SubjectClass<'_>| {
+        class.vol_suffix().is_some_and(|at| {
+            let base = class.name()[..at].to_ascii_lowercase();
+            index_bases.iter().any(|b| b.as_str() == base)
+                || stems.iter().any(|st| st.as_str() == base)
+        })
     };
     for (fi, f) in nzb.files.iter().enumerate() {
-        if (f.kind() != FileKind::Par2Volume && !sniffed_vols.contains(&fi))
+        let class = f.classify();
+        if (class.kind() != FileKind::Par2Volume && !sniffed_vols.contains(&fi))
             || already_fetched.contains(&fi)
         {
             continue;
         }
-        let name = f.filename_hint().unwrap_or(&f.subject);
         // A SNIFFED volume is recovery data identified by packet magic,
         // not by name - an obfuscated post's volume is a hash - so it
         // can never be affine to anything and must never be filtered
-        // out by a decision made about names. It counts as affine to
-        // every set, which leaves it exactly as reachable as it was.
-        let lower = name.to_ascii_lowercase();
-        affine.push(sniffed_vols.contains(&fi) || base_is_affine(&lower));
+        // out by a decision made about names.
+        //
+        // KEPT SEPARATELY rather than counted affine, since the 31 Aug
+        // 2026 sweep's finding 8. Counting it affine did leave the
+        // sniffed volume as reachable as it was - and ARMED the filter
+        // for the whole set, the half the old comment missed. Where no
+        // NAME is affine the fallback hands a set every candidate there
+        // is (`cd1.vol...` against a FileDesc `track01.bin`,
+        // `e2e_multiset`'s own shape); one sniffed volume anywhere in
+        // the NZB took the filter branch instead and dropped every named
+        // volume with it.
+        sniffed.push(sniffed_vols.contains(&fi));
+        affine.push(base_is_affine(&class));
         // Blocks are block_size + ~100 bytes of packet overhead each,
         // yEnc ~2% inflation. Shared with pre-flight, which needs the
         // identical arithmetic to size a `.vol-NN.par2` budget and must
         // not grow a second answer to it (nzbkit::par2).
+        //
+        // The ESTIMATE is only reached when the name declares nothing.
+        // Where it declares a count, [`credited_blocks`] holds that
+        // count down to what the volume's bytes could carry - see its
+        // module header for why a name alone is not evidence, and why
+        // the ceiling can never bite an honest volume of this set.
         let est = nzbkit::par2::est_recovery_blocks(f.bytes(), set.block_size);
-        let count = vol_count_from_name(name).unwrap_or(est.max(1));
+        let count = credited_blocks(class.name(), f.bytes(), set.block_size).unwrap_or(est.max(1));
         vols.push((fi, count, f.bytes()));
     }
     if affine.iter().any(|&a| a) {
         return vols
             .into_iter()
-            .zip(affine)
-            .filter(|(_, a)| *a)
+            .zip(affine.into_iter().zip(sniffed))
+            .filter(|(_, (a, s))| *a || *s)
             .map(|(v, _)| v)
             .collect();
     }
@@ -750,6 +1536,13 @@ pub(crate) async fn try_mapped_repair(
     buf_pool: Arc<nzbkit::pool::BufPool>,
     extractor: &nzbkit::extract::Extractor,
     reports: &[(usize, nzbkit::live::SlotReport)],
+    // Which slot belongs to which adopted set (`LiveVerifier::slot_sets`)
+    // and WHICH of them this call repairs - the scope
+    // `plan_mapped_repair` needs before it resolves a report by NAME.
+    // `None` where no verifier stands behind the call (the unit rigs, a
+    // single-set world by construction); the guard at that function's
+    // report lookup says what a shared list costs without it.
+    set_scope: Option<(&[Option<usize>], usize)>,
     missing_files: &[String],
     // Filled, on success only, with the par2 names this call recreated
     // WHOLE from parity. `repair_mapped` whole-file-MD5s every file it
@@ -790,176 +1583,23 @@ pub(crate) async fn try_mapped_repair(
     // recovery fetch below - see [`crate::lanegate::HeavyCpu`].
     cpu: &mut crate::lanegate::HeavyCpu,
 ) -> Result<bool> {
-    use nzbkit::par2repair::{MAX_INPUT_SLICES, MAX_REPAIR_DIM, VolumeIo, repair_mapped_catalog};
-    // Gate: every set file must be one of
-    //  - verified/damaged with a sane ledger, DAMAGED only if mapped or
-    //    plain-patchable (a clean plain file was always fine - read_at
-    //    serves it from its writer; a DAMAGED one now patches in place
-    //    through the same writer, TODO 160);
-    //  - wholly missing (unclaimed, or claimed with every block bad and
-    //    not a byte on hand) - rebuilt from parity and FED through the
-    //    normal arrival path.
+    use nzbkit::par2repair::{VolumeIo, repair_mapped_catalog};
     let bs = set.block_size as usize;
-    let mut files: Vec<(nzbkit::par2::Par2File, Vec<bool>)> = Vec::with_capacity(set.files.len());
-    // Slot per set file; None = a fresh slot, allocated only after
-    // every cheap decline below so a declined call leaves no stray
-    // slots in the extractor.
-    let mut slot_of: Vec<Option<usize>> = Vec::with_capacity(set.files.len());
-    // Some((par2 name, length)) = this file's reconstructed spans FEED
-    // through `Extractor::write_repair` instead of `patch_volume_span`.
-    let mut feed: Vec<Option<(String, u64)>> = Vec::with_capacity(set.files.len());
-    let mut total_slices = 0usize;
-    let mut missing_slices = 0usize;
-    let mut recreated = 0usize;
-    // Chased slots this call intends to patch in place - re-read for
-    // the conflict verdict once every rebuilt block has landed.
-    let mut chased: Vec<usize> = Vec::new();
-    // The same slots with the END of their damage, for the TODO 278
-    // ordering hook below. A repair only trips the conflict when it
-    // rewrites a byte the decode has already READ, so the hook needs to
-    // know which byte to wait for, and this is the only place that
-    // knows: `r.bad_blocks` and the set's block size are both in scope
-    // here and neither survives into the patch.
-    let mut chased_damage: Vec<(usize, u64)> = Vec::new();
-    // EVERY slot this call intends to patch in place, chased or not.
-    // Each was Rar / Plain / RarChase when the gate below passed it -
-    // `is_mapped`, `is_plain_patchable` and `is_chase_patchable` match
-    // nothing else - so any of them reading `demoted_to_disk` after the
-    // patch demoted DURING it, which deleted the group's extracted
-    // output. Same post-check discipline as `chased`, one question
-    // wider; see the verdict block after `repair_mapped_catalog`.
-    let mut in_place: Vec<usize> = Vec::new();
-    for f in &set.files {
-        let n = f.length.div_ceil(set.block_size) as usize;
-        total_slices += n;
-        match reports
-            .iter()
-            .find(|(_, r)| r.par2_name.as_deref() == Some(f.name.as_str()))
-        {
-            Some((sidx, r)) => {
-                if r.total_blocks != n || r.bad_blocks.iter().any(|&b| b >= n) {
-                    return Ok(false);
-                }
-                // A claimed slot with every block bad and ZERO bytes on
-                // hand (a resume-seeded name whose refetch all failed)
-                // is a whole-file loss, not damage: nothing to patch
-                // through, everything to feed.
-                let wholly_missing = n > 0
-                    && r.bad_blocks.len() == n
-                    && !extractor.is_mapped(*sidx)
-                    && extractor.covered_intervals(*sidx, 0, f.length).is_empty();
-                if wholly_missing {
-                    recreated += 1;
-                    feed.push(Some((f.name.clone(), f.length)));
-                } else {
-                    // Damage patches in place through the slot's own
-                    // byte view: the block→payload mapping for a mapped
-                    // volume, the output writer for a plain file. Any
-                    // other shape - above all a CHASE, whose frontier
-                    // buffer cannot take a rewrite - declines the whole
-                    // call to the materialize path. A plain file is the
-                    // TODO 160 admission: without it, one bad article
-                    // in a plain set member demoted every chased volume
-                    // beside it to disk and re-extracted them.
-                    //
-                    if !r.bad_blocks.is_empty() && !extractor.is_mapped(*sidx) {
-                        let plain_ok = extractor.is_plain_patchable(*sidx)
-                            && plain_patch_keeps_sniff(&r.bad_blocks, bs);
-                        // Shape-coverage row 26: a CHASED volume can
-                        // take the rewrite too, straight into its
-                        // frontier buffer, which is what keeps a damaged
-                        // COMPRESSED set off the three-write disk route
-                        // (measured 22 Aug 2026 at 3.05x of payload
-                        // in device I/O against 1.03x for the same
-                        // damage on a store set, and re-measured the
-                        // same day at 2.03x with this route taken).
-                        // DEFAULT ON since that round; the escape
-                        // hatch is `NZBFAST_NO_CHASE_REPAIR=1` - see
-                        // `chase_repair_on`.
-                        let chase_ok = chase_repair_on() && extractor.is_chase_patchable(*sidx);
-                        if !plain_ok && !chase_ok {
-                            return Ok(false);
-                        }
-                        if chase_ok {
-                            chased.push(*sidx);
-                            // Past the LAST bad block, clipped to the
-                            // file: a decode that has read that far has
-                            // read every byte this repair will rewrite,
-                            // so the conflict is settled rather than
-                            // still in flight.
-                            let last = r.bad_blocks.iter().copied().max().unwrap_or(0);
-                            let end = ((last as u64 + 1) * set.block_size).min(f.length);
-                            chased_damage.push((*sidx, end));
-                        }
-                    }
-                    if !r.bad_blocks.is_empty() {
-                        in_place.push(*sidx);
-                    }
-                    feed.push(None);
-                }
-                missing_slices += r.bad_blocks.len();
-                let mut present = vec![true; n];
-                for &b in &r.bad_blocks {
-                    present[b] = false;
-                }
-                files.push((f.clone(), present));
-                slot_of.push(Some(*sidx));
-            }
-            None => {
-                // No slot claimed this file: a par-only post's target,
-                // or a posted file whose every article vanished before
-                // a name could be learned. Recreate it from parity -
-                // with guard rails, since FileDesc name/length are
-                // attacker-influenced input reaching a new consumer:
-                //  - only files the census actually declared missing;
-                //  - no zero-length targets (the disk path makes empty
-                //    files; a fed slot with no writes would "verify"
-                //    without ever creating one);
-                //  - an internally consistent set (IFSC count must
-                //    match the declared length);
-                //  - posted wins: never a second slot for a name some
-                //    output writer or chased slot already carries.
-                if !missing_files.iter().any(|m| m == &f.name) {
-                    return Ok(false);
-                }
-                if f.length == 0 {
-                    return Ok(false);
-                }
-                if !f.blocks.is_empty() && f.blocks.len() != n {
-                    return Ok(false);
-                }
-                if !extractor
-                    .map_output_range(&nzbkit::disk::sanitize_filename(&f.name), 0, 1)
-                    .is_empty()
-                {
-                    return Ok(false);
-                }
-                recreated += 1;
-                missing_slices += n;
-                // The bomb check below runs AFTER this loop, but the
-                // allocation is here: `n` comes from a FileDesc length
-                // this set declares, and the IFSC cross-check above is
-                // skipped when no IFSC packet survived parsing, so a
-                // declared length alone can size this vector. Refuse at
-                // the same ceiling before reserving anything.
-                if missing_slices > MAX_REPAIR_DIM {
-                    return Ok(false);
-                }
-                feed.push(Some((f.name.clone(), f.length)));
-                files.push((f.clone(), vec![false; n]));
-                slot_of.push(None);
-            }
-        }
-    }
-    // Anti-preallocation-bomb: refuse counts the repair math could
-    // never satisfy anyway (a 64 GiB FileDesc over 4 KiB blocks is 16M
-    // slices against a 32768-slice format) BEFORE allocating anything.
-    if recreated > MAX_RECREATED_FILES
-        || total_slices > MAX_INPUT_SLICES
-        || missing_slices > MAX_REPAIR_DIM
-    {
-        return Ok(false);
-    }
+    // Every set file classified, or a decline - see [`plan_mapped_repair`],
+    // which went out of line on 31 Aug 2026, when this function sat at 469
+    // of the size gate's 500-line ceiling.
+    let MappedPlan {
+        files,
+        slot_of,
+        feed,
+        recreated,
+        chased,
+        chased_damage,
+        in_place,
+    } = match plan_mapped_repair(set, bs, extractor, reports, missing_files, set_scope) {
+        Some(p) => p,
+        None => return Ok(false),
+    };
 
     // Exact-fit recovery fetch - same knapsack + margin as the disk path.
     // Article failures from that fetch, kept for the decline message
@@ -971,15 +1611,26 @@ pub(crate) async fn try_mapped_repair(
     let mut fetch_failures = 0usize;
     let fetched_files: Vec<usize>;
     if needed > 0 {
-        let vols = recovery_candidates(nzb, set, already_fetched, sniffed_vols);
-        let have: usize = vols.iter().map(|v| v.1).sum();
+        let vols = recovery_candidates(nzb, out_dir, set, already_fetched, sniffed_vols);
+        // Saturating folds, not `sum()`: every figure summed here comes
+        // off the wire and `sum()` is a plain `+` that panics under
+        // overflow-checks and wraps in a release build (X5-16, whose
+        // seam is `pick_volumes` below - these are the same values one
+        // frame out). `have` gates a refusal and a wrapped one lets an
+        // unrepairable post through; the two totals below only reach a
+        // log line, where a wrapped figure is merely a lie.
+        let have: usize = vols.iter().fold(0usize, |a, v| a.saturating_add(v.1));
         if have < needed {
             return Ok(false); // the disk path prints the unrepairable warning
         }
-        let target = (needed + (needed / 10).max(2)).min(have);
+        let target = needed.saturating_add((needed / 10).max(2)).min(have);
         let chosen = pick_volumes(&vols, target);
-        let dl_bytes: u64 = chosen.iter().map(|&i| vols[i].2).sum();
-        let dl_blocks: usize = chosen.iter().map(|&i| vols[i].1).sum();
+        let dl_bytes: u64 = chosen
+            .iter()
+            .fold(0u64, |a, &i| a.saturating_add(vols[i].2));
+        let dl_blocks: usize = chosen
+            .iter()
+            .fold(0usize, |a, &i| a.saturating_add(vols[i].1));
         info!(
             target: "repair",
             "need {needed} block(s) → fetching {} volume(s), {} block(s), {:.1} MB",
@@ -1202,312 +1853,6 @@ pub(crate) async fn try_mapped_repair(
     }
 }
 
-/// Run the external par2 binary over `out_dir` with OUR handles released.
-///
-/// par2cmdline 0.8.1 opens every target and every extra file with no
-/// sharing, so a handle we still hold makes its open fail - and it does not
-/// treat that as an error to report, it treats the file as ABSENT. Measured
-/// on Windows before this parked anything, on a set with one corrupt article:
-///
-/// ```text
-/// Could not open ".\testset.par2": ...used by another process.
-/// Could not open ".\payload.bin":  ...used by another process.
-/// Target: "payload.bin" - missing.
-/// Repair is required. Repair is not possible.
-/// You need 1600 more recovery blocks to be able to repair.
-/// ```
-///
-/// A whole-file "missing" verdict needs the entire file's worth of recovery
-/// blocks, so the fallback could never repair anything on Windows no matter
-/// how much recovery the poster shipped. Unix does not enforce sharing, which
-/// is why this went unnoticed until the suite first ran on Windows.
-///
-/// The VERSION is part of that claim and the paragraph above used to state
-/// it flat. Measured on x86-64 Windows 11, 22 Aug 2026, holding a reader
-/// handle across a repair: 0.8.1 fails as above, 1.2.0 and 1.3.0 both repair
-/// fine. So the park is no longer load-bearing on a current par2 - and it
-/// stays anyway, because a Windows user runs whatever par2 they installed.
-/// The full matrix is in `nzbfast/tests/integration/stream_repair.rs`,
-/// which drives this function for real. What does NOT vary across those
-/// three: none of them repairs in place, all rename the damaged target
-/// aside (see `purge_par2_backups`).
-///
-/// The writers are unparked on EVERY path - including a failed park and a
-/// failed spawn - because `finish()` still has to settle groups, verify inner
-/// CRCs and run the decrypt pass through these same writers. Returning early
-/// from a half-parked extractor would instead fail each of those writes one by
-/// one, a long way from the cause.
-///
-/// The two failure kinds are kept apart deliberately. The OUTER result is a
-/// handle-discipline failure and aborts the job: a park failure is a SYNC
-/// failure (buffered pwrites never reached disk, so par2 would "repair"
-/// against a stale file and overwrite bytes we were about to land), and an
-/// unpark failure means our own outputs are no longer openable. Neither is
-/// something to continue past. The INNER result is just "did the tool run",
-/// which the caller already handles - a missing par2 binary is an ordinary
-/// outcome here, and folding it in with the above would report a broken sync
-/// as "no par2 installed".
-pub(crate) fn run_external_par2(
-    par2_bin: &std::path::Path,
-    par2_arg: &std::path::Path,
-    extra_args: &[std::path::PathBuf],
-    out_dir: &std::path::Path,
-    // (name, length) of every file the recovery set declares - the repair
-    // targets, and so the only names whose `.N` siblings may be purged
-    // below. Read for its names only; the caller already has this vector
-    // for `publish_external_coverage`.
-    targets: &[(String, u64)],
-    extractor: &nzbkit::extract::Extractor,
-) -> Result<std::io::Result<std::process::ExitStatus>> {
-    // Taken before the child runs, and the whole reason the purge below
-    // can be safe: it names exactly the backups par2 made THIS run.
-    let before = dir_entry_names(out_dir);
-    if before.is_none() {
-        warn!(target: "repair", "could not snapshot {} before the external repair - its backups stay", out_dir.display());
-    }
-    let parked = extractor.park_outputs_for_repair();
-    let status = parked.is_ok().then(|| {
-        std::process::Command::new(par2_bin)
-            .arg("repair")
-            .arg("-q")
-            .arg(par2_arg)
-            .args(extra_args)
-            .current_dir(out_dir)
-            .status()
-    });
-    // Unconditional, and BEFORE either `?` below.
-    let unparked = extractor.unpark_outputs();
-    parked.context("releasing our output handles for the external par2")?;
-    unparked.context("reopening our output handles after the external par2")?;
-    let status = status.expect("status is Some whenever the park succeeded");
-    if let Some(before) = &before
-        && matches!(&status, Ok(st) if st.success())
-    {
-        purge_par2_backups(out_dir, targets, before);
-    }
-    Ok(status)
-}
-
-/// File names directly in `dir`, or `None` when the directory or ANY
-/// entry could not be read. The purge treats a name absent from this
-/// set as par2's new backup, so a partial snapshot would make every
-/// pre-existing `<target>.N` look new and delete it (22 Aug 2026, Codex
-/// F-06): an incomplete snapshot therefore disables the purge instead.
-fn dir_entry_names(dir: &std::path::Path) -> Option<std::collections::HashSet<std::ffi::OsString>> {
-    std::fs::read_dir(dir)
-        .ok()?
-        .map(|e| e.map(|e| e.file_name()))
-        .collect::<std::io::Result<_>>()
-        .ok()
-}
-
-/// Remove the `<target>.1` backups par2cmdline leaves behind on a
-/// successful repair.
-///
-/// par2 does not repair a damaged target in place: it renames the damaged
-/// file to `<name>.1` (`.2`, `.3`… if that is taken) and writes the
-/// repaired data to a new file under the original name. Nothing cleared
-/// those, and on a multi-volume RAR set one of them FAILS THE WHOLE JOB:
-/// the post-unpack sweep collects candidates by `Rar!` magic rather than
-/// by extension, reads a leftover `r.part3.rar.1` as an obfuscated set of
-/// its own, cannot unpack a middle volume that has no first part, and
-/// reports "an archive in the output directory could not be unpacked" -
-/// with the correct payload sitting beside it. Found 22 Aug 2026 while
-/// verifying sweep 8 M4 on the external path
-/// (`tests/integration/stream_repair.rs`), reproduced on macOS and on
-/// Windows.
-///
-/// **Why not par2's own `-p`.** One flag, and it purges its backups for
-/// us - but it also purges the `.par2` files, which is not ours to
-/// decide: whether those survive the job is the user's `cleanup_exts`
-/// setting, and `-p` would delete them under every setting. It is also a
-/// flag we cannot count on - par2cmdline 0.8.1 is still in the field on
-/// Windows (see the version table in the M4 write-up), and an unknown
-/// switch does not degrade, it fails the repair. Measured against
-/// par2cmdline 1.2.0: `-p` removed the par2 files and its own new backup
-/// and left EARLIER `.1`/`.2` backups exactly where they were, so it does
-/// not even subsume this.
-///
-/// Three guards, because this deletes from a user's output directory:
-///
-///  * **only on a successful repair.** par2 exits 0 only when every
-///    target verifies afterwards, so the backup is then a damaged
-///    duplicate of a file we have just proved good. After a FAILED
-///    repair the backup may be the only copy of the original bytes, and
-///    nothing here touches it.
-///  * **only names that appeared during the run.** A `.1` that predates
-///    the child is not par2's backup and is not ours to delete.
-///  * **only `<target>.<digits>` for a name the recovery set declares**,
-///    and never a name the set declares itself - a set carrying both
-///    `foo.rar` and `foo.rar.1` as targets keeps both.
-///
-/// The delete goes through the sweeps' own `remove_swept_file`, so it
-/// honours the trash-vs-delete setting exactly like the junk and par2
-/// sweeps do. A failure is logged and otherwise ignored: a backup we
-/// could not remove is untidy, never a reason to fail a repaired job.
-fn purge_par2_backups(
-    out_dir: &std::path::Path,
-    targets: &[(String, u64)],
-    before: &std::collections::HashSet<std::ffi::OsString>,
-) {
-    let names: std::collections::HashSet<&str> = targets.iter().map(|(n, _)| n.as_str()).collect();
-    if names.is_empty() {
-        return;
-    }
-    let recoverable = smart::cleanup_recoverable();
-    let staging = smart::trash_staging_dir(out_dir);
-    let mut purged = 0usize;
-    for entry in std::fs::read_dir(out_dir).into_iter().flatten().flatten() {
-        let raw = entry.file_name();
-        if before.contains(&raw) {
-            continue;
-        }
-        let Some(name) = raw.to_str() else { continue };
-        // A set target is never a backup, whatever it is named.
-        if names.contains(name) {
-            continue;
-        }
-        let Some((stem, ordinal)) = name.rsplit_once('.') else {
-            continue;
-        };
-        if ordinal.is_empty() || !ordinal.bytes().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        if !names.contains(stem) || !entry.file_type().is_ok_and(|t| t.is_file()) {
-            continue;
-        }
-        match smart::remove_swept_file(&entry.path(), recoverable, staging.as_deref()) {
-            Ok(_) => purged += 1,
-            Err(e) => warn!(target: "repair", "leftover par2 backup {name}: {e}"),
-        }
-    }
-    if purged > 0 {
-        info!(target: "repair", "removed {purged} par2 backup file(s) left by the external repair");
-    }
-}
-
-/// Hand a verified external repair's new bytes to the live readers
-/// (sweep 8, M5).
-///
-/// par2cmdline exits 0 only when every file in the set verifies AFTER
-/// the repair, which is the verification this publication is tied to -
-/// never the mere fact that the child exited. The writers' interval map
-/// survives the park/unpark unchanged, so without this the ranges par2
-/// filled in are still holes as far as `/stream` is concerned: a reader
-/// that held its handle across the repair waits out its grace period on
-/// bytes that are already correct on disk, and then zero-fills them.
-fn publish_external_coverage(extractor: &nzbkit::extract::Extractor, verified: &[(String, u64)]) {
-    let n = extractor.publish_repaired_coverage(verified);
-    if n > 0 {
-        info!(
-            target: "repair",
-            "published repaired coverage for {n} live output(s)"
-        );
-    }
-}
-
-/// Why the in-process Reed-Solomon pass did not finish the job - which
-/// is what decides what the par2cmdline fallback is allowed to CLAIM
-/// about itself. §282 item 16.
-///
-/// `nzbkit::par2repair` is a complete GF(2^16) implementation that goes
-/// past par2cmdline in two documented ways (recovery volumes hidden
-/// under junk names, found by packet magic where par2cmdline only loads
-/// packets from files with ".par2" in the name; and identified-but-
-/// damaged targets rescanned when damage still exceeds recovery). The
-/// external binary is a CORRECTNESS BACKSTOP for a native bug - the
-/// native path is self-proving, so it declines rather than shipping bad
-/// bytes - plus the one real capability limit, `MAX_REPAIR_DIM`.
-///
-/// None of that applies to a set with no parity on disk, and telling a
-/// user to install a tool in that case is telling them the wrong thing:
-/// on the §282 incident the line above it read "145 block(s) damaged,
-/// only 0 recovery block(s) on disk", and no par2 implementation can
-/// rebuild data it has no parity for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NativeVerdict {
-    /// The set is whole. Nothing below this runs.
-    Done,
-    /// The damage outruns the recovery blocks ON DISK. par2cmdline
-    /// reads the same directory and would reach the same arithmetic.
-    NoRecovery { needed: usize, have: usize },
-    /// A native bug, the repair-dimension guard, an I/O error, or the
-    /// kill switch: the cases the external backstop exists for.
-    Backstop,
-}
-
-/// §293: the donor directories' files as par2cmdline extra-file
-/// arguments - the fallback engine's version of the native scan's
-/// donor candidates, so both engines see the same donors. ABSOLUTE
-/// paths, unlike the `./`-prefixed in-dir names beside them: a donor
-/// dir is outside par2's cwd, and the directory half of the path is
-/// ours (the daemon built it from a job record), not subject-derived,
-/// so the leading-dash switch trap does not apply to it; the file
-/// names inside can still be hostile, which joining under the
-/// absolute donor dir already defuses. Same skip rules as the native
-/// scan: no .par2, no .nzbfast bookkeeping, same 1000-file bound.
-/// The "and adoption already found some of it" half of an unrepairable
-/// verdict, shared by every surface that prints one.
-///
-/// `RepairReport::blocks_adopted` only reaches a caller through
-/// `RepairStatus::Repaired`, so until 29 Aug 2026 a donation that
-/// bridged SOME of the damage and still came up short left no trace on
-/// any surface: the shortfall lines named `needed` and `have` and
-/// nothing else. That is not a cosmetic gap. A bench round on 28 Aug
-/// 2026 read `grep -c "block(s) adopted from" == 0` over a whole daemon
-/// log and recorded "adoption bridged nothing" as an open question,
-/// when the arithmetic in that same log (290 blocks bad at verify, 268
-/// needed at the native verdict) says adoption had in fact found 22 of
-/// them. The count is what tells a partial donation from no donation,
-/// and it belongs wherever the shortfall is reported.
-///
-/// Empty when nothing was adopted, so the everyday line is unchanged.
-pub(crate) fn adopted_clause(adopted: usize) -> String {
-    if adopted == 0 {
-        String::new()
-    } else {
-        format!(" (adoption already found {adopted} of them in files outside the recovery set)")
-    }
-}
-
-/// Report the native pass's shortfall and turn it into a verdict.
-///
-/// Out of line only because [`fetch_and_repair`] is at its size-gate
-/// ceiling; the wording is the whole point of it, so keep the two
-/// together if that ever changes.
-fn native_shortfall(needed: usize, have: usize, adopted: usize) -> NativeVerdict {
-    warn!(
-        target: "repair",
-        "native repair: {needed} block(s) damaged, only {have} recovery block(s) on disk{}",
-        adopted_clause(adopted)
-    );
-    NativeVerdict::NoRecovery { needed, have }
-}
-
-fn donor_extra_args(donor_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for donor in donor_dirs {
-        out.extend(
-            std::fs::read_dir(donor)
-                .into_iter()
-                .flatten()
-                .filter_map(|e| {
-                    let e = e.ok()?;
-                    let p = e.path();
-                    let name = p.file_name()?.to_string_lossy().into_owned();
-                    (e.file_type().ok()?.is_file()
-                        && !name.starts_with(".nzbfast")
-                        && !p
-                            .extension()
-                            .is_some_and(|x| x.eq_ignore_ascii_case("par2")))
-                    .then_some(p)
-                })
-                .take(1000),
-        );
-    }
-    out
-}
-
 /// Damaged path: fetch the cheapest set of recovery volumes covering
 /// `needed` blocks (exact-fit by declared slice counts), then hand the
 /// directory to par2cmdline for Reed-Solomon repair.
@@ -1517,7 +1862,12 @@ pub(crate) async fn fetch_and_repair(
     nzb: &Nzb,
     out_dir: &Path,
     set: &nzbkit::par2::Par2Set,
-    needed: usize,
+    // Narrowed in place by the scan-before-buying probe below: the
+    // ledger's damage count on the way in, the POST-ADOPTION shortfall
+    // once the engine has looked. Everything downstream - `pick_volumes`
+    // and its margin, the "need N block(s)" line - is about what still
+    // has to be BOUGHT, so it wants the narrowed figure.
+    mut needed: usize,
     main_par2: Option<PathBuf>,
     already_fetched: &[usize],
     sniffed_vols: &[usize],
@@ -1548,9 +1898,24 @@ pub(crate) async fn fetch_and_repair(
     // The caller's heavy-CPU permit, handed back for the duration of
     // both recovery fetches below - see [`crate::lanegate::HeavyCpu`].
     cpu: &mut crate::lanegate::HeavyCpu,
-    // §293 donor directories - see [`donor_extra_args`] for the whole
-    // story; both repair engines below read them.
+    // §293 donor directories - see [`extpar2::donor_extra_args`] for the
+    // whole story; both repair engines below read them.
     donor_dirs: &[PathBuf],
+    // X5-10 (31 Aug 2026): where a proven-spent adoption source is
+    // RECORDED rather than deleted. See the push site below.
+    spent: &mut Vec<PathBuf>,
+    // The live block grid's own damage claim, by FileDesc name -
+    // sanitized and lowercased. Read by `shortfall_is_final`'s fourth
+    // arm and by nothing else: `needed` is a SUM, and refuting a sum
+    // means knowing which files it was summed over.
+    damaged: &[String],
+    // 31 Aug 2026: where [`volpayload::rescue_payload_posted_as_volume`]
+    // records the candidates it bought and did NOT publish. Threaded
+    // exactly as `spent` above is, and accumulating across the sets of a
+    // multi-set post for the same reason - this function is per set. The
+    // failing job's quarantine renames these aside; nothing here deletes
+    // them. See that module's stated limits.
+    rescue_left: &mut Vec<PathBuf>,
 ) -> Result<bool> {
     // §282 item 4: the most recent measurement of whether this source
     // will serve this recovery set at all. Seeded from the declined
@@ -1575,42 +1940,98 @@ pub(crate) async fn fetch_and_repair(
             wire.describe()
         );
     }
+    // X5-10's recording cell, and it is a `Mutex` rather than a `&mut`
+    // capture for a reason the type does not make obvious.
+    // `adoption_narrowed_need` below takes the closure as `&dyn Fn`, so
+    // a mutable capture makes it `FnMut` and stops compiling; a
+    // `RefCell` fixes that and is not `Sync`, which costs this whole
+    // future its `Send` and reddens every `tokio::spawn` of a job.
+    // There is no contention to speak of - one thread, one statement's
+    // worth of borrow, nothing re-entrant.
+    let spent = std::sync::Mutex::new(spent);
+    // The native pass, which went out of line on 31 Aug 2026, when this
+    // function sat at 475 of the size gate's 500-line ceiling - see
+    // [`native_repair_pass`], which carries the whole story. Bound as a
+    // closure so the three call sites below
+    // (two direct, one through [`adoption_narrowed_need`]) read exactly as
+    // they did when the body lived here.
+    let native_repair = |probe: bool| native_repair_pass(out_dir, set, donor_dirs, probe, &spent);
+
     let mut fetched_files: Vec<usize> = Vec::new();
     if needed > 0 && !wire.source_will_not_serve() {
-        let vols = recovery_candidates(nzb, set, already_fetched, sniffed_vols);
-        let have: usize = vols.iter().map(|v| v.1).sum();
-        if have < needed {
-            // §293: with a donor available this is no longer a
-            // foregone conclusion - the adoption scan can stand in for
-            // recovery blocks the NZB never declared, and only
-            // `repair_dir` can say how many it finds. Fall through to
-            // the repair with whatever recovery DOES exist; if the
-            // donor comes up short the native verdict below reports
-            // the (post-adoption) shortfall exactly as before. Without
-            // a donor the arithmetic is final, as it always was.
-            if donor_dirs.is_empty() {
-                warn!(
-                    target: "repair",
-                    "unrepairable: {needed} blocks needed, only {have} recovery blocks in the NZB"
-                );
-                *shortfall = Some(RepairShortfall::Blocks { needed, have });
+        let vols = recovery_candidates(nzb, out_dir, set, already_fetched, sniffed_vols);
+        // Saturating folds, not `sum()`: every figure summed here comes
+        // off the wire and `sum()` is a plain `+` that panics under
+        // overflow-checks and wraps in a release build (X5-16, whose
+        // seam is `pick_volumes` below - these are the same values one
+        // frame out). `have` gates a refusal and a wrapped one lets an
+        // unrepairable post through; the two totals below only reach a
+        // log line, where a wrapped figure is merely a lie.
+        let have: usize = vols.iter().fold(0usize, |a, v| a.saturating_add(v.1));
+        if have < needed && shortfall_is_final(needed, have, donor_dirs, out_dir, set, damaged) {
+            // L1 (31 Aug 2026), and the LAST thing tried before the job
+            // is lost: a file the NZB called a recovery VOLUME may be
+            // the payload itself, in which case nothing has ever
+            // fetched it - `build_fetch_plan` skips a non-bootstrap
+            // `Par2Volume` before a slot exists, so every rescue in
+            // `get/settle.rs` is blind to it by construction. See
+            // [`volpayload`] for the screen, the budget and the proof.
+            //
+            // A rescue does NOT return: it falls through to
+            // [`adoption_narrowed_need`] below, whose native probe
+            // re-reads the set OFF DISK - so a set the rescue completed
+            // comes back `Repaired` and one it only partly closed comes
+            // back with a correctly smaller `needed`. Nothing here has
+            // to re-derive either figure.
+            let rescued = cpu
+                .without_permit(rescue_payload_posted_as_volume(
+                    servers,
+                    nzb,
+                    out_dir,
+                    set,
+                    &buf_pool,
+                    already_fetched,
+                    cancel,
+                    rescue_left,
+                ))
+                .await;
+            if rescued.is_empty() {
+                *shortfall = Some(RepairShortfall::Blocks {
+                    needed,
+                    have,
+                    set: Some(set.recovery_set_id),
+                });
                 return Ok(false);
             }
-            info!(
-                target: "repair",
-                "recovery short ({needed} blocks needed, {have} in the NZB) - \
-                 trying the failed predecessor's files as donors before giving up"
-            );
+        }
+        // Scan before buying - see [`adoption_narrowed_need`], which is
+        // out of line only because `fetch_and_repair` was at 498 of the
+        // size gate's 500-line ceiling on 28 Aug 2026.
+        match adoption_narrowed_need(needed, have, banked, &native_repair) {
+            NarrowedNeed::Repaired => return Ok(true),
+            NarrowedNeed::Final { needed: after } => {
+                *shortfall = Some(RepairShortfall::Blocks {
+                    needed: after,
+                    have,
+                    set: Some(set.recovery_set_id),
+                });
+                return Ok(false);
+            }
+            NarrowedNeed::Buy(after) => needed = after,
         }
 
         // Min-bytes subset with slice sum ≥ needed - plus ~10% margin:
         // par2's own damage count can exceed the block ledger's (a hole
         // invalidates boundary blocks under its scan), and coming up
         // short costs a whole second round-trip.
-        let target = (needed + (needed / 10).max(2)).min(have);
+        let target = needed.saturating_add((needed / 10).max(2)).min(have);
         let chosen = pick_volumes(&vols, target);
-        let dl_bytes: u64 = chosen.iter().map(|&i| vols[i].2).sum();
-        let dl_blocks: usize = chosen.iter().map(|&i| vols[i].1).sum();
+        let dl_bytes: u64 = chosen
+            .iter()
+            .fold(0u64, |a, &i| a.saturating_add(vols[i].2));
+        let dl_blocks: usize = chosen
+            .iter()
+            .fold(0usize, |a, &i| a.saturating_add(vols[i].1));
         fetched_files = chosen.iter().map(|&vi| vols[vi].0).collect();
 
         // Did a declined mapped repair already buy exactly this?
@@ -1675,106 +2096,7 @@ pub(crate) async fn fetch_and_repair(
         }
     }
 
-    // Reed-Solomon repair: native in-process GF(2^16) first - verifies the
-    // set from disk, reconstructs missing blocks, and patches files IN
-    // PLACE (no volume rewrite). Self-proving: success requires every
-    // patched file to match its PAR2 whole-file MD5, so a native bug can
-    // never ship bad bytes - it falls through to par2cmdline instead.
-    //
-    // SCOPED TO THIS SET BY ID, and load-bearing: this runs once PER
-    // declined set (`disk_repair_declined_sets`) and the directory-scoped
-    // entry repaired the first set every time, greening over the others'
-    // holes - see [`nzbkit::par2repair::repair_dir_set_with_donors`].
-    let native_repair = || -> NativeVerdict {
-        if std::env::var_os("NZBFAST_NO_NATIVE_REPAIR").is_some() {
-            return NativeVerdict::Backstop;
-        }
-        let t0 = Instant::now();
-        use nzbkit::par2repair::{RepairStatus, repair_dir_set_with_donors};
-        match repair_dir_set_with_donors(out_dir, &set.recovery_set_id, donor_dirs) {
-            Ok(RepairStatus::NoDamage) => {
-                info!(
-                    target: "repair",
-                    "repair complete in {:.2?} ✔ (native - set already verifies on disk)",
-                    t0.elapsed()
-                );
-                NativeVerdict::Done
-            }
-            Ok(RepairStatus::Repaired(r)) => {
-                // `r.blocks_rebuilt` is what `repair_dir`'s own verify
-                // found bad ON DISK at this instant. That is NOT the
-                // damage count settle printed, and on a chased set that
-                // declined the mapped route it is reproducibly LOWER -
-                // often zero, in which case this arm does not run at all
-                // and the `NoDamage` line above prints instead. Nothing
-                // is undercounted here: a declined mapped attempt is not
-                // rolled back, so the blocks it already landed are good
-                // on disk by the time this pass looks.
-                //
-                // Measured 23 Aug 2026 (M3 Ultra, costB2
-                // `loop-comp-silent`, 3 reps of 3 identical; same shape
-                // at test scale in
-                // `a_declined_mapped_repair_still_lands_every_rebuilt_block`)
-                // at "3/35 blocks bad", the verify-gated twin saying
-                // "mapped: 3 block(s)" and this line "in place: 2
-                // block(s)". That split was a DEFECT, fixed the same
-                // day: the mapped attempt's first patched block landed
-                // in the chase's frontier buffer, `chase_span` saw it
-                // conflict with bytes the decode had already consumed
-                // and forfeited INSIDE that write, and
-                // `patch_volume_span` then refused the demoted slot -
-                // so the next block's write returned "no backing data"
-                // and two blocks already solved in memory were thrown
-                // away for this pass to solve again. `patch_volume_span`
-                // now admits `RarFallback` and those writes go through
-                // to the volume the demote just materialized, so the
-                // same fixture reaches here with nothing to rebuild.
-                //
-                // What did NOT change is the decline itself: the decode
-                // consumed stale bytes, so the set still materializes
-                // and re-extracts. Only the repair work stopped being
-                // discarded.
-                //
-                // The "need N block(s) →" line just above still names
-                // the LEDGER's N, so this route still plans for blocks
-                // it no longer needs - it reuses the mapped attempt's
-                // volumes rather than buying them twice (see `banked`),
-                // and the surplus is inside the exact-fit margin.
-                info!(
-                    target: "repair",
-                    "repair complete in {:.2?} ✔ (native, in place: {} block(s) rebuilt across {} file(s){}{})",
-                    t0.elapsed(),
-                    r.blocks_rebuilt,
-                    r.files_patched.len(),
-                    if r.files_created.is_empty() {
-                        String::new()
-                    } else {
-                        format!(", {} recreated", r.files_created.len())
-                    },
-                    if r.blocks_adopted == 0 {
-                        String::new()
-                    } else {
-                        format!(
-                            ", {} block(s) adopted from {}",
-                            r.blocks_adopted,
-                            r.adopted_from.join(", ")
-                        )
-                    },
-                );
-                NativeVerdict::Done
-            }
-            Ok(RepairStatus::Unrepairable {
-                needed,
-                have,
-                adopted,
-            }) => native_shortfall(needed, have, adopted),
-            Err(e) => {
-                warn!(target: "repair", "native repair failed ({e}) - falling back to par2cmdline");
-                NativeVerdict::Backstop
-            }
-        }
-    };
-    let native = native_repair();
+    let native = native_repair(false);
     if native == NativeVerdict::Done {
         return Ok(true);
     }
@@ -1791,54 +2113,9 @@ pub(crate) async fn fetch_and_repair(
     let t0 = Instant::now();
     // `external` is Some only while par2cmdline is still worth trying:
     // taken for each attempt, put back only when it actually ran.
-    let mut external = main_par2.as_ref().map(|main_par2| {
-        // Sibling binary, else PATH (see tools.rs).
-        let par2_bin = tools::resolve("par2");
-        // par2cmdline 1.2.0 rejects absolute par2 paths ("failed to set the
-        // main par file") - pass the bare name and set cwd.
-        let par2_name = main_par2
-            .file_name()
-            .map(|n| n.to_owned())
-            .unwrap_or_else(|| main_par2.clone().into_os_string());
-        // Every non-par2 file in the dir rides along as an extra file so
-        // par2cmdline's sliding scan can adopt misnamed/shifted data - bare
-        // `par2 repair <set>` never looks at files it wasn't told about.
-        //
-        // Our OWN bookkeeping is excluded (`.nzbfast*`, the house convention for
-        // internal names - see disk.rs). `.nzbfast.journal` is the live record of
-        // what is still missing and it is held open for the whole download: naming
-        // it here made par2 try to open it, fail on Windows, and print a scary
-        // "could not access" line about a file that was never a repair candidate.
-        // It cannot contribute blocks either - it is not in the recovery set.
-        let extra_files: Vec<std::ffi::OsString> = std::fs::read_dir(out_dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| {
-                let e = e.ok()?;
-                let p = e.path();
-                let name = p.file_name()?.to_owned();
-                (e.file_type().ok()?.is_file()
-                    && !name.to_string_lossy().starts_with(".nzbfast")
-                    && !p
-                        .extension()
-                        .is_some_and(|x| x.eq_ignore_ascii_case("par2")))
-                .then_some(name)
-            })
-            .take(1000)
-            .collect();
-        // par2cmdline parses any leading-dash argument as a SWITCH, and both the
-        // set name and every extra filename are attacker-controlled (they come
-        // from yEnc/subject names; sanitize_filename keeps a leading '-'). A file
-        // named `-p` would trigger "purge", `-B<path>` would redirect the
-        // basepath, etc. Prefix each with `./` (platform-correct via Path::join,
-        // cwd is out_dir) so they can only ever be read as paths.
-        let dot = std::path::Path::new(".");
-        let par2_arg = dot.join(&par2_name);
-        let mut extra_args: Vec<std::path::PathBuf> =
-            extra_files.iter().map(|f| dot.join(f)).collect();
-        extra_args.extend(donor_extra_args(donor_dirs));
-        (par2_bin, par2_arg, extra_args)
-    });
+    let mut external = main_par2
+        .as_ref()
+        .map(|m| par2cmdline_invocation(m, out_dir, donor_dirs));
     if external.is_none() {
         warn!(target: "repair", "no main .par2 on disk - cannot invoke par2cmdline");
     }
@@ -1912,14 +2189,15 @@ pub(crate) async fn fetch_and_repair(
 
     // Escalation: par2's own damage accounting can exceed the ledger's -
     // fetch every remaining recovery volume and try once more.
-    let remaining: Vec<usize> = recovery_candidates(nzb, set, already_fetched, sniffed_vols)
-        .iter()
-        .map(|v| v.0)
-        .filter(|fi| !fetched_files.contains(fi))
-        .collect();
+    let remaining: Vec<usize> =
+        recovery_candidates(nzb, out_dir, set, already_fetched, sniffed_vols)
+            .iter()
+            .map(|v| v.0)
+            .filter(|fi| !fetched_files.contains(fi))
+            .collect();
     if remaining.is_empty() {
         if shortfall.is_none() {
-            *shortfall = blocks_shortfall(native, &wire);
+            *shortfall = blocks_shortfall(native, &wire, set.recovery_set_id);
         }
         return Ok(false);
     }
@@ -1963,7 +2241,7 @@ pub(crate) async fn fetch_and_repair(
     // Shadows the pre-escalation verdict on purpose: this pass ran with
     // every volume on disk, so its needed/have supersede the first
     // pass's for the [`blocks_shortfall`] verdict at the bottom.
-    let native = native_repair();
+    let native = native_repair(false);
     if native == NativeVerdict::Done {
         return Ok(true);
     }
@@ -2016,7 +2294,7 @@ pub(crate) async fn fetch_and_repair(
             wire.describe()
         );
         *shortfall = Some(RepairShortfall::Unservable(wire));
-    } else if let Some(s) = blocks_shortfall(native, &wire) {
+    } else if let Some(s) = blocks_shortfall(native, &wire, set.recovery_set_id) {
         *shortfall = Some(s);
     }
     Ok(false)
@@ -2027,12 +2305,23 @@ pub(crate) async fn fetch_and_repair(
 /// the native pass has measured the post-adoption shortfall, that
 /// arithmetic still belongs in the job's fail message - not only in
 /// the console. Guarded off a provider that will not serve, where "the
-/// NZB only carries {have}" would blame the poster for the provider's
+/// recovery set ... carries only {have}" would blame the poster for the provider's
 /// refusal - the `Unservable` arms own that story.
-fn blocks_shortfall(native: NativeVerdict, wire: &VolumeYield) -> Option<RepairShortfall> {
+///
+/// `set_id` is recorded unconditionally and blanked later by whoever
+/// owns the whole set list - see [`RepairShortfall::forget_set`].
+fn blocks_shortfall(
+    native: NativeVerdict,
+    wire: &VolumeYield,
+    set_id: [u8; 16],
+) -> Option<RepairShortfall> {
     match native {
         NativeVerdict::NoRecovery { needed, have } if !wire.source_will_not_serve() => {
-            Some(RepairShortfall::Blocks { needed, have })
+            Some(RepairShortfall::Blocks {
+                needed,
+                have,
+                set: Some(set_id),
+            })
         }
         _ => None,
     }
@@ -2045,7 +2334,22 @@ fn blocks_shortfall(native: NativeVerdict, wire: &VolumeYield) -> Option<RepairS
 pub(crate) fn pick_volumes(vols: &[(usize, usize, u64)], needed: usize) -> Vec<usize> {
     if vols.len() > 64 {
         let mut order: Vec<usize> = (0..vols.len()).collect();
-        order.sort_by(|&a, &b| (vols[a].2 * vols[b].1 as u64).cmp(&(vols[b].2 * vols[a].1 as u64)));
+        // Cost-per-slice, compared by cross-multiplication so no division
+        // and no zero-slice special case is needed. WIDENED TO u128 (X5-16):
+        // `bytes` is an NZB's advertised `bytes=`, which parses as a full
+        // u64 and is never bounded by what the article actually holds, so
+        // `bytes * slices` overflows u64 on a figure a tiny real article
+        // can advertise. That panics under overflow-checks and WRAPS in a
+        // release build, and a wrapped comparator is not a consistent
+        // ordering at all - `sort_by` may then return an arbitrary subset
+        // rather than the cheap one. u128 is exactly wide enough: both
+        // factors fit in u64, so the product cannot overflow it. The index
+        // tiebreak keeps equal-ratio volumes in a deterministic order.
+        order.sort_by(|&a, &b| {
+            let l = (vols[a].2 as u128) * (vols[b].1 as u128);
+            let r = (vols[b].2 as u128) * (vols[a].1 as u128);
+            l.cmp(&r).then(a.cmp(&b))
+        });
         let mut chosen = Vec::new();
         let mut got = 0usize;
         for vi in order {
@@ -2053,29 +2357,44 @@ pub(crate) fn pick_volumes(vols: &[(usize, usize, u64)], needed: usize) -> Vec<u
                 break;
             }
             chosen.push(vi);
-            got += vols[vi].1;
+            got = got.saturating_add(vols[vi].1);
         }
         return chosen;
     }
-    // dp[d] = (bytes, mask) - cheapest way to cover a deficit of ≥ d blocks.
+    // dp[d] = Some((bytes, mask)) - cheapest way to cover a deficit of ≥ d
+    // blocks, None where no subset reaches that deficit at all.
+    //
+    // `Option` rather than a `u64::MAX` sentinel, and `saturating_add`
+    // rather than `+`, are one fix and not two (X5-16). The costs here are
+    // attacker-supplied - see the u128 note above - so two of them sum past
+    // u64::MAX, which panicked under overflow-checks at the `cost + bytes`
+    // this replaces. Saturating alone would not do: it lands on u64::MAX,
+    // which the old sentinel spells "unreachable", so the planner would
+    // silently return an EMPTY selection for a deficit it can in fact
+    // cover. Separating reachability from cost keeps "ruinously expensive"
+    // and "impossible" distinct, which is the whole of what the DP decides.
     let n = needed;
-    const INF: u64 = u64::MAX;
-    let mut dp: Vec<(u64, u64)> = vec![(INF, 0); n + 1];
-    dp[0] = (0, 0);
+    let mut dp: Vec<Option<(u64, u64)>> = vec![None; n + 1];
+    dp[0] = Some((0, 0));
     for (vi, &(_, slices, bytes)) in vols.iter().enumerate() {
         for d in (0..=n).rev() {
-            let (cost, mask) = dp[d];
-            if cost == INF {
+            let Some((cost, mask)) = dp[d] else {
                 continue;
-            }
-            let nd = (d + slices).min(n);
-            let ncost = cost + bytes;
-            if ncost < dp[nd].0 {
-                dp[nd] = (ncost, mask | (1u64 << vi));
+            };
+            // Saturating for the same reason the cost below is, and
+            // reachable from the same place: `slices` is a per-volume
+            // recovery-block COUNT derived from parsed packet data, so a
+            // huge one overflows this add before either cost is looked
+            // at. `.min(n)` clamps it back immediately - the saturation
+            // can never change which bucket this lands in.
+            let nd = d.saturating_add(slices).min(n);
+            let ncost = cost.saturating_add(bytes);
+            if dp[nd].is_none_or(|(best, _)| ncost < best) {
+                dp[nd] = Some((ncost, mask | (1u64 << vi)));
             }
         }
     }
-    let mask = dp[n].1;
+    let mask = dp[n].map_or(0, |(_, m)| m);
     (0..vols.len())
         .filter(|vi| mask & (1u64 << vi) != 0)
         .collect()
@@ -2086,6 +2405,13 @@ pub(crate) fn pick_volumes(vols: &[(usize, usize, u64)], needed: usize) -> Vec<u
 // as side_fetch_tests below.
 #[cfg(test)]
 mod repair_tests;
+
+// X5-16's two arithmetic pins for `pick_volumes` above. Out here for the
+// reason the four modules below are - repair.rs sits under the size-gate
+// ceiling (TODO 106) - and in the CRATE rather than in `tests/` because
+// `pick_volumes` is `pub(crate)`.
+#[cfg(test)]
+mod wave5_probe_tests;
 
 // Its second child, split off in turn: `repair_tests` reached the
 // gate's own 3,000-line file ceiling when the bomb-refusal cases landed,
@@ -2114,3 +2440,17 @@ mod unpackprog_tests;
 // 2,939 of the size gate's 3,000 lines, and this subject is its own.
 #[cfg(test)]
 mod vol_affinity_tests;
+
+// Follow-up 13a's third arm on `shortfall_is_final` - whether a set
+// whose files are all CLAIMED is still worth handing to the repair
+// engines. Out here for the reason the five above are: `repair_tests`
+// is 2,939 of the size gate's 3,000 lines, and this subject is its own.
+#[cfg(test)]
+mod shortfall_gate_tests;
+
+// The nested password-chain auto-unlock cases and their harvest/resolve
+// pins, moved out whole. Out here for the reason the six above are:
+// `repair_tests` sat at 2,909 lines of the size gate's 3,000-line
+// ceiling when this subject came out, and it is its own.
+#[cfg(test)]
+mod password_chain_tests;

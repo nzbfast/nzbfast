@@ -26,8 +26,144 @@ use crate::harness::serve;
 #[cfg(feature = "indexer")]
 use nzbkit::nntp::OverEntry;
 
+/// How long [`settle_index`] will wait for the daemon's startup index
+/// open to finish.
+///
+/// Generous on purpose, and it is a CEILING rather than a cost: the loop
+/// only waits while the daemon is actually answering busy, and each such
+/// answer has already cost it `PREMIGRATION_INDEX_WAIT` (2 s) before it
+/// was written. MEASURED 30 Aug 2026, the probe instrumented to report
+/// its own wait, under eight concurrent copies of this binary on a box
+/// also carrying other lanes' builds: the longest settle of forty was
+/// 5.2 s, most were 3 to 5 s, and a quiet box is single-digit
+/// milliseconds. So 60 s is an 11x margin and is only ever spent by an
+/// index that is not coming back, at which point nothing asserted below
+/// would mean anything anyway. nextest's own `terminate-after` for this
+/// profile is 600 s, so this cannot be what a wedged test hits first.
+const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How many times a link lookup is re-asked while the daemon reports
+/// the index busy - see [`addnzblnk_get`].
+///
+/// Three, and the ceiling is not arbitrary: `NZBLNK_EXTERNAL_MAX` is 6,
+/// so past a peer's sixth resolution in the window the ladder degrades
+/// to local-only and never reaches the indexers at all. The worst case
+/// in this module is `a_link_we_cannot_resolve_locally_goes_to_the_indexers`,
+/// whose two lookups share one peer bucket, so 3 each is exactly 6 - the
+/// last attempt may still ask the indexers, and no retry here can turn a
+/// rung-2 test into a rung-1 test. Raise this and that stops being true.
+///
+/// This is the BELT, not the wait: [`settle_index`] does the waiting on
+/// an endpoint the nzblnk rate gate never sees, so these tries are there
+/// for a pool that goes busy again afterwards, not for startup. It was
+/// the only mechanism for one revision of this fix and that is measurably
+/// too tight - under a heavy box it was exhausted four times in five
+/// concurrent runs, which is why the waiting moved off the gated
+/// endpoint rather than the count going up.
+const BUSY_TRIES: usize = 3;
+
+/// Block until the daemon's index will answer a read.
+///
+/// Rung 1 of the nzblnk ladder goes through `Daemon::index_read_checked`,
+/// which before the daemon's first read-write open falls back to the
+/// write mutex on a BOUNDED 2 s wait and REPORTS
+/// `{"busy":true,"error":"the index is busy - try again in a moment"}`
+/// rather than parking an HTTP worker on it (TODO 143's second half,
+/// TODO 166). On a loaded box that open is still running when a test's
+/// first lookup arrives, so `mode=addnzblnk` has TWO legal non-auth
+/// answers and the assertions below admit one. The daemon must NOT be
+/// relaxed to wait it out; that is the http_wedge class of bug.
+///
+/// `mode=index_search` and not `mode=addnzblnk`, which is the whole
+/// point of a separate probe: it reaches the SAME seam and reports the
+/// same refusal, and the nzblnk rate gate never sees it. Waiting on the
+/// gated endpoint spends `NZBLNK_MAX` and, worse, pushes `nth_for_peer`
+/// past `NZBLNK_EXTERNAL_MAX`, at which point the ladder quietly stops
+/// asking the indexers - so a long enough wait there would turn a rung-2
+/// test into a rung-1 test without failing.
+///
+/// `key` is the `&apikey=...` this daemon needs, or empty where it has
+/// none. An auth refusal PANICS rather than returning: a probe the
+/// daemon answers "API Key Incorrect" carries no `busy` flag, so it
+/// would exit the loop at once and disable the settle in silence.
+///
+/// Without the `indexer` feature `index_search` is not a mode at all,
+/// the answer carries no `busy`, and this returns immediately - which is
+/// correct, because rung 1 does not exist there either and no lookup can
+/// be refused as busy.
+fn settle_index(port: u16, key: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        let last = http_get(
+            port,
+            &format!("/api?mode=index_search&q=nzbfastsettleprobe{key}&output=json"),
+        )
+        .1;
+        assert!(
+            !last.contains("API Key"),
+            "the settle probe was refused, so it was never settling anything:\n{last}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_default();
+        if v["busy"] != true {
+            return;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index never settled in {SETTLE_BUDGET:?}:\n{last}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// `http_get` for an answer that must not be the daemon's index-busy
+/// refusal, re-asking while it is.
+///
+/// The belt behind [`settle_index`], whose header carries the mechanism:
+/// the index can go busy again after it has settled (every read
+/// connection lent out, a schema change under the reader), and a lookup
+/// that hits one of those is still a legal refusal this module's
+/// assertions do not admit.
+///
+/// Re-asking is what the refusal itself tells a client to do, so this
+/// models the shipped contract rather than working around it. Bounded,
+/// and exhaustion PANICS with the body: a test that only ever saw a busy
+/// answer proved nothing, and saying so is better than passing. That is
+/// a strengthening as well as a fix - `a_failed_grab_must_not_echo_the_indexer_apikey`
+/// asserts an ABSENCE, which a busy body satisfies without the request
+/// ever reaching the indexer it is about.
+///
+/// `IndexBusy::TooSlow` renders the same `busy` flag and is deliberately
+/// NOT transient, which is the other reason this is bounded and reports
+/// the body instead of looping: an unbounded retry on that one would
+/// hang rather than fail.
+fn addnzblnk_get(port: u16, req: &str) -> (u16, String) {
+    let started = std::time::Instant::now();
+    let mut last = (0u16, String::new());
+    for attempt in 1..=BUSY_TRIES {
+        last = http_get(port, req);
+        // A body that is not JSON at all parses to `Null`, whose "busy"
+        // is `Null` too, so anything unexpected is handed straight back
+        // to the assertion that asked for it.
+        let v: serde_json::Value = serde_json::from_str(&last.1).unwrap_or_default();
+        if v["busy"] != true {
+            return last;
+        }
+        if attempt < BUSY_TRIES {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+    panic!(
+        "the index was still busy after {BUSY_TRIES} tries over {:?} of {req}:\n{}",
+        started.elapsed(),
+        last.1
+    );
+}
+
 /// (status, body) of a GET; connection refusals retried, answers never.
 /// (See tests/integration/newznab.rs for why zero-bytes-back is retried.)
+///
+/// A caller that asserts on the SHAPE of an `addnzblnk` answer wants
+/// [`addnzblnk_get`] instead, which also re-asks a busy index.
 fn http_get(port: u16, req: &str) -> (u16, String) {
     let msg = format!("GET {req} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     let mut last = String::new();
@@ -182,10 +318,15 @@ async fn a_pasted_link_resolves_from_our_own_index() {
     let spool = cfg.with_file_name(".spool");
 
     tokio::task::spawn_blocking(move || {
+        // Before anything is asserted: rung 1 is refused as busy while
+        // the daemon's own startup index open still holds the write
+        // mutex, and this test demands the other answer.
+        settle_index(port, "");
+
         // Exactly what a board publishes, password and all.
         let link =
             format!("nzblnk:?t=Der+Grosse+Film+2024&h={HEADER}&g=alt.binaries.boneless&p=v4c4t10n");
-        let (_, r) = http_get(
+        let (_, r) = addnzblnk_get(
             port,
             &format!("/api?mode=addnzblnk&link={}&output=json", pct(&link)),
         );
@@ -231,7 +372,7 @@ async fn a_pasted_link_resolves_from_our_own_index() {
         );
 
         // A header nothing answers for fails with a reason, not a job.
-        let (_, miss) = http_get(
+        let (_, miss) = addnzblnk_get(
             port,
             "/api?mode=addnzblnk&link=nzblnk%3A%3Fh%3Dnothinghere99&output=json",
         );
@@ -279,7 +420,6 @@ async fn a_pasted_link_resolves_from_our_own_index() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Rung 2: nothing in our own index, so the same header goes out to the
@@ -328,10 +468,24 @@ async fn a_link_we_cannot_resolve_locally_goes_to_the_indexers() {
     let port_b = b.port;
 
     tokio::task::spawn_blocking(move || {
+        // Both peers, and A is not decoration: B reaches it over A's own
+        // Newznab facade, which answers off the SAME seam, so an A that
+        // is still opening its index hands B an <error> and B honestly
+        // reports having found nothing - with no `busy` flag of its own
+        // for the retry below to see.
+        settle_index(port_a, "");
+        settle_index(port_b, "");
+
         // With no indexers configured yet, the link has nowhere to go -
         // and says so rather than reporting a queued job.
+        //
+        // `addnzblnk_get` even though the assertion below would pass on a
+        // busy body anyway (it carries `"status":false` too): that would
+        // be a pass proving nothing, and re-asking here is also what
+        // settles the index before the rung-2 leg below, which does NOT
+        // tolerate one.
         let link = format!("nzblnk:?h={HEADER}&t=Ein+Anderer+Film");
-        let (_, none) = http_get(
+        let (_, none) = addnzblnk_get(
             port_b,
             &format!("/api?mode=addnzblnk&link={}&output=json", pct(&link)),
         );
@@ -348,7 +502,7 @@ async fn a_link_we_cannot_resolve_locally_goes_to_the_indexers() {
         );
         assert!(r.contains("true"), "{r}");
 
-        let (_, r) = http_get(
+        let (_, r) = addnzblnk_get(
             port_b,
             &format!("/api?mode=addnzblnk&link={}&output=json", pct(&link)),
         );
@@ -367,7 +521,6 @@ async fn a_link_we_cannot_resolve_locally_goes_to_the_indexers() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A mock indexer that answers a header search with ONE result whose NZB
@@ -442,6 +595,10 @@ async fn a_failed_grab_must_not_echo_the_indexer_apikey() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
+        // This test asserts an ABSENCE, so a busy rung 1 would satisfy
+        // it without the request ever reaching the indexer it is about.
+        settle_index(port, "");
+
         let entry = format!(
             r#"[{{"name":"leaky","url":"http://127.0.0.1:{mock}/api","apikey":"{SECRET}"}}]"#
         );
@@ -455,7 +612,7 @@ async fn a_failed_grab_must_not_echo_the_indexer_apikey() {
         assert!(r.contains("true"), "{r}");
 
         let link = format!("nzblnk:?h={HEADER}&t=Leak+Probe");
-        let (_, body) = http_get(
+        let (_, body) = addnzblnk_get(
             port,
             &format!("/api?mode=addnzblnk&link={}&output=json", pct(&link)),
         );
@@ -466,7 +623,6 @@ async fn a_failed_grab_must_not_echo_the_indexer_apikey() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The add-only `nzbkey` must not reach `addnzblnk`.
@@ -504,6 +660,10 @@ async fn the_add_only_key_cannot_spend_indexer_quota() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
+        // The full key, because this daemon has one and an auth-refused
+        // probe settles nothing - `settle_index` refuses that outright.
+        settle_index(port, "&apikey=fullkey");
+
         let link = "nzblnk%3A%3Fh%3Dtierprobe99%26t%3DTier+Probe";
 
         // The add-only key is REFUSED, in the exact SAB phrasing.
@@ -531,7 +691,15 @@ async fn the_add_only_key_cannot_spend_indexer_quota() {
         // honestly that it found nothing, having no index and no
         // indexers. Any auth phrase here would mean the mode is gated
         // wrongly in the other direction.
-        let (_, full) = http_get(
+        //
+        // `addnzblnk_get`, because "nothing found" is not the daemon's
+        // only honest answer: a lookup that arrives while the startup
+        // index open still holds the write mutex is REFUSED as busy, and
+        // this test demanded the other one. The assertion below is
+        // deliberately unchanged - it is what proves the mode is not
+        // gated the wrong way, and weakening it to the absence check
+        // alone would give that up.
+        let (_, full) = addnzblnk_get(
             port,
             &format!("/api?mode=addnzblnk&apikey=fullkey&link={link}&output=json"),
         );
@@ -543,5 +711,4 @@ async fn the_add_only_key_cannot_spend_indexer_quota() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

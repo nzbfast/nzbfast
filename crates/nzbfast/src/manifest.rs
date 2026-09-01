@@ -247,7 +247,7 @@ impl Manifest {
             .files
             .iter()
             .map(|f| Entry {
-                name: nzbkit::disk::sanitize_filename(&f.name),
+                name: nzbkit::disk::sanitize_out_name(&f.name),
                 len: f.length,
                 role: if archive { Role::Source } else { Role::Payload },
                 md5: Some(hex(&f.md5)),
@@ -754,8 +754,12 @@ fn demote_if_payload_on_disk(e: &mut Entry, path: &Path) {
 ///   signature the poster destroyed, which no magic sniff can.
 /// - `unpack::sevenz_archive_part` - `.7z`, a `.7z.NNN` split part
 ///   (parts 2 and up carry NO magic, so only the name can claim them),
-///   or the 7z magic. Guarded by `is_final_file` because that arm is
-///   magic-only and a `.cb7` comic is the deliverable, not a container.
+///   or the 7z magic. Guarded by `extract::archive_sniff_eligible`
+///   because that last arm is magic-only and a NAMED file is not
+///   packaging: a `.cb7` comic is the deliverable, and so - matrix row
+///   M4-90, 31 Aug 2026 - is a `Movie.mkv`, a `disc.iso` or a
+///   `Subs.srt`. The guard was `is_final_file` until then, which sees
+///   only the first of those three.
 /// - `nzbkit::zip::is_container` - `.zip`/`.zipx`, a WinZip-spanned
 ///   `.zNN`, a `.zip.NNN` byte split, or a bare numeric part carrying
 ///   `PK\x03\x04`. It carries its own `is_final_file` guard.
@@ -771,21 +775,42 @@ fn demote_if_payload_on_disk(e: &mut Entry, path: &Path) {
 /// though it looks closer: that module is behind the `indexer` feature
 /// and this one is not, so the slim build would not compile.
 ///
-/// ONE STATED GAP, in the safe direction. A covered volume whose
+/// THE 7z ARM ANSWERS THE SAME QUESTION ITS CONSUMER DOES, which is why
+/// the guard is that one and not something looser. `collect_sevenz_archives`
+/// - the sweep that would ever spend one of these - takes the `.7z` and
+/// `.7z.NNN` NAMES unconditionally and gates its magic arm on
+/// `archive_sniff_eligible_name`. This predicate reduces to exactly that:
+/// neither the final-file nor the payload-content list holds a `7z` or a
+/// numeric extension, and both key on the LAST extension only, so the
+/// guard can bite nothing but the magic arm. Nothing on the extraction
+/// path will consume a payload-named file any more, so calling one a
+/// consumable source was a claim about a deletion that can no longer
+/// happen - and until 31 Aug 2026 the two disagreed: a `Subs.srt` whose
+/// first bytes read as 7z was stamped [`Role::Source`], so its later
+/// absence mapped to `SourceGone` and `all_ok` ACCEPTED it. That is the
+/// companion-certified-clean defect this whole function exists to fix,
+/// live in the one family it had not reached.
+///
+/// TWO STATED GAPS, both in the safe direction. A covered volume whose
 /// extension is numeric AND whose archive signature the poster destroyed
 /// answers false to every arm - the name says nothing and the head says
 /// nothing - so it is demoted to [`Role::Payload`] and would report
-/// `Missing` if a later sweep took it. That is a FALSE DAMAGE report
-/// rather than a false clean one, which is the direction to err in for a
-/// feature whose whole job is to notice damage, and closing it needs a
-/// signal that is not on the disk. It is also narrow: this runs after
-/// finalize, so a volume the spent-volume sweep already took is not here
-/// at all and reaches the arm that correctly calls it a consumed source.
+/// `Missing` if a later sweep took it. The second is the new guard's own
+/// cost: a poster who dresses real 7z volumes as `Movie.mkv` gets the
+/// same treatment, deliberately. Both are a FALSE DAMAGE report rather
+/// than a false clean one, which is the direction to err in for a
+/// feature whose whole job is to notice damage, and closing the first
+/// needs a signal that is not on the disk. The second is not open at
+/// all: no sweep takes those files either, so the report they would
+/// provoke needs a deletion nothing here performs. Both are also narrow:
+/// this runs after finalize, so a volume the spent-volume sweep already
+/// took is not here at all and reaches the arm that correctly calls it a
+/// consumed source.
 fn is_consumable_source(path: &Path) -> bool {
     if is_par2_path(path) || crate::unpack::looks_like_named_rar(path) {
         return true;
     }
-    if !nzbkit::extract::is_final_file(path) && crate::unpack::sevenz_archive_part(path) {
+    if nzbkit::extract::archive_sniff_eligible(path) && crate::unpack::sevenz_archive_part(path) {
         return true;
     }
     nzbkit::zip::is_container(path)
@@ -938,6 +963,7 @@ mod tests {
             recovery_set_id: [0u8; 16],
             block_size: bs as u64,
             files,
+            nonrecovery: Vec::new(),
             recovery_blocks_seen: 0,
         }
     }
@@ -1322,6 +1348,69 @@ mod tests {
                 .files
                 .iter()
                 .any(|(n, s)| n == "testset.par2" && *s == FileStatus::SourceGone)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Matrix row M4-90's residue in this module: a companion whose NAME
+    /// says payload is [`Role::Payload`] however its first bytes read.
+    ///
+    /// `is_consumable_source`'s 7z arm was guarded by `is_final_file`,
+    /// which knows only `.cbr`/`.cb7`, so a `Show.srt` carrying the 7z
+    /// signature answered `sevenz_archive_part` on magic alone and was
+    /// stamped `Source`. Its later absence then mapped to `SourceGone`,
+    /// which `all_ok` ACCEPTS - the exact certified-clean-companion
+    /// defect `demote_if_payload_on_disk` exists to fix, in the one
+    /// family it had not reached. 4fabb3ff8 had already taught every
+    /// consumer to decline such a file, so nothing would ever have spent
+    /// it: the manifest was making a promise about a deletion that
+    /// cannot happen.
+    ///
+    /// The real `.7z` beside it is the control and must stay `Source`,
+    /// because narrowing this arm until it denies genuine packaging is
+    /// the mirror-image defect - a volume the sweep really does take,
+    /// reported `Missing` forever after.
+    #[test]
+    fn a_payload_named_companion_is_never_a_consumable_source() {
+        let dir = temp_dir("m490srt");
+        let sevenz = |seed: u8, len: usize| {
+            let mut v = vec![0x37u8, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
+            v.extend(body(len, seed));
+            v
+        };
+        let pack = sevenz(51, 4000);
+        // A subtitle whose head happens to read as 7z. The name is the
+        // evidence; the magic is not.
+        let srt = sevenz(52, 900);
+        std::fs::write(dir.join("pack.7z"), &pack).unwrap();
+        std::fs::write(dir.join("Show.srt"), &srt).unwrap();
+        let set = set_over(&[("pack.7z", &pack), ("Show.srt", &srt)], 4096);
+        let mut m = Manifest::from_set(&set, "M490.Job", "m490", true);
+        m.write_reconciled(&dir).unwrap();
+
+        let back = Manifest::load(&dir).unwrap();
+        let sub = back.files.iter().find(|e| e.name == "Show.srt").unwrap();
+        assert_eq!(sub.role, Role::Payload, "a payload NAME is not packaging");
+        let pk = back.files.iter().find(|e| e.name == "pack.7z").unwrap();
+        assert_eq!(pk.role, Role::Source, "a named .7z is still packaging");
+        assert!(back.verify(&dir).unwrap().all_ok());
+
+        // The sweep may take the container. Not damage.
+        std::fs::remove_file(dir.join("pack.7z")).unwrap();
+        let report = back.verify(&dir).unwrap();
+        assert!(report.all_ok(), "{report:?}");
+
+        // Losing the subtitle is. Nothing sweeps it, so its absence is
+        // damage and must be reported as such.
+        std::fs::remove_file(dir.join("Show.srt")).unwrap();
+        let report = back.verify(&dir).unwrap();
+        assert!(!report.all_ok(), "{report:?}");
+        assert!(
+            report
+                .files
+                .iter()
+                .any(|(n, s)| n == "Show.srt" && *s == FileStatus::Missing),
+            "{report:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

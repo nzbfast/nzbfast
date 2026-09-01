@@ -13,9 +13,122 @@ use std::path::{Path, PathBuf};
 use crate::failkind::{Classified, FailKind};
 
 use super::census::{Census, take_census};
-use super::settle::{SettleVerdict, settle_verify_repair};
-use super::workers::{self, CauseSplit, PendingR};
+use super::settle::{
+    SettleVerdict, fetch_matched_deferred, reclaim_par2_named_payload, settle_verify_repair,
+};
+use super::workers::{self, PendingR};
 use tracing::{info, warn};
+
+/// What the crash-resume REPLAY still owes once the network has
+/// drained: the spans it could not place, and its verdict.
+///
+/// Hoisted out of [`super::get_with_progress`] verbatim (30 Aug 2026) -
+/// that function then sat EXACTLY on the size gate's 500-line ceiling,
+/// so the next line anybody added to it reddened main for whoever
+/// pushed next. Behaviour is unchanged and this is one seam rather than
+/// a rewrite: both paragraphs below are the comments that rode with the
+/// code. It moved again on 31 Aug 2026, from `get/mod.rs` to here,
+/// beside its only caller: the rest of the post-drain bridge came down
+/// with the same split, and leaving the two lanes' hoists stacked would
+/// have left this the one arm of it still up in the orchestrator.
+///
+/// §94 A BACKSTOP: any restored file whose offset-0 article never
+/// arrived (a 430, a take-down, an abort) still owes its bytes to the
+/// extractor. Feeding them here holds exactly as the old up-front
+/// driver did, which is the correct cost for a volume that has no
+/// header to place against - and it is what stops a restored span being
+/// silently dropped. No-op on a fresh run, on the adopt path, and on
+/// the ordinary case where every head landed.
+///
+/// AND THE VERDICT, which must be LOUD. A failed replay's article ids
+/// sit in `completed`, so nothing downstream can tell the extractor
+/// never received those bytes: the run must fail rather than settle
+/// over the hole (Codex F-04). Deleting the journal makes the next
+/// attempt a fresh fetch, where the providers still have the articles.
+fn settle_resume_replay(
+    replay: &super::rig::ReplayPending,
+    extractor: &nzbkit::extract::Extractor,
+    verifier: &nzbkit::live::LiveVerifier,
+) -> Result<()> {
+    if !replay.is_empty() {
+        replay.drain_rest(extractor, verifier);
+    }
+    let failed = replay.failures();
+    if !failed.is_empty() {
+        anyhow::bail!(
+            "resume replay failed for {} - delete the job's .nzbfast.journal and retry to fetch it afresh",
+            failed.join(", ")
+        );
+    }
+    let (files, bytes) = replay.replayed();
+    if files > 0 {
+        info!(
+            target: "resume",
+            "replayed {files} restored file(s) ({:.1} MB) through the one-pass path, {:.1} MB left in place",
+            bytes as f64 / 1e6,
+            replay.left_in_place() as f64 / 1e6
+        );
+    }
+    Ok(())
+}
+
+/// Test-only (`NZBFAST_TEST_STALL_TAIL_MS`): hold the post-network tail
+/// open so the §129 lane suite can observe the Finishing state
+/// deterministically. Unset (the only production state) is a no-op.
+async fn test_stall_tail() {
+    if let Some(ms) = std::env::var("NZBFAST_TEST_STALL_TAIL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+}
+
+/// The marker `test_park_after_engine_finish` prints before it parks.
+/// Named once so the product and the two probes that wait for it cannot
+/// drift apart in the way three hand-typed string literals do.
+const PARK_AFTER_ENGINE_FINISH_MARK: &str =
+    "engine finish settled - parked for the crash-transaction probe";
+
+/// Test-only (`NZBFAST_TEST_PARK_AFTER_ENGINE_FINISH_MS`): announce that
+/// the engine has said its last word on a verified finish - the journal
+/// question settled either way - then hold the process here for up to
+/// that many milliseconds. Unset - the only production state - is a
+/// no-op and reads no clock.
+///
+/// This is a BARRIER, not a delay, and the difference is the whole
+/// point. X5-03 asks what survives a crash landing between the engine's
+/// finish and the terminal commit, and that window is microseconds wide
+/// on an idle box: a test that sleeps into it is guessing, and a guess
+/// on a box running nine other lanes' cargo builds is a flake in both
+/// directions. So the product says WHERE it is and waits; the probe
+/// waits for the LINE - a state - and kills. The `ms` is only a wedge
+/// bound, never the thing being waited for, which is the same division
+/// `harness::wait_until` and `journeys/`'s ban on `waitForTimeout` are
+/// built on.
+///
+/// IT PARKS AFTER THE WHOLE JOURNAL DECISION, not inside one arm of it,
+/// and that is a change of 31 Aug 2026 rather than the original shape.
+/// It used to sit immediately after `Journal::remove`, which was the
+/// only arm there was; the fix for X5-03 gave the daemon an arm that
+/// deliberately does NOT unlink ([`super::JournalOwner::Caller`]), and a
+/// barrier inside the retiring arm is one the daemon can no longer
+/// reach - so the probe that most needs it would hang rather than fail.
+/// The window's left edge was never the unlink itself: it is "this run
+/// has finished and verified, and nothing has reported success yet",
+/// which is true on both arms. Each probe asserts what its OWN owner
+/// did with the file - the CLI's that it is gone, the daemon's that it
+/// is still there - so moving the barrier took no premise away.
+fn test_park_after_engine_finish() {
+    let Some(ms) = std::env::var("NZBFAST_TEST_PARK_AFTER_ENGINE_FINISH_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return;
+    };
+    info!(target: "get", "{PARK_AFTER_ENGINE_FINISH_MARK}");
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
 
 /// The pipeline's terminal failure as one value: the build tag and the
 /// producer's classification, together.
@@ -459,6 +572,15 @@ pub(super) fn unpack_tail(
     // The downloaded volume set is done with. Everything below works on
     // what extraction PRODUCED, which this mode has no business eating.
     drop(eat_arm);
+    // ...and "done with" is exactly the licence the orphan sweep needs,
+    // so it runs HERE rather than beside its sibling above: every arm
+    // that could still want a volume file - the resumed re-extract, the
+    // demoted ladder, the eat arm - has had it. See
+    // [`drop_orphaned_slot_files`] for why `locked_no_password` is one
+    // of its gates rather than one of its guards.
+    if all_good && !no_extract && !locked_no_password {
+        drop_orphaned_slot_files(extractor, slots, ex_report, out_dir);
+    }
     if all_good
         && !no_extract
         && !locked_no_password
@@ -516,11 +638,12 @@ pub(super) fn unpack_tail(
         // The pass's own reason where it has one, on the same rule as
         // the three arms above: a bomb refused inside the nested pass is
         // about the DISK, and every sentence this match composes blames
-        // the archive. See [`extract_nested_why`].
+        // the archive. See [`extract_nested_why`], and
+        // [`TAIL_NESTED_ENTRY_DEPTH`] for why the pass enters at 1.
         let mut nested_why: Option<String> = None;
         let nested_res = {
             let _cpu = crate::lanegate::heavy_cpu_blocking();
-            extract_nested_why(out_dir, password, 1, &mut nested_why)
+            extract_nested_why(out_dir, password, TAIL_NESTED_ENTRY_DEPTH, &mut nested_why)
         };
         // Restore parked volumes before judging the result - they must be
         // back in place on every path, including the failure ones.
@@ -630,6 +753,103 @@ fn drop_replayed_sources(
         let p = out_dir.join(&seed.name);
         if extractor.slot_path(seed.slot).as_deref() != Some(p.as_path()) && p.exists() {
             let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// A downloaded file at a slot's posted name that NO slot owns any more
+/// - swept once the job finishes fully good and its payload is out.
+///
+/// The sibling of the superseded-partial delete in
+/// `settle::repair::reconcile_obfuscated_aliases`, for the orphan
+/// nothing named. That one fires where a slot's HOLE is being excused,
+/// so it reaches a file only while the pairing that licenses it is
+/// being made; this one is what remains when no pairing is in play at
+/// all - the job downloaded whole, nothing needed excusing, and the
+/// file is a leaving of some earlier attempt.
+/// A volume materialized under its posted name by one attempt, and then
+/// mapped in-stream by the attempt that finished, is referenced by
+/// neither at the end: the extractor holds no writer for that slot (its
+/// bytes went through the map into the payload), and the file is not
+/// what any rename published. Measured on a live daemon, 30
+/// Aug 2026 - a Completed 52.8 GB job with a 370 MB
+/// `e3a71dc01c012541063a60e0066c219f.53` beside its payload, four
+/// attempts after the one that put it there.
+///
+/// `slot_path` is the whole safety argument and it is asked the way
+/// round that fails safe. It answers with the file a slot OWNS - the
+/// live, rename-aware path of a writer this run has - so a file it names
+/// is this download's own answer for that slot and is never touched
+/// here. What is left is a name a slot was posted under that the run
+/// itself never wrote to, which cannot be the payload: a plain file's
+/// slot owns its output, and an archive's payload is what the extraction
+/// produced.
+///
+/// Two further gates, both about not deleting a deliverable:
+///
+/// * The extraction must have produced something. A job whose payload
+///   never came out of an archive at all - a plain post, an encrypted
+///   set with no password, a ladder that left the volumes packed - has
+///   nothing this pass could be sweeping TOWARDS, and the volumes may
+///   be the deliverable (see the nested pass's own note below).
+/// * A file the extraction PRODUCED is never removed, whatever it is
+///   named. `drop_replayed_sources` carries the same lock for the same
+///   reason (Codex sweep 3 Aug H3): identity by path string alone once
+///   deleted the only output of the job while reporting it green.
+///
+/// Trash-aware: these are DOWNLOADED bytes and the verdict is a
+/// judgement, which is exactly what the "Deleted files go to the Trash"
+/// setting promises to make reversible. Same call, and same reasoning,
+/// as `unpack::obfuscated::sweep_spent_obfuscated`.
+///
+/// STATED LIMIT: the candidate is the slot's POSTED name, and a slot
+/// whose yEnc header named it something else is written under that
+/// instead (`unpack::slot_name`, GH #63) - so this sees nothing on a
+/// post whose two in-band names disagree. Deliberate, and the safe
+/// direction: the name it does not have is a name it must not guess at
+/// in a pass that deletes. It costs nothing on the shape this was
+/// written for - the live post's NZB subjects ARE
+/// `e3a71dc01c012541063a60e0066c219f.NN`, checked against the spooled
+/// NZB - and an orphan it misses is the state before this existed.
+fn drop_orphaned_slot_files(
+    extractor: &Arc<nzbkit::extract::Extractor>,
+    slots: &[Arc<FileSlot>],
+    ex_report: &nzbkit::extract::ExtractReport,
+    out_dir: &Path,
+) {
+    if ex_report.extracted.is_empty() {
+        return;
+    }
+    // Every path a slot still owns, gathered BEFORE anything is
+    // removed - one slot's stale posted name can be another slot's live
+    // file (a set whose volumes were renamed into each other's names is
+    // the shape `PublishedNames` exists to arbitrate), and a sweep that
+    // decided per slot as it went could delete the second one's output
+    // on its way past the first.
+    let owned: std::collections::HashSet<std::path::PathBuf> = (0..slots.len())
+        .filter_map(|i| extractor.slot_path(i))
+        .collect();
+    let recoverable = crate::smart::cleanup_recoverable();
+    let staging = crate::smart::trash_staging_dir(out_dir);
+    for s in slots {
+        if s.is_par2() {
+            continue;
+        }
+        let name = nzbkit::disk::sanitize_out_name(&s.hint);
+        if name.is_empty() || ex_report.extracted.iter().any(|(n, _)| n == &name) {
+            continue;
+        }
+        let p = out_dir.join(&name);
+        if owned.contains(&p) || !p.exists() {
+            continue;
+        }
+        match crate::smart::remove_swept_file(&p, recoverable, staging.as_deref()) {
+            Ok(_) => info!(
+                target: "cleanup",
+                "removed {} - a downloaded file the extraction is done with",
+                p.display()
+            ),
+            Err(e) => warn!(target: "cleanup", "{}: {e}", p.display()),
         }
     }
 }
@@ -831,11 +1051,12 @@ pub(super) fn sweep_sniffed_leftovers(
             nzbkit::par2repair::covered_names(out_dir)
                 .unwrap_or_default()
                 .iter()
-                .map(|n| nzbkit::disk::sanitize_filename(n).to_lowercase())
+                .map(|n| nzbkit::disk::sanitize_out_name(n).to_lowercase())
                 .collect()
         });
         let mut freed: u64 = 0;
         let mut gone: usize = 0;
+        let mut kept: usize = 0;
         // Same reasoning as the adoption-source sweep above: sniffed
         // recovery files ride the setting that governs named `.par2`,
         // and since §64 that is a recoverable, parked delete. Flag read
@@ -847,7 +1068,20 @@ pub(super) fn sweep_sniffed_leftovers(
                 .file_name()
                 .map(|n| n.to_string_lossy().to_lowercase())
                 .is_some_and(|n| covered.contains(&n));
-            if is_payload {
+            // Wave-4 row M4-53 (30 Aug 2026). The name test above is
+            // the only thing that used to stand between a payload and
+            // this `remove`, and a name is exactly what an obfuscated
+            // post controls: a file the sniff nominated on eight bytes
+            // and no FileDesc happens to name was deleted, at rc=0,
+            // with a leftover count for a log line.
+            // `is_recovery_volume_shape` asks the file instead - the
+            // same house rule the exact-name work settled on, that a
+            // NAME may nominate and only CONTENT may finalize - and a
+            // payload with a packet-shaped head carries DELIVERED bytes
+            // past that head where a spent or deferred volume carries a
+            // hole, so the payload stays.
+            if is_payload || !nzbkit::par2repair::is_recovery_volume_shape(&p) {
+                kept += 1;
                 continue;
             }
             let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -873,6 +1107,18 @@ pub(super) fn sweep_sniffed_leftovers(
                 if recoverable { "to the Trash" } else { "freed" }
             );
         }
+        if kept > 0 {
+            // The other half of "why is this file still here": a
+            // sniffed candidate the loop above declined to remove,
+            // because its name matched a covered payload or its bytes
+            // failed the recovery-volume shape test. At `INFO` on
+            // purpose - `debug!` is filtered out by default (see
+            // logging.rs) and would answer nobody asking that question.
+            info!(
+                target: "cleanup",
+                "kept {kept} sniffed leftover(s) - name matched a payload or failed the recovery-volume shape test"
+            );
+        }
     }
 }
 
@@ -880,6 +1126,33 @@ pub(super) fn sweep_sniffed_leftovers(
 /// retire the journal and return Ok; otherwise print the diagnostics
 /// block the dashboard log ring mirrors and fail with the closest
 /// cause. Body is a verbatim move from the orchestrator's tail.
+///
+/// TWO BUNDLES ARRIVE WHOLE - [`Census`] and
+/// [`workers::LossLedgers`] - and that is the one thing here worth
+/// reading twice (31 Aug 2026). Fourteen of this function's parameters
+/// were fields of the census, EIGHT of them bare `u64` in a row
+/// (`derrs`, `recovery_errs`, `recovery_segments`, `retention_skipped`,
+/// `retention_skipped_payload`, `missing_segments`, `total_segments`,
+/// `total`) and four more bare `&[String]`; another five were the loss
+/// ledgers, four of them the same `&Arc<CauseSplit>` in a row. Any two
+/// of either run swapped at the call site compiled clean, and what came
+/// out the far side was a wrong NUMBER in the failure summary a user is
+/// asked to paste into a bug report - never a crash, so no test
+/// necessarily failed. The census was already being taken apart purely
+/// to be re-assembled here: `take_census` RETURNS it whole.
+///
+/// THIS IS NOT THE ARGUMENT `finish_run`'s doc DECLINES, and the two do
+/// not contradict each other. That one is about LINES - a bundle
+/// invented for a long argument list costs the same lines at the call
+/// site plus a definition to keep in step, so it buys nothing. This one
+/// is about a swap the COMPILER CANNOT SEE, over a bundle that already
+/// existed and was being destructured on the way in. Same distinction
+/// `get::jobspec`'s module doc draws, for the same reason: bundle when
+/// the type system is otherwise silent, not to shorten a list.
+///
+/// `extracted` is NOT a census field - it comes from the extractor
+/// report - so it stays a parameter of its own. Do NOT reach for
+/// `&census.extracted`; there is none.
 #[expect(clippy::too_many_arguments)]
 pub(super) fn finish_job(
     all_good: bool,
@@ -891,40 +1164,37 @@ pub(super) fn finish_job(
     // "7 missing of 7 segments" at promotion, measured 25 Aug 2026 by
     // the insurance A/B before this parameter existed.
     no_extract: bool,
+    // X5-03: who is entitled to unlink the journal once this finish
+    // verifies - see `super::JournalOwner`. Orthogonal to
+    // `no_extract` above, which is about a LATER run of this same job;
+    // this is about the CALLER of this one, and the daemon's answer is
+    // `Caller` because the record that says how the job ended is
+    // committed in its post-processing tail, after this line returns.
+    journal_owner: super::JournalOwner,
     out_dir: &Path,
-    incomplete_spared: &[String],
     journal: Arc<nzbkit::journal::Journal>,
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
     stats: &[nzbkit::pool::PoolStats],
     reextract_failed: Option<String>,
-    incomplete: usize,
-    derrs: u64,
-    recovery_errs: u64,
-    recovery_segments: u64,
+    // The post-drain accounting, whole: see the doc above for why it is
+    // not destructured on the way in.
+    census: &Census,
     // TODO 282 item 4's seam - see `diag::LossCauses::recovery_unobtainable`.
     // The verdict is the repair ladder's to reach; the ORDERING it lands
     // in is `incomplete_reason`'s, and that half is already built.
     recovery_unobtainable: bool,
-    missing_430: &Arc<CauseSplit>,
-    takedown_430: &Arc<CauseSplit>,
-    unasked_430: &Arc<CauseSplit>,
-    retention_skipped: u64,
-    retention_skipped_payload: u64,
-    transport_failed: &Arc<CauseSplit>,
-    transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
-    decode_error_sample: &crate::diag::DecodeSampleCell,
-    dead_servers: &[String],
-    left_servers: &[String],
+    // The five cause ledgers and their two samples, whole: same reason.
+    loss: &workers::LossLedgers,
     slots: &[Arc<FileSlot>],
     stalled: &Arc<std::sync::atomic::AtomicBool>,
-    missing_segments: u64,
-    total_segments: u64,
-    total: u64,
-    backbones: &[String],
-    post_age_days: u32,
     repair_shortfall: Option<crate::repair::RepairShortfall>,
     extracted: &[String],
     unhealed_slots: Option<&[usize]>,
+    // L1 residue (31 Aug 2026): the volume-named candidates the payload
+    // rescue bought and did not publish - see
+    // [`super::settle::SettleVerdict::rescue_left`]. Handed straight to
+    // the quarantine, which is the only reader.
+    rescue_left: &[PathBuf],
     extractor: &Arc<nzbkit::extract::Extractor>,
 ) -> Result<()> {
     // Download complete and verified (or repaired): the journal's job is
@@ -938,7 +1208,7 @@ pub(super) fn finish_job(
         // have healed, so the download really is done - but "done" and
         // "everything arrived" are different claims and only one of them
         // is true.
-        let kept = drop_spared_metadata(out_dir, incomplete_spared);
+        let kept = drop_spared_metadata(out_dir, &census.incomplete_spared);
         if !kept.is_empty() {
             // The delete IS the safety of the spare (see the fn doc):
             // a holed .nfo looks exactly like a real .nfo, and going
@@ -963,15 +1233,53 @@ pub(super) fn finish_job(
                 "volumes banked on disk - the journal stays so a later \
                  extracting run resumes from them"
             );
+        } else if journal_owner == super::JournalOwner::Caller {
+            // X5-03: the caller owns the durable terminal record and has
+            // not written it yet, so this journal is still the only
+            // thing on disk saying the payload arrived. Unlinking it
+            // here is what put a SIGKILL in the next microsecond one
+            // restart away from re-running a finished job against a post
+            // that had gone away, and filing `Failed` on top of the
+            // release it had already delivered.
+            //
+            // The caller unlinks it once its own record is durable -
+            // `serve::job::finalize_completed_gen`, straight after the
+            // `save_queue` that persists the `finalizing` marker. Until
+            // then a crash restores the row as `Queued` and the resume
+            // finishes the job off this file with no BODY at all.
+            info!(
+                target: "get",
+                "journal kept until the caller's terminal record is durable"
+            );
         } else if let Ok(j) = Arc::try_unwrap(journal) {
             j.remove();
         }
+        // The X5-03 window's left edge, and the only place it exists:
+        // the engine has finished and verified, the journal question is
+        // settled whichever way this run answers it, and nobody has
+        // committed a terminal record yet. See
+        // test_park_after_engine_finish in get/tail.rs.
+        test_park_after_engine_finish();
         return Ok(());
     }
     // Failing: print the block a bug report can carry whole. The daemon
     // mirrors stdout into the dashboard log ring, so this is what a user
     // pastes when they say "every file failed".
     print_failure_diagnostics(servers, stats);
+    // Hand the OS back every output descriptor NOW, on the engine's own
+    // failure path, not only in the daemon's post-processing tail. The
+    // tail's `park_outputs` runs after `fetch.await` in `run_tail`, and
+    // on the queue hand-over path the runner does not settle this run
+    // until the PREDECESSOR'S drain ends (`worker.rs`'s history-order
+    // guarantee) - so a failed successor's handles used to sit open for
+    // the whole of a slow drain. Measured 30 Aug 2026 on the live
+    // daemon, both nights of the wedge: ~146 quarantined-volume fds
+    // held for hours, and on the first night an unlinked 51.2 GB
+    // extraction output pinned with them. Nothing streams a failed
+    // job's quarantined bytes, so there is nothing these handles serve.
+    if let Err(e) = extractor.park_outputs() {
+        warn!(target: "cleanup", "could not release the output handles: {e}");
+    }
     if let Some(why) = reextract_failed {
         // An extraction that failed over payload PAR2 already certified:
         // this machine's, not the post's, which is what the string
@@ -987,7 +1295,14 @@ pub(super) fn finish_job(
     // failure returns. See quarantine_partials for why this is a rename
     // and not a delete. Deliberately AFTER the reextract_failed arm,
     // whose files really were verified and whose message says so.
-    quarantine_failed_payload(out_dir, extracted, unhealed_slots, slots, extractor);
+    quarantine_failed_payload(
+        out_dir,
+        extracted,
+        unhealed_slots,
+        slots,
+        rescue_left,
+        extractor,
+    );
     // Recovery errors are deliberately NOT an entry condition. M6 added
     // them here so corrupt parity beside a MISSING payload article kept
     // its automatic retry, and the marker that does that lives in the
@@ -1000,42 +1315,43 @@ pub(super) fn finish_job(
     // the one automatic retry - which is exactly what would fetch clean
     // parity - never armed. Left to the repair openings below, which
     // classify Unrepairable and do retry (Codex sweep 6, N3).
-    if incomplete > 0 || derrs > 0 {
+    if census.incomplete > 0 || census.derrs > 0 {
         let causes = LossCauses {
             // Sweep 8, M7: PAYLOAD-only, every one of them. A cause
             // counter that folds recovery articles in is not a
             // statement about the payload, and every gate below reads
             // these as if it were - see `workers::CauseSplit`.
-            missing_430: missing_430.payload(),
-            takedown_430: takedown_430.payload(),
+            missing_430: loss.missing_430.payload(),
+            takedown_430: loss.takedown_430.payload(),
             // No `unasked_430_recovery` twin to feed, and the discarded
             // `.recovery()` half is deliberate: see the field's own doc
             // comment in `diag.rs`. Every clause that claims a whole
             // fleet answered is a PAYLOAD clause.
-            unasked_430: unasked_430.payload(),
-            retention_excluded: retention_skipped_payload,
-            transport_failed: transport_failed.payload(),
-            missing_430_recovery: missing_430.recovery(),
-            takedown_430_recovery: takedown_430.recovery(),
-            retention_excluded_recovery: retention_skipped - retention_skipped_payload,
-            transport_failed_recovery: transport_failed.recovery(),
-            recovery_segments,
+            unasked_430: loss.unasked_430.payload(),
+            retention_excluded: census.retention_skipped_payload,
+            transport_failed: loss.transport_failed.payload(),
+            missing_430_recovery: loss.missing_430.recovery(),
+            takedown_430_recovery: loss.takedown_430.recovery(),
+            retention_excluded_recovery: census.retention_skipped
+                - census.retention_skipped_payload,
+            transport_failed_recovery: loss.transport_failed.recovery(),
+            recovery_segments: census.recovery_segments,
             recovery_unobtainable,
-            transport_sample: transport_sample.lock_ok().clone(),
-            decode_sample: decode_error_sample.lock_ok().clone(),
-            recovery_errs,
-            dead_servers,
-            left_servers,
+            transport_sample: loss.transport_sample.lock_ok().clone(),
+            decode_sample: loss.decode_error_sample.lock_ok().clone(),
+            recovery_errs: census.recovery_errs,
+            dead_servers: &census.dead_servers,
+            left_servers: &census.left_servers,
             // Sniffed slots count: "this post carries no PAR2 recovery
             // data" must not be claimed about a post whose recovery set
             // was identified in-stream (issue #14).
             par2_slots: slots.iter().filter(|s| s.is_par2()).count(),
             stalled: stalled.load(Ordering::Relaxed),
-            missing_segments,
-            total_segments,
-            bytes_arrived: total,
-            backbones,
-            post_age_days,
+            missing_segments: census.missing_segments,
+            total_segments: census.total_segments,
+            bytes_arrived: census.total,
+            backbones: &census.backbones,
+            post_age_days: census.post_age_days,
         };
         // TODO 307 item 1: the census states which of the six kinds this
         // is, in the same statement that writes the sentence. Every
@@ -1043,7 +1359,7 @@ pub(super) fn finish_job(
         // the same contract the openings have always had with
         // `fail_kind`, now checked by the type rather than by the
         // reader remembering to append.
-        let (kind, mut msg) = incomplete_verdict(incomplete, derrs, &causes);
+        let (kind, mut msg) = incomplete_verdict(census.incomplete, census.derrs, &causes);
         // TODO 305. The repair ARITHMETIC, when it ran on a download that
         // was already short and came up against a post that never
         // carried enough parity to cover the damage. Until now that
@@ -1083,6 +1399,9 @@ pub(super) fn finish_job(
             && msg.starts_with("download incomplete")
         {
             msg.push_str(&format!("; {}", short.clause()));
+            // M4-29 follow-up: and whether the user's own setting is
+            // where those blocks went. See [`skipped_samples_clause`].
+            msg.push_str(&crate::repair::skipped_samples_clause(&short, slots));
         }
         anyhow::bail!(classified(kind, msg))
     } else if let Some(short) = repair_shortfall {
@@ -1093,8 +1412,9 @@ pub(super) fn finish_job(
         anyhow::bail!(classified(
             FailKind::Unrepairable,
             format!(
-                "verification failed and PAR2 repair could not complete: {}",
-                short.clause()
+                "verification failed and PAR2 repair could not complete: {}{}",
+                short.clause(),
+                crate::repair::skipped_samples_clause(&short, slots)
             )
         ))
     } else {
@@ -1272,241 +1592,19 @@ fn print_mem_floor(record: &nzbkit::memgauge::PeakRecord) {
     );
 }
 
-/// Rename a failed job's direct-extracted payload AND its downloaded
-/// files aside, and SAY so.
-///
-/// The mechanism and the reasoning live in
-/// `nzbkit::journal::quarantine_partials`; this is the reporting half.
-/// A failed job's one line about it matters more than the success
-/// path's: the user is about to look in the output directory for the
-/// file the verdict just told them they do not have, and without this
-/// they find a plausible-looking one wearing a suffix nobody explained.
-///
-/// A rename that FAILED is a warning rather than a second failure - the
-/// job is already failing and has its own cause to report, and burying
-/// that cause under a filesystem complaint helps nobody. It still has
-/// to be said: the file it names is the false artifact the rename
-/// exists to prevent, and it is still sitting there.
-///
-/// TODO 159 item 1 - `unhealed_slots` narrows this to the files that
-/// actually lost bytes. A post whose PAR2 set covers two of three
-/// archives, damaged on one covered volume and on the uncovered one,
-/// used to have all three payloads withheld: the two that verified and
-/// repaired perfectly went out of reach to keep the third from
-/// shipping. Withholding what we HAVE is a real cost - it is the
-/// difference between a user getting two of three files (SABnzbd's
-/// answer on that post) and none (NZBGet's), and the round-4 evidence
-/// says two is the better answer.
-fn quarantine_failed_payload(
-    out_dir: &Path,
-    extracted: &[String],
-    unhealed_slots: Option<&[usize]>,
-    slots: &[Arc<FileSlot>],
-    extractor: &Arc<nzbkit::extract::Extractor>,
-) {
-    let (hold, spare) = partition_failed_payload(extracted, unhealed_slots, extractor);
-    if !spare.is_empty() {
-        info!(
-            target: "repair",
-            "{} extracted file(s) came out of archives the repair proved whole, and \
-             are left in place: {}",
-            spare.len(),
-            spare.join(", ")
-        );
-    }
-    let (mut done, mut failed) = nzbkit::journal::quarantine_partials(out_dir, &hold);
-    // TODO 159 item 1c: the downloaded files go the same way. A failed
-    // job's volume set used to keep wearing real names in the output
-    // directory - the one-pass answer to SABnzbd's incomplete/ and
-    // NZBGet's inter/ is a rename, not a move, and the retry's
-    // unquarantine puts every name back before the journal opens.
-    let (vol_done, vol_failed) =
-        nzbkit::journal::quarantine_paths(&held_downloaded_files(slots, unhealed_slots, extractor));
-    done.extend(vol_done);
-    failed.extend(vol_failed);
-    if !done.is_empty() {
-        info!(
-            target: "verify",
-            "{} unverified file(s) renamed to *{} so nothing imports them: {} \
-             (the bytes are kept - a retry resumes from them)",
-            done.len(),
-            nzbkit::journal::PARTIAL_SUFFIX,
-            done.join(", ")
-        );
-        info!(target: "quarantine", "renamed {} unverified payload file(s) aside", done.len());
-    }
-    for name in &failed {
-        warn!(
-            target: "verify",
-            "could not rename the unverified {name} aside - it is INCOMPLETE despite \
-             its name and size, do not import it"
-        );
-        warn!(target: "quarantine", "{name}: could not be renamed aside");
-    }
-}
+// The two ways `finish_job` changes what is in the output directory
+// - the failing job's quarantine and the spared-metadata delete - is
+// one subject and came out whole (TODO 106, 31 Aug 2026). The two
+// helpers under the quarantine door are re-exported only because the
+// test module below asserts on them directly.
+mod disposition;
+use disposition::{drop_spared_metadata, quarantine_failed_payload};
 
-/// Split the direct-extracted payload into (withhold, leave in place).
-///
-/// Two independent facts have to line up before a file is spared, and
-/// EITHER of them missing puts it back in the withhold pile:
-///
-/// 1. Settle said which slots are still holed and that everything else
-///    is proved (`unhealed_slots`). No claim - the pass could not make
-///    one - and every file is withheld, exactly as before.
-/// 2. The extractor can say which source volumes fed the file
-///    (`payload_sources`). A file it cannot speak for is withheld: the
-///    map is a positive claim about the names it lists, and a name it
-///    omits is a payload written through a path this reasoning has not
-///    modelled (a nested level's own output, a chase's members, an
-///    archive that fell back mid-job). Absent means unknown, and
-///    unknown means hold.
-///
-/// The mapping is at GROUP granularity, which is what makes it safe for
-/// the shapes the scope caution named: a solid or multi-volume set is
-/// one group, so damage to any of its volumes withholds every file the
-/// set produced, and a payload spanning two volumes cannot be spared by
-/// the healthy one alone.
-fn partition_failed_payload(
-    extracted: &[String],
-    unhealed_slots: Option<&[usize]>,
-    extractor: &Arc<nzbkit::extract::Extractor>,
-) -> (Vec<String>, Vec<String>) {
-    let Some(unhealed) = unhealed_slots else {
-        return (extracted.to_vec(), Vec::new());
-    };
-    let Some(sources) = extractor.payload_sources() else {
-        return (extracted.to_vec(), Vec::new());
-    };
-    let mut hold = Vec::new();
-    let mut spare = Vec::new();
-    for name in extracted {
-        let whole = sources
-            .get(name)
-            .is_some_and(|srcs| !srcs.iter().any(|s| unhealed.contains(s)));
-        if whole { &mut spare } else { &mut hold }.push(name.clone());
-    }
-    (hold, spare)
-}
-
-/// The downloaded files a failing finish takes out of circulation next
-/// to the extracted payload: every slot file still on disk, EXCEPT a
-/// plain file this job can prove whole.
-///
-/// advG (torture rounds 1-3, TODO 159 item 1c): a failed job's partial
-/// download used to keep wearing real volume names in the completed
-/// directory, so anything consuming that directory counted four `.rar`
-/// volumes as delivered files - where SABnzbd and NZBGet park the same
-/// bytes in `incomplete/` and `inter/`. One-pass extracts in place as
-/// articles arrive, so "somewhere else to live" has to be a rename
-/// rather than a move: the volumes join the payload under
-/// `*.nzbfast-partial`, and the next attempt's unquarantine puts every
-/// name back before the journal opens (`get/plan.rs`), so a retry
-/// still resumes from them.
-///
-/// The discrimination mirrors [`partition_failed_payload`]:
-/// - A volume (a materialized fallback) is ALWAYS held, whole or not.
-///   Its deliverable was the extraction, which this failing job did
-///   not produce; a complete `.part02.rar` of a failed set is
-///   furniture, not a result.
-/// - A par2 file is always held: recovery data for a job that just
-///   failed to recover is spent evidence, not a deliverable.
-/// - A plain file IS its own deliverable, so one that is provably
-///   whole stays delivered (SABnzbd's answer on partly recoverable
-///   posts, which the round-4 evidence prefers): proved by settle's
-///   claim when the repair earned one, otherwise by its own census -
-///   every segment arrived, decoded and wrote clean, and the writer's
-///   declared range is fully covered. The coverage gate is what keeps
-///   a lying `=ybegin size` from sparing a sparse tail.
-///
-/// The failure arms that reach this hold only damaged or unverifiable
-/// sets. A failure a password or a manual unpack actually answers
-/// keeps its volumes visible: it routes through the exempt
-/// `reextract_failed` arm, or completes with `locked_no_password` -
-/// so the daemon's locked-failure folder probe never loses an archive
-/// it could unlock.
-fn held_downloaded_files(
-    slots: &[Arc<FileSlot>],
-    unhealed_slots: Option<&[usize]>,
-    extractor: &Arc<nzbkit::extract::Extractor>,
-) -> Vec<PathBuf> {
-    (0..slots.len())
-        .filter_map(|i| {
-            let path = extractor.slot_path(i)?;
-            let s = &slots[i];
-            // Stably plain is the only shape whose on-disk file is its
-            // own deliverable; slot_uncovered answers None for every
-            // other mode (materialized volumes, chases).
-            let uncovered = extractor.slot_uncovered(i);
-            let whole = match unhealed_slots {
-                Some(unhealed) => !unhealed.contains(&i),
-                None => {
-                    uncovered == Some(0)
-                        && s.missing.load(Ordering::Relaxed) == 0
-                        && s.remaining.load(Ordering::Relaxed) == 0
-                        && s.errors.load(Ordering::Relaxed) == 0
-                        && s.abandoned.load(Ordering::Relaxed) == 0
-                }
-            };
-            if uncovered.is_some() && whole && !s.is_par2() {
-                None
-            } else {
-                Some(path)
-            }
-        })
-        .collect()
-}
-
-/// Issue #23: finish the job WITHOUT the metadata files no server had.
-///
-/// Removed rather than left behind, and that is what makes sparing the
-/// job safe. A slot short an article still has a file on disk with a
-/// zero-filled hole where the bytes should be, and
-/// `a_disk_repair_does_not_certify_files_outside_its_recovery_set` is
-/// right that handing an *arr one of those is worse than failing - a
-/// holed .nfo looks exactly like a real .nfo. Deleting it is the answer
-/// neither the old behaviour nor a bare spare reached: the job
-/// completes, and nothing false is left in the directory.
-///
-/// Safe to delete precisely because of the rule that selected these:
-/// the recovery set does not cover them, so nothing can rebuild them,
-/// and they are furniture rather than payload.
-/// Returns the names it could NOT remove - the caller must refuse to
-/// complete while any remain (a holed file that survived is exactly the
-/// false artifact the delete exists to prevent).
-fn drop_spared_metadata(out_dir: &Path, spared: &[String]) -> Vec<String> {
-    if spared.is_empty() {
-        return Vec::new();
-    }
-    let mut gone = Vec::new();
-    let mut kept = Vec::new();
-    for name in spared {
-        let p = out_dir.join(nzbkit::disk::sanitize_filename(name));
-        match std::fs::remove_file(&p) {
-            // Never written at all is the same outcome we want.
-            Ok(()) => gone.push(name.clone()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => gone.push(name.clone()),
-            Err(e) => {
-                warn!(target: "get", "could not remove the partial {}: {e}", p.display());
-                kept.push(name.clone());
-            }
-        }
-    }
-    if kept.is_empty() {
-        info!(
-            target: "get",
-            "complete, without {} metadata file(s) no server had: {} \
-             (the partial copy was removed - nothing can rebuild it)",
-            gone.len(),
-            gone.join(", ")
-        );
-    }
-    kept
-}
-
-/// Everything the run still has to do once the wire has gone quiet:
-/// post-drain accounting, the settle/repair ladder, the extraction
-/// summary, the disk-unpack tail and the journal's retirement. A
-/// verbatim move out of the orchestrator (TODO 106).
+/// Everything the run still has to do once the wire has gone quiet: the
+/// §94 A replay backstop, post-drain accounting, the settle/repair
+/// ladder, the extraction summary, the disk-unpack tail and the
+/// journal's retirement. A verbatim move out of the orchestrator
+/// (TODO 106).
 ///
 /// The network drain is `get_with_progress`'s natural seam - nothing
 /// above this line has finished, nothing below it is still filling
@@ -1515,9 +1613,34 @@ fn drop_spared_metadata(out_dir: &Path, spared: &[String]) -> Vec<String> {
 /// function 27 lines under the 500-line ceiling, and its whole recorded
 /// history is regrowth: round 5 trimmed it to 478 and it was back over
 /// 500 within two days. The long argument list is the house shape here,
-/// not an accident: `finish_job` below takes 26 and
-/// `settle_verify_repair` 24, and a bundle struct costs the same lines
-/// at the call site plus a definition to keep in step.
+/// not an accident: `settle_verify_repair` takes 24, and a bundle
+/// struct invented to shorten a list costs the same lines at the call
+/// site plus a definition to keep in step.
+///
+/// THAT ARGUMENT IS ABOUT LINES AND IT DOES NOT REACH RUNS OF ONE
+/// TYPE, which is a different question and the one the two bundles
+/// here answer (31 Aug 2026). `&Census` and [`workers::LossLedgers`]
+/// are not here to shorten anything - they are here because eight
+/// bare `u64` in a row and four identical `&Arc<CauseSplit>` in a row
+/// accept any permutation of themselves without a word from the
+/// compiler, and what falls out is a wrong figure in the failure
+/// summary rather than a crash. Both already existed whole upstream
+/// and were being destructured purely to be handed back one field at a
+/// time. The rest of this list is heterogeneous and stays positional;
+/// see `finish_job` for the full reasoning and `get::jobspec`'s module
+/// doc for the same distinction drawn elsewhere.
+///
+/// THE SEAM ABOVE is the rule for what belongs here, and it is what
+/// the three arms at the top of this body were moved in on (31 Aug
+/// 2026): the
+/// replay backstop, `reclaim_par2_named_payload` and
+/// `fetch_matched_deferred` were the last inline logic left in the
+/// orchestrator, they all run strictly after the drain, and they have
+/// to run strictly before `take_census` - which is here. Leaving them
+/// the other side of the seam bought nothing and cost the orchestrator
+/// its last 50 lines of margin against the 500-line ceiling. Anything
+/// that still has to touch the fetch pool stays up there; anything
+/// whose input is a drained run belongs down here.
 #[expect(clippy::too_many_arguments)]
 pub(super) async fn finish_run(
     servers: &[(ServerConfig, nzbkit::pool::PoolConfig)],
@@ -1532,14 +1655,11 @@ pub(super) async fn finish_run(
     out_dir: &Path,
     buf_pool: &Arc<nzbkit::pool::BufPool>,
     decode_errors: &Arc<AtomicU64>,
-    retention_excluded: &Arc<CauseSplit>,
     decoded_bytes: &Arc<AtomicU64>,
-    missing_430: &Arc<CauseSplit>,
-    takedown_430: &Arc<CauseSplit>,
-    unasked_430: &Arc<CauseSplit>,
-    transport_failed: &Arc<CauseSplit>,
-    transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
-    decode_error_sample: &crate::diag::DecodeSampleCell,
+    // The five cause ledgers and their two samples, whole - never
+    // seven positional arguments of which four are the same
+    // `&Arc<CauseSplit>`: see [`workers::LossLedgers`].
+    loss: &workers::LossLedgers,
     stalled: &Arc<std::sync::atomic::AtomicBool>,
     pending_r: &std::sync::Mutex<PendingR>,
     elapsed: std::time::Duration,
@@ -1547,11 +1667,20 @@ pub(super) async fn finish_run(
     resume_vols: &HashMap<usize, PathBuf>,
     prefetched: &Arc<std::sync::Mutex<Vec<(usize, Vec<PathBuf>)>>>,
     restored: &nzbkit::journal::Restored,
+    // §94 A: the restored spans the in-stream replay still owes the
+    // extractor - drained by the backstop at the top of this body.
+    replay: &Arc<super::rig::ReplayPending>,
     fast_verify: bool,
     par_cleanup: bool,
     password: Option<String>,
     resuming: bool,
     no_extract: bool,
+    // Who unlinks the journal on a clean finish - handed straight
+    // through to `finish_job`. A TYPE and not a second `bool` beside
+    // `no_extract` on purpose: the two answer different questions about
+    // the same file, and this function's own doc records what a swap of
+    // two same-typed neighbours costs when the compiler cannot see it.
+    journal_owner: super::JournalOwner,
     resume_map: bool,
     eat_consent: bool,
     note_activity: &(dyn Fn(&'static str) + Sync),
@@ -1569,27 +1698,31 @@ pub(super) async fn finish_run(
     budget: &nzbkit::mem::MemBudget,
     mem_sampler: &super::workers::MemSampler,
 ) -> Result<()> {
-    // Post-drain accounting: see take_census. The destructure keeps every
-    // downstream read on the same names the inline code used.
-    let Census {
-        total,
-        dead_servers,
-        left_servers,
-        backbones,
-        post_age_days,
-        sniff_bootstrap,
-        incomplete,
-        incomplete_spared,
-        missing_segments,
-        total_segments,
-        sparse_slots,
-        recovery_errs,
-        derrs,
-        retention_skipped,
-        retention_skipped_payload,
-        recovery_missing,
-        recovery_segments,
-    } = take_census(
+    settle_resume_replay(replay, extractor, verifier)?;
+
+    test_stall_tail().await;
+
+    // M4-28: a slot the NZB called recovery data by NAME whose bytes a
+    // set names as payload. Before the deferred rescue below, so the two
+    // routes into "this is not recovery data after all" are settled
+    // together and the census that follows sees one answer.
+    reclaim_par2_named_payload(verifier, slots, extractor, out_dir);
+
+    // Issue #14 drain fallback - deferred slots the active set covers
+    // fetch on the side machinery: see fetch_matched_deferred in
+    // get/settle/noset.rs.
+    fetch_matched_deferred(
+        verifier, sniff, slots, slot_file, servers, nzb, out_dir, buf_pool, extractor, cancel,
+    )
+    .await;
+
+    // Post-drain accounting: see take_census. NOT destructured onto
+    // inline names the way the other phase bundles are - it is handed
+    // WHOLE to `finish_job` below, which is what stops two of its eight
+    // identically-typed `u64` figures being swapped on the way into the
+    // failure summary. The fields this body reads itself are spelled
+    // `census.x`. See `finish_job` for the whole reasoning.
+    let census = take_census(
         servers,
         stats,
         nzb,
@@ -1598,7 +1731,7 @@ pub(super) async fn finish_run(
         verifier,
         extractor,
         decode_errors,
-        retention_excluded,
+        &loss.retention_excluded,
         decoded_bytes,
         elapsed,
     );
@@ -1613,6 +1746,7 @@ pub(super) async fn finish_run(
         mut published_names,
         sniff_covered,
         unhealed_slots,
+        rescue_left,
         repaired,
     } = settle_verify_repair(
         verifier,
@@ -1625,18 +1759,18 @@ pub(super) async fn finish_run(
         out_dir,
         buf_pool,
         sniff,
-        sniff_bootstrap,
+        census.sniff_bootstrap,
         bootstrap_vol,
         resume_vols,
         prefetched,
         fast_verify,
         par_cleanup,
         password.as_deref(),
-        incomplete,
-        derrs,
-        &sparse_slots,
-        recovery_errs,
-        recovery_missing,
+        census.incomplete,
+        census.derrs,
+        &census.sparse_slots,
+        census.recovery_errs,
+        census.recovery_missing,
         &note_activity,
         cancel,
         donor_dirs,
@@ -1721,6 +1855,40 @@ pub(super) async fn finish_run(
             sniff_covered.as_ref(),
         )
     })?;
+    // X5-09: a canonical name this job owed a verified file and could
+    // not land is a JOB FAILURE, not a warn line.
+    //
+    // `publish_verified_name` has two could-not-publish arms - the
+    // out-path refusal (a symlink in the way; a regular file where a
+    // directory is needed, which is W4-17's `node` versus
+    // `node/child.bin`) and a failed rename (EXDEV across a mounted
+    // subdirectory, EACCES on a read-only target, a Windows sharing
+    // violation). Both warn and return `None`, and `None` is also what
+    // "already at the right name" returns, so no caller could tell them
+    // apart and none of the four tried: the job finished rc=0 with the
+    // payload still under its hash.
+    //
+    // HERE and not before `unpack_tail`, deliberately. Setting
+    // `all_good = false` earlier would skip the unrar ladder, the SFX
+    // pass and the nested-archive pass, so a stranded .nfo would cost
+    // the user the extraction of a payload that was perfectly fine.
+    // Running the ladder first also makes the stranded-ness question
+    // answerable: `slot_path(...).exists()` is asked AFTER the volumes
+    // a good job consumes have been consumed.
+    //
+    // The failure travels as `reextract_failed`, which is the channel
+    // whose own arm in `finish_job` bails BEFORE
+    // `quarantine_failed_payload` and says "the verified files are still
+    // in the output directory". That is exactly X5-09's requirement:
+    // nonzero with the verified source preserved, never a quarantine of
+    // bytes the recovery set vouched for. A reason some earlier rung
+    // already named WINS, the same rule `unpack_failure` exists to hold.
+    let (all_good, reextract_failed) = match published_names
+        .unlanded_why(|sidx| extractor.slot_path(sidx).is_some_and(|p| p.exists()))
+    {
+        Some(why) => (false, Some(reextract_failed.unwrap_or(why))),
+        None => (all_good, reextract_failed),
+    };
     // Unpacking is over. The token used to be left saying "extracting"
     // from here to the end of the JOB - through this run's own sweeps
     // and, in the daemon, through the whole post-processing tail behind
@@ -1745,16 +1913,13 @@ pub(super) async fn finish_run(
     finish_job(
         all_good,
         no_extract,
+        journal_owner,
         out_dir,
-        &incomplete_spared,
         journal,
         servers,
         stats,
         reextract_failed,
-        incomplete,
-        derrs,
-        recovery_errs,
-        recovery_segments,
+        &census,
         // TODO 282 item 4's verdict, arriving at the seam item 17 left
         // for it. The download-time counters above are all the evidence
         // this run has otherwise, and on the 24 Aug incident they were
@@ -1770,23 +1935,9 @@ pub(super) async fn finish_run(
             repair_shortfall,
             Some(crate::repair::RepairShortfall::Unservable(_))
         ),
-        missing_430,
-        takedown_430,
-        unasked_430,
-        retention_skipped,
-        retention_skipped_payload,
-        transport_failed,
-        transport_sample,
-        decode_error_sample,
-        &dead_servers,
-        &left_servers,
+        loss,
         slots,
         stalled,
-        missing_segments,
-        total_segments,
-        total,
-        &backbones,
-        post_age_days,
         repair_shortfall,
         &ex_report
             .extracted
@@ -1794,6 +1945,7 @@ pub(super) async fn finish_run(
             .map(|(n, _)| n.clone())
             .collect::<Vec<_>>(),
         unhealed_slots.as_deref(),
+        &rescue_left,
         extractor,
     )
 }
@@ -1801,6 +1953,10 @@ pub(super) async fn finish_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The two helpers under the quarantine door: `use super::*` reaches
+    // only what tail.rs itself imports, and the parent has no call for
+    // these two - they are exercised from here and from nowhere else.
+    use super::disposition::{held_downloaded_files, partition_failed_payload};
     use std::sync::atomic::AtomicUsize;
 
     fn tdir(name: &str) -> PathBuf {
@@ -1850,8 +2006,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// A traversal name is neutered by sanitize_filename: the file the
-    /// raw join would have hit, OUTSIDE the output dir, survives.
+    /// A traversal name is neutered by sanitize_out_name (the flatten
+    /// fallback): the file the raw join would have hit, OUTSIDE the
+    /// output dir, survives.
     #[test]
     fn a_traversal_name_cannot_reach_outside_the_dir() {
         let parent = tdir("traverse");
@@ -1861,7 +2018,7 @@ mod tests {
         drop_spared_metadata(&out, &["../evil.nfo".to_string()]);
         assert!(
             parent.join("evil.nfo").exists(),
-            "sanitize_filename must keep the delete inside the output dir"
+            "sanitize_out_name must keep the delete inside the output dir"
         );
         let _ = std::fs::remove_dir_all(&parent);
     }
@@ -1921,37 +2078,26 @@ mod tests {
         finish_job(
             false,
             false,
+            super::super::JournalOwner::Run,
             dir,
-            &[],
             Arc::new(j),
             &[],
             &[],
             None,
-            incomplete,
-            derrs,
-            recovery_errs,
-            0,
+            &Census {
+                incomplete,
+                derrs,
+                recovery_errs,
+                ..Census::blank()
+            },
             false,
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(CauseSplit::default()),
-            0,
-            0,
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(std::sync::Mutex::new(None)),
-            &Arc::new(std::sync::Mutex::new(None)),
-            &[],
-            &[],
+            &workers::LossLedgers::default(),
             &[],
             &Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            0,
-            0,
-            0,
-            &[],
-            0,
             None,
             &[],
             None,
+            &[],
             &Arc::new(nzbkit::extract::Extractor::new(dir, 0, true)),
         )
     }
@@ -1974,39 +2120,27 @@ mod tests {
         finish_job(
             all_good,
             false,
+            super::super::JournalOwner::Run,
             dir,
-            &[],
             Arc::new(j),
             &[],
             &[],
             reextract_failed,
-            incomplete,
-            derrs,
-            0,
-            0,
+            &Census {
+                incomplete,
+                derrs,
+                ..Census::blank()
+            },
             false,
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(CauseSplit::default()),
-            0,
-            0,
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(std::sync::Mutex::new(None)),
-            &Arc::new(std::sync::Mutex::new(None)),
-            &[],
-            &[],
+            &workers::LossLedgers::default(),
             slots,
             &Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            0,
-            0,
-            0,
-            &[],
-            0,
             repair_shortfall,
             extracted,
             // No settle claim: the whole-job quarantine, which is what
             // every case below is about.
             None,
+            &[],
             extractor,
         )
     }
@@ -2100,7 +2234,11 @@ mod tests {
                     None,
                     0,
                     0,
-                    Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+                    Some(crate::repair::RepairShortfall::Blocks {
+                        needed: 9,
+                        have: 1,
+                        set: None,
+                    }),
                 ),
                 FailKind::Unrepairable,
                 "repair could not complete",
@@ -2148,43 +2286,72 @@ mod tests {
         let res = finish_job(
             true,
             true,
+            super::super::JournalOwner::Run,
             &d,
-            &[],
             Arc::new(j),
             &[],
             &[],
             None,
-            0,
-            0,
-            0,
-            0,
+            &Census::blank(),
             false,
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(CauseSplit::default()),
-            0,
-            0,
-            &Arc::new(CauseSplit::default()),
-            &Arc::new(std::sync::Mutex::new(None)),
-            &Arc::new(std::sync::Mutex::new(None)),
-            &[],
-            &[],
+            &workers::LossLedgers::default(),
             &[],
             &Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            0,
-            0,
-            0,
-            &[],
-            0,
             None,
             &[],
             None,
+            &[],
             &Arc::new(nzbkit::extract::Extractor::new(&d, 0, true)),
         );
         assert!(res.is_ok());
         assert!(
             d.join(".nzbfast.journal").exists(),
             "a banked payload's journal must survive its good finish"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A good finish whose journal the CALLER owns KEEPS it: X5-03, the
+    /// daemon half. The queue row is what says how the job ended and it
+    /// is not committed until the post-processing tail, so unlinking
+    /// here would leave a SIGKILL in the next microsecond one restart
+    /// away from re-running a finished job - `serve::job::
+    /// finalize_completed_gen` retires it after that record is durable.
+    ///
+    /// The sibling above (`a_good_no_extract_finish_keeps_the_journal`)
+    /// pins the OTHER keeping arm and they are not the same question:
+    /// that one keeps it for a LATER run of this job, this one for THIS
+    /// job's own tail. A single arm answering both would be an arm that
+    /// stops keeping the journal for one of them the day the other's
+    /// reason goes away.
+    #[test]
+    fn a_good_finish_the_caller_owns_keeps_the_journal() {
+        let d = tdir("owned");
+        let (j, _) = nzbkit::journal::Journal::open(&d, b"<nzb/>").unwrap();
+        let res = finish_job(
+            true,
+            false,
+            super::super::JournalOwner::Caller,
+            &d,
+            Arc::new(j),
+            &[],
+            &[],
+            None,
+            &Census::blank(),
+            false,
+            &workers::LossLedgers::default(),
+            &[],
+            &Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
+            &[],
+            None,
+            &[],
+            &Arc::new(nzbkit::extract::Extractor::new(&d, 0, true)),
+        );
+        assert!(res.is_ok());
+        assert!(
+            d.join(".nzbfast.journal").exists(),
+            "a caller-owned journal must survive the engine's own good finish"
         );
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -2202,7 +2369,11 @@ mod tests {
             Some("boom".into()),
             3,
             2,
-            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+            Some(crate::repair::RepairShortfall::Blocks {
+                needed: 9,
+                have: 1,
+                set: None,
+            }),
         ));
         assert!(m.contains("boom"), "{m}");
         assert!(m.contains("still in the output directory"), "{m}");
@@ -2213,7 +2384,11 @@ mod tests {
             None,
             1,
             0,
-            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+            Some(crate::repair::RepairShortfall::Blocks {
+                needed: 9,
+                have: 1,
+                set: None,
+            }),
         ));
         assert!(m.contains("download incomplete"), "{m}");
         // TODO 305: the OPENING is still incomplete's - `fail_kind`
@@ -2236,7 +2411,11 @@ mod tests {
             None,
             0,
             2,
-            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+            Some(crate::repair::RepairShortfall::Blocks {
+                needed: 9,
+                have: 1,
+                set: None,
+            }),
         ));
         assert!(m.contains("could not write the download"), "{m}");
         // The shortfall arm names its arithmetic.
@@ -2246,10 +2425,14 @@ mod tests {
             None,
             0,
             0,
-            Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+            Some(crate::repair::RepairShortfall::Blocks {
+                needed: 9,
+                have: 1,
+                set: None,
+            }),
         ));
         assert!(m.contains("9 recovery"), "{m}");
-        assert!(m.contains("carries 1"), "{m}");
+        assert!(m.contains("carries only 1"), "{m}");
         // §282 item 4: the SAME arm, the other half of the post. A job
         // whose payload arrived whole and whose parity the provider
         // would not serve reaches here, and must not be handed the
@@ -2308,7 +2491,11 @@ mod tests {
                 "repair-shortfall",
                 0,
                 0,
-                Some(crate::repair::RepairShortfall::Blocks { needed: 9, have: 1 }),
+                Some(crate::repair::RepairShortfall::Blocks {
+                    needed: 9,
+                    have: 1,
+                    set: None,
+                }),
             ),
             ("bare-verify", 0, 0, None),
         ] {
@@ -2385,6 +2572,7 @@ mod tests {
     fn only_the_unhealed_archives_payload_is_withheld() {
         let d = tdir("quarantine-perfile");
         let ex = Arc::new(nzbkit::extract::Extractor::new(&d, 3, true));
+        ex.anchor();
         for (slot, vol, inner) in [(0usize, "c1.rar", "yb1.bin"), (1, "c2.rar", "yb2.bin")] {
             let data = vec![slot as u8 + 1; 40_000];
             let v = nzbkit::rar::fixtures::rar5_volume(&[(inner, 40_000, &data, false, false)]);
@@ -2428,9 +2616,11 @@ mod tests {
         Arc::new(FileSlot {
             hint: String::new(),
             hint_is_posted_name: false,
+            yenc_votes: Default::default(),
             name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main: is_par2,
             sample_skipped: false,
+            par2_name_demoted: Default::default(),
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),
             total_segments: 1,
             remaining: AtomicUsize::new(0),
@@ -2455,6 +2645,7 @@ mod tests {
         let suffix = nzbkit::journal::PARTIAL_SUFFIX;
         let d = tdir("quarantine-volumes");
         let ex = Arc::new(nzbkit::extract::Extractor::new(&d, 4, true));
+        ex.anchor();
         // Slot 0: first volume of a split set whose successor never
         // arrives - the mapper demotes it and materializes the volume
         // file on disk, exactly advG's "volumes on disk" fallback.
@@ -2513,6 +2704,7 @@ mod tests {
     fn the_settle_claim_decides_which_downloaded_files_are_held() {
         let d = tdir("quarantine-vol-claim");
         let ex = Arc::new(nzbkit::extract::Extractor::new(&d, 3, true));
+        ex.anchor();
         let data = vec![7u8; 40_000];
         let vol = nzbkit::rar::fixtures::rar5_volume(&[("g.bin", 80_000, &data, false, true)]);
         feed_volume(&ex, 0, "set.part1.rar", &vol);
@@ -2568,24 +2760,51 @@ mod tests {
         use crate::failkind::{FailKind, another_copy_can_help, fail_hint, fail_kind};
         let d = tdir("shortfallclause");
         let ex = Arc::new(nzbkit::extract::Extractor::new(&d, 0, true));
-        let short = crate::repair::RepairShortfall::Blocks { needed: 9, have: 8 };
-        let msg = run_finish_full(&d, false, None, 1, 0, Some(short), &[], &[], &ex)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            msg.starts_with("download incomplete: 1 file(s) with missing segments"),
-            "the opening is load-bearing and must not have moved: {msg}"
-        );
-        assert_eq!(fail_kind(&msg), FailKind::MissingArticles, "{msg}");
-        assert!(
-            msg.contains("9 recovery block(s) needed but the NZB only carries 8"),
-            "the arithmetic that settles the job has to reach the user: {msg}"
-        );
-        assert!(
-            another_copy_can_help(fail_kind(&msg), fail_hint(&msg), &msg, false),
-            "no amount of asking again fixes a post short of parity - \
-             another release is the only remedy there is: {msg}"
-        );
+        // BOTH spellings, because the set tag is what a reworded clause
+        // is most likely to be spliced INTO: `failkind`'s
+        // RECOVERY_SHORTFALL_CLAUSE is a contiguous substring match, so
+        // a tag put in the middle of the sentence rather than after it
+        // empties `another_copy_can_help` with nothing else going red.
+        // `None` is the one-set post, `Some` the post that carries
+        // several - see `RepairShortfall::Blocks` (31 Aug 2026).
+        for set in [None, Some([0x4Du8; 16])] {
+            let short = crate::repair::RepairShortfall::Blocks {
+                needed: 9,
+                have: 8,
+                set,
+            };
+            let msg = run_finish_full(&d, false, None, 1, 0, Some(short), &[], &[], &ex)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.starts_with("download incomplete: 1 file(s) with missing segments"),
+                "the opening is load-bearing and must not have moved: {msg}"
+            );
+            assert_eq!(fail_kind(&msg), FailKind::MissingArticles, "{msg}");
+            assert!(
+                msg.contains(
+                    "9 recovery block(s) needed but the recovery set that covers this \
+                     damage carries only 8"
+                ),
+                "the arithmetic that settles the job has to reach the user, and it must \
+                 not be stated as a figure for the whole post - `have` is one set's \
+                 volumes: {msg}"
+            );
+            assert!(
+                !msg.contains("the NZB only carries"),
+                "a per-set figure must never be spelled as a claim about the NZB: {msg}"
+            );
+            assert_eq!(
+                msg.contains("(recovery set 4d4d4d4d)"),
+                set.is_some(),
+                "the set tag rides only where it disambiguates: {msg}"
+            );
+            assert!(
+                another_copy_can_help(fail_kind(&msg), fail_hint(&msg), &msg, false),
+                "no amount of asking again fixes a post short of parity - \
+                 another release is the only remedy there is: {msg}"
+            );
+        }
 
         // The Unservable half is deliberately NOT appended here:
         // `incomplete_reason` already leads with that verdict, or
@@ -2605,6 +2824,11 @@ mod tests {
         // arithmetic to it would be the same mistake `incomplete_reason`
         // refuses when it withholds the age clause from a stalled or
         // all-transport run.
+        let short = crate::repair::RepairShortfall::Blocks {
+            needed: 9,
+            have: 8,
+            set: None,
+        };
         let ours = run_finish_full(&d, false, None, 0, 2, Some(short), &[], &[], &ex)
             .unwrap_err()
             .to_string();

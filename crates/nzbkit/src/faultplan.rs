@@ -34,7 +34,7 @@
 use std::collections::HashSet;
 
 use crate::mock::Chaos;
-use crate::nzb::{FileKind, par2_vol_suffix, quoted_filename};
+use crate::nzb::{FileKind, classify_subject, classify_subject_detail};
 
 /// One posted file as the planner sees it: what it is called, what its
 /// articles are, and how big it is.
@@ -93,27 +93,16 @@ pub enum Role {
 
 /// The role a posted file holds, from its name.
 ///
-/// Delegates the PAR2 question to [`NzbFile::kind`]'s own rule by
-/// construction: the same `quoted_filename` extraction, the same
-/// `.par2`-must-END-the-name test, the same `par2_vol_suffix` volume
-/// rule. Kept as a free function over a `&str` because a fault plan is
-/// built from fixture rows, not from a parsed `NzbCollection`.
+/// CALLS [`NzbFile::kind`]'s own rule rather than restating it. It was a
+/// hand-copied twin until 30 Aug 2026 - the same three steps written out
+/// a second time - so N6-04's decoy-quote defect and N6-05's
+/// quoted-`.par2`-with-a-tail defect were each live in two places and
+/// fixable in one. Kept as a free function over a `&str` because a fault
+/// plan is built from fixture rows, not from a parsed `NzbCollection`.
 ///
 /// [`NzbFile::kind`]: crate::nzb::NzbFile::kind
 pub fn role_of(name: &str) -> FileKind {
-    let lower = quoted_filename(name).unwrap_or(name).to_ascii_lowercase();
-    let is_par2 = lower.match_indices(".par2").any(|(i, _)| {
-        let rest = &lower[i + ".par2".len()..];
-        rest.is_empty() || rest.starts_with(char::is_whitespace)
-    });
-    if !is_par2 {
-        return FileKind::Data;
-    }
-    if par2_vol_suffix(&lower).is_some() {
-        FileKind::Par2Volume
-    } else {
-        FileKind::Par2Main
-    }
+    classify_subject(name)
 }
 
 /// The first-block ordinal a recovery volume declares in its name
@@ -123,17 +112,27 @@ pub fn role_of(name: &str) -> FileKind {
 /// set's first volume however the fixture sorted its files, and stays
 /// the first volume when a fixture gains a `vol100+`-and-up tail that
 /// would sort before `vol012` as text.
+///
+/// The offset comes off the name's OWN classification, not from a
+/// second call to the public `par2_vol_suffix` - which is the
+/// raw-subject rule whatever rule produced the kind the caller filtered
+/// on (T2, 31 Aug 2026). The two agree at this site, since the caller
+/// has already kept only `Par2Volume` and the isolated rule accepts a
+/// strict subset of the raw one, but agreeing is not the same as being
+/// one rule: `role_of` was a hand-copied twin of `NzbFile::kind` for
+/// months on exactly that reasoning.
 fn vol_first_block(name: &str) -> Option<u64> {
-    let lower = quoted_filename(name).unwrap_or(name).to_ascii_lowercase();
-    let at = par2_vol_suffix(&lower)?;
+    let class = classify_subject_detail(name);
+    let lower = class.name().to_ascii_lowercase();
+    let at = class.vol_suffix()?;
     let digits: String = lower[at + ".vol".len()..]
         .chars()
         .take_while(|c| c.is_ascii_digit())
         .collect();
     // The bare `.vol-NN` shape has nothing before the dash; its ordinal
     // is the number AFTER it, which is what the poster numbers volumes
-    // with. `par2_vol_suffix` has already proven the shape is one of the
-    // three it accepts, so this only has to tell them apart.
+    // with. `SubjectClass::vol_suffix` has already proven the shape is
+    // one of the three it accepts, so this only has to tell them apart.
     if digits.is_empty() {
         let after = &lower[at + ".vol".len()..];
         let tail = after.strip_prefix('-')?;

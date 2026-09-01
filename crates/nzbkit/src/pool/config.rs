@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{
-    BufPool, CAP_PROBE_BOUNCES, ConnTarget, LiveStats, OUTAGE_BUDGET, RECHECK_430_MAX, RateLimit,
-    handoff, linecap,
+    BufPool, CAP_PROBE_BOUNCES, CONN_DARK, ConnTarget, LiveStats, OUTAGE_BUDGET, RECHECK_430_HOLD,
+    RECHECK_430_MAX, RateLimit, handoff, linecap,
 };
 
 #[derive(Clone)]
@@ -180,6 +180,16 @@ pub struct PoolConfig {
     /// a successor is waiting on the lease. None = no successor can ever
     /// be waiting, which is the CLI and every test that does not opt in.
     pub lease: Option<Arc<handoff::HostLease>>,
+    /// Which class this pool's workers take [`Self::lease`] permits as
+    /// (see [`handoff::LeaseClass`]). `Download` (the default) stops one
+    /// short of the account's cap so a `PostProcess` side pool always has
+    /// a permit; `PostProcess` may take that reserved one.
+    ///
+    /// Set by `repair::sidefetch::strip_side_pool_seams`, which is the
+    /// one driver EVERY side-fetch goes through - so a caller that
+    /// clones the download's configs cannot land a post-processing pool
+    /// in the download's own class and starve itself.
+    pub lease_class: handoff::LeaseClass,
     /// Per-run latch the caller awaits to start the next job: latched
     /// the first time a primary worker finds itself idle after queue-dry.
     pub handoff: Option<Arc<handoff::HandoffSignal>>,
@@ -383,16 +393,36 @@ pub struct PoolConfig {
     /// undoing it.
     pub desync_fence: bool,
     /// TODO 315: hold the refusal that would make an article terminal,
-    /// requeue the article at the queue BACK, and let the LAST live
+    /// requeue the article at the queue MIDPOINT, and let the LAST live
     /// backbone answer once more before the Missing verdict is emitted;
     /// on by default, off with `NZBFAST_RECHECK_430=0`. The measurement
     /// that says an echoed refusal is not proof it is gone, and every
     /// design decision behind this, are at [`Shared::take_recheck`].
+    ///
+    /// It said BACK until 29 Aug 2026 and the doc said so until 30 Aug;
+    /// the back is not a delay, it is the end of the run, and the two
+    /// e2e tests that caught it are at [`recheck_slot`].
     pub recheck_430: bool,
     /// TODO 315: ceiling on articles holding a late re-ask at one time.
     /// `NZBFAST_RECHECK_430_MAX` overrides it; what it bounds, and why
     /// it is not simply large, is at [`RECHECK_430_MAX`].
     pub recheck_430_max: usize,
+    /// TODO 315: how long one late re-ask may keep an article out of a
+    /// terminal verdict. `NZBFAST_RECHECK_430_HOLD_SECS` overrides it
+    /// (0 disables the bound, which is what the tests that want the old
+    /// unbounded shape ask for); what it bounds, why the bound has to
+    /// exist at all, and why it deliberately does NOT inherit
+    /// [`PoolConfig::outage_budget`], are at [`RECHECK_430_HOLD`].
+    pub recheck_430_hold: std::time::Duration,
+    /// How long a server may hold no session at all before it stops
+    /// blocking a terminal verdict for articles it has never refused,
+    /// and stops holding the fill gate shut over them.
+    /// `NZBFAST_CONN_DARK_SECS` overrides it (0 disables the bound,
+    /// which is what the tests that want the pre-30-Aug-2026 shape ask
+    /// for); what it bounds, why the bound has to exist at all, why two
+    /// minutes, and why it deliberately does NOT inherit
+    /// [`PoolConfig::outage_budget`], are at [`CONN_DARK`].
+    pub conn_dark: std::time::Duration,
     /// TODO 121.4: the consumer acks every Done id (`note_settled`, or
     /// `note_decoded` under `crc_steer`), so the pool keeps the
     /// article's `done_ok` liveness entry until the body is DECODED
@@ -421,6 +451,21 @@ pub struct PoolConfig {
     /// idle - see the §96 item 4 write-up for the A/B that says so.
     /// `NZBFAST_STAT_PROBE=1` turns it on.
     pub stat_probe: bool,
+    /// Where to report that this pool is HOLDING an article's terminal
+    /// verdict back (TODO 315's late re-ask, and §129's confirming
+    /// repeat for a bare refusal that would otherwise be the last
+    /// evidence the article needs).
+    ///
+    /// None everywhere but the `get` pipeline, which points it at the
+    /// job's own extractor. What reads it and why nothing else can
+    /// answer the question in time is
+    /// [`crate::extract::LossDoubt`]'s own doc: the extractor's
+    /// terminal-verdict flag is the drop-behind trim's veto, and it
+    /// lands after the pile has built, so a chase under the holds park
+    /// can drop a prefix a repair then needs. A store and nothing more -
+    /// the pool never reads it back, and a `None` here is exactly the
+    /// behaviour every caller had before the field existed.
+    pub loss_doubt: Option<Arc<crate::extract::LossDoubt>>,
 }
 
 impl Default for PoolConfig {
@@ -441,6 +486,7 @@ impl Default for PoolConfig {
             live: None,
             live_target: None,
             lease: None,
+            lease_class: handoff::LeaseClass::Download,
             handoff: None,
             line_cap_fleet: 0,
             line_cap_auto: false,
@@ -494,11 +540,29 @@ impl Default for PoolConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(RECHECK_430_MAX),
+            // TODO 315. A mistyped knob falls back to the shipped
+            // window rather than to zero: zero DISABLES the bound, so
+            // `NZBFAST_RECHECK_430_HOLD_SECS=abc` silently restoring the
+            // unbounded hold is the one reading this must not have.
+            recheck_430_hold: std::env::var("NZBFAST_RECHECK_430_HOLD_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map_or(RECHECK_430_HOLD, std::time::Duration::from_secs),
+            // A mistyped knob falls back to the shipped window rather
+            // than to zero, for the reason directly above: zero DISABLES
+            // the bound, so `NZBFAST_CONN_DARK_SECS=abc` silently
+            // restoring the deadlock is the one reading this must not
+            // have.
+            conn_dark: std::env::var("NZBFAST_CONN_DARK_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map_or(CONN_DARK, std::time::Duration::from_secs),
             // TODO 96.4. Default OFF; same "every pool honors the knob"
             // placement as the two above.
             stat_probe: std::env::var("NZBFAST_STAT_PROBE")
                 .ok()
                 .is_some_and(|v| v == "1"),
+            loss_doubt: None,
         }
     }
 }

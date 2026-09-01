@@ -27,6 +27,45 @@ fn corr_hints(
         .collect()
 }
 
+/// Poster URLs for a page of release rows, keyed by title key.
+///
+/// Reddit feedback (u/Zimmster2020, 31 Aug 2026): posters existed on
+/// the wall GRID and nowhere else, so the Releases table and the
+/// dashboard's Browse card showed the same titles as bare text. The
+/// grid gets its art free - `browse_cards` joins `titles` per card -
+/// and a release list has no such join, so this is the extra question
+/// those two pages ask. One read-lock pass; an unavailable index is an
+/// empty map, exactly like `corr_hints` above and every other
+/// decoration on these pages.
+///
+/// The URL is only handed out when the cache file is really there.
+/// `titles.poster` records what enrichment WROTE, and art eviction
+/// (`maint.rs`) can take the file away underneath it - a row is better
+/// with no picture than with a broken one. The `?v=<checked>` query is
+/// the grid's own cache-buster, and the `/art/` route strips the query
+/// before it joins the name, so a replaced poster is not served out of
+/// the browser's copy of the old one.
+///
+/// `hide_adult` is passed down to the SQL rather than decided here -
+/// see [`nzbkit::index::Index::title_art`] for why art is gated on a
+/// path where the ROW is not.
+fn row_art(
+    d: &Arc<Daemon>,
+    keys: Vec<String>,
+    hide_adult: bool,
+) -> std::collections::HashMap<String, String> {
+    if keys.is_empty() {
+        return Default::default();
+    }
+    let art_dir = d.spool.join("art");
+    d.with_index_read(|ix| ix.title_art(&keys, hide_adult).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, a)| art_dir.join(&a.poster).is_file())
+        .map(|(k, a)| (k, format!("/art/thumb_{}?v={}", a.poster, a.checked)))
+        .collect()
+}
+
 fn m_index_stats(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -1345,9 +1384,26 @@ fn m_index_search(
             // Parsed name facts ride along so the UI can show
             // quality badges and offer one-click watchlisting.
             let cats = d.custom_categories.read_ok().clone();
-            json!({"results": hits.iter().map(|r| {
+            // Classified ONCE, up here, because the art lookup needs
+            // every row's title key before the first row is rendered.
+            // Doing it inside the map and again for the keys would
+            // parse the whole page twice.
+            let parsed: Vec<_> = hits
+                .iter()
+                .map(|r| nzbkit::categories::classify(r.display_name(), &cats))
+                .collect();
+            // The adult setting is read HERE even though `search()`
+            // applies no adult filter of its own. That asymmetry is
+            // the point: this list has always shown adult NAMES, and
+            // showing an adult POSTER is a different act. See
+            // `Index::title_art`.
+            let art = row_art(
+                d,
+                parsed.iter().map(|p| p.key.clone()).collect(),
+                d.wall_hide_adult.load(Ordering::Relaxed),
+            );
+            json!({"results": hits.iter().zip(&parsed).map(|(r, p)| {
                             let name = r.display_name();
-                            let p = nzbkit::categories::classify(name, &cats);
                             json!({
                                 "id": r.id, "name": name, "group": r.grp,
                                 // Provenance, so a rescued name can be
@@ -1363,9 +1419,23 @@ fn m_index_search(
                                 "size": r.total_bytes, "files": r.files,
                                 "complete": r.complete, "par2": r.has_par2,
                                 "first_seen": r.first_seen,
-                                "quality": crate::wall::quality_label(&p),
+                                "quality": crate::wall::quality_label(p),
                                 "kind": nzbkit::index::kind_str(&p.kind).to_string(),
                                 "title": p.title, "year": p.year,
+                                // Wall-card dedupe key, the same field
+                                // `index_browse` carries - what `art`
+                                // below is keyed on.
+                                "key": p.key,
+                                // Poster thumbnail for this row's
+                                // title, '' when the index has none
+                                // (or the adult gate withheld it).
+                                // Named `art` and not `poster`: on a
+                                // RELEASE, "poster" is the person who
+                                // posted it (`Release::poster`, the
+                                // From: header), and one of those
+                                // meanings is already in this file.
+                                "art": art.get(&p.key).cloned()
+                                    .unwrap_or_default(),
                             })
                         }).collect::<Vec<_>>()})
         }
@@ -1829,6 +1899,23 @@ fn m_index_browse(
                         .unwrap_or_default();
                     cands.into_iter().filter(|id| !enc.contains(id)).collect()
                 };
+                // Classified ONCE, up here, because the art lookup
+                // needs every row's title key before the first row is
+                // rendered - and because `classify` is not free over a
+                // 200-row page.
+                let parsed: Vec<_> = rows
+                    .iter()
+                    .map(|r| nzbkit::categories::classify(r.display_name(), &ccats))
+                    .collect();
+                // `bq.hide_adult`, not the raw setting: on THIS path
+                // the filter already dropped the row, so art on a
+                // surviving row leaks nothing - passing the query's
+                // own answer keeps the two from disagreeing.
+                let art = row_art(
+                    d,
+                    parsed.iter().map(|p| p.key.clone()).collect(),
+                    bq.hide_adult,
+                );
                 json!({
                     "total": total,
                     "offset": bq.offset,
@@ -1837,7 +1924,7 @@ fn m_index_browse(
                     "cats": ccats.iter()
                         .map(|c| json!({"slug": c.slug, "name": c.name}))
                         .collect::<Vec<_>>(),
-                    "results": rows.iter().map(|r| {
+                    "results": rows.iter().zip(&parsed).map(|(r, p)| {
                         let verdict = oracle_verdict_json(
                             &ocx, &r.grp, r.first_posted, now);
                         // Badge text still needs source/remux
@@ -1853,7 +1940,6 @@ fn m_index_browse(
                         // stem instead would throw the
                         // rescue away at the last step.
                         let name = r.display_name();
-                        let p = nzbkit::categories::classify(name, &ccats);
                         json!({
                             "verdict": verdict,
                             "reaped": reaped.contains(
@@ -1894,7 +1980,7 @@ fn m_index_browse(
                             "kind": r.kind, "res": r.res,
                             "have_parts": r.have_parts,
                             "need_parts": r.need_parts,
-                            "quality": crate::wall::quality_label(&p),
+                            "quality": crate::wall::quality_label(p),
                             // What separates two encodes of one
                             // film. Taken from the fresh parse
                             // rather than the stored columns so
@@ -1905,15 +1991,24 @@ fn m_index_browse(
                             // Higher = closer to what the user
                             // said they want; the sheet orders on
                             // this instead of raw size.
-                            "pref": crate::watchlist::preference_score(&p, &qprefs),
+                            "pref": crate::watchlist::preference_score(p, &qprefs),
                             // Which preferences this one
                             // satisfies, so the row can say WHY
                             // it sorted where it did.
-                            "prefhit": crate::watchlist::preference_hits(&p, &qprefs),
+                            "prefhit": crate::watchlist::preference_hits(p, &qprefs),
                             // Wall-card dedupe key: lets the
                             // list's info action open the
-                            // existing detail sheet.
+                            // existing detail sheet, and is what
+                            // `art` below is keyed on.
                             "key": p.key,
+                            // Poster thumbnail for this row's
+                            // title, '' when the index has none.
+                            // Named `art` and not `poster`: on a
+                            // RELEASE, "poster" is the person who
+                            // posted it (`Release::poster`, the
+                            // From: header).
+                            "art": art.get(&p.key).cloned()
+                                .unwrap_or_default(),
                             "title": p.title, "year": p.year,
                             // M28: the card sheet's episode
                             // grid needs these per release.

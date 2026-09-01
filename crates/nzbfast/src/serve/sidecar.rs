@@ -28,6 +28,11 @@ pub struct Sidecar {
     /// BEFORE that, so a stop can never miss the install window.
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
     pub task: tokio::task::JoinHandle<()>,
+    /// Rolling ~5 s window of `progress` samples, for the early start's
+    /// OWN throughput series on the dashboard chart (`Sidecar::rate_bps`).
+    /// Per-sidecar rather than on the daemon, so a fresh early start can
+    /// never read a rate across the previous one's bytes.
+    pub rate_win: Mutex<VecDeque<(Instant, u64)>>,
     /// True when this sidecar runs on connections BORROWED from servers
     /// busy on the active job (no healthy idle server existed). An idle
     /// sidecar suppresses the defer verdict - the idle capacity is
@@ -35,6 +40,33 @@ pub struct Sidecar {
     /// A borrowed sidecar claims no idle capacity, so that reasoning
     /// does not apply and the watchdog stays armed.
     pub borrowed: bool,
+}
+
+impl Sidecar {
+    /// What the early start is pulling right now, bytes/sec, over the
+    /// same ~5 s window and the same rules as the primary job's rate -
+    /// `window_rate` is shared with `Daemon::current_speed_bps` for
+    /// exactly that reason, since the dashboard draws the two against
+    /// one axis.
+    ///
+    /// Sampled where it is READ (once per queue poll, before the queue
+    /// lock, beside the `progress` snapshot the rows are matched
+    /// against), not on a timer of its own: the counter is a plain
+    /// atomic the pipeline bumps, so there is nothing to schedule.
+    /// A poll that stops therefore stops the window too, and the first
+    /// figure after it resumes is an honest average over that whole gap
+    /// - `window_rate` never evicts its last two samples, precisely so
+    /// that a client polling more slowly than the window is long reads a
+    /// rate rather than a zero.
+    ///
+    /// Which is also why the counter is handed over as a CLOSURE rather
+    /// than loaded here: several clients can be polling at once, and a
+    /// reading taken before the window's lock can arrive after a later
+    /// one, which reads as a counter going backwards and drops the
+    /// window. See `window_rate`, where the measurement is written up.
+    pub fn rate_bps(&self) -> f64 {
+        window_rate(&self.rate_win, || self.progress.load(Ordering::Relaxed))
+    }
 }
 
 /// Which round of a record's life this is, and where it is pointed:
@@ -446,35 +478,43 @@ pub(super) fn spawn_sidecar(
             let res = if cancelled.load(Ordering::Relaxed) {
                 Err(anyhow::anyhow!("cancelled before start"))
             } else {
-                crate::get_with_progress(
-                    &config,
-                    &nzb_path,
-                    &out_dir,
+                crate::get_with_progress(crate::JobSpec {
+                    config: &config,
+                    nzb_path: &nzb_path,
+                    out_dir: &out_dir,
                     connections,
                     window,
                     decoders,
                     fast_verify,
                     verify_lean,
-                    false,
+                    no_extract: false,
+                    // X5-03. A prefetch that finishes the WHOLE job runs
+                    // the same tail the runner gives one - `sidecar::
+                    // completion_tail` is `finalize_completed_gen`, the
+                    // hooks, then `park_gen` - so the terminal record
+                    // lands there and not here, and this run's finish is
+                    // only half of it. Same window, same answer as the
+                    // runner beside it.
+                    journal_owner: crate::JournalOwner::Caller,
                     par_cleanup,
                     skip_samples,
                     password,
                     // The sidecar prefetches ANOTHER job; its consent
                     // travels with that job's record, not this one's.
-                    eat_ok,
+                    eat_consent: eat_ok,
                     // §293: and its donor question travels the same way -
                     // the primary runner resolves donors when the job
                     // actually runs; the prefetch never repairs.
-                    Vec::new(),
+                    donor_dirs: Vec::new(),
                     // PLAN M31, same reason one line up: the prefetch
                     // never settles, so it never has a bad block to fill.
-                    Vec::new(),
-                    Some(progress.clone()),
-                    Some(hub.clone()),
-                    &nzo_id,
-                    None,
+                    donor_nzbs: Vec::new(),
+                    progress: Some(progress.clone()),
+                    hub: Some(hub.clone()),
+                    stream_owner: &nzo_id,
+                    net_done: None,
                     budget,
-                )
+                })
                 .await
             };
             // Bill what moved to the per-server usage history either way
@@ -675,6 +715,7 @@ pub(super) fn spawn_sidecar(
         nzo_id,
         hub,
         progress,
+        rate_win: Mutex::new(VecDeque::new()),
         cancelled,
         task,
         borrowed: borrow,
@@ -774,6 +815,7 @@ mod sidecar_tests {
             nzo_id: "nzo-drain-1".into(),
             hub: Arc::new(crate::StreamHub::default()),
             progress: Arc::new(AtomicU64::new(0)),
+            rate_win: Mutex::new(VecDeque::new()),
             cancelled: cancelled.clone(),
             task: tokio::spawn(async {}),
             borrowed: false,
@@ -885,6 +927,7 @@ mod sidecar_tests {
             nzo_id: "nzo-drain-2".into(),
             hub: Arc::new(crate::StreamHub::default()),
             progress: Arc::new(AtomicU64::new(0)),
+            rate_win: Mutex::new(VecDeque::new()),
             cancelled: cancelled.clone(),
             task: tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(900)).await;
@@ -1100,6 +1143,7 @@ mod sidecar_tests {
             nzo_id: "nzo-drainhold-1".into(),
             hub: Arc::new(crate::StreamHub::default()),
             progress: Arc::new(AtomicU64::new(0)),
+            rate_win: Mutex::new(VecDeque::new()),
             cancelled: cancelled.clone(),
             task: tokio::spawn(async {}),
             borrowed: false,
@@ -1319,6 +1363,7 @@ mod sidecar_tests {
             nzo_id: "nzo-somebody-else".into(),
             hub: Arc::new(crate::StreamHub::default()),
             progress: Arc::new(AtomicU64::new(0)),
+            rate_win: Mutex::new(VecDeque::new()),
             cancelled: other.clone(),
             task: rt.spawn(async {}),
             borrowed: false,

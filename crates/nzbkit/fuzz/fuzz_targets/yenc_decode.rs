@@ -44,6 +44,19 @@ fuzz_target!(|data: &[u8]| {
     if hits_documented_deviation(data) {
         return;
     }
+    // M4-76: a CR-FRAMED body (CRs, no LF anywhere) is retried by BOTH
+    // decoders on the CRLF rewrite of itself, so the deviations above have
+    // to be judged over that rewrite too - a lone `.` line and a payload
+    // line ending in a bare `=` only become LINES once the reframing has
+    // happened, and the raw body has no line for the guard to look at.
+    // Measured: `=ybegin …\rABCD\r.\r=yend size=4\r` decodes on the oracle
+    // and is Truncated on the SIMD path, which is deviation one, reached a
+    // new way rather than a new divergence.
+    if let Some(reframed) = nzbkit::yenc::cr_framed_to_crlf(data) {
+        if hits_documented_deviation(&reframed) {
+            return;
+        }
+    }
     let simd = nzbkit::yenc_simd::decode(data);
     let scalar = nzbkit::yenc::decode(data);
     match (&simd, &scalar) {

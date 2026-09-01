@@ -319,6 +319,16 @@ pub(super) fn mover_pacer(d: &Daemon) -> impl Fn(u64) + Send + Sync + '_ {
 #[cfg(test)]
 mod lane_tests;
 
+// TODO 317 (GitHub #67). Here rather than in a file of its own because
+// the decisions it pins - which root, and whether a move is owed - are
+// this module's, and `writes_through` / `write_through_root` sit beside
+// `move_dest_root` for the reason that one's own header gives: a lane
+// keyed off a root the move does not use is a lane keyed off the wrong
+// device, and a DOWNLOAD written to one is worse.
+#[cfg(test)]
+#[path = "writethrough_tests.rs"]
+mod writethrough_tests;
+
 /// The `Daemon` half of the mover: where a finished job is allowed to
 /// go, what it may spend getting there, and the move itself.
 ///
@@ -360,6 +370,54 @@ impl Daemon {
     /// mover a visit.
     pub(super) fn move_destination_configured(&self, cat: &str) -> bool {
         self.move_dest_root(cat).is_some()
+    }
+
+    /// TODO 317 (GitHub #67): does `cat` download STRAIGHT INTO its
+    /// destination rather than moving there at completion?
+    ///
+    /// Two conditions, and both are load-bearing. The category must
+    /// have a destination at all - write-through with nowhere to write
+    /// through TO is just the ordinary download folder - and the opt-in
+    /// must name it, either globally or by category. The two halves are
+    /// a UNION rather than an override chain, which is what a mixed
+    /// install needs: the reporter's setup is one drive per content
+    /// type, and TODO 317's own warning is that the same feature on an
+    /// SMB share pays per-write network latency for the entire
+    /// download. Naming the local categories and leaving the global
+    /// switch off is how you say that.
+    pub(super) fn writes_through(&self, cat: &str) -> bool {
+        if self.move_dest_root(cat).is_none() {
+            return false;
+        }
+        self.write_through.load(Ordering::Relaxed)
+            || self.write_through_cats.lock_ok().iter().any(|c| c == cat)
+    }
+
+    /// TODO 317: the directory a write-through category's jobs are
+    /// placed UNDER - the destination-side twin of
+    /// [`Daemon::cat_dir`]. `None` = this category does not write
+    /// through, which is the feature being off for it.
+    ///
+    /// DERIVED by running the category's ordinary download directory
+    /// through [`Self::move_dest_for`], rather than computed a second
+    /// way from `move_dest_root`. That is deliberate and it is the
+    /// whole safety argument for this feature: the mapping the mover
+    /// WOULD have applied at completion is the one applied at enqueue,
+    /// so `relocate_completed` computing a different path afterwards is
+    /// not a case that can arise. Doing the arithmetic twice is how a
+    /// per-category `dir` override (`cat_meta.dir = "anime"` under a
+    /// category named `tv`) parts the two - the override is a component
+    /// of the relative path, and only `move_dest_for` knows the rule
+    /// for when the category level is dropped from it.
+    ///
+    /// A job directory is then `root.join(dir_stem)`, which is the same
+    /// answer as mapping the job directory itself: both sides of
+    /// `move_dest_for` are prefix operations, so appending the stem
+    /// commutes with them.
+    pub(super) fn write_through_root(&self, cat: &str) -> Option<PathBuf> {
+        self.writes_through(cat)
+            .then(|| self.move_dest_for(&self.cat_dir(cat), cat))
+            .flatten()
     }
 
     /// Where a job whose payload is currently at `cur` (its `out_dir`,

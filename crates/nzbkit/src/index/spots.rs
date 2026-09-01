@@ -467,6 +467,7 @@ impl Index {
     /// that merely shares the (stem, poster, grp) triple is NOT that
     /// post - see the note at the fresh-row upsert - and a repost with
     /// fresh article ids gets a release of its own.
+    ///
     /// Otherwise the NZB's files become real `files` rows and a new
     /// release is inserted and named the same way, so cards, enrichment,
     /// watch arrivals and NZB synthesis all work unchanged.

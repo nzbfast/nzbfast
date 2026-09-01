@@ -25,29 +25,6 @@ use super::*;
 #[cfg(test)]
 mod unit_tests;
 
-/// Has this server used up [`PoolConfig::outage_budget`]?
-///
-/// One place, so the pre-dial gate and the park ladder cannot drift.
-/// `None` (never give up) is a supported configuration and answers false
-/// forever - the queue row says which provider the job is waiting on for
-/// as long as it waits.
-pub(super) fn outage_budget_blown(cfg: &PoolConfig, shared: &Arc<Shared>, idx: usize) -> bool {
-    let Some(budget) = cfg.outage_budget else {
-        return false;
-    };
-    shared.auth[idx].down_ms() >= budget.as_millis() as u64
-}
-
-/// Has the elected prober's CONSECUTIVE bounce ladder run out?
-///
-/// False forever when `outage_budget` is off: the two give-up paths
-/// answer to one control, or the setting lies (a user who chose "wait
-/// however long it takes" would still get a failed job at ~10 minutes
-/// from a ladder they cannot see).
-pub(super) fn ladder_exhausted(cfg: &PoolConfig, bounces: u32) -> bool {
-    cfg.outage_budget.is_some() && bounces >= cfg.cap_probe_bounces
-}
-
 /// One dial attempt: the `None` arm of `session_loop`'s warm-claim
 /// match, moved verbatim (TODO 113). Owns the connect, the AUTHINFO
 /// refusal taxonomy (permanent vs capacity, §15e / TODO 115) and the
@@ -102,6 +79,16 @@ pub(super) async fn dial_session(
         shared.auth[ctx.idx].publish_episode(CapEpisode::Dead);
         return DialStep::Quit;
     }
+    // The stated-cap canary (`dialgate`): while this server sits at a
+    // connection cap it named in words, one dial is in flight at a time
+    // and everyone else waits a spread delay and asks again. Ahead of
+    // the warm miss, which is a statistic about a dial we then make.
+    let canary =
+        match dialgate::wait_for_canary(&shared.auth[ctx.idx].dial, cfg, finished, shared).await {
+            dialgate::Permit::Go(c) => c,
+            dialgate::Permit::Retry => return DialStep::Retry,
+            dialgate::Permit::Quit => return DialStep::Quit,
+        };
     if let Some(w) = &cfg.warm {
         w.miss();
     }
@@ -126,6 +113,10 @@ pub(super) async fn dial_session(
         r = Connection::connect(server) => r,
         _ = run_over(finished, shared) => return DialStep::Quit,
     };
+    // The permit covers the DIAL and nothing after it: `park_or_probe`
+    // below waits minutes, and holding it across that would queue the
+    // whole server's fleet behind one worker.
+    drop(canary);
     match dialed {
         Ok((c, _)) => {
             connects.fetch_add(1, Ordering::Relaxed);
@@ -177,6 +168,9 @@ pub(super) async fn dial_session(
             *connect_failures = 0;
             *flap_bounces = 0;
             *cap_bounces = 0;
+            // A GRANTED session is the only evidence a stated cap has
+            // room again, so it alone stands the canary gate down.
+            shared.auth[ctx.idx].dial.reopen();
             // The capacity episode (if any) is over: free the probe
             // role for a future episode and wake the parked yielders -
             // a session was just GRANTED, so the cap has room again
@@ -330,9 +324,15 @@ pub(super) async fn dial_session(
                     // (Codex sweep 5, M9). The clamp above still widens
                     // either way - backing off is right for both.
                     if crate::nntp::capacity_limit(&line) == crate::nntp::CapacityLimit::Connections
-                        && let Some(sl) = cfg.live.as_ref().and_then(|l| l.servers.get(ctx.idx))
                     {
-                        sl.note_cap(held);
+                        if let Some(sl) = cfg.live.as_ref().and_then(|l| l.servers.get(ctx.idx)) {
+                            sl.note_cap(held);
+                        }
+                        // Serialise dials behind one canary until a
+                        // session is granted. Outside the `live` guard
+                        // on purpose: a CLI run configures no gauge
+                        // and storms just as hard.
+                        shared.auth[ctx.idx].dial.arm();
                     }
                     // The account is fine; the server will not give us
                     // ANOTHER session. Retrying at the same connection
@@ -397,8 +397,13 @@ pub(super) async fn dial_session(
                         // own, and not the PROBE ladder's either
                         // (see the two locals in `worker`).
                         *flap_bounces = flap_bounces.saturating_add(1).min(5);
+                        // Spread: every keeper of one server shares this
+                        // ladder, so without it they bounce in lockstep.
                         if !backoff_or_finish(
-                            cfg.connect_backoff * 2u32.pow(*flap_bounces - 1),
+                            dialgate::spread_delay(
+                                cfg.connect_backoff * 2u32.pow(*flap_bounces - 1),
+                                shared.auth[ctx.idx].dial.ticket(),
+                            ),
                             finished,
                             shared,
                         )
@@ -467,166 +472,20 @@ pub(super) async fn dial_session(
                 return park_or_probe(cfg, ctx, shared, finished, cap_bounces, connect_failures)
                     .await;
             }
-            let backoff = cfg.connect_backoff * 2u32.pow((*connect_failures).min(5) - 1);
+            // The ladder that produced the 29 Aug bursts: a pure
+            // function of this worker's own counter, so workers that
+            // bounced together redial together. `spread_delay` only
+            // ever SHORTENS a step, never lengthens one.
+            let backoff = dialgate::spread_delay(
+                cfg.connect_backoff * 2u32.pow((*connect_failures).min(5) - 1),
+                shared.auth[ctx.idx].dial.ticket(),
+            );
             if !backoff_or_finish(backoff, finished, shared).await {
                 return DialStep::Quit;
             }
             DialStep::Retry
         }
     }
-}
-
-/// The park-and-probe tail shared by the CAPACITY refusal and the hard
-/// connect outage (issue #16 machinery, generalised): the caller has
-/// decided this server is not granting sessions right now for a reason
-/// that is plausibly transient. Most workers park on the episode watch
-/// (claim_yield keeps someone behind); ONE elected prober rides the
-/// capped bounce ladder (~8 s cadence) up to `CAP_PROBE_BOUNCES`
-/// (~10 min). Any successful connect anywhere sends `Reopened` and the
-/// parked fleet rejoins at full width; the horizon sends `Dead` so the
-/// parked workers exit and `seal_run` can reach a truthful terminal.
-/// Both the park loop and the ladder select on `finished`, so a dead
-/// server never holds a FINISHED run open (§34/A15).
-pub(super) async fn park_or_probe(
-    cfg: &PoolConfig,
-    ctx: ServerCtx,
-    shared: &Arc<Shared>,
-    finished: &mut tokio::sync::watch::Receiver<bool>,
-    bounces: &mut u32,
-    connect_failures: &mut u32,
-) -> DialStep {
-    // Subscribe BEFORE claiming the yield: an event published between
-    // the claim and the subscription must still wake this parker.
-    let mut sub = shared.auth[ctx.idx].episode.subscribe();
-    let entry_gen = sub.borrow().1;
-    // F-22: under a live target only ADMITTED workers can dial, so the
-    // election counts those - a parked ordinal counted as alive once
-    // let the sole admitted worker yield to a fleet that could not probe.
-    let electorate = if cfg.live_target.is_some() {
-        &shared.admitted[ctx.idx]
-    } else {
-        &shared.alive[ctx.idx]
-    };
-    if shared.auth[ctx.idx].claim_yield(electorate) {
-        // Park, don't die (issue #16): a ghost-session
-        // lease clears in minutes, and a fleet that
-        // exited leaves the reopened server to one
-        // prober crawling the rest of the job alone.
-        // Wait for the prober's verdict; Reopened =
-        // rejoin the dial loop, Dead (or the run
-        // ending) = the old exit.
-        loop {
-            match *sub.borrow_and_update() {
-                // Only a Reopened published AFTER this park counts:
-                // the watch never returns to Idle, so the previous
-                // episode's Reopened is still sitting in it, and
-                // consuming that here would skip the prober election
-                // for every later episode - a permanent outage then
-                // never reaches Dead and the run never terminates.
-                (CapEpisode::Reopened, g) if g > entry_gen => {
-                    shared.auth[ctx.idx].yielded.fetch_sub(1, Ordering::SeqCst);
-                    // A fresh ladder for the rejoin: the pre-park
-                    // failures were the episode's, not this worker's,
-                    // and carrying them over would bounce a rejoining
-                    // worker straight back into the park on its first
-                    // unlucky dial.
-                    *connect_failures = 0;
-                    return DialStep::Retry;
-                }
-                // A leftover Dead is as final as a fresh one: the
-                // prober exhausted its horizon for this server.
-                (CapEpisode::Dead, _) => return DialStep::Quit,
-                (CapEpisode::Idle | CapEpisode::Probing | CapEpisode::Reopened, _) => {}
-            }
-            // `drain()` deliberately does not send `finished`, and the
-            // prober's own drain exits quit WITHOUT publishing an episode
-            // event - so a park that only awaited the watch and `finished`
-            // outlived a graceful pause forever: workers_live never reached
-            // zero and join_fleet never returned. Poll draining on the same
-            // 250 ms slice as run_over/backoff_or_finish.
-            if shared.draining.load(Ordering::Acquire) {
-                return DialStep::Quit;
-            }
-            tokio::select! {
-                r = sub.changed() => {
-                    if r.is_err() {
-                        return DialStep::Quit;
-                    }
-                }
-                _ = finished.wait_for(|f| *f) => return DialStep::Quit,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {}
-            }
-        }
-    }
-    // Single-prober election: claim_yield's alive-count
-    // race can leave SEVERAL workers thinking they are
-    // the last one - only the holder of this flag rides
-    // the long ladder, the rest stand down (they missed
-    // the yield window, so they exit as every extra
-    // claimant did before parking existed).
-    if shared.auth[ctx.idx].cap_prober.swap(true, Ordering::AcqRel) && *bounces == 0 {
-        return DialStep::Quit;
-    }
-    shared.auth[ctx.idx].publish_episode(CapEpisode::Probing);
-    // Issue #16 (the restart stall): this LAST prober
-    // used to walk the ordinary connect ladder to
-    // permanent death - five capacity bounces in
-    // ~15-30 s and the server was never dialed again,
-    // while a provider that still counts a dead
-    // process's sessions holds its cap for MINUTES.
-    // A capacity refusal is a known-transient (it
-    // clears when the ghosts are reaped), so the
-    // prober paces on its own bounce ladder instead
-    // and gives the lease a realistic horizon to
-    // expire; any successful connect resets both
-    // counters. A server capped for good costs one
-    // paced dial every ~32 s until the horizon.
-    *bounces = bounces.saturating_add(1);
-    // The prober is the one worker still dialling, so the budget has to
-    // be able to end ITS ladder too - otherwise a server that reopens
-    // just often enough to keep resetting `bounces` is probed forever.
-    if outage_budget_blown(cfg, shared, ctx.idx) {
-        shared.auth[ctx.idx].publish_episode(CapEpisode::Dead);
-        return DialStep::Quit;
-    }
-    // Each paced bounce is DELIBERATE progress along the recovery
-    // ladder, and it must say so on the liveness counter the stall
-    // watchdog reads: during a from-the-start outage nothing decodes
-    // and nothing resolves, so without this tick the watchdog's 180 s
-    // default aborted the job squarely inside the ladder's promised
-    // ~10 min horizon (a provider recovering at 4 min was reported as
-    // a local pool wedge). A prober genuinely frozen mid-dial stops
-    // bouncing, stops ticking, and still trips the watchdog.
-    shared.deferred.fetch_add(1, Ordering::Relaxed);
-    // `outage_budget: None` means the user asked to WAIT, however long
-    // it takes, rather than have a job come back failed - so it stands
-    // this horizon down too. Retiring here at ~10 minutes would give
-    // them a failed job on a provider that was going to come back,
-    // which is the exact outcome they turned the budget off to avoid.
-    //
-    // The run then genuinely does not end on its own, which is the
-    // point: the queue row names the provider and the duration for the
-    // whole wait, the auto-defer watchdog moves other jobs past this one
-    // (see the daemon's stall watchdog), and pause/cancel still land -
-    // every wait here selects on `finished`.
-    if ladder_exhausted(cfg, *bounces) {
-        // The lease outlived any realistic horizon:
-        // release the parked yielders to exit so the
-        // run can reach a truthful terminal instead of
-        // idling forever.
-        shared.auth[ctx.idx].publish_episode(CapEpisode::Dead);
-        return DialStep::Quit;
-    }
-    if !backoff_or_finish(
-        cfg.connect_backoff * 2u32.pow((*bounces).min(3) - 1),
-        finished,
-        shared,
-    )
-    .await
-    {
-        return DialStep::Quit;
-    }
-    DialStep::Retry
 }
 
 /// One pipelined read: the select over the BODY read, the run-finished
@@ -1282,6 +1141,39 @@ pub(super) fn handle_probe_hit(
     }
 }
 
+/// Tell the extractor that a terminal verdict is being HELD BACK, when
+/// the refusal in hand is the article's LAST evidence.
+///
+/// Two sites call it and both are holds: §129's confirming repeat for a
+/// bare refusal (attribution doubt) and TODO 315's late re-ask (was the
+/// answer TRUE). Between either hold and the verdict it defers, the
+/// extractor's own `lost_articles` flag is still false, and that flag is
+/// what stops the drop-behind trim releasing a prefix a repair will
+/// need - measured 30 Aug 2026 doing exactly that, five megabytes of a
+/// PAR2-vouched prefix under the holds park, after which the mapped
+/// repair declined and the set took the disk ladder with a re-fetch on
+/// top (`research/CHASE-TRIM-DROPS-BEFORE-VERDICT-2026-08-30.md`).
+///
+/// THE `mask == live` TEST IS THE WHOLE OF THE PRECISION HERE, and it
+/// is why this is not simply called on every 430. A refusal from one
+/// backbone of several is ordinary ladder business - the next server
+/// answers and nothing about the job is in doubt - while a refusal that
+/// completes the live mask is an article that is GONE unless the hold's
+/// own question comes back the other way. The extractor's veto is
+/// per-JOB and sticky, so raising it on the ordinary case would stand
+/// the drop down for whole clean downloads and give back the 0.48x of
+/// spilled disk the drop exists to avoid (measured 21 Aug 2026,
+/// `research/MEASURED-HOLDS-LADDER-2026-08-21.md`).
+///
+/// A store and nothing else: no lock, and nothing here reads it back.
+fn note_doubt(cfg: &PoolConfig, mask: u32, live: u32) {
+    if let Some(d) = &cfg.loss_doubt
+        && mask & live == live
+    {
+        d.raise();
+    }
+}
+
 /// An authoritative 430/423 "no such article": per-server evidence,
 /// dup-mask merging and Missing/requeue routing - the `Ok(Ok(false))`
 /// arm of `session_loop`'s response match, moved verbatim (TODO 113).
@@ -1366,6 +1258,19 @@ pub(super) async fn handle_missing(
         // already requeued) and declare Missing the moment
         // the union goes unanimous, instead of waiting for
         // the original to walk the rest of the ladder.
+        // STATED LIMIT, TODO 315. The INFLIGHT arm below still declares
+        // Missing without consulting `Shared::take_recheck`: the hold is
+        // per-article state living on the ORIGINAL's `Work`, which is on
+        // another worker's stack while it reads, so there is nothing here
+        // to charge or requeue. The original still walks its own
+        // `handle_missing` and still takes its re-ask, so the article is
+        // asked again - what is early is the VERDICT the consumer saw.
+        // Closing that means moving the hold onto the inflight entry so
+        // one helper owns every unanimous verdict, which is a change to
+        // where the state lives rather than a guard - so it is left
+        // named here instead of half-done. The QUEUED arm below is a
+        // different question and IS answered: the hold is right there on
+        // the queued `Work` to read.
         let live = shared.live_mask();
         let mut unanimous = false;
         // The mask the verdict was taken on, kept so the report can say
@@ -1388,7 +1293,43 @@ pub(super) async fn handle_missing(
             // stamp is cheap, and a miss (article mid-hand-
             // off) only costs one redundant attempt.
             let mut q = shared.queue.lock().await;
-            if let Some(qi) = q.iter_mut().find(|x| x.id == w.id) {
+            if let Some(qi) = q.iter_mut().find(|x| x.id == w.id)
+                // TODO 315: NOT onto a bit this article's late re-ask is
+                // deliberately holding open. `handle_missing` clears the
+                // re-asked group's bit precisely so the requeued item is
+                // not live-unanimous while it waits, and stamping it
+                // back here is the one write that undoes that: the item
+                // goes terminal on evidence the hold was taken over,
+                // reports a Missing the re-ask was bought to test, and
+                // leaves its budget slot held by a `Work` nothing will
+                // ever release. This dup is not the delayed ask - it was
+                // already in flight when the hold was taken - so its
+                // refusal is the same evidence the hold is doubting.
+                // A dup from any OTHER group still stamps and is still
+                // folded; unanimity simply cannot be reached while the
+                // held group's own bit is down, which is the point.
+                //
+                // BOUNDED SINCE 30 Aug 2026, and this arm has to know it
+                // or the bound does not take: `expire_hold` restores the
+                // suppressed bit once the window at `RECHECK_430_HOLD`
+                // is up, and after that this dup's refusal is ordinary
+                // evidence about an article nothing is holding open any
+                // more. The test is `recheck::holding` and NOT the bare
+                // `recheck_430` read it replaced, because that read also
+                // refused a dup about a hold whose re-ask had already
+                // been ANSWERED - `recheck_430` stays set for the life
+                // of the article, so a settled one could never be
+                // terminalized from here at all.
+                && {
+                    // Milliseconds since `Shared::start`, which is what
+                    // the hold is stamped in - NOT the module's
+                    // `now_ms()`, which is wall clock and would read
+                    // every hold as expired since the epoch.
+                    let run_ms = shared.start.elapsed().as_millis() as u64;
+                    recheck::expire_hold(qi, run_ms, shared.recheck_hold_ms);
+                    !recheck::holding(qi, ctx.group_bits)
+                }
+            {
                 qi.tried_430 |= ctx.group_bits;
                 unanimous = qi.tried_430 & live == live;
                 verdict_mask = qi.tried_430;
@@ -1486,6 +1427,12 @@ pub(super) async fn handle_missing(
     }
     if !echoed && !w.fenced && w.soft_430 & ctx.group_bits != ctx.group_bits {
         w.soft_430 |= ctx.group_bits;
+        // This hold is one of the two the extractor has to hear about.
+        // See `note_doubt`: only when folding THIS group's bit in would
+        // have gone live-unanimous, which is the difference between "an
+        // article a later server may still answer" and "an article that
+        // is gone unless this repeat says otherwise".
+        note_doubt(cfg, w.tried_430 | ctx.group_bits, shared.live_mask());
         // A wholly dead post takes this branch for EVERY article before
         // any of them can go terminal, so the whole first pass resolves
         // nothing and decodes nothing - indistinguishable from a wedged
@@ -1562,6 +1509,10 @@ pub(super) async fn handle_missing(
         // buys nothing and costs a dispatch on every article of a
         // DMCA'd post.
         if !w.promoted && !takedown && shared.take_recheck(&mut w, cfg, ctx.group_bits) {
+            // The other one. `w.tried_430` already carries this group,
+            // and the branch above proved it live-unanimous, so the
+            // article is terminal but for the hold this line just took.
+            note_doubt(cfg, w.tried_430, live);
             w.tried_430 &= !ctx.group_bits;
             // Counted like `soft_430`'s deferral for the same reason: a
             // caller's stall watchdog reads bytes and outstanding count,

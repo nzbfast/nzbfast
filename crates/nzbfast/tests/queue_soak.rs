@@ -3,6 +3,11 @@
 //! completes byte-identical, states/history stay sane, no
 //! cross-contamination between overlapping jobs.
 
+// The forward guard on the repeating-payload trap, and the waiver that
+// says a fixture is deliberately in it. A sibling the way `harness` is,
+// and reached from `harness::DaemonLog`'s own Drop, so every daemon this
+// binary starts is read whether or not the suite looks at its log.
+mod adoptguard;
 mod harness;
 mod scratch;
 
@@ -231,7 +236,6 @@ async fn three_jobs_back_to_back_all_byte_identical() {
         let out = dir.join(format!("complete/job{i}/f{i}.bin"));
         assert_eq!(&std::fs::read(&out).unwrap(), data, "job{i} differs");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The NZB xml the addfile tests post, from `make_file_articles` output.
@@ -428,6 +432,4 @@ async fn a_completed_renamed_job_never_requeues() {
     })
     .await
     .unwrap();
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

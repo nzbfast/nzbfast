@@ -55,3 +55,21 @@ crates/nzbkit/fuzz/seeds/**        -text
 # with literal \r\n and scp'd from a temp path, so it is never in git.
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# The claims ledger is append-only JSONL merged by hand on every push
+# race (177 append-append conflicts in six hours on one box's view of
+# origin/main, measured 31 Aug 2026) - every one of them a lane
+# hand-resolving two sides that each only appended lines. Git's built-in
+# union driver auto-resolves exactly that shape: verified in a throwaway
+# repo where two branches each append a different record to the file's
+# end. It needs no per-clone config, being a built-in rather than a
+# custom `merge.*.driver`, so this one line reaches the whole fleet.
+# `tools/claims.py`'s reducer already sorts by each record's own `ts`
+# (see `_ev_key`'s docstring) rather than by file position, and already
+# tolerates a duplicated record, so union's reordering and the rare
+# byte-identical duplicate it can produce were both true before this
+# line and needed no change here. This is a toil and risk fix, not a
+# response to data loss: two independent audits (this line's own claim,
+# and `claims-ledger-superset-gate`'s 2,040-commit / 1,331-record sweep)
+# found zero genuine drops from hand-resolving these conflicts.
+research/CLAIMS.jsonl merge=union

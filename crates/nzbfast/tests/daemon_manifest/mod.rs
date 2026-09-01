@@ -287,5 +287,4 @@ async fn a_settled_job_leaves_a_manifest_that_convicts_later_damage() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

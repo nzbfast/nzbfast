@@ -16,29 +16,6 @@ pub(super) struct Fleet {
     pub(super) servers: Vec<(ServerConfig, PoolConfig)>,
 }
 
-/// Does any enabled server have a peer it could steer a CRC-failed
-/// article to: same LEVEL, different host, and not an explicit mirror of
-/// the same backbone?
-///
-/// Level matters because a deeper server's pickup gate demands the
-/// shallower one's 430 bit, so a primary + fill pair can never steer.
-/// That makes this sensitive to the M29 routing demotion in plan.rs
-/// (`demote_predicted_gone`): sinking servers to a new bottom tier can
-/// leave a survivor alone on level 0, which correctly turns the steer
-/// off rather than paying its forced CRC for a peer that cannot take
-/// the article.
-pub(super) fn has_steer_peer(servers: &[ServerConfig]) -> bool {
-    let on: Vec<_> = servers.iter().filter(|s| s.enabled).collect();
-    on.iter().enumerate().any(|(i, a)| {
-        on.iter().enumerate().any(|(j, b)| {
-            i != j
-                && a.level == b.level
-                && a.host != b.host
-                && (a.group.is_none() || b.group.is_none() || a.group != b.group)
-        })
-    })
-}
-
 /// Everything the last job taught this hub about the line, for the
 /// fleet rules below: the link anchor in bytes/s, whether that anchor
 /// was MEASURED rather than typed into Settings (TODO 275 item 1
@@ -248,12 +225,6 @@ pub(super) async fn build_fleet(
     } else {
         Default::default()
     };
-    // Say what the cap IS and what it is capping, not just a bare
-    // number. `connection auto-tune: news.example.com 6` was the entire
-    // explanation a v1.0.14 tester had for why the 24 he had typed into
-    // Settings never took effect, and it read as a status line rather
-    // than as "something overrode you". Name the asked-for count and
-    // the switch that turns it off.
     // Whether the live epoch controller is in charge for this run (the
     // `live_tune` setting mirrored on the hub, or the dev override).
     // Computed here because the cap note below must not print when the
@@ -277,110 +248,16 @@ pub(super) async fn build_fleet(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    // Would a stored knee cap this host, and how old is the number doing
-    // it? Both notes below need the same answer, so it is computed once.
-    // A pinned server is not capped, so it must not be announced as
-    // capped - these lines are the ONLY explanation a user gets for a
-    // number they did not choose, and printing one for a number they DID
-    // choose is worse than printing nothing.
-    let cap_state = |s: &nzbkit::config::ServerConfig| {
-        let t = tuned.get(&s.host)?;
-        let asked = crate::conntune::effective_limit(connections, s.connections);
-        (!s.pin_connections && !t.suspect && t.connections > 0 && t.connections < asked).then_some(
-            (
-                t,
-                asked,
-                crate::conntune::age_str(crate::conntune::age_secs(t, now)),
-            ),
-        )
-    };
-    let tuned_note: Vec<String> = cfg_all
-        .servers
-        .iter()
-        .filter_map(|s| {
-            let (t, asked, age) =
-                cap_state(s).filter(|(t, ..)| !crate::conntune::is_expired(t, now))?;
-            // Name the sample's AGE, always. This line used to end
-            // "(measured sweet spot)", which reads as the provider's
-            // verdict rather than as our own probe of it - and a knee is
-            // exactly as good as it is recent. A bench leg spent an hour
-            // on 23 Aug 2026 working out why a provider was granting 32
-            // before finding a fifteen-day-old entry saying so; the age
-            // was on disk the whole time and nothing ever printed it.
-            let overdue = match crate::conntune::is_stale(t, now) {
-                true => ", overdue for re-measurement",
-                false => "",
-            };
-            // And say when this knee, not the fleet cap, is the thing
-            // that binds; see `conntune::knee_under_cap_note`.
-            let under_cap =
-                crate::conntune::knee_under_cap_note(t.connections, line_share, line_cap);
-            Some(format!(
-                "{} capped at {} of {asked}, probed {age} ago{overdue}{under_cap}",
-                s.host, t.connections
-            ))
-        })
-        .collect();
-    // With the live controller on, the knee SEEDS instead of capping -
-    // announcing a cap that is not being applied is the same lie the
-    // pinned-server exclusion exists to avoid.
-    if !live_tune && !tuned_note.is_empty() {
-        let note = tuned_note.join(" · ");
-        info!(target: "tune", "connection auto-tune: {note} (our own probe of this \
-             provider, not a limit it stated; Settings → Auto-tune connections turns \
-             this off)");
-    }
-    // The other half of the same honesty: a knee old enough to have
-    // stopped applying (`conntune::EXPIRE_SECS`) leaves the job on the
-    // user's own count. That is the right number and a SILENT change to
-    // one, so say which cap went away and how old it was - otherwise the
-    // next person to read conntune.json derives a cap that no longer
-    // governs, which is the mirror image of the trap above.
-    let expired_note: Vec<String> = cfg_all
-        .servers
-        .iter()
-        .filter_map(|s| {
-            let (t, asked, age) =
-                cap_state(s).filter(|(t, ..)| crate::conntune::is_expired(t, now))?;
-            Some(format!(
-                "{} measured {} connections {age} ago and nothing has re-measured it \
-                 since, so it is no longer capping: this job uses the {asked} you set",
-                s.host, t.connections
-            ))
-        })
-        .collect();
-    if !live_tune && !expired_note.is_empty() {
-        let note = expired_note.join(" · ");
-        info!(target: "tune", "connection auto-tune: {note}");
-    }
-    // Config is reloaded for every daemon job, while the warm pool lives
-    // across jobs. Reconcile the cache before building the new fleet so
-    // sessions authenticated with a removed password/user, proxy or bind
-    // address stop occupying the provider's connection cap immediately.
-    if let Some(warm) = hub.as_ref().and_then(|h| h.warm()) {
-        warm.retain_servers(&cfg_all.servers).await;
-        // Idle release is settled PER SERVER and read straight off the
-        // config this job is about to use, so a provider added, removed
-        // or re-tuned since the last job is reflected before any of its
-        // connections are parked.
-        warm.set_release_policies(&cfg_all.servers);
-    }
-    // Sidecar connection borrowing: caps a host's pool below its normal
-    // budget when this hub is a prefetch sidecar borrowing from a server
-    // that is busy on the active job. Empty on every other hub.
-    let host_caps = hub
-        .as_ref()
-        .map(|h| h.host_conn_caps.lock_ok().clone())
-        .unwrap_or_default();
-    // §96.5: remaining prepaid bytes per host, computed by the daemon at
-    // job start. Threaded into each server's pool config so the pool can
-    // release a server whose block runs out MID-RUN - the job-boundary
-    // exclusion above this (excluded_hosts) only helps the next job.
-    // Empty on a CLI run, which has no usage ledger to budget from.
-    let host_budgets = hub
-        .as_ref()
-        .map(|h| h.host_byte_budgets.lock_ok().clone())
-        .unwrap_or_default();
+    announce_knee_caps(
+        &cfg_all.servers,
+        &tuned,
+        connections,
+        now,
+        line_share,
+        line_cap,
+        live_tune,
+    );
+    let (host_caps, host_budgets) = hub_host_limits(hub, &cfg_all.servers).await;
     // TODO 112: with live tuning on (the `live_tune` setting, or
     // NZBFAST_LIVE_TUNE=1 as the dev override), the fleet is SPAWNED at
     // the ceiling and run at a live target the epoch controller moves.
@@ -657,12 +534,183 @@ pub(super) async fn build_fleet(
             (s.clone(), cfg)
         })
         .collect();
+    attach_live_and_oracle(&mut servers, hub, job_posted, job_family);
+    Fleet {
+        buf_pool,
+        out_pool,
+        servers,
+    }
+}
+
+/// Say what the cap IS and what it is capping, not just a bare
+/// number. `connection auto-tune: news.example.com 6` was the entire
+/// explanation a v1.0.14 tester had for why the 24 he had typed into
+/// Settings never took effect, and it read as a status line rather
+/// than as "something overrode you". Name the asked-for count and
+/// the switch that turns it off.
+///
+/// Split out of [`build_fleet`] under the size gate's 500-line function
+/// ceiling (31 Aug 2026), body verbatim. One subject: everything the log
+/// says about a knee, and nothing that decides one - `cap_state` is
+/// private to the two notes and was never read anywhere else.
+///
+/// Silent under `live_tune`, both notes, for the reason each carries: a
+/// knee SEEDS rather than caps there, and announcing a cap that is not
+/// being applied is the same lie the pinned-server exclusion avoids.
+fn announce_knee_caps(
+    servers: &[ServerConfig],
+    tuned: &std::collections::HashMap<String, crate::conntune::Tuned>,
+    connections: usize,
+    now: u64,
+    line_share: Option<usize>,
+    line_cap: usize,
+    live_tune: bool,
+) {
+    // Would a stored knee cap this host, and how old is the number doing
+    // it? Both notes below need the same answer, so it is computed once.
+    // A pinned server is not capped, so it must not be announced as
+    // capped - these lines are the ONLY explanation a user gets for a
+    // number they did not choose, and printing one for a number they DID
+    // choose is worse than printing nothing.
+    let cap_state = |s: &ServerConfig| {
+        let t = tuned.get(&s.host)?;
+        let asked = crate::conntune::effective_limit(connections, s.connections);
+        (!s.pin_connections && !t.suspect && t.connections > 0 && t.connections < asked).then_some(
+            (
+                t,
+                asked,
+                crate::conntune::age_str(crate::conntune::age_secs(t, now)),
+            ),
+        )
+    };
+    let tuned_note: Vec<String> = servers
+        .iter()
+        .filter_map(|s| {
+            let (t, asked, age) =
+                cap_state(s).filter(|(t, ..)| !crate::conntune::is_expired(t, now))?;
+            // Name the sample's AGE, always. This line used to end
+            // "(measured sweet spot)", which reads as the provider's
+            // verdict rather than as our own probe of it - and a knee is
+            // exactly as good as it is recent. A bench leg spent an hour
+            // on 23 Aug 2026 working out why a provider was granting 32
+            // before finding a fifteen-day-old entry saying so; the age
+            // was on disk the whole time and nothing ever printed it.
+            let overdue = match crate::conntune::is_stale(t, now) {
+                true => ", overdue for re-measurement",
+                false => "",
+            };
+            // And say when this knee, not the fleet cap, is the thing
+            // that binds; see `conntune::knee_under_cap_note`.
+            let under_cap =
+                crate::conntune::knee_under_cap_note(t.connections, line_share, line_cap);
+            Some(format!(
+                "{} capped at {} of {asked}, probed {age} ago{overdue}{under_cap}",
+                s.host, t.connections
+            ))
+        })
+        .collect();
+    // With the live controller on, the knee SEEDS instead of capping -
+    // announcing a cap that is not being applied is the same lie the
+    // pinned-server exclusion exists to avoid.
+    if !live_tune && !tuned_note.is_empty() {
+        let note = tuned_note.join(" · ");
+        info!(target: "tune", "connection auto-tune: {note} (our own probe of this \
+             provider, not a limit it stated; Settings → Auto-tune connections turns \
+             this off)");
+    }
+    // The other half of the same honesty: a knee old enough to have
+    // stopped applying (`conntune::EXPIRE_SECS`) leaves the job on the
+    // user's own count. That is the right number and a SILENT change to
+    // one, so say which cap went away and how old it was - otherwise the
+    // next person to read conntune.json derives a cap that no longer
+    // governs, which is the mirror image of the trap above.
+    let expired_note: Vec<String> = servers
+        .iter()
+        .filter_map(|s| {
+            let (t, asked, age) =
+                cap_state(s).filter(|(t, ..)| crate::conntune::is_expired(t, now))?;
+            Some(format!(
+                "{} measured {} connections {age} ago and nothing has re-measured it \
+                 since, so it is no longer capping: this job uses the {asked} you set",
+                s.host, t.connections
+            ))
+        })
+        .collect();
+    if !live_tune && !expired_note.is_empty() {
+        let note = expired_note.join(" · ");
+        info!(target: "tune", "connection auto-tune: {note}");
+    }
+}
+
+/// Bring the warm cache in line with this job's config, then read the
+/// per-host caps and budgets the hub carries for it.
+///
+/// Split out of [`build_fleet`] under the size gate's 500-line function
+/// ceiling (31 Aug 2026), body verbatim. The reconcile has to happen
+/// FIRST and in the same step, which is why one function: both maps
+/// below are read off the same hub the reconcile has just settled, and a
+/// job that read them before retiring the stale sessions would size its
+/// pools against a provider cap those sessions still occupy.
+///
+/// Both maps are empty off a CLI run, which has no hub.
+async fn hub_host_limits(
+    hub: &Option<Arc<StreamHub>>,
+    servers: &[ServerConfig],
+) -> (
+    std::collections::HashMap<String, usize>,
+    std::collections::HashMap<String, u64>,
+) {
+    // Config is reloaded for every daemon job, while the warm pool lives
+    // across jobs. Reconcile the cache before building the new fleet so
+    // sessions authenticated with a removed password/user, proxy or bind
+    // address stop occupying the provider's connection cap immediately.
+    if let Some(warm) = hub.as_ref().and_then(|h| h.warm()) {
+        warm.retain_servers(servers).await;
+        // Idle release is settled PER SERVER and read straight off the
+        // config this job is about to use, so a provider added, removed
+        // or re-tuned since the last job is reflected before any of its
+        // connections are parked.
+        warm.set_release_policies(servers);
+    }
+    // Sidecar connection borrowing: caps a host's pool below its normal
+    // budget when this hub is a prefetch sidecar borrowing from a server
+    // that is busy on the active job. Empty on every other hub.
+    let host_caps = hub
+        .as_ref()
+        .map(|h| h.host_conn_caps.lock_ok().clone())
+        .unwrap_or_default();
+    // §96.5: remaining prepaid bytes per host, computed by the daemon at
+    // job start. Threaded into each server's pool config so the pool can
+    // release a server whose block runs out MID-RUN - the job-boundary
+    // exclusion above this (excluded_hosts) only helps the next job.
+    // Empty on a CLI run, which has no usage ledger to budget from.
+    let host_budgets = hub
+        .as_ref()
+        .map(|h| h.host_byte_budgets.lock_ok().clone())
+        .unwrap_or_default();
+    (host_caps, host_budgets)
+}
+
+/// Hang the per-server live gauges and the M29 outcome sink on a built
+/// fleet.
+///
+/// Split out of [`build_fleet`] under the size gate's 500-line function
+/// ceiling (31 Aug 2026), body verbatim. Last, and after every pool
+/// config is settled: `LiveStats::for_servers` mints each row's key off
+/// this list in this order, and the oracle's context is the same host
+/// order.
+fn attach_live_and_oracle(
+    servers: &mut [(ServerConfig, PoolConfig)],
+    hub: &Option<Arc<StreamHub>>,
+    job_posted: Option<i64>,
+    job_family: &str,
+) {
     // Per-server live gauges for the dashboard (workers update, API reads).
-    let pool_live = nzbkit::pool::LiveStats::for_servers(&servers);
+    let pool_live = nzbkit::pool::LiveStats::for_servers(servers);
     for (_, cfg) in servers.iter_mut() {
         cfg.live = Some(pool_live.clone());
     }
-    if let Some(h) = &hub {
+    if let Some(h) = hub {
         *h.pool_live.lock_ok() = Some(pool_live.clone());
     }
     // M29 oracle: every server pool records per-article hit/430 outcomes
@@ -683,11 +731,6 @@ pub(super) async fn build_fleet(
         for (_, cfg) in servers.iter_mut() {
             cfg.oracle = Some(sink.clone());
         }
-    }
-    Fleet {
-        buf_pool,
-        out_pool,
-        servers,
     }
 }
 

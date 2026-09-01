@@ -35,9 +35,12 @@ pub(crate) fn split_7z_part(name: &str) -> Option<(String, u32)> {
 /// `.7z.NNN` split sets grouped and ordered by part index. Each job is
 /// the ordered list of on-disk parts that form one container.
 ///
-/// The magic sniff accepts any extension except a named payload one
-/// (`nzbkit::extract::is_final_name` - a `.cb7` comic is the
-/// deliverable). It used to require an EMPTY extension, so an
+/// The magic sniff accepts any extension except a payload one
+/// ([`nzbkit::extract::archive_sniff_eligible_name`] - a `.cb7` comic is
+/// the deliverable, and so is a `Movie.mkv`; that second half arrived 31
+/// Aug 2026, before which this collector returned `Movie.mkv` and
+/// `disc.iso` carrying 7z heads as extractable jobs). It used to require
+/// an EMPTY extension, so an
 /// obfuscated container posted as `hash.bin` was invisible here: the
 /// disk post-pass walked past it, nothing extracted, and the job
 /// reported Completed holding one unopened archive. Obfuscation strips
@@ -77,11 +80,14 @@ pub(crate) fn collect_sevenz_archives(dir: &std::path::Path) -> Result<Vec<Vec<P
         if let Some((base, num)) = split_7z_part(&name) {
             splits.entry(base).or_default().insert(num, path);
         } else if name.ends_with(".7z")
-            || (!nzbkit::extract::is_final_name(&name) && sevenz_magic(&path))
+            || (nzbkit::extract::archive_sniff_eligible_name(&name) && sevenz_magic(&path))
         {
             // Named, or obfuscated under any name at all - except a
-            // named payload file (`.cb7`), whose 7z bytes ARE the
-            // deliverable and must never be unpacked.
+            // payload name (`.cb7`, `.mkv`, `.iso`...), whose 7z bytes
+            // ARE the deliverable and must never be unpacked. The
+            // `.7z` arm is ahead of the gate and stays there: a file
+            // NAMED `.7z` is a container by its own name, and the two
+            // name sets are disjoint anyway.
             singles.push(path);
         }
     }

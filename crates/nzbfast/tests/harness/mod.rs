@@ -99,6 +99,10 @@ const LOG_TAIL_LINES: usize = 40;
 pub struct DaemonLog {
     port: u16,
     path: PathBuf,
+    /// Has [`DaemonLog::check_now`] already run for this daemon? Two
+    /// routes reach it - `Daemon::stop`, and `Daemon`'s own field order
+    /// for a daemon nobody stops - and whichever arrives first wins.
+    checked: std::sync::atomic::AtomicBool,
 }
 
 impl DaemonLog {
@@ -112,11 +116,78 @@ impl DaemonLog {
     pub fn text(&self) -> String {
         std::fs::read_to_string(&self.path).unwrap_or_default()
     }
+
+    /// **THE ADOPTION GUARD'S DAEMON-SIDE CHOKEPOINT** (31 Aug 2026, the
+    /// follow-up named under "What this does not close" in
+    /// `research/PAYLOAD-TRAP-GATE-DECISION-2026-08-31.md`).
+    ///
+    /// `crates/nzbfast/tests/adoptguard/mod.rs` refuses a repair that
+    /// completed having rebuilt ZERO blocks from parity and adopted
+    /// some. On the `nzbfast get` side it hangs off `run_get_win`, the
+    /// one chokepoint every e2e leg goes through. The daemon binary has
+    /// no such function - and it is over a WORSE generator,
+    /// `daemon.rs::payload` having no position term at all, so 184 of
+    /// 200 aligned blocks of one of its files have an exact duplicate in
+    /// the same file, against 0 for the e2e one.
+    ///
+    /// THIS is the daemon's equivalent, and it computes its population
+    /// rather than listing it: every daemon under test owns exactly one
+    /// `DaemonLog`, so a suite is covered on the day it is written and
+    /// there is no roster to go stale.
+    ///
+    /// THE MOMENT IS THE REAPING, and getting that wrong is the whole
+    /// story of this function's shape. Two earlier placements were
+    /// measured and are both wrong. `Daemon::log` fires only for the
+    /// suites that happen to READ the log, and it reads a file the child
+    /// is still appending to - a line torn mid-clause ("...266 block(s)
+    /// adopted fro") would be refused as an unreadable spelling. `Drop
+    /// for DaemonLog` looked right and is measurably not: the house
+    /// idiom is `let _log = d.stop();` and then `remove_dir_all(&dir)`,
+    /// which is exactly what `stop`'s own doc comment prescribes, so the
+    /// guard drops LAST and reads a file that has legitimately gone.
+    /// Driven over the whole daemon suite that day: 101 tests read an
+    /// empty log that way, every one of them correct. So the read
+    /// happens where the child has just been reaped and the tree is
+    /// still standing, and both routes there call this - with a latch,
+    /// because a stopped daemon reaches it twice.
+    ///
+    /// FAILING TO FIND IS FAILING. A `Daemon` only exists once
+    /// `wait_ready` has SEEN the banner in this file, so an empty or
+    /// absent log HERE means the tree came down while the daemon was
+    /// still alive - which leaves the failure tail this type exists for
+    /// and the guard both reading nothing. Fix that at the test, by
+    /// ending the daemon before its directory; never by loosening this.
+    fn check_now(&self) {
+        if self
+            .checked
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let text = self.text();
+        assert!(
+            !text.is_empty(),
+            "the daemon's log is empty or gone while the daemon is still \
+             alive: {}\nA `Daemon` only exists once its banner was read out of \
+             that file, so something took the tree down underneath it - which \
+             leaves both the failure tail this type exists for and \
+             `adoptguard::refuse_a_solve_that_solved_nothing` reading nothing \
+             at all. End the daemon first: `drop(d)`, or `let _log = d.stop()` \
+             above the teardown.",
+            self.path.display()
+        );
+        crate::adoptguard::refuse_a_solve_that_solved_nothing(&text, &self.path);
+    }
 }
 
 impl Drop for DaemonLog {
     fn drop(&mut self) {
         if !std::thread::panicking() {
+            // A daemon nobody called `stop` on is reaped by `Daemon`'s
+            // field order, which puts `child` before `log`, so the child
+            // is dead and this text is final. A STOPPED one has already
+            // been read and this is a no-op. See `check_now`.
+            self.check_now();
             return;
         }
         let text = self.text();
@@ -148,7 +219,9 @@ impl Drop for DaemonLog {
 /// - The fields then drop in DECLARATION ORDER, so the child is killed
 ///   and reaped before `log` reads the file. The tail a failure prints
 ///   is the finished one, not one still being appended to. Do not
-///   reorder these fields.
+///   reorder these fields. Since 31 Aug 2026 the adoption guard leans on
+///   the same order for the daemons nobody calls `stop` on - see
+///   [`DaemonLog::check_now`], which is where the reasoning lives.
 /// - `stop` below can move the log out. A type with a `Drop` impl
 ///   cannot be destructured, and the first version of this guard - a
 ///   plain `Drop` on the daemon that printed the tail - is exactly the
@@ -204,8 +277,132 @@ impl Daemon {
     /// and what is left of `self` - the `KillOnDrop` - is dropped at
     /// the end of the call.
     pub fn stop(self) -> DaemonLog {
-        self.log
+        let Daemon {
+            child,
+            port: _,
+            log,
+        } = self;
+        // Explicit and ordered rather than left to the end of the call:
+        // the adoption guard has to read this log with the child reaped
+        // AND the tree still standing, and the caller's very next line
+        // is routinely `remove_dir_all(&dir)`. See `DaemonLog::check_now`.
+        drop(child);
+        log.check_now();
+        log
     }
+}
+
+/// Spin until `ready()` says so, or panic naming `what`.
+///
+/// The shared shape for an ORDERING wait, as opposed to a wall-clock
+/// one. A test that needs the world to be in a particular state before
+/// it acts has two ways to get there, and only one of them survives a
+/// loaded box: wait for the state, or sleep long enough that the state
+/// is probably reached. This is the first, and it exists here rather
+/// than inline so the suites converge on one spelling - see the freeze
+/// gates in `integration/stream_repair.rs`, which pair it with
+/// `MockServer::pause` to hold the provider still while a handshake
+/// runs.
+///
+/// The 25 ms gap is `stream_live`'s, and is the point: it is short
+/// enough that the wait costs nothing when the state is already there,
+/// and the deadline only has to beat scheduler starvation, never the
+/// thing being waited for.
+pub fn wait_until(what: &str, within: std::time::Duration, mut ready: impl FnMut() -> bool) {
+    let t0 = std::time::Instant::now();
+    while !ready() {
+        assert!(
+            t0.elapsed() < within,
+            "timed out after {within:?} waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// How long `spawn_under_test` keeps re-trying an ENOENT, and the gap
+/// between tries. 2 s against a measured ~2.4 ms window is an ~800x
+/// margin; a binary that is genuinely gone still fails, 2 s later, with
+/// a message that says which of the two it was.
+const SPAWN_ENOENT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+const SPAWN_ENOENT_GAP: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Spawn a command whose program is a cargo-uplifted binary, absorbing
+/// the ENOENT that cargo's own uplift leaves behind.
+///
+/// WHY THIS IS NOT A RETRY-UNTIL-GREEN. `env!("CARGO_BIN_EXE_nzbfast")`
+/// is `target/debug/nzbfast`, the UPLIFTED copy, and cargo REMOVES and
+/// re-links that file on EVERY invocation - a no-op `cargo build` that
+/// compiles nothing and prints only `Finished` in 0.11 s still does it.
+/// So the program can be absent for a moment while nothing at all is
+/// being rebuilt, and `Command::spawn` answers `Os { code: 2, kind:
+/// NotFound }` for a file that is there before and after.
+///
+/// MEASURED 31 Aug 2026 on the dev Mac, because the shape is exactly
+/// the one that gets ruled out by reasoning:
+///
+/// - 40 consecutive no-op `cargo build -p nzbfast` runs each gave
+///   `target/debug/nzbfast` a NEW INODE, with zero `Compiling` lines.
+/// - A 459k-per-second `stat` loop over those 40 caught the path absent
+///   2,588 times: about 141 us of non-existence per invocation. Three
+///   no-op `cargo nextest list` builds were 17x worse, ~2.4 ms each.
+/// - End to end: 10,832 spawns of the real binary during a continuous
+///   no-op build loop gave 45 ENOENTs (0.42%). The same loop with no
+///   cargo running gave 0 in 7,525. That control is the whole proof.
+///
+/// This is what put `Os { code: 2, kind: NotFound }` at `cmd.spawn()`
+/// below in THREE unrelated families - `dashboard_rev`, `stream_repair`
+/// and (at its own call site) `fault_contract` - under a load recipe of
+/// EIGHT concurrent `cargo nextest run`s over this crate's integration
+/// binary. Cargo serializes BUILDS on its lock but not RUNS, so copies
+/// 2..8 each punch a hole in the binary while copy 1's tests are
+/// already spawning it.
+///
+/// Do NOT widen this to other error kinds. EACCES, ETXTBSY and ENOMEM
+/// are all real and none of them goes away by waiting; the one window
+/// this absorbs is the one measured above.
+pub fn spawn_under_test(cmd: &mut Command) -> Child {
+    let deadline = std::time::Instant::now() + SPAWN_ENOENT_GRACE;
+    let mut tries = 0u32;
+    loop {
+        tries += 1;
+        match cmd.spawn() {
+            Ok(c) => return c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "spawning {:?} answered NotFound for {SPAWN_ENOENT_GRACE:?} \
+                     across {tries} tries. Cargo's uplift window is microseconds, \
+                     so this is the binary really being gone - a `cargo clean` \
+                     under a running suite, or a path that was never built.",
+                    cmd.get_program()
+                );
+                std::thread::sleep(SPAWN_ENOENT_GAP);
+            }
+            Err(e) => panic!("spawning {:?} failed: {e:?}", cmd.get_program()),
+        }
+    }
+}
+
+/// `Command::output`, through the same ENOENT grace as
+/// `spawn_under_test`.
+///
+/// The suites that run `nzbfast get` to completion and read its census
+/// out of the captured output take this rather than the spawning form -
+/// `fault_contract` is the one that was actually seen failing this way,
+/// as `run nzbfast get: NotFound`.
+///
+/// `Command::output` also nulls STDIN - a child that reads it gets an
+/// immediately-closed stream rather than the test binary's own - so this
+/// sets all three rather than only the two it reads back.
+pub fn output_under_test(cmd: &mut Command) -> std::process::Output {
+    let child = spawn_under_test(
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("waiting on {:?} failed: {e:?}", cmd.get_program()))
 }
 
 /// One launch attempt: pick a port, open its log, spawn the child.
@@ -221,7 +418,7 @@ fn spawn_one(dir: &Path, build: &impl Fn(u16) -> Command) -> (KillOnDrop, u16, P
     let err = out.try_clone().unwrap();
     let mut cmd = build(port);
     cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
-    (KillOnDrop(cmd.spawn().unwrap()), port, path)
+    (KillOnDrop(spawn_under_test(&mut cmd)), port, path)
 }
 
 /// The daemon exited instead of binding: `free_port()` handed :port to a
@@ -242,6 +439,18 @@ fn assert_retryable(attempt: u32, port: u16, path: &Path) {
 /// configured command; it may be called again on a fresh port, so it
 /// must not consume anything.
 ///
+/// DO NOT REMOVE `dir` WHILE THE DAEMON IS ALIVE. The log lives in it,
+/// and both the failure tail this harness exists for and
+/// [`DaemonLog::check_now`]'s adoption guard read that file when the
+/// daemon ends - so a teardown that runs first leaves each of them
+/// reading nothing, silently. A `scratch::ScratchDir` on the same path
+/// already does the removal, and it drops AFTER the daemon; 135
+/// redundant `let _ = std::fs::remove_dir_all(&dir);` teardown lines
+/// were swept out of this binary on 31 Aug 2026 for exactly that
+/// reason, 53% of the daemon suite having been unreadable that way.
+/// Where a test really must delete the tree itself, end the daemon
+/// first: `drop(d)`, or `let _log = d.stop()`.
+///
 /// The blocking half of `serve`, for the suites that are not `async`.
 pub fn serve_blocking(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
     for attempt in 0..3 {
@@ -250,7 +459,11 @@ pub fn serve_blocking(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
             return Daemon {
                 child,
                 port,
-                log: DaemonLog { port, path },
+                log: DaemonLog {
+                    port,
+                    path,
+                    checked: std::sync::atomic::AtomicBool::new(false),
+                },
             };
         }
         assert_retryable(attempt, port, &path);
@@ -280,7 +493,11 @@ pub async fn serve(dir: &Path, build: impl Fn(u16) -> Command) -> Daemon {
             return Daemon {
                 child,
                 port,
-                log: DaemonLog { port, path },
+                log: DaemonLog {
+                    port,
+                    path,
+                    checked: std::sync::atomic::AtomicBool::new(false),
+                },
             };
         }
         assert_retryable(attempt, port, &path);
@@ -395,6 +612,51 @@ fn wait_ready(child: &mut KillOnDrop, port: u16, log: &Path) -> bool {
 /// jobs can satisfy between them.
 pub fn queue_slot(payload: &str, nzo: &str) -> serde_json::Value {
     section_slot(payload, "queue", nzo)
+}
+
+/// Is this queue slot HELD behind another copy?
+///
+/// The answer is in SAB's `labels` - `DUPLICATE` for an ordinary
+/// duplicate hold, `ALTERNATIVE` for a spare parked behind a named job
+/// and promoted if that job fails - and NOT in `priority`.
+///
+/// Every one of these suites used to ask `slot["priority"] ==
+/// "Duplicate"`, which worked only because the facade published a held
+/// row's STATE in the field SAB reserves for its five interface
+/// priorities (Force, Repair, High, Normal, Low). SAB never does that:
+/// `NzbObject.set_priority` applies a state-setting priority as a state
+/// and then calls `set_stateless_priority`, so a client can be written
+/// against those five words. Ours moved to `labels` on 31 Aug 2026 -
+/// see `serve/sabcompat/units.rs::sab_priority_name` and
+/// `research/SAB-QUEUE-HISTORY-SHAPE-2026-08-31.md`.
+///
+/// One helper rather than nine copies of the array walk, so the next
+/// suite that needs the question gets the answer that is true of the
+/// wire rather than the one that used to be.
+pub fn held_behind_a_copy(slot: &serde_json::Value) -> bool {
+    slot["labels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|l| matches!(l.as_str(), Some("DUPLICATE" | "ALTERNATIVE")))
+}
+
+/// Does this `mode=queue` BODY carry a row held behind another copy?
+///
+/// The payload companion to `held_behind_a_copy`, for the several
+/// suites whose question is only "was the spare held at all". Each was
+/// a `q.contains("\"Duplicate\"")` over the raw body until 31 Aug 2026
+/// - which is the whole-payload substring search
+/// `tools/payload-id-gate.py` refuses for job ids, for the same reason:
+/// it answers a different question from the one asked, and it answered
+/// this one only while the facade published a held row's STATE in
+/// `priority`. Parses and asks the rows.
+pub fn any_held_behind_a_copy(payload: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .as_ref()
+        .and_then(|v| v["queue"]["slots"].as_array())
+        .is_some_and(|slots| slots.iter().any(held_behind_a_copy))
 }
 
 /// One slot out of a SAB `mode=history` payload. See [`queue_slot`].

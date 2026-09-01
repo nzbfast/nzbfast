@@ -8,7 +8,7 @@ before details are public:
 - **Preferred:** GitHub private vulnerability reporting - the
   ["Report a vulnerability"](https://github.com/nzbfast/nzbfast/security/advisories/new)
   button on this repository's Security tab.
-- **Email:** releases@nzbfast.com
+- **Email:** nzbfast@pm.me
 
 You can expect an acknowledgement within 48 hours. Please include steps
 to reproduce and the version (`nzbfast --version` or the dashboard

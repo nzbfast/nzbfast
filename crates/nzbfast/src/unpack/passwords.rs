@@ -411,21 +411,6 @@ pub(crate) fn first_encrypted_zip(dir: &std::path::Path) -> Option<Vec<PathBuf>>
         .find(|parts| nzbkit::zip::needs_password(parts))
 }
 
-/// Candidate sweep for an encrypted zip.
-///
-/// Unlike the RAR and 7z twins this needs no wall-clock budget of its
-/// own: `password_opens` reads a salt and a two-byte verifier (AE) or a
-/// twelve-byte header (ZipCrypto) and derives one key, so a candidate
-/// costs microseconds rather than a decode - there is no cost for a
-/// hostile post to inflate. The budget stays anyway, because the
-/// candidate LIST is attacker-influenced (harvested sidecars) even when
-/// each try is cheap, and one bound is easier to reason about than a
-/// special case.
-///
-/// A ZipCrypto check byte accepts a wrong password once in 256 tries, so
-/// the winner returned here is a candidate, not a verdict: the
-/// extraction's CRC32 is what proves it, and a false accept costs one
-/// failed unpack, exactly as it did before this probe existed.
 /// EVERY value worth spending an extraction on for this container,
 /// best first - not just the first one the verifier likes.
 ///
@@ -468,6 +453,21 @@ pub(crate) fn zip_password_candidates(
     if out.is_empty() { keep() } else { out }
 }
 
+/// Candidate sweep for an encrypted zip.
+///
+/// Unlike the RAR and 7z twins this needs no wall-clock budget of its
+/// own: `password_opens` reads a salt and a two-byte verifier (AE) or a
+/// twelve-byte header (ZipCrypto) and derives one key, so a candidate
+/// costs microseconds rather than a decode - there is no cost for a
+/// hostile post to inflate. The budget stays anyway, because the
+/// candidate LIST is attacker-influenced (harvested sidecars) even when
+/// each try is cheap, and one bound is easier to reason about than a
+/// special case.
+///
+/// A ZipCrypto check byte accepts a wrong password once in 256 tries, so
+/// the winner returned here is a candidate, not a verdict: the
+/// extraction's CRC32 is what proves it, and a false accept costs one
+/// failed unpack, exactly as it did before this probe existed.
 pub(crate) fn resolve_zip_password(
     parts: &[PathBuf],
     dir: &std::path::Path,

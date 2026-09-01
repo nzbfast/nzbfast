@@ -43,6 +43,19 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// The sweep's own working directory. One per process, and the CALLER
+/// holds the guard: this used to `create_dir_all` and hand back a bare
+/// path with nothing removing it, which is 1,255 of the 66,095 leaked
+/// `$TMPDIR` entries measured on the dev Mac on 31 Aug 2026. Every
+/// per-test fixture goes through `case` instead, which takes a directory
+/// of its own - two tests of this file run in parallel under `cargo
+/// test` and `attach` clears what it attaches to.
+fn scratch_root() -> crate::scratch::ScratchDir {
+    crate::scratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-compact-latency-{}", std::process::id())),
+    )
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("nzbfast-compact-latency-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -333,17 +346,22 @@ fn quick_ballast(path: &Path, rows: usize) -> Index {
     Index::open(path).unwrap()
 }
 
-fn case(name: &str) -> PathBuf {
-    let p = scratch(&format!("{name}.db"));
-    for q in [p.clone(), wal(&p), shm(&p)] {
-        let _ = std::fs::remove_file(q);
-    }
-    p
+/// A fixture database in a directory of this case's own, cleared on
+/// entry and removed on drop - so the caller has to hold the guard.
+/// `attach` gives an empty tree, which is what the old three
+/// `remove_file` calls (db, `-wal`, `-shm`) were for.
+fn case(name: &str) -> (crate::scratch::ScratchDir, PathBuf) {
+    let d = crate::scratch::ScratchDir::attach(&std::env::temp_dir().join(format!(
+        "nzbfast-compact-latency-{name}-{}",
+        std::process::id()
+    )));
+    let p = d.join(format!("{name}.db"));
+    (d, p)
 }
 
 #[test]
 fn a_new_database_is_incremental_from_birth() {
-    let p = case("birth");
+    let (_scratch, p) = case("birth");
     let ix = Index::open(&p).unwrap();
     assert_eq!(
         ix.compact_style().unwrap(),
@@ -354,7 +372,7 @@ fn a_new_database_is_incremental_from_birth() {
 
 #[test]
 fn compact_migrates_an_existing_database_to_incremental() {
-    let p = case("migrate");
+    let (_scratch, p) = case("migrate");
     drop(Index::open(&p).unwrap());
     force_auto_vacuum_none(&p);
     let ix = Index::open(&p).unwrap();
@@ -377,7 +395,7 @@ fn compact_migrates_an_existing_database_to_incremental() {
 /// 49 MB, where 6 chunks now do it.
 #[test]
 fn a_chunk_reclaims_the_whole_chunk_not_one_page() {
-    let p = case("chunksize");
+    let (_scratch, p) = case("chunksize");
     let ix = quick_ballast(&p, 4_000);
     let before = ix.freelist_pages().unwrap();
     assert!(
@@ -396,7 +414,7 @@ fn a_chunk_reclaims_the_whole_chunk_not_one_page() {
 
 #[test]
 fn a_chunk_hands_the_space_back_and_keeps_it() {
-    let p = case("keeps");
+    let (_scratch, p) = case("keeps");
     let ix = quick_ballast(&p, 4_000);
     let before = ix.db_bytes().unwrap();
     assert!(ix.freelist_pages().unwrap() > 0);
@@ -417,7 +435,7 @@ fn a_chunk_hands_the_space_back_and_keeps_it() {
 /// empty, and stops on request without losing what it has done.
 #[test]
 fn the_chunk_loop_terminates_and_is_resumable() {
-    let p = case("loop");
+    let (_scratch, p) = case("loop");
     let ix = quick_ballast(&p, 4_000);
     let start = ix.db_bytes().unwrap();
     // Stand down after one chunk, exactly as a job arriving would.
@@ -446,6 +464,7 @@ fn the_chunk_loop_terminates_and_is_resumable() {
 #[test]
 #[ignore = "builds a large database and sweeps it; run deliberately"]
 fn a_job_arriving_mid_compact_waits_this_long() {
+    let _scratch = scratch_root();
     let releases = env_usize("BALLAST_RELEASES", 6000);
     let parts = env_usize("BALLAST_PARTS", 200);
     let base = scratch("base.db");

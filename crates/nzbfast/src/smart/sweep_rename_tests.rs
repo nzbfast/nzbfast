@@ -6,6 +6,13 @@
 use super::testkit::*;
 use super::*;
 
+// The racing pins for this file's rename doors, in a child of this
+// module rather than inline: sweep_rename_tests.rs sits 246 lines
+// under the flat size-gate ceiling, and the child gets `use super::*`
+// and this module's helpers with no re-export.
+#[path = "renameclaim_tests.rs"]
+mod renameclaim_tests;
+
 /// The Supergirl case: a 56-byte extensionless scrap packed inside the
 /// RAR, left beside a 20 GB feature because nothing could classify it.
 /// Tests the predicate directly - driving sweep_junk would mean
@@ -478,6 +485,39 @@ fn keep_media_only_keeps_disc_structure_and_companion_tracks() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The four disc families beyond DVD-Video and mainline Blu-ray:
+/// AVCHD (camcorder-rip BDMV lookalike, shortened structure-file names),
+/// DVD-Audio's AUDIO_TS tree, HD-DVD's HVDVD_TS tree, and Blu-ray Java
+/// menus. Disc trees ship uppercase, and `ext_of` lowercases before the
+/// list lookup - so the uppercase spellings have to survive too, or this
+/// test would pass on a case-fold nobody actually relies on.
+#[test]
+fn keep_media_only_keeps_avchd_dvd_audio_hddvd_and_bdj_extensions() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepdisc2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The largest video, so the sweep arms and picks a feature.
+    std::fs::write(dir.join("00000.MTS"), vec![0u8; 4096]).unwrap();
+    let keep = [
+        "00000.CPI",        // AVCHD's shortened clpi twin
+        "00000.MPL",        // AVCHD's shortened mpls twin
+        "AUDIO_TS.AOB",     // DVD-Audio's AUDIO_TS payload
+        "HVDVD_TS.EVO",     // HD-DVD's multiplexed stream
+        "MOVIEOBJECT.BDJO", // Blu-ray Java disc object
+        "00001.JAR",        // Blu-ray Java package
+    ];
+    for f in keep {
+        std::fs::write(dir.join(f), b"x").unwrap();
+    }
+    std::fs::write(dir.join("cover.jpg"), b"x").unwrap();
+    assert_eq!(keep_media_only(&dir), 1, "only the jpg goes");
+    for f in keep {
+        assert!(dir.join(f).exists(), "{f} belongs to the disc");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// keep-media-only judges by extension and deletes what it does not
 /// recognise, so a hash-named payload with NO extension was removed
 /// outright. One properly named video in the same folder is enough to
@@ -664,11 +704,11 @@ fn prune_takes_a_folder_left_holding_only_finder_droppings() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("Sample")).unwrap();
     std::fs::create_dir_all(dir.join("Proof")).unwrap();
-    std::fs::write(dir.join("Sample/.DS_Store"), vec![0u8; 6148]).unwrap();
-    std::fs::write(dir.join("Proof/._clip.mkv"), b"resource fork").unwrap();
+    std::fs::write(dir.join("Sample/.DS_Store"), ds_store_bytes()).unwrap();
+    std::fs::write(dir.join("Proof/._clip.mkv"), appledouble_bytes()).unwrap();
     // The job's own directory keeps its .DS_Store: it is never pruned,
     // so there is nothing to clear it out of the way for.
-    std::fs::write(dir.join(".DS_Store"), vec![0u8; 6148]).unwrap();
+    std::fs::write(dir.join(".DS_Store"), ds_store_bytes()).unwrap();
 
     let n = prune_empty_dirs(&dir, 0);
 
@@ -692,6 +732,13 @@ fn prune_takes_a_folder_left_holding_only_finder_droppings() {
 /// prefix says. The husk sweep deletes permanently, so a mis-packed
 /// archive member or a poster-named extra called `._big.mkv` must
 /// survive its own folder rather than be classified away by name.
+///
+/// SIZE IS NO LONGER THE ONLY THING SAYING SO (M4-68): the 2 MiB file
+/// here is over `APPLEDOUBLE_MAX` and would survive on the ceiling
+/// alone, but the small one beside it now has to carry the AppleDouble
+/// magic to go - `b"resource fork"` was a name-shaped stand-in and this
+/// pin passed on it. The payload the row is really about is the one
+/// UNDER the ceiling, which `setclaim`'s own cases hold.
 #[test]
 fn prune_keeps_a_folder_holding_a_payload_sized_appledouble() {
     let dir = std::env::temp_dir().join(format!("nzbfast-adbig-{}", std::process::id()));
@@ -700,7 +747,7 @@ fn prune_keeps_a_folder_holding_a_payload_sized_appledouble() {
     std::fs::create_dir_all(dir.join("Small")).unwrap();
     std::fs::write(dir.join("Big/._big.mkv"), vec![0u8; 2 * 1024 * 1024]).unwrap();
     // The genuine article, in the same sweep: still swept.
-    std::fs::write(dir.join("Small/._clip.mkv"), b"resource fork").unwrap();
+    std::fs::write(dir.join("Small/._clip.mkv"), appledouble_bytes()).unwrap();
 
     let n = prune_empty_dirs(&dir, 0);
 
@@ -721,7 +768,7 @@ fn prune_keeps_a_folder_where_finder_droppings_sit_beside_content() {
     let dir = std::env::temp_dir().join(format!("nzbfast-dskeep-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("Subs")).unwrap();
-    std::fs::write(dir.join("Subs/.DS_Store"), vec![0u8; 6148]).unwrap();
+    std::fs::write(dir.join("Subs/.DS_Store"), ds_store_bytes()).unwrap();
     std::fs::write(dir.join("Subs/english.srt"), b"1").unwrap();
 
     assert_eq!(prune_empty_dirs(&dir, 0), 0);
@@ -1410,22 +1457,30 @@ fn a_sample_name_running_like_an_episode_survives() {
     // Small beside the feature, "sample" in the name - but its own
     // header says 50 minutes. That is an episode, not a clip.
     let episode = dir.join("Show.S01E02.sample.mkv");
+    // A real 45-second clip with the same shape still goes.
+    let clip = dir.join("Show.S01E02.sample2.mkv");
+    // No readable duration: the name+size+sibling verdict stands.
+    let blob = dir.join("Show.S01E02.sample3.mkv");
+    // ALL THREE ARE WRITTEN BEFORE ANYTHING IS ASSERTED, and that is
+    // load-bearing rather than tidy. `is_deletable_sample` has asked
+    // since 31 Aug 2026 whether the name reads as a teaser OF a
+    // sibling, and with the files written one at a time `episode` is
+    // alone in the directory when it is judged - so it is spared for
+    // having no relatives and the duration veto is never reached.
+    // Mutation-checked: with the veto deleted, the staggered version
+    // still passes and this one fails.
     std::fs::write(
         &episode,
         nzbkit::mkv::test_mux(Some(50.0 * 60.0), Some((1920, 1080))),
     )
     .unwrap();
-    assert!(!is_deletable_sample(&episode, 1 << 30));
-
-    // A real 45-second clip with the same shape still goes.
-    let clip = dir.join("Show.S01E02.sample2.mkv");
     std::fs::write(&clip, nzbkit::mkv::test_mux(Some(45.0), Some((1920, 1080)))).unwrap();
-    assert!(is_deletable_sample(&clip, 1 << 30));
-
-    // No readable duration: the old name+size verdict stands.
-    let blob = dir.join("Show.S01E02.sample3.mkv");
     std::fs::write(&blob, b"junk").unwrap();
-    assert!(is_deletable_sample(&blob, 1 << 30));
+    let sibs = files_in_reach(&dir);
+
+    assert!(!is_deletable_sample(&episode, 1 << 30, &sibs));
+    assert!(is_deletable_sample(&clip, 1 << 30, &sibs));
+    assert!(is_deletable_sample(&blob, 1 << 30, &sibs));
 }
 
 /// The 1.0.9 report: an F1 round finished as
@@ -1607,6 +1662,94 @@ fn de_obfuscation_replaces_a_generic_stem() {
         assert!(!rename_obfuscated_video(out, rel), "{stem}");
         assert!(out.join(format!("{stem}.mkv")).exists(), "{stem}");
     }
+}
+
+/// The BUDGETED cap, asserted at the CALL SITE and really creating the
+/// files - because what a future edit reverts is the call, not the
+/// helper (`disk::relpath::tests::a_shared_stem_is_capped_against_the_longest_tail_it_will_carry`
+/// is the helper's own half).
+///
+/// `rename_movie` composes THREE names off one stem and the sidecar
+/// pairing IS that shared stem, so neither obvious cap works: capping
+/// the composed names hashes different inputs and the subtitle stops
+/// being that video's, and capping the stem alone leaves `{base}.mkv`
+/// over the limit and the write still fails. Both halves are asserted
+/// here, against a name a filesystem really refuses (measured on APFS
+/// 31 Aug 2026: 255 bytes creates, 300 is `ENAMETOOLONG` for both
+/// `mkdir` and `create`).
+#[test]
+fn an_overlong_movie_name_fits_on_disk_and_keeps_its_sidecars_paired() {
+    let parent = &scratch("longmovie");
+    let out = &parent.join("job");
+    std::fs::create_dir_all(out).unwrap();
+    let hash = "1fRbH6e0eX8v5hv7fSyXgBb";
+    std::fs::write(out.join(format!("{hash}.mkv")), b"v").unwrap();
+    std::fs::write(out.join(format!("{hash}.en.srt")), b"s").unwrap();
+    std::fs::write(out.join(format!("{hash}.forced.fr.srt")), b"s").unwrap();
+
+    let base = format!(
+        "Example.Movie.2024.{}.1080p.BluRay.x264-FGT",
+        "V".repeat(260)
+    );
+    let clean = nzbkit::release::sanitize_name(&base);
+    // The defect this closes, stated as an assertion rather than as
+    // prose: the stem capped on its own fits and the name composed off
+    // it does not.
+    let alone = nzbkit::disk::sanitize_filename_capped(&clean);
+    assert!(alone.len() <= 255);
+    assert!(
+        alone.len() + ".forced.fr.srt".len() > 255,
+        "the unbudgeted cap must be the one that overflows, or this test proves nothing"
+    );
+
+    let dest = rename_movie(parent, out, &base).expect("the folder must be renamed");
+    let stem = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap();
+    // Every component the job now owns is one the filesystem took - and
+    // it really took them, which is the assertion the byte counts stand
+    // in for.
+    assert!(stem.len() <= 255, "{} bytes: {stem}", stem.len());
+    assert!(dest.is_dir(), "the capped folder really exists");
+    for tail in [".mkv", ".en.srt", ".forced.fr.srt"] {
+        let name = format!("{stem}{tail}");
+        assert!(name.len() <= 255, "{} bytes: {name}", name.len());
+        assert!(
+            dest.join(&name).exists(),
+            "{name} must exist - the video and both sidecars share ONE stem, \
+             which is what pairs them for a player"
+        );
+    }
+    assert!(
+        !dest.join(format!("{hash}.mkv")).exists(),
+        "the hash name is gone, so the rename really happened"
+    );
+}
+
+/// The same budget on the de-obfuscation door, which composes the same
+/// two names off the same stem and had the same latent overflow.
+#[test]
+fn an_overlong_release_name_fits_on_the_de_obfuscation_path_too() {
+    let out = &scratch("longdeobf");
+    let hash = "GqRTzbOIvUzZg1hqbipRind85vn";
+    std::fs::write(out.join(format!("{hash}.mkv")), b"v").unwrap();
+    std::fs::write(out.join(format!("{hash}.en.srt")), b"s").unwrap();
+
+    let base = format!("Example.Movie.2024.{}.1080p.WEB.x264-GRP", "W".repeat(260));
+    assert!(rename_nameless_video(out, &base));
+
+    let clean = nzbkit::release::sanitize_name(&base);
+    let stem = nzbkit::disk::cap_shared_stem(&clean, [".mkv", ".en.srt"]);
+    assert!(stem.len() + ".en.srt".len() <= 255);
+    // Asserted against the transform the door applies rather than
+    // against a literal, so the pin follows a rename of the helper.
+    assert!(out.join(format!("{stem}.mkv")).exists(), "feature renamed");
+    assert!(
+        out.join(format!("{stem}.en.srt")).exists(),
+        "sidecar kept its language tail AND its pairing"
+    );
+    assert!(!out.join(format!("{hash}.mkv")).exists());
 }
 
 /// A one-digit generic stem is a PREFIX of its numbered neighbours,
@@ -2042,4 +2185,639 @@ fn keep_media_only_spares_every_part_of_a_plain_split() {
     assert_eq!(n, 2, "the poster and the set-less blob go, nothing else");
     assert!(dir.join("teaser.mkv").exists());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// DATA LOSS, measured on origin/main and not predicted (M4-88).
+///
+/// A CD image is posted as a PAIR: a tiny text `.cue` index beside the
+/// track data it names. `cue` sat in `PAYLOAD_EXTS` and `bin` sat in no
+/// list at all, so keep-media-only kept the index and deleted the disc.
+/// The job reported Completed over a cue sheet pointing at a file that
+/// was no longer there, and there is no copy anywhere to restore from.
+///
+/// The setting is default-off and `sweep_junk` leaves `.bin` alone, so
+/// this is not the default path - which bounds the blast radius and
+/// does not make the deletion correct.
+#[test]
+fn keep_media_only_keeps_the_disc_a_cue_sheet_indexes() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepcue-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The 24D category trap: ONE bonus video in a non-video job is
+    // enough to clear the no-video guard and arm the whole sweep.
+    std::fs::write(dir.join("Bonus.Interview.mp4"), vec![0u8; 4096]).unwrap();
+    std::fs::write(
+        dir.join("Album.cue"),
+        b"REM GENRE Rock\nFILE \"Album.bin\" BINARY\n  TRACK 01 AUDIO\n",
+    )
+    .unwrap();
+    let keep = [
+        "Album.bin", // the disc, by extension AND by the cue's own name
+        "Disc2.mdf", // Alcohol 120%
+        "Disc2.mds", // its descriptor
+        "Disc3.nrg", // Nero
+        "Disc4.ccd", // CloneCD
+        "Disc5.toc", // cdrdao
+        "Disc6.cdi", // DiscJuggler
+        "Disc7.gdi", // Dreamcast
+    ];
+    for f in keep {
+        std::fs::write(dir.join(f), vec![0u8; 65536]).unwrap();
+    }
+    std::fs::write(dir.join("cover.jpg"), b"x").unwrap();
+
+    assert_eq!(keep_media_only(&dir), 1, "only the jpg goes");
+    for f in keep {
+        assert!(
+            dir.join(f).exists(),
+            "{f} is the release's payload and cannot be recovered once deleted"
+        );
+    }
+    assert!(dir.join("Album.cue").exists(), "the index stays too");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The cue sheet is a NAME MAP, and that is the half no extension list
+/// can reach: a lossless rip cued against `.tta`, `.tak` or `.shn` -
+/// real formats, in none of our lists - is spared because the poster
+/// said which file it is, not because anyone thought of the format.
+///
+/// The negative half is the same test: an unnamed file with one of
+/// those extensions still goes, so this arm cannot be read as "keep
+/// everything beside a cue sheet".
+#[test]
+fn a_cue_sheet_spares_the_track_it_names_whatever_the_extension() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepcue2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Bonus.mkv"), vec![0u8; 4096]).unwrap();
+    // Windows-authored sheet: the spelling differs from disk in case,
+    // which is an everyday shape and must not be a deletion.
+    std::fs::write(dir.join("Live.cue"), b"FILE \"LIVE SET.SHN\" WAVE\n").unwrap();
+    std::fs::write(dir.join("Live Set.shn"), vec![0u8; 4096]).unwrap();
+    // Same extension, NOT named by any sheet: still clutter.
+    std::fs::write(dir.join("stray.shn"), vec![0u8; 4096]).unwrap();
+
+    assert_eq!(keep_media_only(&dir), 1, "only the unnamed stray goes");
+    assert!(
+        dir.join("Live Set.shn").exists(),
+        "the sheet names this track, in the poster's own words"
+    );
+    assert!(!dir.join("stray.shn").exists(), "nothing names this one");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// M4-89, both directions, measured on origin/main.
+///
+/// The MPEG-TS arm of this sniff was `b[0] == 0x47` and nothing else,
+/// which is ONE byte of evidence: GIF87a/GIF89a open with 0x47, and so
+/// does every text file starting with a capital G - so a hash-named
+/// scene .nfo or SFV leftover was kept as a video payload forever. The
+/// naming door (`videoext::is_transport_stream`) had already been
+/// repaired for exactly this and the cleanup door had not; there is one
+/// sync test in the crate now.
+///
+/// The inverse is the sharper half: `iso`/`img` are in `VIDEO_EXTS`
+/// because a disc rip IS the feature, but ISO9660's only magic sits
+/// 32 KB in at sector 16, where no head buffer reaches - so a
+/// hash-named disc image was DELETED as unrecognised clutter.
+#[test]
+fn keep_media_only_reads_a_ts_sync_period_and_an_iso_descriptor() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepsniff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Show.S01E01.mkv"), vec![0u8; 4096]).unwrap();
+
+    // G-headed furniture: a scene .nfo whose extension was stripped.
+    // One 0x47 and no stride behind it.
+    std::fs::write(
+        dir.join("a1b2c3d4e5"),
+        b"Greetings from the group - this is a scene nfo, not a video.\n",
+    )
+    .unwrap();
+    // A real transport stream: the sync repeats on the 188-byte stride.
+    let mut ts = Vec::new();
+    for _ in 0..8 {
+        ts.push(0x47u8);
+        ts.extend(std::iter::repeat_n(0x11u8, 187));
+    }
+    std::fs::write(dir.join("bb44cc55dd"), &ts).unwrap();
+    // An extensionless ISO9660 image: CD001 at sector 16 plus one type
+    // byte, and nothing whatever in the head.
+    let mut iso = vec![0u8; 32769];
+    iso.extend_from_slice(b"CD001\x01");
+    iso.extend(std::iter::repeat_n(0u8, 4096));
+    std::fs::write(dir.join("ff99aa88bb"), &iso).unwrap();
+
+    let removed = keep_media_only(&dir);
+    assert!(
+        !dir.join("a1b2c3d4e5").exists(),
+        "one capital G is not a transport stream"
+    );
+    assert!(
+        dir.join("bb44cc55dd").exists(),
+        "a real sync period is payload"
+    );
+    assert!(
+        dir.join("ff99aa88bb").exists(),
+        "a disc image is the feature and cannot be recovered once deleted"
+    );
+    assert_eq!(removed, 1, "only the G-headed furniture");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The cleanup door and the naming door must not disagree about what a
+/// video is, and this is the shape of that disagreement that cost real
+/// bytes: an ISO-BMFF whose first box is not `ftyp`.
+///
+/// `looks_like_video_bytes` hand-wrote the three container magics
+/// instead of asking `mediaprobe::container_ext`, which is what
+/// `video_ext` has always asked, and the copy was NARROWER - `ftyp` at
+/// offset 4 and nothing else, against container_ext's
+/// ftyp/moov/mdat/free/skip/wide/styp/sidx. So a fragmented segment
+/// (`styp`-first) or a moov-first MP4 with no extension was DELETED by
+/// this sweep and would have been NAMED `.mp4` by the rename pass.
+/// Measured on origin/main at e6195232a: `PROBEASYM removed=2
+/// styp_kept=false moov_kept=false`.
+///
+/// Same doctrine as every other keep-media regression in this file:
+/// keeping a stray file costs disk, deleting a wanted one is
+/// unrecoverable.
+#[test]
+fn keep_media_only_spares_an_extensionless_mp4_that_does_not_lead_with_ftyp() {
+    let _steady = trash_globals_steady();
+    let dir = std::env::temp_dir().join(format!("nzbfast-keepbmff-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A named video arms the sweep - one named file beside one
+    // hash-named one is the ordinary obfuscated-post shape.
+    std::fs::write(dir.join("Show.S01E06.1080p.WEB.mkv"), vec![0u8; 4096]).unwrap();
+
+    for (name, body) in extensionless_bmff_fixtures() {
+        std::fs::write(dir.join(name), &body).unwrap();
+    }
+    // Extensionless junk that is NOT a container still goes, so this is
+    // a pin on the sweep and not on the sweep having stopped running.
+    std::fs::write(dir.join("readme_no_ext"), b"just some text here").unwrap();
+
+    let removed = keep_media_only(&dir);
+    for (name, _) in extensionless_bmff_fixtures() {
+        assert!(
+            dir.join(name).exists(),
+            "{name}: the naming pass would call this an mp4, so the cleanup pass may not delete it"
+        );
+    }
+    assert!(
+        !dir.join("readme_no_ext").exists(),
+        "non-container junk still goes"
+    );
+    assert_eq!(removed, 1, "only the junk file");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The ISO-BMFF first boxes that are not `ftyp`, as files with no
+/// extension. `styp` opens a fragmented-MP4 segment and `sidx` its
+/// index; `moov` first is an ordinary faststart MP4 whose `ftyp` a
+/// remuxer dropped, and `mdat` first is what a muxer writing the index
+/// last produces. The moov one is DERIVED from the shared faststart
+/// fixture rather than hand-rolled, so it carries real tracks: a
+/// hand-written empty `moov` probes complete-with-no-video, which is
+/// the audio-only rule, and would make the agreement pin below assert
+/// nothing.
+fn extensionless_bmff_fixtures() -> Vec<(&'static str, Vec<u8>)> {
+    use nzbkit::mediaprobe::testmux;
+    let faststart = testmux::mp4_faststart();
+    let ftyp_len = u32::from_be_bytes(faststart[..4].try_into().unwrap()) as usize;
+    let moov_first = faststart[ftyp_len..].to_vec();
+    let mut segment = testmux::mp4box(b"styp", b"msdhmsixmsdh");
+    segment.extend(testmux::mp4box(b"mdat", &vec![0u8; 4096]));
+    let mut indexed = testmux::mp4box(b"sidx", &[0u8; 48]);
+    indexed.extend(testmux::mp4box(b"mdat", &vec![0u8; 4096]));
+    let mut payload_first = testmux::mp4box(b"mdat", &vec![0u8; 4096]);
+    payload_first.extend(testmux::mp4_faststart());
+    vec![
+        ("s7yp0001", segment),
+        ("m00v0002", moov_first),
+        ("s1dx0003", indexed),
+        ("md4t0004", payload_first),
+    ]
+}
+
+/// The invariant behind M4-88, M4-89 and this row, stated once: a file
+/// the NAMING door is willing to rename is a file the CLEANUP door must
+/// keep. Deleting it is unrecoverable; keeping it costs disk.
+///
+/// This direction is the one that has drifted, three times now, and
+/// always because the two doors spell one rule twice - MPEG-TS with the
+/// cleanup copy left on the one-byte test, ISO9660 with neither door
+/// knowing it, and the ISO-BMFF box set above. Pinning the IMPLICATION
+/// rather than a list of magics is what makes the fourth one fail here
+/// instead of in somebody's output folder.
+///
+/// The converse does NOT hold and must not be asserted: the cleanup
+/// door also keeps an ISO9660 disc image the naming door declines to
+/// name (that gap is M4-92's to close, since naming one makes it a
+/// `largest_video` candidate), and it keeps a container whose only
+/// tracks are audio, which `video_ext` refuses on purpose.
+#[test]
+fn every_nameable_extensionless_file_survives_the_cleanup_door() {
+    use nzbkit::mediaprobe::testmux;
+    let dir = std::env::temp_dir().join(format!("nzbfast-doorsync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut cases: Vec<(&'static str, Vec<u8>)> = extensionless_bmff_fixtures();
+    cases.push(("ebm10005", testmux::mkv_full()));
+    cases.push(("webm0006", testmux::webm()));
+    cases.push(("r1ff0007", testmux::avi()));
+    cases.push(("ftyp0008", testmux::mp4_faststart()));
+    // The MPEG family, which `container_ext` declines and both doors
+    // therefore answer for themselves.
+    let mut ps = vec![0x00, 0x00, 0x01, 0xBA];
+    ps.extend_from_slice(&[0u8; 64]);
+    cases.push(("mpgp0009", ps));
+    let mut ts = Vec::new();
+    for _ in 0..4 {
+        ts.push(0x47u8);
+        ts.extend_from_slice(&[0x11u8; 187]);
+    }
+    cases.push(("mp2t0010", ts));
+
+    let mut named = 0;
+    for (name, body) in &cases {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        if super::videoext::video_ext(&p).is_some() {
+            named += 1;
+            assert!(
+                looks_like_video_bytes(&p),
+                "{name}: the naming door would rename this, so cleanup may not delete it"
+            );
+        }
+    }
+    assert_eq!(
+        named,
+        cases.len(),
+        "every fixture here is meant to be nameable - a zero would make this pin vacuous"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------
+// Occupancy: what "the name is already taken" means at a rename.
+//
+// `Path::exists` follows symlinks and answers false on any error, so as
+// an occupancy test it asks whether a name RESOLVES. `rename(2)` asks a
+// different question: it removes whatever ENTRY sits at the destination
+// and never resolves it. The pins below are the four filing doors held
+// to the ENTRY question, one per guard, so a guard reverted to
+// `exists()` kills exactly one of them.
+//
+// Each carries a PORTABLE half - the same decline over an ordinary file,
+// which was already true before this decision - so the windows-unit
+// shards run the guard, and so the change stays specific to what a
+// symlink does. The decision itself is argued at `tv_rename`'s guard in
+// `filing.rs`, which is where the measurement and the harms live; every
+// other site in this class cites that one.
+// ---------------------------------------------------------------------
+
+/// `tv_rename`'s doc says it never overwrites an existing target, and a
+/// symlink at that target is what made the sentence false.
+#[test]
+fn tv_rename_declines_a_target_name_an_entry_already_holds() {
+    let stem = "My.Show.S01E02.1080p.WEB.x264-TEST";
+    let want = "My Show - S01E02.mkv";
+
+    let d = scratch("tvren-file");
+    std::fs::write(d.join(format!("{stem}.mkv")), b"payload").unwrap();
+    std::fs::write(d.join(want), b"users copy").unwrap();
+    assert_eq!(tv_rename(&d, stem, "", &EpisodeTitles::default()), 0);
+    assert_eq!(std::fs::read(d.join(want)).unwrap(), b"users copy");
+
+    #[cfg(unix)]
+    {
+        let d = scratch("tvren-dangle");
+        std::fs::write(d.join(format!("{stem}.mkv")), b"payload").unwrap();
+        std::os::unix::fs::symlink(d.join("on-the-nas"), d.join(want)).unwrap();
+        assert_eq!(
+            tv_rename(&d, stem, "", &EpisodeTitles::default()),
+            0,
+            "a dangling link is an entry, so the episode name is taken"
+        );
+        assert!(link_still_there(&d.join(want)));
+        assert!(d.join(format!("{stem}.mkv")).exists());
+    }
+}
+
+/// The de-obfuscation door's VIDEO arm. Its sidecar loop is pinned
+/// separately below, so a revert of either is attributable.
+///
+/// The portable occupant is a DIRECTORY rather than a file, and that is
+/// forced rather than stylistic: `nameless_video` counts anything named
+/// `*.mkv` as a video, so a plain file at the target makes the payload
+/// stop being the LONE one and the door declines for a reason that has
+/// nothing to do with this guard - a vacuous pin. A directory is not a
+/// file, so the door still reaches the guard.
+#[test]
+fn rename_nameless_video_declines_a_name_an_entry_already_holds() {
+    let hash = "n1iY94U6fTpMVY9GPD.mkv";
+
+    let d = scratch("nameless-dir");
+    std::fs::write(d.join(hash), b"v").unwrap();
+    std::fs::create_dir_all(d.join("Example Movie 2019.mkv")).unwrap();
+    assert!(!rename_nameless_video(&d, "Example Movie 2019"));
+    assert!(d.join(hash).exists(), "the payload keeps its posted name");
+
+    #[cfg(unix)]
+    {
+        let d = scratch("nameless-dangle");
+        std::fs::write(d.join(hash), b"v").unwrap();
+        std::os::unix::fs::symlink(d.join("on-the-nas"), d.join("Example Movie 2019.mkv")).unwrap();
+        assert!(
+            !rename_nameless_video(&d, "Example Movie 2019"),
+            "a dangling link is an entry, so the name is taken"
+        );
+        assert!(link_still_there(&d.join("Example Movie 2019.mkv")));
+        assert!(d.join(hash).exists());
+    }
+}
+
+/// The de-obfuscation door's SIDECAR loop: the video's own target is
+/// free, so the video moves, and only the subtitle's target is held.
+#[test]
+fn a_subtitle_is_not_carried_onto_a_name_an_entry_already_holds() {
+    let stem = "n1iY94U6fTpMVY9GPD";
+    let sub = "Example Movie 2019.en.srt";
+
+    let d = scratch("sidecar-file");
+    std::fs::write(d.join(format!("{stem}.mkv")), b"v").unwrap();
+    std::fs::write(d.join(format!("{stem}.en.srt")), b"ours").unwrap();
+    std::fs::write(d.join(sub), b"users copy").unwrap();
+    assert!(rename_nameless_video(&d, "Example Movie 2019"));
+    assert_eq!(std::fs::read(d.join(sub)).unwrap(), b"users copy");
+    assert!(d.join(format!("{stem}.en.srt")).exists());
+
+    #[cfg(unix)]
+    {
+        let d = scratch("sidecar-dangle");
+        std::fs::write(d.join(format!("{stem}.mkv")), b"v").unwrap();
+        std::fs::write(d.join(format!("{stem}.en.srt")), b"ours").unwrap();
+        std::os::unix::fs::symlink(d.join("on-the-nas"), d.join(sub)).unwrap();
+        assert!(
+            rename_nameless_video(&d, "Example Movie 2019"),
+            "the video's own name is free, so the video still lands"
+        );
+        assert!(link_still_there(&d.join(sub)));
+        assert!(
+            d.join(format!("{stem}.en.srt")).exists(),
+            "the subtitle keeps the name it arrived with"
+        );
+    }
+}
+
+/// `rename_movie`'s one-video arm, and its sidecar loop. Both are in one
+/// call, so they are driven in two fixtures rather than two tests: the
+/// first leaves the sidecar name free, the second leaves the video's.
+#[test]
+fn rename_movie_declines_names_an_entry_already_holds() {
+    let stem = "Example.Movie.2024.1080p.BluRay.x264-FGT";
+    let base = "Example Movie (2024)";
+
+    // VIDEO arm.
+    let root = scratch("mv-file");
+    let out = root.join(stem);
+    std::fs::create_dir_all(&out).unwrap();
+    write_mkv(&out.join(format!("{stem}.mkv")));
+    std::fs::write(out.join(format!("{base}.mkv")), b"users copy").unwrap();
+    rename_movie(&root, &out, base).unwrap();
+    let landed = root.join(base);
+    assert_eq!(
+        std::fs::read(landed.join(format!("{base}.mkv"))).unwrap(),
+        b"users copy"
+    );
+    assert!(landed.join(format!("{stem}.mkv")).exists());
+
+    #[cfg(unix)]
+    {
+        let root = scratch("mv-dangle");
+        let out = root.join(stem);
+        std::fs::create_dir_all(&out).unwrap();
+        write_mkv(&out.join(format!("{stem}.mkv")));
+        std::os::unix::fs::symlink(out.join("on-the-nas"), out.join(format!("{base}.mkv")))
+            .unwrap();
+        rename_movie(&root, &out, base).unwrap();
+        let landed = root.join(base);
+        assert!(link_still_there(&landed.join(format!("{base}.mkv"))));
+        assert!(landed.join(format!("{stem}.mkv")).exists());
+    }
+}
+
+/// `rename_movie`'s SIDECAR loop, split from the video arm above so a
+/// revert of either guard is attributable to one pin rather than to the
+/// pair. The video's own target is free here, so the video moves and
+/// only the subtitle's name is held.
+#[test]
+fn rename_movie_declines_a_sidecar_name_an_entry_already_holds() {
+    let stem = "Example.Movie.2024.1080p.BluRay.x264-FGT";
+    let base = "Example Movie (2024)";
+
+    let root = scratch("mvsub-file");
+    let out = root.join(stem);
+    std::fs::create_dir_all(&out).unwrap();
+    write_mkv(&out.join(format!("{stem}.mkv")));
+    std::fs::write(out.join(format!("{stem}.en.srt")), b"ours").unwrap();
+    std::fs::write(out.join(format!("{base}.en.srt")), b"users copy").unwrap();
+    rename_movie(&root, &out, base).unwrap();
+    let landed = root.join(base);
+    assert_eq!(
+        std::fs::read(landed.join(format!("{base}.en.srt"))).unwrap(),
+        b"users copy"
+    );
+    assert!(landed.join(format!("{stem}.en.srt")).exists());
+
+    #[cfg(unix)]
+    {
+        let root = scratch("mvsub-dangle");
+        let out = root.join(stem);
+        std::fs::create_dir_all(&out).unwrap();
+        write_mkv(&out.join(format!("{stem}.mkv")));
+        std::fs::write(out.join(format!("{stem}.en.srt")), b"ours").unwrap();
+        std::os::unix::fs::symlink(out.join("on-the-nas"), out.join(format!("{base}.en.srt")))
+            .unwrap();
+        rename_movie(&root, &out, base).unwrap();
+        let landed = root.join(base);
+        assert!(
+            landed.join(format!("{base}.mkv")).exists(),
+            "the video's own name was free"
+        );
+        assert!(link_still_there(&landed.join(format!("{base}.en.srt"))));
+        assert!(landed.join(format!("{stem}.en.srt")).exists());
+    }
+}
+
+/// `tv_organize`'s PLAN guard, which is not a destruction site and is
+/// still wrong: the execute loop claims each file with `create_new`,
+/// which is EEXIST over a link of either kind, and renames a directory
+/// only where the kernel answers ENOTDIR. So a link at a NON-canonical
+/// target - a shared `Subs/`, a generic `.nfo` - passed the plan, failed
+/// the claim, and aborted and rolled back the whole filing. That is
+/// exactly the outcome the "still filing" arm of that guard exists to
+/// prevent, and it is a LIVENESS fix rather than a harms one.
+#[test]
+fn a_taken_sidecar_name_leaves_the_entry_behind_and_still_files_the_episode() {
+    let _steady = trash_globals_steady();
+    let stem = "My.Show.S01E02.1080p.WEB.x264-TEST";
+
+    let root = scratch("org-file");
+    let out = root.join("job");
+    std::fs::create_dir_all(&out).unwrap();
+    write_mkv(&out.join("blob.mkv"));
+    std::fs::write(out.join("notes.nfo"), b"ours").unwrap();
+    let season = root.join("tv").join("My Show").join("Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    std::fs::write(season.join("notes.nfo"), b"someone elses").unwrap();
+    let dest = tv_organize(&root.join("tv"), stem, &out, "", &EpisodeTitles::default())
+        .expect("one taken sidecar name must not abort the filing");
+    assert_eq!(dest, season);
+    assert!(season.join("My Show - S01E02.mkv").exists());
+    assert_eq!(
+        std::fs::read(season.join("notes.nfo")).unwrap(),
+        b"someone elses"
+    );
+
+    #[cfg(unix)]
+    {
+        let root = scratch("org-dangle");
+        let out = root.join("job");
+        std::fs::create_dir_all(&out).unwrap();
+        write_mkv(&out.join("blob.mkv"));
+        std::fs::write(out.join("notes.nfo"), b"ours").unwrap();
+        let season = root.join("tv").join("My Show").join("Season 01");
+        std::fs::create_dir_all(&season).unwrap();
+        std::os::unix::fs::symlink(season.join("on-the-nas"), season.join("notes.nfo")).unwrap();
+        let dest = tv_organize(&root.join("tv"), stem, &out, "", &EpisodeTitles::default())
+            .expect("a dangling link at one sidecar name must not abort the filing");
+        assert_eq!(dest, season);
+        assert!(
+            season.join("My Show - S01E02.mkv").exists(),
+            "the episode still files"
+        );
+        assert!(link_still_there(&season.join("notes.nfo")));
+    }
+}
+
+/// `rename_dir`'s collision ladder. The loop is looking for a FREE name,
+/// and a dangling link is not one: stopping there made the rename fail
+/// ENOTDIR and its entry-by-entry fallback fail EEXIST at
+/// `create_dir_all`, so the folder was not renamed at all. Nothing is
+/// destroyed either way - this is the ladder doing its job.
+#[test]
+fn the_folder_collision_ladder_steps_past_a_name_an_entry_already_holds() {
+    let root = scratch("dirladder-file");
+    let out = root.join("Some.Release.2024");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("readme.txt"), b"x").unwrap();
+    std::fs::create_dir_all(root.join("Some Release (2024)")).unwrap();
+    assert_eq!(
+        rename_movie(&root, &out, "Some Release (2024)").unwrap(),
+        root.join("Some Release (2024).2")
+    );
+
+    #[cfg(unix)]
+    {
+        let root = scratch("dirladder-dangle");
+        let out = root.join("Some.Release.2024");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("readme.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(root.join("on-the-nas"), root.join("Some Release (2024)"))
+            .unwrap();
+        assert_eq!(
+            rename_movie(&root, &out, "Some Release (2024)").unwrap(),
+            root.join("Some Release (2024).2"),
+            "a dangling link holds the name, so the ladder steps past it"
+        );
+        assert!(link_still_there(&root.join("Some Release (2024)")));
+    }
+}
+
+/// A file whose bytes `video_ext` sniffs as Matroska, so the naming
+/// doors above treat it as the feature whatever it is called.
+fn write_mkv(path: &Path) {
+    let mut b = vec![0x1A, 0x45, 0xDF, 0xA3];
+    b.extend_from_slice(&[0x42u8; 512]);
+    std::fs::write(path, b).unwrap();
+}
+
+/// Is the entry at `p` still the symlink the fixture put there? Named
+/// rather than inlined so every pin above asserts it the same way, and
+/// so a pin cannot pass by asserting only that SOMETHING is at the name.
+#[cfg(unix)]
+fn link_still_there(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// A .nzb name too long to be a directory entry must still name the
+/// payload it renames, and the collision rung it climbs to.
+///
+/// `rename_from_nzb` caps the stem through `sanitize_filename_capped`, so
+/// for a long name `base` is EXACTLY 255 bytes - capping is what produced
+/// it - and `{base}.mkv` is 259, which `rename` refuses with
+/// `ENAMETOOLONG`. That is
+/// `disk::sanitize_filename_capped_for`'s own "cap the COMPOSED name,
+/// never the stem" rule, broken at a live site: the payload kept the
+/// obfuscated name this door exists to replace, and the report of it read
+/// as an ordinary rename failure.
+///
+/// The folder's own ladder is the same defect one line down. The loop
+/// EXITS on an overlong candidate rather than spinning - `symlink_metadata`
+/// answers Err for a name too long to look up, and Err reads as free -
+/// so the cost was the rename, every collision.
+#[test]
+fn an_overlong_nzb_name_renames_both_the_payload_and_a_collided_folder() {
+    let root = std::env::temp_dir().join(format!(
+        "nzbfast-nzbnamecap-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let out_dir = root.join("obfuscated-job");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    std::fs::write(out_dir.join("abcdef0123456789.mkv"), vec![0u8; 4096]).unwrap();
+
+    let long = "L".repeat(400);
+    let base = nzbkit::disk::sanitize_filename_capped(&long);
+    assert_eq!(base.len(), 255, "the premise moved");
+    // The folder's own canonical name is taken, so the rename climbs.
+    std::fs::create_dir_all(root.join(&base)).unwrap();
+
+    let moved = rename_from_nzb(&root, &out_dir, &format!("{long}.nzb"))
+        .expect("the folder must be renamed onto a rung the disk takes");
+    assert_eq!(moved.parent(), Some(root.as_path()));
+    let leaf = moved.file_name().unwrap().to_string_lossy();
+    assert!(leaf.len() <= 255, "{} bytes: {leaf}", leaf.len());
+    assert_ne!(moved, root.join(&base), "the taken name is left alone");
+
+    // The payload inside it carries the new name too, with its extension.
+    let named: Vec<String> = std::fs::read_dir(&moved)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert!(named[0].ends_with(".mkv"), "{}", named[0]);
+    assert!(
+        named[0].len() <= 255,
+        "{} bytes: {}",
+        named[0].len(),
+        named[0]
+    );
+    assert_ne!(
+        named[0], "abcdef0123456789.mkv",
+        "the payload must not keep the obfuscated name"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

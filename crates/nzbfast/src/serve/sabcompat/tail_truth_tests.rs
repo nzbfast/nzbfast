@@ -25,11 +25,12 @@ fn a_finishing_job_never_reads_the_next_download_s_counters() {
         false,
         40 * GB,
         0,
+        0,
     );
     assert_eq!(b, (5, 38 * GB), "the owner reports the live counters");
 
     // A is in its tail: same state, no ownership, a phase word.
-    let a = slot_progress(JobState::Downloading, None, true, 50 * GB, 0);
+    let a = slot_progress(JobState::Downloading, None, true, 50 * GB, 0, 0);
     assert_eq!(
         a,
         (100, 0),
@@ -47,12 +48,12 @@ fn a_finishing_job_never_reads_the_next_download_s_counters() {
 fn the_tail_phase_outranks_ownership() {
     let done = (10 * GB, 10 * GB);
     assert_eq!(
-        slot_progress(JobState::Downloading, Some(done), true, 10 * GB, 0),
+        slot_progress(JobState::Downloading, Some(done), true, 10 * GB, 0, 0),
         (100, 0),
         "still the owner, but verifying: the phase wins"
     );
     assert_eq!(
-        slot_progress(JobState::Downloading, Some(done), false, 10 * GB, 0),
+        slot_progress(JobState::Downloading, Some(done), false, 10 * GB, 0, 0),
         (100, 0),
         "and the numbers agree when it is still downloading"
     );
@@ -65,7 +66,7 @@ fn the_tail_phase_outranks_ownership() {
 #[test]
 fn a_job_that_has_not_claimed_the_counters_reports_nothing_fetched() {
     assert_eq!(
-        slot_progress(JobState::Downloading, None, false, 8 * GB, 0),
+        slot_progress(JobState::Downloading, None, false, 8 * GB, 0, 0),
         (0, 8 * GB)
     );
 }
@@ -77,13 +78,70 @@ fn a_job_that_has_not_claimed_the_counters_reports_nothing_fetched() {
 #[test]
 fn a_paused_job_reports_what_is_already_on_disk() {
     assert_eq!(
-        slot_progress(JobState::Queued, None, false, 40 * GB, 25 * GB),
+        slot_progress(JobState::Queued, None, false, 40 * GB, 25 * GB, 0),
         (62, 15 * GB)
     );
     // Never run: no record, no claim.
     assert_eq!(
-        slot_progress(JobState::Queued, None, false, 40 * GB, 0),
+        slot_progress(JobState::Queued, None, false, 40 * GB, 0, 0),
         (0, 40 * GB)
+    );
+}
+
+/// The idle-server early start banks bytes into the QUEUED job's out_dir
+/// and journal, and until this arm read them the row said `Queued, 0%,
+/// mbleft unchanged` for the whole of it - measured on the live daemon
+/// on 29 Aug 2026, where a prefetch pulled 29.5 GB in 9.4 minutes and
+/// the user reasonably concluded the queue was stuck.
+#[test]
+fn a_job_the_early_start_is_holding_reports_what_it_has_banked() {
+    assert_eq!(
+        slot_progress(JobState::Queued, None, false, 40 * GB, 0, 10 * GB),
+        (25, 30 * GB),
+        "the banked bytes are bytes this queue no longer has to fetch"
+    );
+    // Nothing banked is the ordinary row, and it must not move.
+    assert_eq!(
+        slot_progress(JobState::Queued, None, false, 40 * GB, 0, 0),
+        (0, 40 * GB)
+    );
+}
+
+/// The MAX and never the sum. A sidecar resumes from the journal, so its
+/// counter already contains whatever an earlier run left behind - adding
+/// the two puts a resumed early start past 100% of its own job, which is
+/// the same double count the bar would show.
+#[test]
+fn banked_bytes_and_a_previous_run_s_bytes_are_the_same_bytes() {
+    assert_eq!(
+        slot_progress(JobState::Queued, None, false, 40 * GB, 12 * GB, 30 * GB),
+        (75, 10 * GB),
+        "the early start's counter already includes the resumed bytes"
+    );
+    // And a stale sidecar counter never walks the bar BACKWARDS past
+    // what a completed run recorded.
+    assert_eq!(
+        slot_progress(JobState::Queued, None, false, 40 * GB, 30 * GB, GB),
+        (75, 10 * GB)
+    );
+}
+
+/// A row the early start is NOT holding gets 0 from the walk, but the
+/// arm must also stay out of the way of a job on the wire: the sidecar
+/// only ever runs a queued job, and a live row reports its own counters.
+#[test]
+fn a_live_row_ignores_banked_bytes() {
+    assert_eq!(
+        slot_progress(
+            JobState::Downloading,
+            Some((2 * GB, 40 * GB)),
+            false,
+            40 * GB,
+            0,
+            39 * GB,
+        ),
+        (5, 38 * GB),
+        "the counters of the job actually on the wire win"
     );
 }
 
@@ -91,7 +149,7 @@ fn a_paused_job_reports_what_is_already_on_disk() {
 #[test]
 fn a_completed_job_is_all_in() {
     assert_eq!(
-        slot_progress(JobState::Completed, None, false, 40 * GB, 40 * GB),
+        slot_progress(JobState::Completed, None, false, 40 * GB, 40 * GB, 0),
         (100, 0)
     );
 }
@@ -102,21 +160,24 @@ fn a_completed_job_is_all_in() {
 /// its own end.
 #[test]
 fn the_percentage_cannot_divide_by_zero_or_pass_100() {
-    assert_eq!(slot_progress(JobState::Queued, None, false, 0, 0), (0, 0));
     assert_eq!(
-        slot_progress(JobState::Queued, None, false, 10, 999),
+        slot_progress(JobState::Queued, None, false, 0, 0, 0),
+        (0, 0)
+    );
+    assert_eq!(
+        slot_progress(JobState::Queued, None, false, 10, 999, 0),
         (100, 0),
         "more on disk than the NZB claims: clamped, not 9990%"
     );
     assert_eq!(
-        slot_progress(JobState::Downloading, Some((0, 0)), false, 0, 0),
+        slot_progress(JobState::Downloading, Some((0, 0)), false, 0, 0, 0),
         (0, 0)
     );
     // A hostile NZB can present a saturated total (nzb.rs sums the
     // segment attribute with saturating_add rather than wrapping),
     // and `done * 100` in u64 overflows long before it.
     assert_eq!(
-        slot_progress(JobState::Queued, None, false, u64::MAX, u64::MAX),
+        slot_progress(JobState::Queued, None, false, u64::MAX, u64::MAX, 0),
         (100, 0)
     );
     assert_eq!(
@@ -124,6 +185,7 @@ fn the_percentage_cannot_divide_by_zero_or_pass_100() {
             JobState::Downloading,
             Some((u64::MAX / 2, u64::MAX)),
             false,
+            0,
             0,
             0
         ),
@@ -263,7 +325,7 @@ fn the_phase_word_never_lapses_across_the_finalize_hand_off() {
         // Composed exactly as the queue walk composes it: no live
         // counters (released at net-drain), the phase as the tail flag.
         assert_eq!(
-            slot_progress(*state, None, phase.is_some(), 40 * GB, 0),
+            slot_progress(*state, None, phase.is_some(), 40 * GB, 0, 0),
             (100, 0),
             "{tok}: the bytes are all in and the row must say so"
         );
@@ -296,7 +358,7 @@ fn the_phase_word_never_lapses_across_the_finalize_hand_off() {
     let pre = d.tail_phase("nzo-pre");
     assert_eq!(pre, None, "preflight is not a post-network stage");
     assert_eq!(
-        slot_progress(JobState::Downloading, None, pre.is_some(), 40 * GB, 0),
+        slot_progress(JobState::Downloading, None, pre.is_some(), 40 * GB, 0, 0),
         (0, 40 * GB)
     );
 

@@ -44,6 +44,11 @@
 //! 15 s tick), `NZBFAST_SOAK_REPORT` (path for the JSON report, which
 //! carries every sample so a baseline can be re-recorded from a green run).
 
+// The forward guard on the repeating-payload trap, and the waiver that
+// says a fixture is deliberately in it. A sibling the way `harness` is,
+// and reached from `harness::DaemonLog`'s own Drop, so every daemon this
+// binary starts is read whether or not the suite looks at its log.
+mod adoptguard;
 // The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
 // serve / wait_ready), one copy for every suite that spawns a daemon.
 mod harness;
@@ -1094,5 +1099,4 @@ async fn mixed_queue_soak_holds_resources_flat() {
 
     // The daemon dies with `d` here - by its own pid, never by pattern.
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }

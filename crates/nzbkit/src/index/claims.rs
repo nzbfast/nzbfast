@@ -6,7 +6,10 @@
 //! this layer, each lane wrote its truth somewhere different (or
 //! nowhere: `pre_corr_verdict` drops the proof on the floor when no
 //! correlation row happens to exist), and a one-hit table like
-//! `par_hashes` lets the first writer win forever.
+//! `par_hashes` let the first writer win forever. That table now
+//! borrows this ladder rather than carrying a second one - see
+//! `Index::par_hash_remember` - which is why [`NameEvidence::rank`] is
+//! reachable from the rest of `index` and not private here.
 //!
 //! Here every proof is a ROW - claimed name, evidence tier, proving
 //! key, producing lane - and the strongest eligible claim is what gets
@@ -96,7 +99,12 @@ impl NameEvidence {
 
     /// Ordering within the ladder. The NUMBERS are not stored anywhere -
     /// only compared - so they can be renumbered when a tier is added.
-    fn rank(self) -> i32 {
+    ///
+    /// Reachable from the rest of `index` because the repost table
+    /// (`Index::par_hash_remember`) decides the same question with the
+    /// same ladder: a second copy of this ordering is how two naming
+    /// tiers start disagreeing about which evidence outranks which.
+    pub(super) fn rank(self) -> i32 {
         match self {
             NameEvidence::BodyProbe => 7,
             NameEvidence::MsgidSet => 6,

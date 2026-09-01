@@ -436,7 +436,12 @@ mod producers {
 
         // The arithmetic clause `get::tail` appends off
         // `RepairShortfall::Blocks`, on a missing-articles opening.
-        let shortfall = crate::repair::RepairShortfall::Blocks { needed: 9, have: 8 }.clause();
+        let shortfall = crate::repair::RepairShortfall::Blocks {
+            needed: 9,
+            have: 8,
+            set: None,
+        }
+        .clause();
         let with_clause = format!(
             "{}; {shortfall}",
             declared(
@@ -453,7 +458,8 @@ mod producers {
             )
         );
         assert!(
-            with_clause.contains("recovery block(s) needed but the NZB only carries"),
+            with_clause
+                .contains("recovery block(s) needed but the recovery set that covers this damage"),
             "{with_clause}"
         );
         assert_eq!(fail_kind(&with_clause), FailKind::MissingArticles);
@@ -741,7 +747,11 @@ mod producers {
             "verification failed and PAR2 repair could not complete: {}",
             crate::repair::RepairShortfall::Blocks {
                 needed: 20,
-                have: 8
+                have: 8,
+                // The multi-set spelling on purpose: the classification
+                // is about the ARITHMETIC, and a set tag riding on the
+                // end of the clause must not move it (31 Aug 2026).
+                set: Some([0xAB; 16]),
             }
             .clause()
         );
@@ -1152,7 +1162,7 @@ mod matrix {
         for clause in [
             "the recovery data is what failed, not the payload",
             "recovery volumes this repair needed could not be fetched",
-            "recovery block(s) needed but the NZB only carries",
+            "recovery block(s) needed but the recovery set that covers this damage carries only",
         ] {
             let msg = format!("download incomplete: 1 file(s); {clause} 8");
             assert!(

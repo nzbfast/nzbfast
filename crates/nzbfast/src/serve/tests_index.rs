@@ -97,6 +97,104 @@ fn an_empty_new_spool_does_not_pass_for_a_migration() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An entry at `.spool` that is not a directory this daemon can READ is
+/// neither absent nor a migrated spool, and the 31 Aug 2026
+/// rename-occupancy census is what separated the two: `read_dir` failing
+/// was classified with `Path::exists`, which follows symlinks and
+/// answers false on any error.
+///
+/// A `.spool` symlinked onto a volume that is not mounted read as
+/// ABSENT, so the migration ran and died at its publishing rename
+/// (ENOTDIR - a directory onto a symlink). Worse, a link that resolves
+/// to a FILE read as OCCUPIED and took the migrated-spool branch: the
+/// user's live queue was retired into a path nothing can create, the log
+/// then called it "unused; safe to delete", and the daemon was handed a
+/// spool path that cannot hold anything. Both states must DECLINE - keep
+/// running on `old`, retire nothing, move nothing - which is what
+/// `spool_dir`'s own comment already asked for.
+#[cfg(unix)]
+#[test]
+fn a_new_spool_that_is_not_a_readable_directory_declines_to_migrate() {
+    // The CLASSIFICATION is pinned first and directly. Driving this
+    // through `spool_dir` alone cannot separate `Absent` from
+    // `Unusable`: both end up returning `old`, one by declining and one
+    // by attempting a migration whose publishing rename fails ENOTDIR -
+    // so a revert of the classification to `exists()` survives every
+    // end-to-end assertion below. That is the two-guards-either-of-which
+    // -suffices trap, and this is what closes it.
+    let probe = std::env::temp_dir().join(format!("nzbfast-spoolstate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&probe);
+    std::fs::create_dir_all(&probe).unwrap();
+    assert_eq!(
+        super::new_spool_state(&probe.join("never-made")),
+        super::NewSpool::Absent
+    );
+    std::os::unix::fs::symlink(probe.join("no-such-volume"), probe.join("dangling")).unwrap();
+    assert_eq!(
+        super::new_spool_state(&probe.join("dangling")),
+        super::NewSpool::Unusable,
+        "a link onto a volume that is not mounted is an entry, not an absence"
+    );
+    std::fs::write(probe.join("notes.txt"), b"not a spool").unwrap();
+    std::os::unix::fs::symlink(probe.join("notes.txt"), probe.join("onto-a-file")).unwrap();
+    assert_eq!(
+        super::new_spool_state(&probe.join("onto-a-file")),
+        super::NewSpool::Unusable
+    );
+    std::fs::create_dir_all(probe.join("empty")).unwrap();
+    assert_eq!(
+        super::new_spool_state(&probe.join("empty")),
+        super::NewSpool::Placeholder
+    );
+    std::fs::write(probe.join("empty/queue.json"), b"{}").unwrap();
+    assert_eq!(
+        super::new_spool_state(&probe.join("empty")),
+        super::NewSpool::Live
+    );
+    // A link onto a readable, populated directory is a spool: putting
+    // the state on another volume on purpose has to keep working, and is
+    // why this cannot simply refuse every symlink.
+    std::os::unix::fs::symlink(probe.join("empty"), probe.join("onto-a-dir")).unwrap();
+    assert_eq!(
+        super::new_spool_state(&probe.join("onto-a-dir")),
+        super::NewSpool::Live
+    );
+    let _ = std::fs::remove_dir_all(&probe);
+
+    // ...and then end to end, which is what says the classification is
+    // WIRED to a decline rather than merely computed.
+    for (tag, target) in [("unmounted", "no-such-volume"), ("a-file", "notes.txt")] {
+        let (dir, config, out) = spool_case(&format!("spool-entry-{tag}"), &[], &["queue.json"]);
+        // `spool_case` makes `new` an empty directory; replace it with
+        // the entry this case is about.
+        std::fs::remove_dir(dir.join(".spool")).unwrap();
+        if target == "notes.txt" {
+            std::fs::write(dir.join(target), b"not a spool").unwrap();
+        }
+        std::os::unix::fs::symlink(dir.join(target), dir.join(".spool")).unwrap();
+
+        let spool = super::spool_dir(&config, &out);
+        assert_eq!(
+            spool,
+            out.join(".spool"),
+            "{tag}: the daemon keeps running on the state it can actually read"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join(".spool/queue.json")).unwrap(),
+            "queue.json",
+            "{tag}: the live queue is left exactly where it was"
+        );
+        assert!(
+            std::fs::symlink_metadata(dir.join(".spool"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{tag}: and the entry the user put there is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// The ordinary path: nothing in the download folder, nothing to do.
 /// In particular `spool_dir` must not CREATE the spool - the caller
 /// does that, after it has decided which path it is.
@@ -450,6 +548,85 @@ fn every_grouped_indexer_copy_renders_its_own_name() {
         cell.starts_with(" title="),
         "the name cell must carry a tooltip, or a clipped name is \
          unreadable and a blank one is unexplained: {cell}"
+    );
+}
+
+/// Poster thumbnails on the release rows (Reddit, u/Zimmster2020:
+/// "it would be nice if Releases could have posters too"). Three
+/// invariants that nothing else here would notice regress, since the
+/// pages live in the binary and the failure is a picture that stops
+/// appearing rather than an error.
+#[cfg(feature = "indexer")]
+#[test]
+fn both_release_surfaces_render_their_poster_the_same_way() {
+    let rel = WALL_HTML
+        .split("function relRow(")
+        .nth(1)
+        .and_then(|s| s.split("\nfunction ").next())
+        .expect("wall.html no longer has relRow");
+    // A release nested under its title row must NOT repeat the poster
+    // the title row above it is already showing. `sub` is what tells
+    // the two apart, and dropping that guard puts one image down forty
+    // rows of one title.
+    assert!(
+        rel.contains("rowArt&&!sub?artImg("),
+        "a nested release row must not repeat its title's poster: {rel}"
+    );
+    let grp = WALL_HTML
+        .split("function grpRow(")
+        .nth(1)
+        .and_then(|s| s.split("\nfunction ").next())
+        .expect("wall.html no longer has grpRow");
+    // The title row's art comes off the card payload `wall2` already
+    // sends, not from the release rows' `art` - a grouped page never
+    // asks index_browse at all.
+    assert!(
+        grp.contains("artImg(c.poster)"),
+        "a title row must show the card's own poster: {grp}"
+    );
+    // One preference, two surfaces. Both pages carry a visible toggle
+    // and both read and write the SAME key: "show posters in release
+    // lists" is one wish, and a later edit that gives one page a key of
+    // its own splits it in silence.
+    for (page, name) in [(WALL_HTML, "wall.html"), (DASHBOARD_HTML, "dashboard.html")] {
+        assert_eq!(
+            page.matches("localStorage.nzbfastRowArt").count(),
+            2,
+            "{name} must read and write the shared poster preference exactly once each"
+        );
+    }
+}
+
+/// The poster on a Browse-card row is withheld from an adult title even
+/// though the ROW is not, and that asymmetry is the point rather than
+/// an oversight - see `Index::title_art`. `mode=index_search` runs
+/// `Index::search`, which has never had an adult filter of any kind, so
+/// a caller that passed `false` here "for consistency with the row"
+/// would put a picture where this install has only ever shown a name.
+/// Source-scanned because the tidying edit that breaks it is one word.
+#[cfg(feature = "indexer")]
+#[test]
+fn the_search_path_gates_its_poster_on_the_adult_setting() {
+    let src = include_str!("api/index.rs");
+    let f = src
+        .split("fn m_index_search(")
+        .nth(1)
+        .and_then(|s| s.split("\nfn ").next())
+        .expect("m_index_search moved");
+    assert!(
+        f.contains("d.wall_hide_adult.load(Ordering::Relaxed)"),
+        "index_search must gate its art on the adult setting: {f}"
+    );
+    // And the browse path passes the QUERY's own answer, so the filter
+    // that already dropped the row and the art cannot disagree.
+    let b = src
+        .split("fn m_index_browse(")
+        .nth(1)
+        .and_then(|s| s.split("\nfn ").next())
+        .expect("m_index_browse moved");
+    assert!(
+        b.contains("bq.hide_adult,"),
+        "index_browse must pass the query's own adult answer: {b}"
     );
 }
 
@@ -1239,6 +1416,12 @@ fn art_names_reject_traversal_and_dos_devices() {
     assert!(!super::art_name_ok("con.jpg"));
     assert!(!super::art_name_ok("COM1"));
     assert!(!super::art_name_ok("LPT9.jpg"));
+    // A component no filesystem will hold is a name no art file can be
+    // under, so the join behind it is a syscall that can only fail.
+    // `wall::art_name` reserves well inside this, so nothing we produce
+    // is refused here - see `wall::art_names_leave_room_for_every_decoration`.
+    assert!(super::art_name_ok(&format!("{}.jpg", "a".repeat(251))));
+    assert!(!super::art_name_ok(&format!("{}.jpg", "a".repeat(252))));
     // The thumb source is joined too, so it gets its own pass.
     assert!(!super::art_name_ok(
         "thumb_CON.jpg".strip_prefix("thumb_").unwrap()
@@ -1419,7 +1602,7 @@ fn multipart_fields_parses_and_skips_files() {
 #[cfg(feature = "indexer")]
 #[test]
 fn the_space_ledger_survives_a_restart_and_merges_rather_than_clobbers() {
-    let dir = std::env::temp_dir().join(format!("nzbf-ledger-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-ledger-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let d = crate::serve::testutil::test_daemon(&dir);
     d.index_enabled.store(true, Ordering::Relaxed);
@@ -1469,7 +1652,7 @@ fn the_space_ledger_survives_a_restart_and_merges_rather_than_clobbers() {
 #[cfg(feature = "indexer")]
 #[test]
 fn an_eviction_that_removed_nothing_leaves_the_ledger_alone() {
-    let dir = std::env::temp_dir().join(format!("nzbf-ledger-noop-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-ledger-noop-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let d = crate::serve::testutil::test_daemon(&dir);
     d.note_evicted(0, 0);

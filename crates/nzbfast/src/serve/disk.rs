@@ -262,7 +262,17 @@ pub(crate) async fn park_on_full_disk(
         && {
             let min = d.min_free.load(Ordering::Relaxed);
             min > 0 && {
-                let out = d.out_dir();
+                // TODO 317: the JOB's own directory, not the download
+                // root. A write-through job writes into its category's
+                // destination, which is routinely a different VOLUME -
+                // so probing the download root asks about free space on
+                // a disk this download never touched, and a
+                // write-through job that really did fill its drive
+                // would fall through to a hard Failed instead of
+                // parking. Identical to `d.out_dir()` for every job
+                // that is not writing through, since its out_dir is
+                // under the root.
+                let out = job.lock_ok().out_dir.clone();
                 let probe = tokio::task::spawn_blocking(move || free_bytes(&out));
                 matches!(
                     tokio::time::timeout(std::time::Duration::from_secs(2), probe).await,

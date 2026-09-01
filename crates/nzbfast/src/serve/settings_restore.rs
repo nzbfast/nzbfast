@@ -438,6 +438,7 @@ pub(super) fn restore_ui_and_index_settings(
         ("shape_chip_color", &daemon.shape_chip_color),
         ("rename_junk", &daemon.rename_junk),
         ("early_file_publish", &daemon.early_file_publish),
+        ("write_through", &daemon.write_through),
         ("write_manifest", &daemon.write_manifest),
         ("metrics_open", &daemon.metrics_open),
         ("rename_media_only", &daemon.rename_media_only),
@@ -518,15 +519,49 @@ pub(super) fn restore_ui_and_index_settings(
     {
         *daemon.move_pace.lock_ok() = v.to_string();
     }
+    // ABSOLUTE, the same rule `set_move_completed` applies - and the
+    // paragraph above is why it has to be spelled out again here rather
+    // than assumed from the setter. A relative destination is not a NAS
+    // that is down: it is a path that will resolve against the daemon's
+    // working directory whatever the NAS does, so completed payloads move
+    // somewhere nobody can predict, which is the exact behaviour the API
+    // validator exists to refuse. Legacy, imported and hand-edited
+    // settings files reach here without ever passing that validator.
+    // IGNORED and warned, never cleared: dropping the stored value would
+    // lose a setting the user can still fix by hand, and the move path
+    // degrades to leave-in-place on its own.
     if let Some(v) = saved.get("move_completed").and_then(Value::as_str)
         && !v.is_empty()
     {
-        *daemon.move_completed.write_ok() = Some(PathBuf::from(v));
+        let path = PathBuf::from(v);
+        match require_absolute_dest(&path) {
+            Ok(()) => *daemon.move_completed.write_ok() = Some(path),
+            Err(e) => warn!(target: "settings", "⚠ stored move_completed ignored: {e}"),
+        }
     }
     if let Some(v) = saved.get("move_completed_cats").and_then(Value::as_str)
         && let Ok(list) = parse_cat_dests(v)
     {
-        *daemon.move_completed_cats.write_ok() = list;
+        // Per entry, not all-or-nothing: one bad rule must not take the
+        // categories that ARE absolute down with it.
+        let (good, bad): (Vec<_>, Vec<_>) = list
+            .into_iter()
+            .partition(|(_, p)| require_absolute_dest(p).is_ok());
+        for (cat, p) in bad {
+            warn!(
+                target: "settings",
+                "⚠ stored destination for category {cat} ignored: {}",
+                require_absolute_dest(&p).unwrap_err()
+            );
+        }
+        *daemon.move_completed_cats.write_ok() = good;
+    }
+    // TODO 317: names only, and NOT held to the category list - a
+    // category is registered the first time a job uses it, so a
+    // write-through rule saved for one not yet seen must survive the
+    // restart that would otherwise drop it.
+    if let Some(v) = saved.get("write_through_cats").and_then(Value::as_str) {
+        *daemon.write_through_cats.lock_ok() = parse_cat_names(v);
     }
     if let Some(v) = saved.get("categories").and_then(Value::as_str) {
         let mut set = daemon.cats.lock_ok();
@@ -1437,5 +1472,82 @@ mod watchlist_seed_tests {
             "the saved state was not seeded"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// M6 (29 Aug 2026 sweep): the absolute-path rule the API setters
+/// enforce, applied to what startup reads back off disk.
+#[cfg(test)]
+mod move_dest_restore_tests {
+    use super::*;
+
+    fn restored(saved: serde_json::Value) -> Arc<Daemon> {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbfast-restore-dest-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = crate::serve::testutil::test_daemon(&dir);
+        let map = saved.as_object().unwrap().clone();
+        restore_ui_and_index_settings(&d, &map);
+        let _ = std::fs::remove_dir_all(&dir);
+        d
+    }
+
+    /// An absolute destination spelled the way THIS platform spells
+    /// one.
+    ///
+    /// `/NAS/Movies` is absolute on unix and is NOT on Windows, where
+    /// `Path::is_absolute` wants a drive prefix or a UNC root - so a
+    /// POSIX literal makes these tests assert the exact opposite of
+    /// what they mean on the one platform nobody on this fleet runs.
+    /// The rule under test is right either way; the literals were not.
+    /// That is how they reddened windows-unit shards 1/6 and 6/6 with
+    /// every host gate green (run 33284073343, 30 Aug 2026) - the
+    /// SIXTEENTH gate's class, arriving through a test rather than
+    /// through a unix-only symbol, so `win-portability-gate` had
+    /// nothing to see.
+    fn abs(tail: &str) -> String {
+        match cfg!(windows) {
+            true => format!(r"C:\{}", tail.replace('/', r"\")),
+            false => format!("/{tail}"),
+        }
+    }
+
+    #[test]
+    fn a_relative_stored_destination_is_ignored_not_adopted() {
+        // Legacy, imported or hand-edited settings never passed
+        // `set_move_completed`. Adopted, a relative destination resolves
+        // against the daemon's working directory and completed payloads
+        // move somewhere nobody can predict.
+        let good = abs("NAS/Movies");
+        let d = restored(serde_json::json!({
+            "move_completed": "nas/movies",
+            "move_completed_cats": format!("tv=nas/TV, movies={good}"),
+        }));
+        assert!(
+            d.move_completed.read_ok().is_none(),
+            "a relative global destination must not be adopted at startup"
+        );
+        let cats = d.move_completed_cats.read_ok().clone();
+        assert_eq!(
+            cats,
+            vec![("movies".to_string(), PathBuf::from(&good))],
+            "one bad rule must not take the absolute ones down with it"
+        );
+    }
+
+    #[test]
+    fn an_absolute_stored_destination_still_loads_when_it_is_unreachable() {
+        // The point of restoring without a create/writable probe: a NAS
+        // that is down at boot must not lose the setting.
+        let nas = abs("nowhere/that/exists/NAS");
+        let d = restored(serde_json::json!({ "move_completed": nas.clone() }));
+        assert_eq!(
+            d.move_completed.read_ok().clone(),
+            Some(PathBuf::from(&nas))
+        );
     }
 }

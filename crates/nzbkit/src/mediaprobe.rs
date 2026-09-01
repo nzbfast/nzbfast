@@ -537,12 +537,23 @@ fn sniff(b: &[u8]) -> Option<Container> {
 /// arrived with NO extension at all - which is what an indexer that
 /// obfuscates the filenames inside an NZB produces.
 ///
-/// Head-only and allocation-free on purpose: the callers are rename
-/// passes that run over every file in a finished job's directory, and
-/// they must not pay a container parse just to ask what a file should
-/// be called. The bytes decide, exactly as in [`sniff`] - but this is
-/// only ever asked about a file that named nothing, so there is no
-/// claim here for the bytes to override.
+/// Head-only and allocation-free on purpose: the callers run over every
+/// file in a finished job's directory and must not pay a container
+/// parse just to ask what a file is. The bytes decide, exactly as in
+/// [`sniff`] - but this is only ever asked about a file that named
+/// nothing, so there is no claim here for the bytes to override.
+///
+/// NOT ONLY RENAME PASSES, which is what this said until 31 Aug 2026.
+/// `nzbfast`'s `smart::looks_like_video_bytes` - the keep-media-only
+/// CLEANUP door - asks it too, and answering NO there means the file is
+/// DELETED. So the two failure directions are not symmetric any more: a
+/// name this declines to offer costs a hash-named file, and a container
+/// it stops recognising costs the file itself. NARROWING [`sniff`]'s
+/// accepted first-box set is therefore a data-loss change in a crate
+/// this one does not build, and wants that door read first. It was one
+/// caller short of that door for months precisely because the door
+/// spelled the same three magics by hand instead of asking here, which
+/// is the drift `smart/videoext.rs` documents three instances of.
 pub fn container_ext(head: &[u8]) -> Option<&'static str> {
     match sniff(head)? {
         Container::Mkv => Some("mkv"),

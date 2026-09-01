@@ -45,9 +45,11 @@ impl Extractor {
             } else {
                 s.name.clone()
             };
-            let mut fname = sanitize_filename(&base);
+            // Tree-preserving: a member path that is provably safe keeps
+            // its directory structure (a VIDEO_TS tree has to stay a
+            // tree to play); anything else flattens exactly as before.
+            let mut fname = sanitize_out_name(&base);
             Self::claim_name(inner, slot, &mut fname);
-            let path = self.out_dir.join(&fname);
             // The same two bounds as `inner_writer`, and for the same
             // reason: with nested routing on (the default) a group's inner
             // files are forwarded to the CHILD, so a non-archive inner
@@ -58,10 +60,15 @@ impl Extractor {
             // never binds there and preallocation is untouched.
             let size = inner.slots[slot].size;
             let cap = inner.limits.prealloc_cap();
+            // ANCHORED ON THE OUTPUT ROOT, not on a path: the
+            // directories the member name needs are made and the
+            // payload is opened inside the last of them, so no
+            // component below `out_dir` is re-resolved between the
+            // check and the write. See `FileWriter::create_under`.
             let w = if self.resume {
-                FileWriter::create_resume_capped(&path, size, cap)?
+                FileWriter::create_resume_under(&self.out_dir, &fname, size, cap)?
             } else {
-                FileWriter::create_capped(&path, size, cap)?
+                FileWriter::create_under(&self.out_dir, &fname, size, cap)?
             };
             // Only a NESTED plain file is extraction output. Level 0's
             // plain files are the downloaded volumes themselves, which the
@@ -113,11 +120,12 @@ impl Extractor {
         }
         let mut n = 0usize;
         loop {
-            let cand = if n == 0 {
-                format!("{slot:03}-{out}")
-            } else {
-                format!("{slot:03}-{n}-{out}")
-            };
+            // Capped at composition: `out` is a `sanitize_out_name`
+            // result and is routinely AT the component cap, so a raw
+            // `000-` prefix is a name `openat` refuses at the writer.
+            // See `disk::disambiguated_out_name` for why the cap cannot
+            // go at the write - this string is also the claim key.
+            let cand = crate::disk::disambiguated_out_name(out, slot, n);
             if names.insert(name_collision_key(fold, &cand)) {
                 *out = cand;
                 return;
@@ -155,6 +163,16 @@ impl Extractor {
         data: &[u8],
     ) -> io::Result<()> {
         let w = self.ensure_plain_writer(inner, slot)?;
+        // A STATED LIMIT, not an oversight: the plain door, so a
+        // conflicting overlap that reaches a file by THIS route is not
+        // latched. `plain_span` has no `repair` flag, and threading one
+        // through its ~20 callers (chase, holds, settle, split) would buy
+        // little: the routes that reach here are the held-bytes-cap and
+        // RAR-fallback re-routes, which deliberately rewrite IDENTICAL
+        // bytes and say so at their own sites, plus the materialization
+        // read-back, whose destination starts empty. An ordinary plain
+        // article lands through the job loop in mod.rs, which is the door
+        // that checks - measured 30 Aug 2026 against the M4-14a fixture.
         w.write_at(offset, data)?;
         // A drained held span landing plain (spill/overflow/fallback
         // during a drain): file offset == volume offset by definition.
@@ -172,12 +190,14 @@ impl Extractor {
             inner.late_placements.push(LatePlacement {
                 slot,
                 frag: Frag {
-                    file: w
-                        .path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
+                    // The out_dir-RELATIVE name, never the bare one (30 Aug 2026
+                    // sweep): the resume journal resolves a fragment's file by
+                    // joining this onto out_dir, and matches it against the `S`/`M`
+                    // records, which carry `sanitize_out_name`'s tree form. A bare
+                    // basename sent restore to `out_dir/x.vob` for a payload living
+                    // at `out_dir/VIDEO_TS/x.vob` - every article whose bytes were
+                    // in it refetched, and its crypto facts unfindable.
+                    file: out_name_of(&inner.out_dir, &w.path),
                     file_off: offset,
                     vol_off: offset,
                     len: data.len() as u64,
@@ -316,16 +336,25 @@ impl Extractor {
                     // A promoted routed-plain writer is a plain pwrite
                     // at `file_off` with no `src_start`: the same
                     // in-place test the parent's job loop applies.
+                    // `out_name_of` and not `file_name()`, the same
+                    // conversion the parent's `InPlace::matches` took as
+                    // the 31 Aug 2026 read-only sweep's finding 11: the
+                    // journal's `Frag::file` is out_dir-relative, so a
+                    // basename test here matched nothing for a tree
+                    // payload and every replayed span wrote itself back.
                     match in_place.as_deref_mut() {
                         Some(ip)
                             if !repair
                                 && ip.off == file_off
-                                && w.path.file_name().is_some_and(|f| f == ip.file) =>
+                                && out_name_of(&self.out_dir, &w.path) == ip.file =>
                         {
                             w.note_covered(file_off, bytes.len() as u64)?;
                             ip.covered += bytes.len() as u64;
                         }
-                        _ => w.write_at(file_off, bytes)?,
+                        // Repair keeps the plain door; see the job loop
+                        // in mod.rs for both halves.
+                        _ if repair => w.write_at(file_off, bytes)?,
+                        _ => w.write_article_at(file_off, bytes)?,
                     }
                     return Ok(Persist::No);
                 }
@@ -498,14 +527,16 @@ impl Extractor {
         let Some(w) = inner.slots[slot].writer.take() else {
             return;
         };
-        w.abandon();
-        let _ = std::fs::remove_file(&w.path);
-        let name = w
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        // `abandon_close`: close the shared handle before the unlink so
+        // no surviving Arc clone (stream snapshot, spill list) pins the
+        // unlinked inode - see the method's own doc for the incident.
+        let gone = w.abandon_close();
+        let _ = std::fs::remove_file(&gone);
+        // Release the name the writer CLAIMED: the out_dir-relative
+        // form, which for a tree-preserved member carries its
+        // directories ("VIDEO_TS/x.vob") - the bare file name would
+        // release somebody else's key (or nothing).
+        let name = out_name_of(&inner.out_dir, &w.path);
         inner
             .names_taken
             .lock_ok()
@@ -527,7 +558,7 @@ impl Extractor {
         if name.is_empty() || size == 0 {
             return;
         }
-        let name = sanitize_filename(&name);
+        let name = sanitize_out_name(&name);
         match self.parent.upgrade() {
             Some(p) => p.promote_file(&name, size, spans, urgent),
             // The ROOT: a slot here is a POSTED file, so its byte space
@@ -577,7 +608,7 @@ impl Extractor {
             if sname.is_empty() {
                 continue;
             }
-            p.promote_file(&sanitize_filename(&sname), ssize, &ranges, urgent);
+            p.promote_file(&sanitize_out_name(&sname), ssize, &ranges, urgent);
         }
     }
 }

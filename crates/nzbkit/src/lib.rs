@@ -35,6 +35,9 @@ pub mod extract;
 #[doc(hidden)]
 pub mod fail;
 pub mod faultplan;
+/// FF1 format-preserving encryption (NIST SP 800-38G) - the cipher
+/// under `yencrypt`'s control-lines half; see its header.
+pub mod ff1;
 /// GF(2^16) primitives for the PAR2 engines. Not part of the real API:
 /// public only so nzbkit's own examples (par2_fold_bench, par2_ntt_bench)
 /// can build against it.
@@ -67,6 +70,10 @@ pub mod nzbimport;
 pub mod nzblnk;
 pub mod oracle;
 pub mod par2;
+/// PAR2 creation - the third direction after `par2` (parse/verify) and
+/// `par2repair` (reconstruct). Native, so `nzbfast post`'s no-RAR mode
+/// can describe a 0-byte member, which par2cmdline skips outright.
+pub mod par2gen;
 pub(crate) mod par2ntt;
 pub mod par2repair;
 pub mod pesto;
@@ -78,6 +85,8 @@ pub mod preflight;
 pub mod rar;
 pub(crate) mod rarcrypt;
 pub mod release;
+#[cfg(test)]
+mod renameclaim;
 pub mod sfx;
 pub mod shaping;
 #[cfg(feature = "indexer")]
@@ -85,11 +94,15 @@ pub mod spot;
 pub mod sync;
 pub mod sysbench;
 pub mod tar;
+#[cfg(test)]
+mod testscratch;
 pub mod urlauth;
 pub mod warmbench;
 pub mod warmpool;
 pub mod yenc;
 pub mod yenc_simd;
+/// yEnc body-layer encryption spike (Tensai75 draft) - see its header.
+pub mod yencrypt;
 pub mod zip;
 pub(crate) mod zipcrypt;
 

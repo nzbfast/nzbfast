@@ -177,7 +177,8 @@ fn oracle_pick_prefers_the_unsampled_and_skips_junk() {
 }
 
 /// The repost table: remember once, recognise later, and never let a
-/// second download rewrite what the first one taught us.
+/// second download rewrite what the first one taught us on no better
+/// evidence than turning up second.
 #[test]
 fn par_hashes_remember_first_and_recognise_reposts() {
     let dir = std::env::temp_dir().join(format!("nzbfast-index-ph-{}", std::process::id()));
@@ -189,6 +190,7 @@ fn par_hashes_remember_first_and_recognise_reposts() {
             .map(|h| ((*h).to_string(), format!("{h}.r00")))
             .collect()
     };
+    let weak = NameEvidence::Hash16kLen;
 
     // Nothing known yet.
     assert_eq!(ix.par_hash_lookup(&pairs(&["aa", "bb"])).unwrap(), None);
@@ -199,7 +201,8 @@ fn par_hashes_remember_first_and_recognise_reposts() {
             &named,
             "Example.Movie.2019.1080p-GRP",
             "m:example movie:2019",
-            100
+            100,
+            weak,
         )
         .unwrap(),
         3
@@ -218,9 +221,13 @@ fn par_hashes_remember_first_and_recognise_reposts() {
 
     // The obfuscated repost must NOT overwrite the good name: the
     // first writer knew what it was, and every future repost depends
-    // on that answer staying put.
+    // on that answer staying put. It must not CONTEST it either - a
+    // hash is not a claim, so it has no standing to make the row
+    // ambiguous, and a table that fell silent whenever an obfuscated
+    // repost arrived would answer nothing for exactly the arrivals it
+    // exists to serve.
     assert_eq!(
-        ix.par_hash_remember(&named, "8a7f2c1b9d0e4f", "", 200)
+        ix.par_hash_remember(&named, "8a7f2c1b9d0e4f", "", 200, weak)
             .unwrap(),
         0,
         "a later download rewrote a fingerprint it did not name"
@@ -233,11 +240,215 @@ fn par_hashes_remember_first_and_recognise_reposts() {
     // A nameless job records nothing at all rather than a blank row
     // that would then shadow the real name forever.
     assert_eq!(
-        ix.par_hash_remember(&pairs(&["dd"]), "  ", "", 300)
+        ix.par_hash_remember(&pairs(&["dd"]), "  ", "", 300, weak)
             .unwrap(),
         0
     );
     assert_eq!(ix.par_hash_lookup(&pairs(&["dd"])).unwrap(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// W7-01: a later naming with STRONGER evidence corrects the row, and
+/// a weaker one still cannot. The table used to be first-writer-wins
+/// forever, so a fingerprint a subject parse named wrongly stayed
+/// wrong for every future repost even after the payload's own bytes
+/// said otherwise.
+#[test]
+fn a_proof_corrects_a_name_a_weak_lane_taught() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-index-phfix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ix = Index::open(&dir.join("index.db")).unwrap();
+    let one = vec![("aa".to_string(), "aa.r00".to_string())];
+
+    ix.par_hash_remember(
+        &one,
+        "Wrong.Movie.2019.1080p",
+        "m:wrong movie:2019",
+        100,
+        NameEvidence::Hash16kLen,
+    )
+    .unwrap();
+    // The pesto lane matched the payload's own bytes against this
+    // set's FileDesc. That outranks a posted stem, so it lands.
+    assert_eq!(
+        ix.par_hash_remember(
+            &one,
+            "Real.Movie.2019.1080p",
+            "m:real movie:2019",
+            200,
+            NameEvidence::Par2SetId
+        )
+        .unwrap(),
+        1
+    );
+    let hit = ix.par_hash_lookup(&one).unwrap().unwrap();
+    assert_eq!(hit.1, "Real.Movie.2019.1080p");
+    assert_eq!(hit.2, "m:real movie:2019");
+
+    // And the correction does not swing back: a weak lane disagreeing
+    // with a proof is not news, and must neither replace it nor make
+    // the row ambiguous.
+    assert_eq!(
+        ix.par_hash_remember(
+            &one,
+            "Wrong.Movie.2019.1080p",
+            "",
+            300,
+            NameEvidence::Hash16kLen
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        ix.par_hash_lookup(&one).unwrap().unwrap().1,
+        "Real.Movie.2019.1080p"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// W7-03: `hash16k` is the identical-head twin family, so two jobs
+/// with equally good claims and different names is not an answer.
+/// Both the per-row contest and the cross-member disagreement decline,
+/// and a later proof can still settle the row.
+#[test]
+fn equally_evidenced_disagreement_declines_and_a_proof_settles_it() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-index-phamb-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let ix = Index::open(&dir.join("index.db")).unwrap();
+    let pairs = |hs: &[&str]| -> Vec<(String, String)> {
+        hs.iter()
+            .map(|h| ((*h).to_string(), format!("{h}.r00")))
+            .collect()
+    };
+    let weak = NameEvidence::Hash16kLen;
+
+    ix.par_hash_remember(&pairs(&["aa"]), "Alpha.Movie.2019.1080p", "", 100, weak)
+        .unwrap();
+    assert_eq!(
+        ix.par_hash_remember(&pairs(&["aa"]), "Beta.Show.2021.1080p", "", 200, weak)
+            .unwrap(),
+        1,
+        "the second, equally-evidenced name must mark the row contested"
+    );
+    assert_eq!(
+        ix.par_hash_lookup(&pairs(&["aa"])).unwrap(),
+        None,
+        "a fingerprint claimed by two names is not an answer"
+    );
+    // A third weak claim changes nothing - the row is already refused,
+    // and re-marking it would be a write per arriving repost forever.
+    assert_eq!(
+        ix.par_hash_remember(&pairs(&["aa"]), "Gamma.Movie.2020.1080p", "", 250, weak)
+            .unwrap(),
+        0
+    );
+
+    // CROSS-MEMBER: two members of one set that answer two different
+    // releases. Each row on its own is a perfectly good answer, which
+    // is why taking the first hit read as one.
+    ix.par_hash_remember(&pairs(&["bb"]), "Alpha.Movie.2019.1080p", "", 100, weak)
+        .unwrap();
+    ix.par_hash_remember(&pairs(&["cc"]), "Beta.Show.2021.1080p", "", 100, weak)
+        .unwrap();
+    assert!(ix.par_hash_lookup(&pairs(&["bb"])).unwrap().is_some());
+    assert!(ix.par_hash_lookup(&pairs(&["cc"])).unwrap().is_some());
+    assert_eq!(
+        ix.par_hash_lookup(&pairs(&["bb", "cc"])).unwrap(),
+        None,
+        "one set naming two releases answers nothing"
+    );
+
+    // Re-teaching the HELD name at the same weak tier must not settle
+    // the contest either. Otherwise the twin that happens to be
+    // downloaded twice clears an ambiguity it never resolved, and the
+    // more-frequent poster wins - first-writer-wins wearing a hat.
+    assert_eq!(
+        ix.par_hash_remember(&pairs(&["aa"]), "Alpha.Movie.2019.1080p", "", 260, weak)
+            .unwrap(),
+        0
+    );
+    assert_eq!(ix.par_hash_lookup(&pairs(&["aa"])).unwrap(), None);
+
+    // A proof settles the contested row: the name it names wins, the
+    // contest is over, and the table starts answering again. Here it
+    // names the OTHER contender, so it replaces as well as settles.
+    assert_eq!(
+        ix.par_hash_remember(
+            &pairs(&["aa"]),
+            "Beta.Show.2021.1080p",
+            "t:beta show",
+            300,
+            NameEvidence::Par2SetId
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        ix.par_hash_lookup(&pairs(&["aa"])).unwrap().unwrap().1,
+        "Beta.Show.2021.1080p"
+    );
+
+    // And a proof AGREEING with the held name settles it too - the
+    // contest was between that name and another, and this side just
+    // won on evidence.
+    ix.par_hash_remember(&pairs(&["ee"]), "Alpha.Movie.2019.1080p", "", 100, weak)
+        .unwrap();
+    ix.par_hash_remember(&pairs(&["ee"]), "Beta.Show.2021.1080p", "", 110, weak)
+        .unwrap();
+    assert_eq!(ix.par_hash_lookup(&pairs(&["ee"])).unwrap(), None);
+    assert_eq!(
+        ix.par_hash_remember(
+            &pairs(&["ee"]),
+            "Alpha.Movie.2019.1080p",
+            "",
+            120,
+            NameEvidence::Par2SetId
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        ix.par_hash_lookup(&pairs(&["ee"])).unwrap().unwrap().1,
+        "Alpha.Movie.2019.1080p"
+    );
+
+    // A proof AGREEING with an uncontested weak row upgrades its tier
+    // rather than doing nothing, so the next weak disagreement loses
+    // instead of contesting.
+    assert_eq!(
+        ix.par_hash_remember(
+            &pairs(&["bb"]),
+            "Alpha.Movie.2019.1080p",
+            "",
+            400,
+            NameEvidence::Par2SetId
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        ix.par_hash_remember(&pairs(&["bb"]), "Delta.Movie.2022.1080p", "", 500, weak)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        ix.par_hash_lookup(&pairs(&["bb"])).unwrap().unwrap().1,
+        "Alpha.Movie.2019.1080p"
+    );
+
+    // The STRONGEST hit is what comes back when members agree, because
+    // the hash it returns is the proving key the claims layer records.
+    ix.par_hash_remember(&pairs(&["dd"]), "Alpha.Movie.2019.1080p", "", 600, weak)
+        .unwrap();
+    assert_eq!(
+        ix.par_hash_lookup(&pairs(&["dd", "bb"]))
+            .unwrap()
+            .unwrap()
+            .0,
+        "bb"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

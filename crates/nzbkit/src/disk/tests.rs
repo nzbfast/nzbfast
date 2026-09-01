@@ -277,12 +277,76 @@ fn unpark_follows_a_published_rename() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// X5-06/08/19 OWED item 6 (31 Aug 2026): [`FileWriter::unpark`] is a
+/// by-name REOPEN, and it happens at the one moment in a job when
+/// something else has been renaming inodes around - the external par2
+/// has just run, and `park_for_repair` closed our handle on purpose so
+/// it could. The row said this had no fixture. It does now, and it is
+/// two questions rather than one.
+///
+/// It cannot land bytes OUTSIDE the output directory the way X5-06 and
+/// X5-08 could, because it never creates - what it could do is bind the
+/// writer to a foreign inode, so every later `write_at` and every
+/// reader admitted after the repair would be talking to somebody else's
+/// file while the job reported success.
+#[cfg(unix)]
+#[test]
+fn unpark_refuses_an_alias_that_appeared_while_parked() {
+    const SENTINEL: &[u8] = b"nothing in the job may touch this inode\n";
+    let dir = std::env::temp_dir().join(format!("nzbfast-unparkalias-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    let out = dir.join("out");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let sentinel = outside.join("sentinel.bin");
+    std::fs::write(&sentinel, SENTINEL).unwrap();
+
+    let path = out.join("payload.bin");
+    let w = FileWriter::create(&path, 8).unwrap();
+    w.write_at(0, b"abcd").unwrap();
+    w.park().unwrap();
+
+    // The window par2 owns: our handle is closed and only the name is
+    // left. Something replaces the name with a link out of the job.
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&sentinel, &path).unwrap();
+    let e = w.unpark().unwrap_err();
+    assert!(
+        e.to_string().contains("an alias is in the way"),
+        "unexpected error: {e}"
+    );
+    assert!(
+        w.write_at(4, b"efgh").is_err(),
+        "a refused unpark must stay parked"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        SENTINEL,
+        "unpark bound the writer to an inode outside the job"
+    );
+
+    // And the reason `Existing` is its own mode rather than `Keep`: a
+    // file that has GONE is `NotFound`, never an empty one created here
+    // and handed back as the repaired payload.
+    std::fs::remove_file(&path).unwrap();
+    let e = w.unpark().unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+    assert!(
+        !path.exists(),
+        "unpark created the file it was told was missing"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The whole point on Windows: while parked, an EXCLUSIVE open of the file
 /// succeeds. That is exactly what par2cmdline does, and a handle we still
 /// held made it report the target missing and decline to repair.
 #[cfg(windows)]
 #[test]
 fn a_parked_file_can_be_opened_exclusively() {
+    use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
     // share mode 0 - what par2cmdline asks for.
     let exclusive = |p: &Path| OpenOptions::new().read(true).share_mode(0).open(p);
@@ -524,6 +588,7 @@ fn a_reader_follows_an_external_repair_onto_its_new_inode() {
 #[cfg(windows)]
 #[test]
 fn a_revoked_reader_lets_the_external_tool_in() {
+    use std::fs::OpenOptions;
     use std::os::windows::fs::OpenOptionsExt;
     let exclusive = |p: &Path| OpenOptions::new().read(true).share_mode(0).open(p);
 
@@ -919,6 +984,67 @@ fn abandoning_a_writer_credits_its_bytes_back_to_the_extract_budget() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// `abandon_close` is the disown-and-unlink primitive: it must flag the
+/// writer abandoned AND close the shared OS handle for every Arc clone
+/// at once, and hand back the CURRENT path for the unlink.
+///
+/// The close is the load-bearing half, and it is why a bare `abandon()`
+/// before an unlink was a disk leak: the handle lives in shared state,
+/// clones of the Arc (the stream picker's snapshot, `routed_plain`, a
+/// pending spill) outlive the slot, and on unix an unlinked file with
+/// any live descriptor keeps its blocks. On the 30 Aug 2026 live
+/// incident that pinned a 51.2 GB preallocated .mkv for over four
+/// hours after its chase was demoted.
+#[test]
+fn abandon_close_closes_the_shared_handle_for_every_clone() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-abandon-close-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("movie.mkv");
+    let w = std::sync::Arc::new(FileWriter::create(&path, 4096).unwrap());
+    w.write_at(0, &[7u8; 64]).unwrap();
+    // The stream picker's shape: a clone taken before the demote.
+    let viewer = w.clone();
+
+    let gone = w.abandon_close();
+    assert_eq!(gone, path, "unrenamed writer unlinks its creation path");
+    std::fs::remove_file(&gone).unwrap();
+
+    assert!(viewer.is_abandoned(), "the flag reaches every clone");
+    // The handle is CLOSED for the clone too - a read through the
+    // shared state answers NotConnected, exactly as a parked writer
+    // does, instead of quietly serving the unlinked inode.
+    let mut buf = [0u8; 8];
+    let e = viewer.read_at(&mut buf, 0).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::NotConnected, "{e}");
+    // And a write through the clone cannot resurrect it.
+    let e = viewer.write_at(64, &[1u8; 8]).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::NotConnected, "{e}");
+
+    drop((w, viewer));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// And the unlink target follows a verified-name publish: after
+/// `note_renamed` the creation name is ENOENT, so an unlink aimed there
+/// would miss while the real file survived as a false artifact -
+/// `abandon_close` must answer the CURRENT path.
+#[test]
+fn abandon_close_returns_the_renamed_path() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-abandon-renamed-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let created = dir.join("aGVsbG8.mkv");
+    let published = dir.join("Real.Name.mkv");
+    let w = FileWriter::create(&created, 64).unwrap();
+    std::fs::rename(&created, &published).unwrap();
+    w.note_renamed(published.clone());
+
+    let gone = w.abandon_close();
+    assert_eq!(gone, published);
+    std::fs::remove_file(&gone).unwrap();
+    drop(w);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A stale file LONGER than `size` at the resume path must be shrunk
 /// to exactly `size` - fallocate never shrinks, so this pins the
 /// unconditional set_len that precedes it (trailing garbage past
@@ -1005,10 +1131,104 @@ fn note_written_merges_like_a_byte_set() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// M4-66 (30 Aug 2026): the leading-dot trim was a many-to-one collapse
+/// of two names that are both legal and distinct EVERYWHERE - Windows
+/// folds trailing dots, never leading ones - so a PAR2 set declaring
+/// `.movie.mkv` and `movie.mkv` had two payloads and one on-disk name.
+/// The e2e half is `crates/nzbfast/tests/e2e_norar3/mod.rs`, which is
+/// where the cost was measured; this is the rule it rests on.
+#[test]
+fn a_leading_dot_no_longer_collides_with_the_undotted_name() {
+    // The row's own shape, both platform arms.
+    for win in [false, true] {
+        assert_ne!(
+            sanitize_filename_for(".movie.mkv", win),
+            sanitize_filename_for("movie.mkv", win),
+            "leading-dot twin collapsed (windows={win})"
+        );
+        assert_eq!(sanitize_filename_for(".movie.mkv", win), "_movie.mkv");
+        assert_eq!(sanitize_filename_for("movie.mkv", win), "movie.mkv");
+    }
+    // The whole RUN maps, one `_` per dot, so the depths stay distinct
+    // from each other as well as from the bare name. Collapsing to a
+    // single dot (or a single `_`) would re-create the same defect one
+    // character over.
+    let names = ["movie.mkv", ".movie.mkv", "..movie.mkv", "...movie.mkv"];
+    let out: std::collections::HashSet<String> =
+        names.iter().map(|n| sanitize_filename(n)).collect();
+    assert_eq!(
+        out.len(),
+        names.len(),
+        "a leading-dot depth collapsed: {out:?}"
+    );
+    // Visible, and portable: never hidden, and `_` is legal everywhere.
+    // A dotfile is FURNITURE to this product - `smart::nzbname::
+    // is_furniture` refuses to call one the main payload, `repair.rs`
+    // skips it when scanning for unclaimed files, and `identity.rs`
+    // will not take it as a release name - so preserving the dot would
+    // have traded a name collision for an invisibility bug.
+    for n in names {
+        assert!(
+            !sanitize_filename(n).starts_with('.'),
+            "{n:?} landed hidden"
+        );
+    }
+}
+
+/// The TRAILING half of the same trim is deliberately UNCHANGED: Windows
+/// really does fold `evil. ` onto `evil`, so a stable portable name has
+/// to strip there, and mapping it to `_` would break the extension
+/// (`movie.mkv.` -> `movie.mkv_`). That asymmetry is the whole scope of
+/// M4-66; the trailing-dot and trailing-space collisions are M4-99 and
+/// M4-80, which are their own rows and NOT fixed here. This pin exists
+/// so that stays true by measurement rather than by intention.
+#[test]
+fn the_trailing_trim_is_untouched_by_the_leading_dot_mapping() {
+    assert_eq!(sanitize_filename("Movie.mkv."), "Movie.mkv");
+    assert_eq!(sanitize_filename("Movie.mkv "), "Movie.mkv");
+    assert_eq!(sanitize_filename("Movie.mkv\u{a0}"), "Movie.mkv");
+    assert_eq!(sanitize_filename("evil. "), "evil");
+    // ...including the interleaved shape the old alternating trim chain
+    // could not reach a fixed point on.
+    assert_eq!(sanitize_filename("Movie.mkv . . "), "Movie.mkv");
+}
+
+/// M4-67 (30 Aug 2026): `char::is_control()` is general category Cc
+/// only, so every Cf format character reached disk. U+202E is the sharp
+/// one - it REORDERS the display, so the bytes end `.exe` and the
+/// listing ends `.jpg` - and the zero-width family is the quiet one.
+#[test]
+fn format_characters_are_neutralised_like_control_characters() {
+    // The RLO attack, exactly as the row spells it.
+    assert_eq!(sanitize_filename("readme\u{202e}gpj.exe"), "readme_gpj.exe");
+    // Zero-width twins are two files a person cannot tell apart; after
+    // this they are one name, which the collision machinery can see.
+    assert_eq!(sanitize_filename("movie\u{200b}.mkv"), "movie_.mkv");
+    assert_eq!(sanitize_filename("mo\u{feff}vie.mkv"), "mo_vie.mkv");
+    assert_eq!(sanitize_filename("mo\u{ad}vie.mkv"), "mo_vie.mkv");
+    // The tag block is wholly invisible on every renderer.
+    assert_eq!(sanitize_filename("a\u{e0041}b"), "a_b");
+    // A name that is nothing BUT format characters still has to become
+    // something openable rather than empty.
+    assert_eq!(sanitize_filename("\u{202e}\u{200b}"), "__");
+    // Ordinary names are untouched, including non-ASCII ones - this is
+    // not a fold to ASCII.
+    for n in [
+        "Movie.mkv",
+        "Fi\u{e9}vre.2024.mkv",
+        "\u{41c}\u{43e}\u{441}\u{43a}\u{432}\u{430}.mkv",
+    ] {
+        assert_eq!(sanitize_filename(n), n, "{n:?} was altered");
+    }
+}
+
 #[test]
 fn sanitize() {
     assert_eq!(sanitize_filename("a/b\\c.rar"), "a_b_c.rar");
-    assert_eq!(sanitize_filename("  ..hidden  "), "hidden");
+    // M4-66: the leading dots are MAPPED, not deleted - one `_` each -
+    // so this no longer collides with a poster's plain "hidden". The
+    // surrounding whitespace still goes.
+    assert_eq!(sanitize_filename("  ..hidden  "), "__hidden");
     assert_eq!(sanitize_filename(""), "unnamed");
     // Traversal neutralisation (bug sweep: category/stem build the
     // download path). The result must be a single component - no
@@ -1154,4 +1374,199 @@ fn chunk_len_clamps_in_u64_so_a_huge_span_still_makes_progress() {
     assert_eq!(super::chunk_len(100, BUF), 100);
     assert_eq!(super::chunk_len(BUF as u64 + 1, BUF), BUF);
     assert_eq!(super::chunk_len(500, 0), 0, "an empty buffer takes nothing");
+}
+
+/// W4-14 (30 Aug 2026): [`copy_file_cow`] is a CLONE where the volume
+/// has one and a plain copy where it does not, and the caller cannot
+/// tell which ran - so what is pinned is the part that must hold on
+/// every arm. Deliberately NOT asserted: that a clone happened. This
+/// runs on APFS here, on ext4 in CI and on NTFS on the Windows shards,
+/// and a test demanding a reflink would be red on two of the three
+/// while saying nothing about correctness.
+#[test]
+fn copy_file_cow_reproduces_the_bytes_on_every_arm() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-cowcopy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("src.bin");
+    // Past one clone extent and not a round number of them.
+    let data: Vec<u8> = (0..300_007u32)
+        .map(|i| (i.wrapping_mul(37) >> 3) as u8)
+        .collect();
+    std::fs::write(&src, &data).unwrap();
+
+    let dst = dir.join("dst.bin");
+    assert_eq!(copy_file_cow(&src, &dst).unwrap(), data.len() as u64);
+    assert!(
+        std::fs::read(&dst).unwrap() == data,
+        "clone/copy lost bytes"
+    );
+
+    // The clone and the copy must not share a future: a write through
+    // one destination is invisible to the source. On a reflink that is
+    // the copy-on-write itself doing the work, which is the one
+    // property the fan-out caller's correctness rests on.
+    std::fs::write(&dst, b"overwritten").unwrap();
+    assert!(
+        std::fs::read(&src).unwrap() == data,
+        "the source moved under a clone"
+    );
+
+    // An empty source is a real case here (a zero-length FileDesc's
+    // sibling), and clonefile/FICLONE both accept one.
+    let esrc = dir.join("empty.bin");
+    let edst = dir.join("empty-copy.bin");
+    std::fs::write(&esrc, b"").unwrap();
+    assert_eq!(copy_file_cow(&esrc, &edst).unwrap(), 0);
+    assert!(edst.exists() && std::fs::metadata(&edst).unwrap().len() == 0);
+
+    // A missing source is an error on both arms, never a silent empty
+    // destination - the caller stats first, so reaching this means the
+    // file vanished mid-settle.
+    let gone = dir.join("nope.bin");
+    assert!(copy_file_cow(&gone, &dir.join("nope-copy.bin")).is_err());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// X5-06/08/19 OWED item 4 (31 Aug 2026): [`copy_file_cow`]'s
+/// destination is BOUND on every arm, so the rule X5-07 had to spell a
+/// second time at its own call site is now the one `relpath` already
+/// spelled.
+///
+/// The defect being pinned is `std::fs::copy`'s, and it was measured
+/// red once already: it FOLLOWS a symlink at its destination, so a
+/// dangling link planted at the copy's name created the file it pointed
+/// at - outside the job's output directory, under a log line saying the
+/// bytes had been verified.
+#[cfg(unix)]
+#[test]
+fn copy_file_cow_refuses_an_alias_at_its_destination() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-cowbind-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    let out = dir.join("out");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let src = out.join("src.bin");
+    std::fs::write(&src, b"payload").unwrap();
+
+    // A DANGLING link at the destination's name. `Path::exists` answers
+    // false for this and `std::fs::copy` wrote straight through it.
+    let elsewhere = outside.join("elsewhere.bin");
+    let dst = out.join("copy.bin");
+    std::os::unix::fs::symlink(&elsewhere, &dst).unwrap();
+    assert!(copy_file_cow(&src, &dst).is_err());
+    assert!(
+        !elsewhere.exists(),
+        "the copy followed a dangling alias out of the output directory"
+    );
+    std::fs::remove_file(&dst).unwrap();
+
+    // A live link at the destination, over a file that must not move.
+    const SENTINEL: &[u8] = b"nothing in the job may touch this inode\n";
+    let sentinel = outside.join("sentinel.bin");
+    std::fs::write(&sentinel, SENTINEL).unwrap();
+    std::os::unix::fs::symlink(&sentinel, &dst).unwrap();
+    assert!(copy_file_cow(&src, &dst).is_err());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), SENTINEL);
+    std::fs::remove_file(&dst).unwrap();
+
+    // The PARENT swapped for a link, which is the X5-08 half.
+    let deep = out.join("sub");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::remove_dir(&deep).unwrap();
+    std::os::unix::fs::symlink(&outside, &deep).unwrap();
+    let e = copy_file_cow(&src, &deep.join("copy.bin")).unwrap_err();
+    assert!(
+        e.to_string().contains("not a real directory"),
+        "unexpected error: {e}"
+    );
+    assert!(!outside.join("copy.bin").exists());
+
+    // And the documented contract - the destination must not exist - is
+    // a MECHANISM now rather than a note to the caller.
+    let taken = out.join("taken.bin");
+    std::fs::write(&taken, b"somebody else's").unwrap();
+    let e = copy_file_cow(&src, &taken).unwrap_err();
+    assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "{e}");
+    assert_eq!(std::fs::read(&taken).unwrap(), b"somebody else\'s");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `write_article_at` is the article-delivery door: it must stay silent
+/// for a disjoint write and for a duplicate that agrees with what is
+/// already there, and latch only when two deliveries CONTRADICT each
+/// other. The three cases drive the method directly, so a change to the
+/// peek, the read-back or the compare shows here rather than only at the
+/// far end of an e2e run.
+#[test]
+fn write_article_at_latches_only_a_contradiction() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-artconf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // (a) DISJOINT: the shape every well-formed post has. Nothing to
+    // compare, nothing latched.
+    let w = FileWriter::create(&dir.join("disjoint.bin"), 8).unwrap();
+    w.write_article_at(0, b"abcd").unwrap();
+    w.write_article_at(4, b"efgh").unwrap();
+    assert!(
+        !w.had_rewrite(),
+        "disjoint article ranges are not a rewrite at all"
+    );
+    assert_eq!(
+        w.conflicting_rewrite_span(),
+        None,
+        "a disjoint write must never latch a conflict"
+    );
+
+    // (b) IDENTICAL OVERLAP: a same-article hedge or tail duplicate
+    // re-delivering bytes already on disk. `had_rewrite` sees it - that
+    // is what forces the set-covered read-back - but it is harmless, so
+    // the conflict latch must stay clear.
+    let w = FileWriter::create(&dir.join("agree.bin"), 8).unwrap();
+    w.write_article_at(0, b"abcdefgh").unwrap();
+    w.write_article_at(2, b"cdef").unwrap();
+    assert!(w.had_rewrite(), "the range really was written twice");
+    assert_eq!(
+        w.conflicting_rewrite_span(),
+        None,
+        "a duplicate that agrees with the bytes on disk is not a contradiction"
+    );
+
+    // (c) DIFFERING OVERLAP: two deliveries claim [2, 6) and disagree.
+    // The span is latched by its FILE offset and length, which is what
+    // lets the refusal name the bytes; and the write still happens, so
+    // nothing about the existing on-disk behaviour moves.
+    let path = dir.join("conflict.bin");
+    let w = FileWriter::create(&path, 8).unwrap();
+    w.write_article_at(0, b"abcdefgh").unwrap();
+    w.write_article_at(2, b"ZZZZ").unwrap();
+    assert!(
+        w.had_conflicting_rewrite(),
+        "two deliveries disagreeing about one range is exactly the conflict"
+    );
+    assert_eq!(
+        w.conflicting_rewrite_span(),
+        Some((2, 4)),
+        "the latch names the contested range so settle can quote it"
+    );
+    let mut got = [0u8; 8];
+    w.read_at(&mut got, 0).unwrap();
+    assert_eq!(
+        &got, b"abZZZZgh",
+        "latching a conflict must not suppress the write - which copy lands is \
+         settle's problem, and refusing here would only put it back on arrival order"
+    );
+
+    // A second, DIFFERENT contradiction does not move the record: the
+    // first range is the one the refusal quotes.
+    w.write_article_at(6, b"QQ").unwrap();
+    assert_eq!(
+        w.conflicting_rewrite_span(),
+        Some((2, 4)),
+        "the first contested range wins the record"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

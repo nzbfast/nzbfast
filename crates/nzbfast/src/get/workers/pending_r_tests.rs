@@ -53,6 +53,10 @@ fn held_articles_journal_after_their_holds_drain() {
                     len: (e - s) as u64,
                     frags,
                     par2_main: false,
+                    // The X5-02 commitment over exactly these bytes -
+                    // the real number, so the park carries what the
+                    // download path would carry.
+                    crc: Some(crc32fast::hash(&vol[s..e])),
                 });
             }
             _ => panic!("article {i} arrived pre-sniff and must park as Held"),
@@ -159,6 +163,10 @@ fn parked_articles_journal_off_a_materialized_volume_with_no_placements() {
                     len: (e - s) as u64,
                     frags,
                     par2_main: false,
+                    // The X5-02 commitment over exactly these bytes -
+                    // the real number, so the park carries what the
+                    // download path would carry.
+                    crc: Some(crc32fast::hash(&vols[0][s..e])),
                 });
             }
             _ => panic!("article {i} arrived pre-sniff and must park as Held"),
@@ -260,6 +268,10 @@ fn held_crypto_articles_journal_as_d_and_restore_posted_bytes() {
                     len: (e - s) as u64,
                     frags,
                     par2_main: false,
+                    // The X5-02 commitment over exactly these bytes -
+                    // the real number, so the park carries what the
+                    // download path would carry.
+                    crc: Some(crc32fast::hash(&vol[s..e])),
                 });
             }
             _ => panic!("article {i} arrived pre-sniff and must park as Held"),

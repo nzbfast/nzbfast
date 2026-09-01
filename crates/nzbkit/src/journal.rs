@@ -19,6 +19,10 @@
 //!   S <slot> <size> <volume-file-name>     restore destination for a slot
 //!   F <idx> <file-name>                    file table (append-ordered;
 //!                                          later runs may redefine idx)
+//!   H <crc32-hex> <message-id>             content commitment over the
+//!                                          article's payload, emitted
+//!                                          directly ahead of its own
+//!                                          R/D line (X5-02)
 //!   R <slot> <fidx>:<file_off>:<vol_off>:<len>[,…] <message-id>
 //!   X <file-name>                          the journal's claim over this
 //!                                          file is retired. No producer
@@ -30,7 +34,17 @@
 //!   M <slot>                               the slot demoted to a
 //!                                          materialized volume (see
 //!                                          [`Journal::record_materialized`])
+//!   V <slot> <votes> <yenc-name>           how many of this slot's
+//!                                          articles declared that name,
+//!                                          for a slot whose articles
+//!                                          DISAGREE (see
+//!                                          [`Journal::record_name_votes`])
 //!   ```
+//!
+//!   G <token>                              this open's generation claim
+//!                                          (X5-01): `Journal::remove`
+//!                                          unlinks only while the LAST
+//!                                          one is its own
 //!
 //! - Crypto lines - `E`/`K`/`T`/`D` - the plaintext-once records: an
 //!   in-stream decrypted (encrypted store) output holds PLAINTEXT, so
@@ -61,11 +75,11 @@
 use crate::sync::MutexExt;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::disk::sanitize_filename;
+use crate::disk::sanitize_out_name;
 use crate::extract::{CryptoJournalEvent, Frag};
 
 fn to_hex(b: &[u8]) -> String {
@@ -106,6 +120,222 @@ struct Compose {
 
 thread_local! {
     static COMPOSE: std::cell::RefCell<Compose> = std::cell::RefCell::new(Compose::default());
+}
+
+/// The journal's leaf name inside a job's output directory. One
+/// spelling, because every guard below is about THIS leaf and a second
+/// literal is a guard that misses one of them - `pub` since 31 Aug 2026
+/// so X5-03's deferred retirement (`nzbfast`'s `JournalOwner::Caller`,
+/// which never holds an open handle) names this rather than its own.
+pub const JOURNAL_LEAF: &str = ".nzbfast.journal";
+
+/// Open the journal leaf as a PRIVATE REGULAR FILE, or refuse.
+///
+/// The whole point is that the returned descriptor, not the path, is
+/// what everything afterwards uses - see [`Journal::open`] for the
+/// measured cost of the path-based opens this replaces. Three refusals,
+/// each for a different way the name can stop naming a private regular
+/// leaf:
+///
+/// * `O_NOFOLLOW` (and, on Windows, opening the reparse point itself and
+///   then refusing it) turns a planted SYMLINK into an error at the open
+///   rather than a write through it;
+/// * the `fstat` refuses anything that is not a regular file. That is
+///   what catches a FIFO. `O_NONBLOCK` rides beside it so the open
+///   RETURNS at all, and what that flag is worth is worth stating
+///   exactly, because the pin cannot tell you: measured on this fleet
+///   30 Aug 2026, `open(fifo, O_RDONLY)` on a reader-less FIFO blocks
+///   and `open(fifo, O_RDWR)` returns immediately - and this helper
+///   asks for read+append, which IS `O_RDWR`. So today the flag is
+///   removable and the FIFO pin stays green without it. It stays
+///   because POSIX leaves `O_RDWR` on a FIFO UNSPECIFIED, so without it
+///   the guarantee rests on a behaviour no standard promises. Do not
+///   read the green pin as evidence the flag is doing work here, and do
+///   not delete it on the strength of that green either;
+/// * the link count refuses a second directory entry for the same inode.
+///   No open flag can see a HARDLINK: it is not a link object, it is the
+///   file, so the only tell is that the file is reachable by another
+///   name.
+///
+/// STATED LIMIT, in the docs rather than left to be found: this guards
+/// the LEAF. The parent components are resolved by the kernel as
+/// ordinary path lookup, so a hostile directory component is a
+/// different question (X5-06/X5-08, `disk.rs`, another lane) and this
+/// helper does not answer it.
+fn open_private_leaf(path: &Path, create: bool) -> std::io::Result<File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true).append(true).create(create);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open the link itself instead of
+        // its target, so the check below can refuse it.
+        opts.custom_flags(0x0020_0000);
+    }
+    let f = opts.open(path)?;
+    let md = f.metadata()?;
+    if !md.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} is not a regular file - refusing to use it as a journal",
+                path.display()
+            ),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        // FILE_ATTRIBUTE_REPARSE_POINT
+        if md.file_attributes() & 0x0000_0400 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} is a reparse point - refusing to use it as a journal",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if md.nlink() > 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} has {} links - another name reaches this inode, so it is \
+                     not a private journal",
+                    path.display(),
+                    md.nlink()
+                ),
+            ));
+        }
+    }
+    Ok(f)
+}
+
+/// Truncate to zero the file `f` is already open on, WITHOUT resolving a
+/// path - the in-place restart [`Journal::open`] does when the journal
+/// on disk belongs to a different NZB.
+///
+/// `f.set_len(0)` is the whole of this on Unix and CANNOT be on Windows,
+/// which is what took all six `windows-unit` shards red on 30 Aug 2026
+/// with `Error: Access is denied. (os error 5)`. `open_private_leaf`
+/// opens APPEND, and Rust spells Windows append as `FILE_GENERIC_WRITE &
+/// !FILE_WRITE_DATA` - the missing `FILE_WRITE_DATA` is precisely how the
+/// kernel forces every write to the end. `set_len` is
+/// `SetFileInformationByHandle(FileEndOfFileInfo)`, which REQUIRES
+/// `FILE_WRITE_DATA`, so the handle that guarantees the appends is the
+/// one that may not truncate. Measured on a Windows box, three arms: the
+/// append handle refuses `set_len` with error 5 with the reparse-point
+/// flag and without it alike, and a read+write handle accepts it - so it
+/// is the access mask and never `custom_flags`. `nzbkit`'s own
+/// `Cargo.toml` already records the same fact for `logtee`.
+///
+/// `logtee`'s answer is to reopen BY PATH, which is right there and wrong
+/// here: X5-04/X5-05 exist because the journal path is the thing that
+/// cannot be trusted, so a second `CreateFileW` on it reintroduces
+/// exactly the window `open_private_leaf` closed. `ReOpenFile` takes the
+/// HANDLE and not the name - a new access mask on the same file object,
+/// with no path lookup to race - so it is the faithful port of "the
+/// truncate is on the descriptor we already hold". Do NOT replace it with
+/// a path reopen, and do NOT drop the append mode to make `set_len` work
+/// directly: two generations may legitimately hold this file at once
+/// (X5-01), and append is what keeps their writes from landing on each
+/// other.
+fn truncate_leaf(f: &File) -> std::io::Result<()> {
+    #[cfg(not(windows))]
+    {
+        f.set_len(0)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
+        use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
+        };
+        // GENERIC_WRITE rather than a bare FILE_WRITE_DATA: it carries
+        // SYNCHRONIZE, which a handle opened without FILE_FLAG_OVERLAPPED
+        // needs to do synchronous I/O at all, and it is the mask the
+        // measurement above actually used. The share mode is the one
+        // Rust's own `OpenOptions` defaults to, so this second handle
+        // cannot refuse the first one its existing access.
+        //
+        // SAFETY: `f` is a live `File`, so `as_raw_handle` is a valid
+        // open handle for the duration of the call, which is the only
+        // thing `ReOpenFile` requires of it; the remaining arguments are
+        // plain integers. The returned handle is a fresh one this call
+        // owns, checked for both failure spellings before it is used, and
+        // `from_raw_handle` takes ownership of it exactly once - nothing
+        // else ever closes it, so the `File`'s own `Drop` is that
+        // handle's only close.
+        let h = unsafe {
+            ReOpenFile(
+                f.as_raw_handle(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                0,
+            )
+        };
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `h` is the handle `ReOpenFile` just returned and this
+        // is its only owner; the checks above have ruled out both values
+        // the API uses for failure.
+        let w = unsafe { File::from_raw_handle(h) };
+        w.set_len(0)
+    }
+}
+
+/// Whether `path` still names the very inode `f` is open on (Unix). A
+/// belt beside the `G` generation token in [`Journal::remove`]: the
+/// token says "this file is still mine", and this says "this NAME is
+/// still that file".
+///
+/// Always true off Unix, where there is no cheap stable inode identity
+/// to compare and the generation token carries the whole check.
+fn path_still_names(f: &File, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        match (f.metadata(), std::fs::symlink_metadata(path)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Discharged rather than waived with an `#[allow]`: both
+        // parameters are read on Unix and neither is here, so no single
+        // lint expectation is true in every build - and an `#[allow]`
+        // that suppresses nothing in the build you happen to run is
+        // invisible forever.
+        let _ = (f, path);
+        true
+    }
+}
+
+/// A token unique to one [`Journal::open`], for the `G` line X5-01 turns
+/// on. Process id pins it across processes, the clock pins it across pid
+/// reuse, and the counter pins it across two opens in one process within
+/// one clock tick - none of the three is sufficient alone.
+fn next_generation() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("{:x}-{:x}-{:x}", std::process::id(), t, n)
 }
 
 struct WriteState {
@@ -176,6 +406,10 @@ impl WriteState {
 pub struct Journal {
     state: Mutex<WriteState>,
     pub path: PathBuf,
+    /// This open's `G` token (X5-01). [`Journal::remove`] unlinks only
+    /// while this is still the LAST `G` line in the file, so a stale
+    /// generation cannot retire a live one's journal.
+    generation: String,
 }
 
 /// One journaled article: every fragment must restore for the article
@@ -188,6 +422,14 @@ pub struct Article {
     pub(crate) frags: Vec<Frag>,
     pub(crate) crypto_frag: Vec<bool>,
     pub(crate) crypto: bool,
+    /// X5-02's content commitment: the crc32 the POST declared over this
+    /// article's payload, verified against the decoded bytes by
+    /// [`crate::yenc`] before the record was written. `None` for a
+    /// journal an older binary wrote, and for the handful of articles
+    /// that reach the record site without one - and `None` means the
+    /// article REFETCHES, because an unauthenticated record is exactly
+    /// what this exists to stop being trusted. See [`restore`].
+    pub(crate) crc: Option<u32>,
 }
 
 /// Per-slot placement parsed from a journal.
@@ -227,6 +469,12 @@ pub struct ResumeState {
     pub(crate) slots: HashMap<usize, SlotPlacement>,
     /// Plaintext-once outputs by name (`E`/`K`/`T` facts).
     pub crypto_files: HashMap<String, CryptoFileMeta>,
+    /// M4-70 across a crash: what an earlier run's articles declared
+    /// each slot's file was called, as `(yEnc name, votes)`, for the
+    /// slots whose articles DISAGREED. Empty for every ordinary post -
+    /// see [`Journal::record_name_votes`] for why only a contested slot
+    /// is ever written down.
+    pub name_votes: HashMap<usize, Vec<(String, u32)>>,
 }
 
 impl ResumeState {
@@ -241,6 +489,35 @@ impl ResumeState {
             .flat_map(|a| a.frags.iter())
             .map(|f| f.len)
             .sum()
+    }
+
+    /// Every article id this journal carries a record for - the v1
+    /// `completed` set plus every placement record's article - as the
+    /// measured size of what run 1 got DURABLE before it died.
+    ///
+    /// WHAT THIS IS NOT, said here because the difference is the whole
+    /// reason it is a separate question from [`restore`]: a record is
+    /// not a promise the article will be trusted. `restore` re-reads the
+    /// bytes and checks them against [`Article::crc`], so a record whose
+    /// crc is absent (an older binary) or whose bytes were torn by the
+    /// very crash that ended run 1 is recorded here and REFETCHES
+    /// anyway. So this is an upper bound on what a resume can reuse and
+    /// a lower bound on nothing. It exists so a test can price the gap a
+    /// crash left - the quantity `contract_crash_in_fault_window`
+    /// measures - without growing a second reader of the record grammar
+    /// beside [`parse_lines`], which is what [`Journal::peek`]'s own
+    /// header refuses.
+    pub fn recorded_ids(&self) -> HashSet<String> {
+        self.completed
+            .iter()
+            .cloned()
+            .chain(
+                self.slots
+                    .values()
+                    .flat_map(|s| s.articles.iter())
+                    .map(|a| a.id.clone()),
+            )
+            .collect()
     }
 
     /// The FULL size of the widest slot the journal has placements for -
@@ -330,6 +607,20 @@ pub struct Restored {
     /// resume cannot reconstruct what the wire sent, not because
     /// anything on disk moved.
     pub dropped_crypto: usize,
+    /// Articles refused by X5-02's content check: their bytes ARE on
+    /// disk at the recorded offsets and at the recorded length, and they
+    /// are not the bytes the wire sent - or the record carries no
+    /// commitment to compare them against, which an older binary's
+    /// journal never does.
+    ///
+    /// A third counter rather than a third meaning for `dropped_source`,
+    /// for that field's own stated reason: the two have different causes
+    /// and different remedies. "Your partial output moved" sends a user
+    /// looking at their disk; this one is either a crash they already
+    /// know about (the common case - a preallocated slot whose bytes
+    /// never landed) or an upgrade from a journal format that had no
+    /// commitment, and neither is a question about their filesystem.
+    pub dropped_unauthenticated: (usize, u64),
 }
 
 pub struct SlotSeed {
@@ -386,7 +677,10 @@ impl Journal {
     ///   was considered and refused: it would be a copy-paste sibling of
     ///   the record grammar, free to drift, for a saving nobody measured.
     pub fn peek(dir: &Path) -> Option<ResumeState> {
-        let f = File::open(dir.join(".nzbfast.journal")).ok()?;
+        // Same inode discipline as `open`, minus the create: a peek
+        // that followed a planted symlink would read an outside file
+        // and report its contents as this job's resume cost.
+        let f = open_private_leaf(&dir.join(JOURNAL_LEAF), false).ok()?;
         let mut lines = utf8_lines(std::io::BufReader::new(f));
         lines
             .next()?
@@ -400,16 +694,57 @@ impl Journal {
     /// Open (or create) the journal for an NZB. Returns the journal and
     /// the resume state parsed from it (empty on a fresh run or when the
     /// existing journal belongs to a different NZB).
+    ///
+    /// **The journal is bound to an INODE, not to a path** (X5-04/X5-05,
+    /// 30 Aug 2026). Everything below runs on ONE descriptor: it is
+    /// opened no-follow, its type and link count are checked through
+    /// `fstat` on that descriptor, the header is read positionally from
+    /// it, and a fingerprint mismatch truncates THAT DESCRIPTOR rather
+    /// than re-creating the path. The three path-based opens this
+    /// replaces (`File::open`, an append-open, `File::create`) each
+    /// followed whatever the name resolved to at the instant they ran,
+    /// and the measured cost of that was total: with a symlink planted
+    /// at `<out>/.nzbfast.journal`, an outside file's bytes afterwards
+    /// were literally `nzbfast-journal v1 <fingerprint>` - the header
+    /// written straight through the link by the `File::create` arm. A
+    /// hardlink did the same with no symlink anywhere to notice, and a
+    /// FIFO wedged `File::open` in the kernel, unbounded, before the job
+    /// reached any networking at all.
+    ///
+    /// So a journal path that is not a private regular leaf is a typed
+    /// REFUSAL and never a silent adaptation:
+    ///
+    /// * a symlink is refused by `O_NOFOLLOW` at the open itself;
+    /// * a FIFO (or any other non-regular file) is refused by the
+    ///   `fstat`, and `O_NONBLOCK` is what lets the open return at all
+    ///   so there is something to refuse - without it the open never
+    ///   comes back;
+    /// * a second directory entry for the same inode - a hardlink, which
+    ///   no flag can see - is refused by the link count.
+    ///
+    /// Do NOT "fix" a refusal here by dropping a check and reopening by
+    /// path: the path is exactly what cannot be trusted. Move the
+    /// hostile file aside instead.
     pub fn open(dir: &Path, nzb_bytes: &[u8]) -> std::io::Result<(Journal, ResumeState)> {
         use md5::{Digest, Md5};
         let fp = format!("{:x}", Md5::digest(nzb_bytes));
-        let path = dir.join(".nzbfast.journal");
+        let path = dir.join(JOURNAL_LEAF);
         std::fs::create_dir_all(dir)?;
+
+        let mut file = open_private_leaf(&path, true)?;
 
         let mut resume = ResumeState::default();
         let mut valid = false;
-        if let Ok(f) = File::open(&path) {
-            let mut lines = utf8_lines(std::io::BufReader::new(f));
+        if file.metadata()?.len() > 0 {
+            // Read through a CLONE of the same descriptor, never a
+            // second open by path: `dup` cannot land on a different
+            // inode the way a re-open can. Sharing the file offset with
+            // the writer is safe here and only here - nothing else holds
+            // this `Journal` yet, so no write can interleave, and every
+            // write below is `O_APPEND` and ignores the cursor anyway.
+            let mut rd = file.try_clone()?;
+            rd.seek(std::io::SeekFrom::Start(0))?;
+            let mut lines = utf8_lines(std::io::BufReader::new(rd));
             if let Some(header) = lines.next()
                 && header.strip_prefix("nzbfast-journal v1 ") == Some(fp.as_str())
             {
@@ -417,17 +752,26 @@ impl Journal {
                 parse_lines(lines, &mut resume);
             }
         }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
         if !valid {
-            // Fresh or mismatched: restart the journal.
-            drop(file);
-            file = File::create(&path)?;
+            // Fresh or mismatched: restart the journal IN PLACE. The
+            // truncate is on the descriptor we already hold, so it can
+            // only ever reach the inode this call opened - see
+            // `truncate_leaf`, which is where the Windows half of "the
+            // descriptor we already hold" lives.
+            truncate_leaf(&file)?;
             writeln!(file, "nzbfast-journal v1 {fp}")?;
             resume = ResumeState::default();
         }
+        // X5-01: this generation's claim on the file. `remove` unlinks
+        // only while this is still the LAST `G` line, so a stale
+        // generation reaching its own retirement cannot unlink the
+        // journal a LIVE generation is still appending to - which cost
+        // the live run every record it had (`completed = {}` on the next
+        // open, every recorded article refetched) and, on Unix, went on
+        // silently appending to an unlinked inode nothing would ever
+        // read.
+        let generation = next_generation();
+        writeln!(file, "G {generation}")?;
         // The leading dot is invisible to Windows, where this file sits
         // in the user's own download folder looking like junk we forgot
         // to clean up. It is not junk - a failed job keeps it so a retry
@@ -444,6 +788,7 @@ impl Journal {
                     used_names: HashSet::new(),
                 }),
                 path,
+                generation,
             },
             resume,
         ))
@@ -473,6 +818,16 @@ impl Journal {
     /// `slot_file` is the slot's on-disk (name, size) when a writer
     /// exists; otherwise `name`/`size` (the yEnc header values) predict
     /// what a resume run will create.
+    ///
+    /// `crc` is X5-02's content commitment: the crc32 the post declared
+    /// over exactly this article's payload, which [`crate::yenc`] has
+    /// already verified against the decoded bytes. It costs nothing to
+    /// record - it is a number the decode already computed - and it is
+    /// the whole of what lets a resume tell bytes that ARRIVED from
+    /// bytes that merely have the right length. Pass `None` only where
+    /// no such number exists; the article then refetches on resume
+    /// rather than being trusted.
+    #[expect(clippy::too_many_arguments)]
     pub fn record_placed(
         &self,
         slot: usize,
@@ -481,8 +836,9 @@ impl Journal {
         name: &str,
         size: u64,
         frags: &[Frag],
+        crc: Option<u32>,
     ) {
-        self.record_letter('R', slot, id, slot_file, name, size, frags, None);
+        self.record_letter('R', slot, id, slot_file, name, size, frags, None, crc);
     }
 
     /// Record a plaintext-once placement: `R`'s grammar under the `D`
@@ -500,6 +856,7 @@ impl Journal {
         size: u64,
         frags: &[Frag],
         crypto_mask: &[bool],
+        crc: Option<u32>,
     ) {
         self.record_letter(
             'D',
@@ -510,6 +867,7 @@ impl Journal {
             size,
             frags,
             Some(crypto_mask),
+            crc,
         );
     }
 
@@ -524,6 +882,7 @@ impl Journal {
         size: u64,
         frags: &[Frag],
         crypto_mask: Option<&[bool]>,
+        crc: Option<u32>,
     ) {
         if frags.is_empty() {
             return;
@@ -569,9 +928,15 @@ impl Journal {
                 let (dest, dsize) = match slot_file {
                     Some((n, s)) => (n, s),
                     None => {
-                        let mut n = sanitize_filename(name);
+                        let mut n = sanitize_out_name(name);
                         if st.used_names.contains(&n) {
-                            n = format!("{slot:03}-{n}");
+                            // Capped at composition, and the record is
+                            // why: `parse_lines` runs `sanitize_out_name`
+                            // over this `S` destination again on load, so
+                            // a raw prefix on a name already at the cap
+                            // is re-spelled by the reader and the record
+                            // stops naming the file it describes.
+                            n = crate::disk::disambiguated_out_name(&n, slot, 0);
                         }
                         (n, size)
                     }
@@ -593,6 +958,20 @@ impl Journal {
                         i
                     }
                 });
+            }
+            // X5-02: the commitment rides in its OWN line directly
+            // ahead of the record it authenticates, and never as a
+            // fifth field of the fragment tail. Two reasons, both about
+            // what an OLDER binary does with it: a fragment gains a
+            // field and that parser refuses the whole record (its
+            // `nums.next().is_some()` arm), while a line it has never
+            // heard of falls through to the v1 arm as a message-id that
+            // can never match a real one - inert. Ahead of the record so
+            // ordering settles last-wins for free: `R`/`D` is what the
+            // parser keys on, and the commitment it takes is the one
+            // that arrived immediately before it.
+            if let Some(crc) = crc {
+                let _ = writeln!(out, "H {crc:08x} {id}");
             }
             let _ = write!(out, "{letter} {slot} ");
             let mut start = 0usize;
@@ -633,7 +1012,7 @@ impl Journal {
     /// `M`.
     pub fn record_materialized(&self, slot: usize, name: &str, size: u64) {
         use std::fmt::Write as _;
-        let dest = sanitize_filename(name);
+        let dest = sanitize_out_name(name);
         let mut st = self.state.lock_ok();
         let mut out = String::new();
         if !dest.is_empty() {
@@ -643,6 +1022,72 @@ impl Journal {
         }
         let _ = writeln!(out, "M {slot}");
         let _ = st.land(out.as_bytes());
+    }
+
+    /// Record how many of a slot's articles have declared each yEnc
+    /// name, for a slot whose articles DISAGREE about it.
+    ///
+    /// M4-70 decides a contested file's published name at settle, off
+    /// the whole post's majority (`nzbfast::get::yencname`), and it can
+    /// only count the articles THIS run decoded. A resume never refetches
+    /// what run 1 already placed, so without this the tally comes back
+    /// EMPTY: `contested_yenc_name` reads "every article agreed", the
+    /// re-decision never runs, and a decoy name that run 1's first
+    /// article latched stays on the disk for good. Crash after the decoy,
+    /// resume, finish - and smart filing and every *arr see `x.dat`.
+    ///
+    /// ONLY A CONTESTED SLOT IS EVER WRITTEN, which is what makes this
+    /// affordable: the caller asks the slot first, and the answer for the
+    /// ordinary post - every article of every file agreeing - is one
+    /// relaxed load and no line at all. A contested slot pays two lines
+    /// per article, against the `R` line it was already paying.
+    ///
+    /// LAST WINS PER `(slot, name)`, the same rule as `S`: each line
+    /// carries a RUNNING total rather than an increment, so a torn tail
+    /// costs at most the newest count of one name and never double-counts
+    /// a replayed one. A count that comes back one article short cannot
+    /// change a verdict that a whole-post majority was going to reach.
+    ///
+    /// NOT `sanitize_out_name`d, unlike every other name this grammar
+    /// carries. `S`/`E`/`K`/`T` name a FILE the restore has to find on
+    /// disk; this names what an ARTICLE DECLARED, which is evidence and
+    /// not a path - the settle tier sanitizes it at the moment it
+    /// compares it with what is on disk (`nzbfast::get::yencname`), and
+    /// sanitizing it here would record a different string from the one
+    /// the un-crashed run counts votes for.
+    ///
+    /// Growth is bounded by the ARTICLE count and not by how many names
+    /// a hostile poster spends: the caller hands back at most two
+    /// entries per article whatever the tally holds, so a slot that
+    /// disagrees costs 2 lines per article against the `R` line it was
+    /// already writing, and a poster who spends one name per article
+    /// still gets no rename out of it.
+    ///
+    /// An older binary reading these lines takes them for unknown v1
+    /// message-ids that never match a real bracketed id, so it simply
+    /// refetches - safe in both directions, as the module header
+    /// promises for every line shape after the header.
+    pub fn record_name_votes(&self, slot: usize, votes: &[(String, u32)]) {
+        if votes.is_empty() {
+            return;
+        }
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for (name, n) in votes {
+            // A yEnc header name is the poster's own bytes and rides
+            // LAST for that reason - it may hold spaces, and the parser
+            // splits three ways. A name carrying a newline would end the
+            // record early, so it is dropped rather than written: the
+            // cost is one uncounted vote in a tally the majority decides.
+            if name.is_empty() || name.contains(['\n', '\r']) {
+                continue;
+            }
+            let _ = writeln!(out, "V {slot} {n} {name}");
+        }
+        if out.is_empty() {
+            return;
+        }
+        let _ = self.state.lock_ok().land(out.as_bytes());
     }
 
     /// Write the drained [`CryptoJournalEvent`]s as `E`/`K`/`T` lines.
@@ -690,10 +1135,61 @@ impl Journal {
     }
 
     /// Download finished and verified - the journal has served its purpose.
+    ///
+    /// **Only while the journal is still THIS generation's** (X5-01,
+    /// 30 Aug 2026). The unconditional path-based `remove_file` this
+    /// replaces let a STALE generation, reaching its own successful
+    /// retirement, unlink the journal a LIVE generation was still
+    /// appending to. Measured: the next open then parsed
+    /// `completed = {}` and every recorded article went back on the
+    /// wire, and on Unix the live generation went on writing into an
+    /// unlinked inode nothing would ever read - so the loss was silent
+    /// at both ends.
+    ///
+    /// A fence after the fetch does not close that, which is why the
+    /// claim is written INTO the file: the two generations are two
+    /// handles that may legitimately overlap, so the question is not
+    /// "has the fetch ended" but "is the journal on disk still mine".
+    /// The last `G` line answers it, and `path_still_names` answers the
+    /// narrower one beside it - that this NAME is still that inode.
+    ///
+    /// Not retiring is always safe: the journal is an optimisation over
+    /// a refetch, so a lingering one is at worst a file the next run
+    /// resumes correctly from and the live generation retires when it
+    /// finishes.
     pub fn remove(self) {
         // Nothing queued is worth landing in a file about to be unlinked.
         self.state.lock_ok().pending.clear();
+        if !self.is_current_generation() {
+            return;
+        }
         let _ = std::fs::remove_file(&self.path);
+    }
+
+    /// Whether the file this journal holds open is still the one the
+    /// path names AND still carries this generation's `G` line last.
+    ///
+    /// Read through our OWN descriptor, so the answer is about the inode
+    /// we have been writing to and never about whatever the path
+    /// resolves to now.
+    fn is_current_generation(&self) -> bool {
+        let st = self.state.lock_ok();
+        if !path_still_names(&st.file, &self.path) {
+            return false;
+        }
+        let Ok(mut rd) = st.file.try_clone() else {
+            return false;
+        };
+        if rd.seek(std::io::SeekFrom::Start(0)).is_err() {
+            return false;
+        }
+        let mut last: Option<String> = None;
+        for line in utf8_lines(std::io::BufReader::new(rd)) {
+            if let Some(g) = line.strip_prefix("G ") {
+                last = Some(g.to_string());
+            }
+        }
+        last.as_deref() == Some(self.generation.as_str())
     }
 }
 
@@ -743,7 +1239,13 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
     // appends its own F table (reusing indexes) and its R lines must bind
     // to ITS definitions, so fidx→name is resolved per line, not at the end.
     let mut ftable: HashMap<usize, String> = HashMap::new();
-    let mut placed: HashMap<String, (usize, Vec<Frag>, Vec<bool>, bool)> = HashMap::new();
+    let mut placed: HashMap<String, (usize, Vec<Frag>, Vec<bool>, bool, Option<u32>)> =
+        HashMap::new();
+    // X5-02 commitments seen so far, by article id. An `H` line always
+    // rides directly ahead of the record it authenticates, so the entry
+    // standing when an `R`/`D` is parsed is that record's own - and a
+    // re-record (last R/D wins) brings its own `H` with it.
+    let mut digests: HashMap<String, u32> = HashMap::new();
     let mut slot_meta: HashMap<usize, (String, u64)> = HashMap::new();
     for line in lines {
         if line.is_empty() {
@@ -773,7 +1275,7 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
                         None => continue, // malformed check: drop the record
                     },
                 };
-                let name = sanitize_filename(name);
+                let name = sanitize_out_name(name);
                 let m = resume.crypto_files.entry(name).or_default();
                 (m.salt, m.lg2, m.iv, m.unp, m.check) = (salt, lg2, iv, unp, check);
             }
@@ -788,7 +1290,7 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
             {
                 resume
                     .crypto_files
-                    .entry(sanitize_filename(name))
+                    .entry(sanitize_out_name(name))
                     .or_default()
                     .checkpoints
                     .insert(off, block);
@@ -809,10 +1311,37 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
                 if let Some(pad) = pad {
                     resume
                         .crypto_files
-                        .entry(sanitize_filename(name))
+                        .entry(sanitize_out_name(name))
                         .or_default()
                         .pad = Some(pad);
                 }
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("V ") {
+            // V <slot> <votes> <yenc-name>. Last wins per (slot, name):
+            // every line carries a running total, so a slot re-recorded
+            // by a later run overwrites rather than accumulating.
+            let mut it = rest.splitn(3, ' ');
+            if let (Some(slot), Some(votes), Some(name)) = (it.next(), it.next(), it.next())
+                && let (Ok(slot), Ok(votes)) = (slot.parse::<usize>(), votes.parse::<u32>())
+                && !name.is_empty()
+            {
+                let tally = resume.name_votes.entry(slot).or_default();
+                match tally.iter_mut().find(|(n, _)| n == name) {
+                    Some(e) => e.1 = votes,
+                    None => tally.push((name.to_string(), votes)),
+                }
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("H ") {
+            // H <crc32-hex> <message-id>
+            if let Some((hex, id)) = rest.split_once(' ')
+                && !id.is_empty()
+                && let Ok(crc) = u32::from_str_radix(hex, 16)
+            {
+                digests.insert(id.to_string(), crc);
             }
             continue;
         }
@@ -821,7 +1350,7 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
                 && let Ok(idx) = idx.parse::<usize>()
                 && !name.is_empty()
             {
-                ftable.insert(idx, sanitize_filename(name));
+                ftable.insert(idx, sanitize_out_name(name));
             }
         } else if let Some(rest) = line.strip_prefix("S ") {
             let mut it = rest.splitn(3, ' ');
@@ -830,7 +1359,7 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
                 && !name.is_empty()
             {
                 // Last S wins - a later run knows the actual file.
-                slot_meta.insert(slot, (sanitize_filename(name), size));
+                slot_meta.insert(slot, (sanitize_out_name(name), size));
             }
         } else if let Some((rest, crypto)) = line
             .strip_prefix("R ")
@@ -899,7 +1428,8 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
             }
             if ok && !frags.is_empty() {
                 // Last R/D wins (a failed restore refetches, re-records).
-                placed.insert(id.to_string(), (slot, frags, crypto_frag, crypto));
+                let crc = digests.get(id).copied();
+                placed.insert(id.to_string(), (slot, frags, crypto_frag, crypto, crc));
             }
         } else if let Some(name) = line.strip_prefix("X ") {
             // Claim retired: from here on this file is no longer the
@@ -919,8 +1449,16 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
             if name.is_empty() {
                 continue;
             }
-            let name = sanitize_filename(name);
-            placed.retain(|_, (_, frags, _, _)| !frags.iter().any(|f| f.file == name));
+            let name = sanitize_out_name(name);
+            placed.retain(|_, (_, frags, _, _, _)| !frags.iter().any(|f| f.file == name));
+        } else if line.starts_with("G ") {
+            // X5-01 generation claim: a fact about WHO owns the journal,
+            // never about an article. Ignored by the resume, and named
+            // here rather than left to fall through - the `else` arm
+            // below takes an unknown line for a v1 message-id, and a
+            // `completed` set carrying `G <token>` is a lie about what
+            // arrived even if nothing ever matches it.
+            continue;
         } else if let Some(rest) = line.strip_prefix("M ") {
             // Slot demoted to a materialized volume: everything recorded
             // for it SO FAR also sits at final offsets in the slot's own
@@ -938,7 +1476,7 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
             let Some((name, _)) = slot_meta.get(&mslot) else {
                 continue; // no S yet: nothing recorded, nothing to rewrite
             };
-            for (slot, frags, crypto_frag, crypto) in placed.values_mut() {
+            for (slot, frags, crypto_frag, crypto, _) in placed.values_mut() {
                 if *slot != mslot {
                     continue;
                 }
@@ -953,7 +1491,7 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
             resume.completed.insert(line);
         }
     }
-    for (id, (slot, frags, crypto_frag, crypto)) in placed {
+    for (id, (slot, frags, crypto_frag, crypto, crc)) in placed {
         let Some((name, size)) = slot_meta.get(&slot) else {
             continue;
         };
@@ -971,6 +1509,7 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
                 frags,
                 crypto_frag,
                 crypto,
+                crc,
             });
     }
 }
@@ -983,1182 +1522,20 @@ fn parse_lines(lines: impl Iterator<Item = String>, resume: &mut ResumeState) {
 // callers in nzbfast, the sibling extract tests and this file's own
 // test module.
 mod restore;
+
+/// X5-01/02/04/05: the journal's identity invariants - bound to an
+/// inode rather than to a path, and admitting only bytes it can
+/// authenticate. Its own file because the pins are a family and this
+/// one is already the workspace's largest module.
+#[cfg(test)]
+mod identity_tests;
 pub use self::restore::{
     PARTIAL_SUFFIX, quarantine_partials, quarantine_paths, restore, restore_for,
     unquarantine_partials,
 };
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// [`Journal::peek`] is what the demotion watchdog reads (TODO
-    /// 309(d)), and the whole of its value is that it agrees with
-    /// [`Journal::open`] without WRITING - `open` creates the file,
-    /// opens it for append and truncates it on a fingerprint mismatch,
-    /// none of which may happen to a journal a running job still holds.
-    ///
-    /// So the three claims: it agrees on `placement_bytes`, it leaves
-    /// the file byte-identical, and it refuses a file that is not a
-    /// journal rather than parsing it as an empty one - which is what
-    /// stops a stray file in an out_dir reading as "nothing restored".
-    #[test]
-    fn peek_agrees_with_open_and_writes_nothing() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-peek-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(Journal::peek(&dir).is_none(), "no journal, no answer");
-
-        let (j, _) = Journal::open(&dir, b"<nzb/>").unwrap();
-        for i in 0..3u64 {
-            j.record_placed(
-                0,
-                &format!("<a{i}@x>"),
-                None,
-                "vol.part01.rar",
-                3_000,
-                &[Frag::identity("vol.part01.rar", i * 1_000, 1_000)],
-            );
-        }
-        j.flush();
-        let path = dir.join(".nzbfast.journal");
-        let before = std::fs::read(&path).unwrap();
-
-        let peeked = Journal::peek(&dir).expect("a journal we just wrote");
-        assert_eq!(peeked.placement_bytes(), 3_000);
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            before,
-            "a peek must not touch the file the running job is appending to"
-        );
-        // And it agrees with the reader the rerun itself will use.
-        drop(j);
-        let (_j2, resume) = Journal::open(&dir, b"<nzb/>").unwrap();
-        assert_eq!(resume.placement_bytes(), peeked.placement_bytes());
-
-        // Not a journal: refused, not read as empty.
-        std::fs::write(&path, b"hello\nR 0 <a@x>\n").unwrap();
-        assert!(Journal::peek(&dir).is_none(), "no v1 header, no answer");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn journal_roundtrip_and_fingerprint() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let nzb = b"<nzb>fake</nzb>";
-        let (j, resume) = Journal::open(&dir, nzb).unwrap();
-        assert!(resume.completed.is_empty());
-        j.record("<a@x>");
-        j.record("<b@x>");
-        drop(j);
-
-        // Same NZB: completed ids come back.
-        let (j2, resume) = Journal::open(&dir, nzb).unwrap();
-        assert_eq!(resume.completed.len(), 2);
-        assert!(resume.completed.contains("<a@x>"));
-        j2.record("<c@x>");
-        drop(j2);
-        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
-        assert_eq!(resume.completed.len(), 3);
-
-        // Different NZB: journal resets.
-        let (_j4, resume) = Journal::open(&dir, b"<nzb>other</nzb>").unwrap();
-        assert!(resume.completed.is_empty());
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// TODO 309(a): `largest_slot_bytes` reports the widest slot's FULL
-    /// recorded size, and `placement_bytes` the sum of the fragments -
-    /// two numbers a resumed run needs separately, because the replay's
-    /// held bytes track the first and the admission gate used to be
-    /// written against only the second.
-    #[test]
-    fn the_widest_slot_is_its_recorded_size_and_not_its_restored_bytes() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-wide-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let nzb = b"<nzb>wide</nzb>";
-
-        let (j, resume) = Journal::open(&dir, nzb).unwrap();
-        assert_eq!(resume.placement_bytes(), 0);
-        assert_eq!(resume.largest_slot_bytes(), 0, "no placements, no slots");
-
-        // Slot 0 is a big volume with a SMALL restored fragment; slot 1 a
-        // small volume that happens to be fully restored. The sum of the
-        // fragments makes slot 1 look like the larger of the two, and it
-        // is the one that can hold less.
-        j.record_placed(
-            0,
-            "<a@x>",
-            None,
-            "big.part01.rar",
-            256_000_000,
-            &[Frag::identity("big.part01.rar", 0, 1_000)],
-        );
-        j.record_placed(
-            1,
-            "<b@x>",
-            None,
-            "small.part01.rar",
-            8_000_000,
-            &[Frag::identity("small.part01.rar", 0, 8_000)],
-        );
-        drop(j);
-
-        let (_j, resume) = Journal::open(&dir, nzb).unwrap();
-        assert_eq!(resume.placement_bytes(), 9_000);
-        assert_eq!(
-            resume.largest_slot_bytes(),
-            256_000_000,
-            "the widest slot is the 256 MB volume, however little of it is on disk"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// One record torn mid-multibyte (ENOSPC, power loss) must not hide
-    /// the valid records appended after it. `lines()` +
-    /// `map_while(Result::ok)` stopped permanently at the first
-    /// invalid-UTF-8 line, so every later completion was re-fetched on
-    /// every retry, forever.
-    #[test]
-    fn a_torn_journal_line_does_not_hide_the_records_after_it() {
-        // NOT "-torn-": `malformed_and_torn_lines_are_ignored` already
-        // owns that directory, and two tests sharing one journal dir in
-        // one process clobber each other's records (found 27 Aug 2026
-        // as a parallel-run flake, len 3 vs 2).
-        let dir =
-            std::env::temp_dir().join(format!("nzbfast-journal-tornafter-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let nzb = b"<nzb>torn</nzb>";
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record("<a@x>");
-        drop(j);
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(dir.join(".nzbfast.journal"))
-                .unwrap();
-            f.write_all(b"F 0 \xff\xfe torn\n").unwrap();
-        }
-        // This open must still see <a@x>, and the record IT appends
-        // lands after the torn line.
-        let (j2, resume) = Journal::open(&dir, nzb).unwrap();
-        assert!(resume.completed.contains("<a@x>"));
-        j2.record("<c@x>");
-        drop(j2);
-
-        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
-        assert!(
-            resume.completed.contains("<c@x>"),
-            "a record appended after a torn line must restore: {:?}",
-            resume.completed
-        );
-        assert_eq!(resume.completed.len(), 2);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn qdir(name: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("nzbfast-quarantine-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    /// The round trip that makes the rename free: a failed job's payload
-    /// goes aside under a name nothing imports, and the next attempt
-    /// gets the ORIGINAL name back with the bytes untouched. If either
-    /// half broke, a retry would refetch the whole post instead of the
-    /// one article it is missing.
-    #[test]
-    fn a_quarantined_partial_comes_back_under_its_own_name_with_its_bytes() {
-        let d = qdir("roundtrip");
-        std::fs::write(d.join("movie.mkv"), b"holed payload").unwrap();
-        let (done, failed) = quarantine_partials(&d, &["movie.mkv".to_string()]);
-        assert_eq!(done, vec!["movie.mkv".to_string()]);
-        assert!(failed.is_empty());
-        assert!(
-            !d.join("movie.mkv").exists(),
-            "the payload name must not survive a failed job"
-        );
-        assert!(d.join(format!("movie.mkv{PARTIAL_SUFFIX}")).exists());
-
-        assert_eq!(unquarantine_partials(&d), vec!["movie.mkv".to_string()]);
-        assert_eq!(
-            std::fs::read(d.join("movie.mkv")).unwrap(),
-            b"holed payload",
-            "the bytes are the resume state - they must survive the round trip"
-        );
-        assert!(!d.join(format!("movie.mkv{PARTIAL_SUFFIX}")).exists());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// Volume files and every other resident are none of this pass's
-    /// business: they are the classic resume target and nothing mistakes
-    /// a holed `.part02.rar` for a finished download. Only the names the
-    /// caller passes - the direct-extracted payload - move.
-    #[test]
-    fn quarantine_touches_only_the_named_payload() {
-        let d = qdir("scope");
-        for f in ["a.part01.rar", "a.par2", ".nzbfast.journal", "inner.mkv"] {
-            std::fs::write(d.join(f), b"x").unwrap();
-        }
-        let (done, _) = quarantine_partials(&d, &["inner.mkv".to_string()]);
-        assert_eq!(done, vec!["inner.mkv".to_string()]);
-        for f in ["a.part01.rar", "a.par2", ".nzbfast.journal"] {
-            assert!(d.join(f).exists(), "{f} must be left exactly where it is");
-        }
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// A payload the extractor reported but never wrote (a group that
-    /// fell back, a name that lost a race) is not an error: there is
-    /// nothing on disk to mislead anyone.
-    #[test]
-    fn a_payload_that_was_never_written_is_not_a_failure() {
-        let d = qdir("absent");
-        let (done, failed) = quarantine_partials(&d, &["never-written.mkv".to_string()]);
-        assert!(done.is_empty() && failed.is_empty());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// A traversal name cannot reach outside the output directory -
-    /// the same rule `drop_spared_metadata` relies on, and it matters
-    /// more here because this end RENAMES rather than deletes.
-    #[test]
-    fn a_traversal_payload_name_stays_inside_the_out_dir() {
-        let parent = qdir("traverse");
-        let out = parent.join("out");
-        std::fs::create_dir_all(&out).unwrap();
-        std::fs::write(parent.join("evil.mkv"), b"keep me").unwrap();
-        quarantine_partials(&out, &["../evil.mkv".to_string()]);
-        assert!(
-            parent.join("evil.mkv").exists(),
-            "sanitize_filename must keep the rename inside the output dir"
-        );
-        let _ = std::fs::remove_dir_all(&parent);
-    }
-
-    /// The live file wins. If something else already owns the base name
-    /// - a re-add into an occupied directory, a copy the user made -
-    /// the quarantined bytes must NOT clobber it, and must not vanish
-    /// either: guessing between two candidates is how a resume gets
-    /// seeded with the wrong bytes.
-    #[test]
-    fn unquarantine_never_clobbers_a_file_that_already_holds_the_name() {
-        let d = qdir("clobber");
-        std::fs::write(d.join(format!("m.mkv{PARTIAL_SUFFIX}")), b"old").unwrap();
-        std::fs::write(d.join("m.mkv"), b"live").unwrap();
-        assert!(unquarantine_partials(&d).is_empty());
-        assert_eq!(std::fs::read(d.join("m.mkv")).unwrap(), b"live");
-        assert!(
-            d.join(format!("m.mkv{PARTIAL_SUFFIX}")).exists(),
-            "the loser is kept, not deleted"
-        );
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// An ordinary directory has nothing to undo, and a bare suffix with
-    /// no base name in front of it is not ours to rename to "".
-    #[test]
-    fn unquarantine_is_a_no_op_without_quarantined_files() {
-        let d = qdir("noop");
-        std::fs::write(d.join("a.mkv"), b"x").unwrap();
-        std::fs::write(d.join(PARTIAL_SUFFIX), b"x").unwrap();
-        assert!(unquarantine_partials(&d).is_empty());
-        assert!(d.join("a.mkv").exists() && d.join(PARTIAL_SUFFIX).exists());
-        assert!(unquarantine_partials(Path::new("/nonexistent/nzbfast-q")).is_empty());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// §94 A: `restore_for(.., materialize_volumes = false)` must not
-    /// write the volume file at all, and must say where each span's
-    /// bytes actually are so the replay can read them from there.
-    ///
-    /// This is the whole disk saving. Materialising first writes a full
-    /// extra copy of the resumed fraction and the replay then reads it
-    /// back - the difference between a resumed job costing 2.02x
-    /// payload of device I/O and 1.5x. If this test ever passes with a
-    /// volume file on disk, that saving has been quietly given back.
-    #[test]
-    fn a_no_materialise_restore_writes_no_volume_and_names_the_real_source() {
-        let dir = qdir("nomat");
-        let inner: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(dir.join("inner.bin"), &inner).unwrap();
-        let plain: Vec<u8> = (0..30_000u32).map(|i| (i % 13) as u8).collect();
-        std::fs::write(dir.join("plain.bin"), &plain).unwrap();
-
-        let nzb = b"<nzb>nomat</nzb>";
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        // Direct-extracted: volume bytes [5000,15000) live in inner.bin
-        // at [10000,20000). Under materialisation this is the copy.
-        j.record_placed(
-            0,
-            "<vol@x>",
-            None,
-            "vol.part1.rar",
-            25_000,
-            &[frag("inner.bin", 10_000, 5_000, 10_000)],
-        );
-        // Identity: the bytes never moved, so this one reports its own
-        // file either way - which is also every PAR2 recovery volume,
-        // and why the issue-#14 resume sniff still finds them on disk.
-        j.record_placed(
-            1,
-            "<pl@x>",
-            Some(("plain.bin".to_string(), 30_000)),
-            "ignored",
-            0,
-            &[frag("plain.bin", 2_000, 2_000, 4_000)],
-        );
-        // A source that is too SHORT for its span must still fail its
-        // article. The read happens later under no-materialise, so an
-        // article admitted here would never refetch and the replay
-        // would simply lose those bytes.
-        j.record_placed(
-            2,
-            "<short@x>",
-            None,
-            "short.rar",
-            9_000,
-            &[frag("plain.bin", 29_000, 0, 8_000)],
-        );
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore_for(&dir, &resume, None, false);
-        assert!(restored.ids.contains("<vol@x>"));
-        assert!(restored.ids.contains("<pl@x>"));
-        assert!(
-            !restored.ids.contains("<short@x>"),
-            "a source too short for its span must drop its article"
-        );
-        assert!(
-            !dir.join("vol.part1.rar").exists(),
-            "the volume was materialised anyway - the replay's saving is gone"
-        );
-
-        let vol = restored.seeds.iter().find(|s| s.slot == 0).unwrap();
-        assert_eq!(vol.spans, [(5_000, 10_000)]);
-        assert_eq!(
-            vol.sources
-                .iter()
-                .map(|(f, o)| (&**f, *o))
-                .collect::<Vec<_>>(),
-            [("inner.bin", 10_000)],
-            "the span must name the file its bytes are really in"
-        );
-        let pl = restored.seeds.iter().find(|s| s.slot == 1).unwrap();
-        assert_eq!(
-            pl.sources
-                .iter()
-                .map(|(f, o)| (&**f, *o))
-                .collect::<Vec<_>>(),
-            [("plain.bin", 2_000)],
-            "an identity span stays in its own file at its own offset"
-        );
-
-        // 27 Aug 2026 sweep F1: a §293 donation lands AFTER the
-        // map-shape restore and forces the run onto the adopt shape,
-        // whose seeds assert their spans are in the volume files - so
-        // `get()` re-runs the restore MATERIALISING on the SAME state
-        // the no-materialise pass already walked. Pin what that re-run
-        // relies on: same admissions, and the volume bytes really land.
-        let redone = restore_for(&dir, &resume, None, true);
-        assert_eq!(
-            redone.ids, restored.ids,
-            "the re-run admits the same articles"
-        );
-        assert_eq!(
-            std::fs::read(dir.join("vol.part1.rar")).unwrap()[5_000..15_000],
-            inner[10_000..20_000],
-            "the re-run put the span's bytes into the volume"
-        );
-        assert!(
-            redone.seeds.iter().all(|s| s.sources.is_empty()),
-            "re-run seeds are volume-resident, exactly what the adopt path asserts"
-        );
-
-        // And the twin: with materialisation ON, nothing changes from
-        // what every earlier caller has always got.
-        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
-        let mat = restore(&dir, &resume, None);
-        assert!(dir.join("vol.part1.rar").exists(), "the volume is rebuilt");
-        assert_eq!(
-            std::fs::read(dir.join("vol.part1.rar")).unwrap()[5_000..15_000],
-            inner[10_000..20_000],
-            "and holds the bytes the placement points at"
-        );
-        assert!(
-            mat.seeds.iter().all(|s| s.sources.is_empty()),
-            "materialised seeds carry no source list - every span is in the volume"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// TODO 309(b), 28 Aug 2026: a refused article is COUNTED, so the
-    /// resume can say the bytes went back on the wire.
-    ///
-    /// The refusal itself is right and is pinned above; what was wrong
-    /// is that it was invisible. `get/plan.rs` reports what it
-    /// restored, so an out-dir something outside nzbfast had moved,
-    /// truncated or deleted resumed looking exactly like an ordinary
-    /// resume with less on disk.
-    ///
-    /// Both directions, and the zero side is the one that matters: a
-    /// counter that fires on a clean resume would put a "your files
-    /// moved" warning in front of every user who ever pauses, which is
-    /// worse than the silence it replaces.
-    #[test]
-    fn a_refused_article_is_counted_so_the_resume_can_say_the_bytes_refetch() {
-        let dir = qdir("dropcount");
-        let plain: Vec<u8> = (0..30_000u32).map(|i| (i % 13) as u8).collect();
-        std::fs::write(dir.join("plain.bin"), &plain).unwrap();
-        let nzb = b"<nzb>dropcount</nzb>";
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        // Admitted: an identity span wholly inside the file.
-        j.record_placed(
-            0,
-            "<ok@x>",
-            Some(("plain.bin".to_string(), 30_000)),
-            "ignored",
-            0,
-            &[frag("plain.bin", 2_000, 2_000, 4_000)],
-        );
-        drop(j);
-        let (_j, resume) = Journal::open(&dir, nzb).unwrap();
-        let clean = restore_for(&dir, &resume, None, false);
-        assert!(clean.ids.contains("<ok@x>"));
-        assert_eq!(
-            clean.dropped_source,
-            (0, 0),
-            "an ordinary resume must report nothing dropped, or every pause warns"
-        );
-        assert_eq!(clean.dropped_crypto, 0);
-
-        // Now the shape the disclosure exists for: a second article
-        // whose bytes are past the end of the file they were written
-        // into. Two fragments, one of them fine, because an article is
-        // admitted only whole - the honest figure is BOTH fragments,
-        // since the whole article refetches.
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_placed(
-            1,
-            "<gone@x>",
-            None,
-            "vol.part1.rar",
-            40_000,
-            &[
-                frag("plain.bin", 1_000, 0, 500),
-                frag("plain.bin", 29_000, 500, 8_000),
-            ],
-        );
-        drop(j);
-        let (_j, resume) = Journal::open(&dir, nzb).unwrap();
-        let dropped = restore_for(&dir, &resume, None, false);
-        assert!(
-            dropped.ids.contains("<ok@x>") && !dropped.ids.contains("<gone@x>"),
-            "the readable article still restores - one bad article is not a failed resume"
-        );
-        assert_eq!(
-            dropped.dropped_source,
-            (1, 8_500),
-            "the refused article is counted whole, both fragments"
-        );
-        assert_eq!(
-            dropped.dropped_crypto, 0,
-            "a source that moved is not a password problem - the two causes stay apart"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn frag(file: &str, file_off: u64, vol_off: u64, len: u64) -> Frag {
-        Frag {
-            file: file.to_string(),
-            file_off,
-            vol_off,
-            len,
-        }
-    }
-
-    /// N5 moved record composition out of the shared lock into reused
-    /// thread-local buffers. The grammar is a compatibility surface (an
-    /// old binary resumes from these bytes), so pin the exact lines: S
-    /// before any placement of its slot, every F before the first line
-    /// that references its index, one record per line.
-    #[test]
-    fn record_letter_emits_the_exact_line_grammar() {
-        let dir =
-            std::env::temp_dir().join(format!("nzbfast-journal-golden-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let (j, _) = Journal::open(&dir, b"<nzb>golden</nzb>").unwrap();
-        j.record_placed(
-            3,
-            "<a@x>",
-            None,
-            "vol.rar",
-            100,
-            &[frag("in.bin", 1, 2, 3), frag("in2.bin", 40, 50, 60)],
-        );
-        j.record_placed_crypto(
-            3,
-            "<b@x>",
-            None,
-            "vol.rar",
-            100,
-            &[frag("in.bin", 7, 8, 9)],
-            &[false],
-        );
-        j.record("<c@x>");
-        let path = j.path.clone();
-        drop(j);
-        let text = std::fs::read_to_string(path).unwrap();
-        let mut lines = text.lines();
-        assert!(lines.next().unwrap().starts_with("nzbfast-journal v1 "));
-        assert_eq!(lines.next(), Some("S 3 100 vol.rar"));
-        assert_eq!(lines.next(), Some("F 0 in.bin"));
-        assert_eq!(lines.next(), Some("F 1 in2.bin"));
-        assert_eq!(lines.next(), Some("R 3 0:1:2:3,1:40:50:60 <a@x>"));
-        assert_eq!(lines.next(), Some("D 3 0:7:8:9:0 <b@x>"));
-        assert_eq!(lines.next(), Some("<c@x>"));
-        assert_eq!(lines.next(), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn placement_roundtrip_restore_and_copyback() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-v2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // "Run 1": inner.bin carries a direct-extracted article's bytes at
-        // a translated offset; plain.bin holds an identity article.
-        let inner: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(dir.join("inner.bin"), &inner).unwrap();
-        let plain: Vec<u8> = (0..30_000u32).map(|i| (i % 13) as u8).collect();
-        std::fs::write(dir.join("plain.bin"), &plain).unwrap();
-
-        let nzb = b"<nzb>v2</nzb>";
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        // Direct-extracted: volume bytes [5000, 15000) live in inner.bin
-        // at [10000, 20000).
-        j.record_placed(
-            0,
-            "<vol@x>",
-            None,
-            "vol.part1.rar",
-            25_000,
-            &[frag("inner.bin", 10_000, 5_000, 10_000)],
-        );
-        // Identity (plain slot, writer existed).
-        j.record_placed(
-            1,
-            "<pl@x>",
-            Some(("plain.bin".to_string(), 30_000)),
-            "ignored",
-            0,
-            &[frag("plain.bin", 2_000, 2_000, 4_000)],
-        );
-        // Fragment pointing at a file that will not exist → must drop.
-        j.record_placed(
-            2,
-            "<gone@x>",
-            None,
-            "ghost.rar",
-            9_000,
-            &[frag("deleted.bin", 0, 0, 100)],
-        );
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        assert_eq!(resume.slots.len(), 3);
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            restored.ids.contains("<vol@x>"),
-            "copy-back article restored"
-        );
-        assert!(restored.ids.contains("<pl@x>"), "identity article restored");
-        assert!(
-            !restored.ids.contains("<gone@x>"),
-            "missing source must drop"
-        );
-
-        // The copied bytes really moved: vol.part1.rar[5000..15000] ==
-        // inner.bin[10000..20000], and the file spans the recorded size.
-        let vol = std::fs::read(dir.join("vol.part1.rar")).unwrap();
-        assert_eq!(vol.len(), 25_000);
-        assert_eq!(&vol[5_000..15_000], &inner[10_000..20_000]);
-
-        let seed = restored.seeds.iter().find(|s| s.slot == 0).unwrap();
-        assert_eq!(seed.name, "vol.part1.rar");
-        assert_eq!(seed.spans, vec![(5_000, 10_000)]);
-        // Identity slot seeds too (its spans are trusted in place).
-        assert!(restored.seeds.iter().any(|s| s.slot == 1));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The materialized-volume gap, measured 13 Aug 2026: a job whose
-    /// direct extraction fell back to volumes-on-disk left complete
-    /// volume files in the output directory, but its R records named the
-    /// inner files the fallback had just deleted - so a retry refetched
-    /// the ENTIRE post. The `M` line records that the fallback put those
-    /// bytes at final offsets in the volume file, and parse rewrites the
-    /// slot's placements to identity form.
-    #[test]
-    fn materialized_slot_restores_placements_as_identity() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-m-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>mat</nzb>";
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        // Two direct-extracted articles whose fragments name an inner
-        // file; a third on a slot that never demotes.
-        j.record_placed(
-            0,
-            "<a@x>",
-            None,
-            "vol.part01.rar",
-            20_000,
-            &[frag("inner.bin", 7_000, 3_000, 5_000)],
-        );
-        j.record_placed(
-            0,
-            "<b@x>",
-            None,
-            "vol.part01.rar",
-            20_000,
-            &[frag("inner.bin", 12_000, 8_000, 5_000)],
-        );
-        j.record_placed(
-            1,
-            "<c@x>",
-            None,
-            "vol.part02.rar",
-            20_000,
-            &[frag("inner.bin", 0, 0, 100)],
-        );
-        // The demote: slot 0's bytes reconstructed into the volume file,
-        // inner.bin deleted right after (so it does NOT exist here).
-        j.record_materialized(0, "vol.part01.rar", 20_000);
-        std::fs::write(dir.join("vol.part01.rar"), vec![0xAAu8; 20_000]).unwrap();
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            restored.ids.contains("<a@x>") && restored.ids.contains("<b@x>"),
-            "materialized slot's articles restore as identity, no inner file needed"
-        );
-        assert!(
-            !restored.ids.contains("<c@x>"),
-            "a slot that never demoted still needs its copy source"
-        );
-        let seed = restored.seeds.iter().find(|s| s.slot == 0).unwrap();
-        assert_eq!(seed.name, "vol.part01.rar");
-        let mut spans = seed.spans.clone();
-        spans.sort();
-        assert_eq!(spans, vec![(3_000, 5_000), (8_000, 5_000)]);
-        // Identity means trusted in place: the volume's bytes are untouched.
-        assert_eq!(
-            std::fs::read(dir.join("vol.part01.rar")).unwrap(),
-            vec![0xAAu8; 20_000]
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The rewrite is positional, mirroring `X`: a record appended after
-    /// the `M` line describes the file as it is now and is NOT rewritten,
-    /// and an `X` retiring the volume file after the `M` drops the
-    /// rewritten placements (which now name it).
-    /// Codex sweep D, 13 Aug 2026: a PAR2 report renames a writerless
-    /// slot after its `S` line landed, and the volume materializes
-    /// under the VERIFIED name. Replay must rewrite the slot's
-    /// placements onto the file that exists - the stale posted name
-    /// restored nothing and the retry refetched the whole post.
-    #[test]
-    fn a_materialized_slot_renamed_after_its_s_line_restores_under_the_new_name() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-mren-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>matren</nzb>";
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        // Recorded under the obfuscated posted name…
-        j.record_placed(
-            0,
-            "<a@x>",
-            None,
-            "0Bf3qZlM8kTn4dWx",
-            20_000,
-            &[frag("inner.bin", 7_000, 3_000, 5_000)],
-        );
-        // …renamed from a PAR2 report while still writerless, then
-        // materialized under that verified name.
-        j.record_materialized(0, "verified.part01.rar", 20_000);
-        std::fs::write(dir.join("verified.part01.rar"), vec![0xAAu8; 20_000]).unwrap();
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            restored.ids.contains("<a@x>"),
-            "the article is on disk under the verified name"
-        );
-        let seed = restored.seeds.iter().find(|s| s.slot == 0).unwrap();
-        assert_eq!(seed.name, "verified.part01.rar");
-        assert_eq!(seed.spans, vec![(3_000, 5_000)]);
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Codex sweep 13 Aug R3: the reverse ordering - the slot
-    /// MATERIALIZES under its posted name, and the PAR2 verify renames
-    /// it afterwards. The extractor re-fires the materialized hook on
-    /// that rename, which lands here as a second `S new-name` + `M`
-    /// pair: last-S-wins retargets the destination and the positional
-    /// rewrite carries every earlier placement onto the file that now
-    /// exists. Replay against a directory holding ONLY the verified
-    /// name must restore every placement - it used to find nothing and
-    /// refetch the whole post.
-    #[test]
-    fn a_rename_after_materialize_restores_under_the_new_name() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-renm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>renafter</nzb>";
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        // Placed under the obfuscated posted name, demoted under it...
-        j.record_placed(
-            0,
-            "<a@x>",
-            None,
-            "0Bf3qZlM8kTn4dWx",
-            20_000,
-            &[frag("inner.bin", 7_000, 3_000, 5_000)],
-        );
-        j.record_materialized(0, "0Bf3qZlM8kTn4dWx", 20_000);
-        // ...one more placement while the demote-time name stands...
-        j.record_placed(
-            0,
-            "<b@x>",
-            None,
-            "0Bf3qZlM8kTn4dWx",
-            20_000,
-            &[frag("0Bf3qZlM8kTn4dWx", 20_000, 9_000, 1_000)],
-        );
-        // ...and then the verified-name publish (the re-fired hook).
-        j.record_materialized(0, "verified.part01.rar", 20_000);
-        std::fs::write(dir.join("verified.part01.rar"), vec![0xAAu8; 20_000]).unwrap();
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            restored.ids.contains("<a@x>") && restored.ids.contains("<b@x>"),
-            "every placement is on disk under the verified name: {:?}",
-            restored.ids
-        );
-        let seed = restored.seeds.iter().find(|s| s.slot == 0).unwrap();
-        assert_eq!(seed.name, "verified.part01.rar");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Append the retirement lines an older build's finish decrypt
-    /// would have written. Its producer (`Journal::invalidate`) went
-    /// with TODO 27 phase 3 - nothing mutates an output under live
-    /// records any more - but the PARSER stays, because a journal that
-    /// build left behind must still resume correctly. So the tests that
-    /// cover the parser write the record by hand.
-    ///
-    /// Append mode, and every caller DROPS its `Journal` first. Two
-    /// reasons, and both bite: placement records sit in
-    /// [`WriteState::pending`] behind the batch rule until a flush, so
-    /// an `X` written past a live journal lands AHEAD of records that
-    /// were composed before it and the retirement stops being
-    /// positional; and the open handle's own offset does not move with
-    /// these writes either, so a record appended through it afterwards
-    /// would land on top of them.
-    fn append_retirement(dir: &Path, files: &[&str]) {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(dir.join(".nzbfast.journal"))
-            .unwrap();
-        for n in files {
-            writeln!(f, "X {n}").unwrap();
-        }
-    }
-
-    #[test]
-    fn materialized_rewrite_is_positional_and_x_still_retires() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-mx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>matx</nzb>";
-
-        // Before-M and after-M articles on the demoting slot.
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_placed(
-            0,
-            "<pre@x>",
-            None,
-            "vol.rar",
-            10_000,
-            &[frag("gone.bin", 500, 100, 400)],
-        );
-        j.record_materialized(0, "vol.rar", 10_000);
-        j.record_placed(
-            0,
-            "<post@x>",
-            None,
-            "vol.rar",
-            10_000,
-            &[frag("gone.bin", 500, 4_000, 400)],
-        );
-        std::fs::write(dir.join("vol.rar"), vec![0u8; 10_000]).unwrap();
-        {
-            let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-            let r = restore(&dir, &resume, None);
-            assert!(r.ids.contains("<pre@x>"), "pre-M record rewrites");
-            assert!(
-                !r.ids.contains("<post@x>"),
-                "post-M record keeps its own fragment sources"
-            );
-        }
-        // Retire the volume file itself: the rewritten placements name it
-        // now, so they must drop with it.
-        drop(j);
-        append_retirement(&dir, &["vol.rar"]);
-        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
-        let r = restore(&dir, &resume, None);
-        assert!(
-            !r.ids.contains("<pre@x>"),
-            "X after M retires the rewritten identity placements"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A `D` (plaintext-once) record on a materialized slot rewrites to
-    /// PLAIN identity: the fallback reconstruction wrote POSTED bytes
-    /// into the volume, so no crypt facts or password are needed.
-    #[test]
-    fn materialized_slot_restores_crypto_placements_as_plain_identity() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-md-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>matd</nzb>";
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_placed_crypto(
-            0,
-            "<d@x>",
-            None,
-            "vol.rar",
-            10_000,
-            &[frag("secret.mkv", 2_000, 1_000, 3_000)],
-            &[true],
-        );
-        j.record_materialized(0, "vol.rar", 10_000);
-        std::fs::write(dir.join("vol.rar"), vec![0u8; 10_000]).unwrap();
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        // No password, no E facts on disk - identity needs neither.
-        let r = restore(&dir, &resume, None);
-        assert!(
-            r.ids.contains("<d@x>"),
-            "D record restores as plain identity after materialization"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// An `M` line for a slot with no records (or a truncated volume
-    /// file) must not fabricate restores: identity is still gated on the
-    /// pre-restore file length.
-    #[test]
-    fn materialized_identity_still_respects_the_length_ceiling() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-ml-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>matl</nzb>";
-
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_materialized(9, "", 0); // no S line for slot 9: harmless no-op
-        j.record_placed(
-            0,
-            "<t@x>",
-            None,
-            "vol.rar",
-            10_000,
-            &[frag("gone.bin", 0, 6_000, 4_000)],
-        );
-        j.record_materialized(0, "vol.rar", 10_000);
-        // The volume survived only truncated: the identity span [6000,
-        // 10000) is past the end, so the bytes cannot be there.
-        std::fs::write(dir.join("vol.rar"), vec![0u8; 5_000]).unwrap();
-        drop(j);
-
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let r = restore(&dir, &resume, None);
-        assert!(
-            !r.ids.contains("<t@x>"),
-            "identity past the pre-restore length must refetch"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Finding A8, the restart half. A run that publishes decrypted
-    /// plaintext over an encrypted store output stops that file from being
-    /// the ciphertext its placement records describe. The next run must
-    /// refetch those articles from the provider rather than copy the
-    /// mutated bytes into the volume files and call them restored - which
-    /// is what poisoned the retry loop, since without PAR2 nothing was
-    /// ever going to notice.
-    #[test]
-    fn retired_claim_refetches_instead_of_restoring_mutated_bytes() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-x-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>retire</nzb>";
-
-        // Run 1 direct-extracts two articles into movie.mkv (ciphertext at
-        // store offsets) and one into an untouched sibling.
-        let cipher: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(dir.join("movie.mkv"), &cipher).unwrap();
-        std::fs::write(dir.join("extra.bin"), &cipher).unwrap();
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        for (id, off) in [("<a@x>", 0u64), ("<b@x>", 10_000)] {
-            j.record_placed(
-                0,
-                id,
-                None,
-                "v.part1.rar",
-                30_000,
-                &[frag("movie.mkv", off, off, 10_000)],
-            );
-        }
-        j.record_placed(
-            1,
-            "<c@x>",
-            None,
-            "v.part2.rar",
-            30_000,
-            &[frag("extra.bin", 0, 0, 10_000)],
-        );
-
-        // Without the barrier those all come back - the intact-ciphertext
-        // resume, the fast path a crash before the publish still gets.
-        // (Records are batched - land them, as a decoder's idle flush
-        // would have, before modelling the crash with a re-open.)
-        j.flush();
-        {
-            let (_j, resume) = Journal::open(&dir, nzb).unwrap();
-            let r = restore(&dir, &resume, None);
-            assert!(r.ids.contains("<a@x>") && r.ids.contains("<b@x>") && r.ids.contains("<c@x>"));
-            // Clear that probe's copy-back so the run below measures only
-            // what the retirement allows.
-            std::fs::remove_file(dir.join("v.part1.rar")).unwrap();
-            std::fs::remove_file(dir.join("v.part2.rar")).unwrap();
-        }
-
-        // Now the decrypt publishes: the claim over movie.mkv is retired,
-        // and only then do its bytes change.
-        drop(j);
-        append_retirement(&dir, &["movie.mkv"]);
-        let plaintext: Vec<u8> = (0..40_000u32).map(|i| (i % 97) as u8).collect();
-        std::fs::write(dir.join("movie.mkv"), &plaintext).unwrap();
-
-        let (j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            !restored.ids.contains("<a@x>") && !restored.ids.contains("<b@x>"),
-            "articles recorded into a mutated file were treated as restored"
-        );
-        assert!(
-            restored.ids.contains("<c@x>"),
-            "retiring one file must not cost every other file its resume"
-        );
-        // Nothing was copied out of the mutated file either.
-        assert!(!dir.join("v.part1.rar").exists());
-
-        // Retirement is positional: the refetched articles re-record and
-        // are trusted again, so a second crash still resumes locally.
-        j2.record_placed(
-            0,
-            "<a@x>",
-            None,
-            "v.part1.rar",
-            30_000,
-            &[frag("movie.mkv", 0, 0, 10_000)],
-        );
-        drop(j2);
-        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            restored.ids.contains("<a@x>"),
-            "a placement recorded AFTER the retirement must still count"
-        );
-        assert!(
-            !restored.ids.contains("<b@x>"),
-            "the stale one stays retired"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// An older binary reading a journal that carries retirement lines
-    /// must not mistake them for message ids (it refetches everything,
-    /// which is safe in both directions - the journal's forward/backward
-    /// compatibility contract).
-    #[test]
-    fn retirement_lines_are_never_read_as_message_ids() {
-        let mut resume = ResumeState::default();
-        parse_lines(
-            ["X movie.mkv".to_string(), "<real@id>".to_string()].into_iter(),
-            &mut resume,
-        );
-        assert_eq!(resume.completed.len(), 1);
-        assert!(resume.completed.contains("<real@id>"));
-    }
-
-    #[test]
-    fn identity_without_existing_file_refetches() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-id-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>id</nzb>";
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_placed(
-            0,
-            "<a@x>",
-            Some(("data.bin".to_string(), 1_000)),
-            "",
-            0,
-            &[frag("data.bin", 0, 0, 1_000)],
-        );
-        drop(j);
-        // data.bin was deleted between runs (user cleanup): the identity
-        // fragment must NOT be trusted against a file we'd create fresh.
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(restored.ids.is_empty());
-        assert!(!dir.join("data.bin").exists(), "restore must not create it");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The path surviving is not the bytes surviving. A destination that
-    /// was truncated between runs (a partial write, an interrupted move, an
-    /// external tool) still passes an existence probe, so presence alone
-    /// would accept its identity fragments; `seed_slot` then grows the file
-    /// back to the recorded size and marks those spans covered, and with no
-    /// PAR2 behind the job the zeros ship. Refetch instead.
-    #[test]
-    fn identity_against_truncated_file_refetches() {
-        let dir =
-            std::env::temp_dir().join(format!("nzbfast-journal-trunc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>trunc</nzb>";
-        // Run 1 placed two identity articles into a 1,000-byte data.bin.
-        std::fs::write(dir.join("data.bin"), vec![7u8; 1_000]).unwrap();
-        let (j, _) = Journal::open(&dir, nzb).unwrap();
-        j.record_placed(
-            0,
-            "<a@x>",
-            Some(("data.bin".to_string(), 1_000)),
-            "",
-            0,
-            &[frag("data.bin", 0, 0, 400)],
-        );
-        j.record_placed(
-            0,
-            "<b@x>",
-            Some(("data.bin".to_string(), 1_000)),
-            "",
-            0,
-            &[frag("data.bin", 400, 400, 600)],
-        );
-        drop(j);
-
-        // Between runs the file is truncated to 400 bytes: only the first
-        // article's span survives.
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(dir.join("data.bin"))
-            .unwrap()
-            .set_len(400)
-            .unwrap();
-        let (_j2, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(
-            restored.ids.contains("<a@x>"),
-            "a span the file still holds stays restored"
-        );
-        assert!(
-            !restored.ids.contains("<b@x>"),
-            "a span past the end of the file must refetch"
-        );
-        // Nothing past the truncation is handed to `seed_slot` as covered.
-        let seeded: Vec<(u64, u64)> = restored
-            .seeds
-            .iter()
-            .flat_map(|s| s.spans.iter().copied())
-            .collect();
-        assert_eq!(seeded, vec![(0, 400)]);
-        assert!(
-            seeded.iter().all(|&(off, len)| off + len <= 400),
-            "no uncovered byte may be marked complete"
-        );
-        assert_eq!(
-            std::fs::metadata(dir.join("data.bin")).unwrap().len(),
-            400,
-            "restore must not grow the file back"
-        );
-
-        // Truncated to nothing at all is the same verdict for both.
-        std::fs::write(dir.join("data.bin"), b"").unwrap();
-        let (_j3, resume) = Journal::open(&dir, nzb).unwrap();
-        let restored = restore(&dir, &resume, None);
-        assert!(restored.ids.is_empty(), "an empty file holds no span");
-        assert!(restored.seeds.is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn malformed_and_torn_lines_are_ignored() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-journal-torn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let nzb = b"<nzb>torn</nzb>";
-        {
-            let (j, _) = Journal::open(&dir, nzb).unwrap();
-            j.record("<good@x>");
-            drop(j);
-        }
-        // Simulate a torn tail + garbage placement lines.
-        {
-            use std::io::Write;
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(dir.join(".nzbfast.journal"))
-                .unwrap();
-            write!(f, "R 0 0:1:2:3 <no-ftable@x>\nS x y\nR 1 junk\nF 0\n<torn@").unwrap();
-        }
-        let (_j, resume) = Journal::open(&dir, nzb).unwrap();
-        assert!(resume.completed.contains("<good@x>"));
-        assert!(resume.slots.is_empty());
-        // The torn bare line parses as a (harmless, never-matching) id.
-        assert!(resume.completed.contains("<torn@"));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-}
+mod tests;
 
 #[cfg(test)]
 #[path = "journal_bench_tests.rs"]

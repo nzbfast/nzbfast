@@ -12,6 +12,87 @@
 
 use super::*;
 
+/// How long a TEST WAIT in this binary tolerates seeing NO PROGRESS at
+/// all before it reports a STALL.
+///
+/// A NO-PROGRESS GAP, deliberately, and never a total. It is a budget
+/// for BEATING STARVATION and nothing else - `wait_until`'s rule over
+/// in `crates/nzbfast/tests/harness/mod.rs`, which is the shape this
+/// binary had no equivalent of: "the deadline only has to beat
+/// scheduler starvation, never the thing being waited for". What stays
+/// bounded is therefore one STEP, the number of steps being a property
+/// of the test rather than of the box.
+///
+/// THE MEASUREMENT THAT SIZED IT is the mover's, and it is the loudest
+/// of the starvation sources rather than the only one: a wait on a
+/// daemon-side completion that lands after `save_queue()` queues behind
+/// `Daemon::hold_queue_writes`, a PROCESS-GLOBAL mutex every
+/// `save_queue` takes and every one of the ~2,770 tests in `cargo test
+/// -p nzbfast --bin nzbfast` shares. Instrumented on the 32-core dev
+/// Mac, 31 Aug 2026: 143-208 waits over 200 ms per sweep, the longest
+/// 978 ms, under CPU load alone. The long form, and which three mover
+/// tests it reddened, is at `serve::mover::lane_tests::NO_PROGRESS`,
+/// which takes this number from here.
+///
+/// AND NONE OF THE THREE SITES ADDED ON 31 Aug 2026 IS BEHIND THAT
+/// LOCK - measured, not assumed, because reading the code says
+/// otherwise and that reading is what the chip for those sites was
+/// written on. The redrive settle reads an observable written and
+/// released BEFORE the task's `save_queue`, and holding that lock for
+/// 5 s on another thread across the redrive left the settle observed at
+/// 22 ms; the picker spin waits on `enqueue`, which publishes under the
+/// queue lock and saves after releasing it, and whose real cost is its
+/// own `write_spool_copy`; and the drain-count settle never builds a
+/// `Daemon` at all - it drives `run_capped_sieve` directly, so its
+/// exposure is scheduler latency plus two PROCESS-WIDE counters any
+/// other test in the binary can perturb. So do NOT read a trip at one
+/// of those as evidence about the queue-write lock. Disk and the
+/// scheduler are what they share, which is also what the tail below is
+/// about.
+///
+/// WHY IT LIVES HERE rather than at the mover's site. FOUR SITES in
+/// three files reference it - `serve::mover::lane_tests`'s own
+/// constant, which all nine of that file's waits go through, plus the
+/// three added on 31 Aug 2026: `serve::tests_api`'s redrive settle and
+/// its drain-count settle, and `serve::daemon::daemon_tests`'s picker
+/// spin. And the number has already MOVED ONCE - 30 s to 60 s in
+/// `cea15ceed`, hours after it was written, when a merge brought the
+/// disk-starvation measurement below. Four sites each spelling their
+/// own 60 is a fifth re-measurement that moves one and leaves three,
+/// which is the argument CLAUDE.md's fourteenth gate makes about a
+/// threshold hand-copied into four sibling drivers.
+///
+/// AND IT STILL CANNOT COVER A STARVED BOX. Measured 31 Aug 2026 by
+/// the lane that wrote up the `terminate-after = 600` ceiling
+/// (`37bdf653f`): at load 130-160 with seventeen `cargo-nextest`
+/// processes across worktrees, a test that runs in 3.3 s took SEVEN
+/// MINUTES - 127x, state `U` at 0.0% CPU. That is disk starvation, not
+/// a product hang, and no budget a test can name survives it. So the
+/// reading rule is that commit's: above ~load 100 a trip here is a
+/// statement about the MACHINE, run `uptime` before believing it, and
+/// trust the failure KIND - a wrong ANSWER is real at any load, a
+/// no-progress trip under contention is not. Applied to the three
+/// sites added on 31 Aug: their own worst readings were 44 ms (the
+/// redrive settle) and 126 ms (the picker spin), so that tail puts
+/// them at 5.6 s and 16.0 s - which is how it was decided that the
+/// picker's old 10 s budget was demonstrably too small and the
+/// redrive's, honestly, was not.
+///
+/// WHAT MUST NOT TAKE IT, because the next person to grep for a
+/// `Duration::from_secs` deadline in a test will find these three and
+/// they are the opposite construction - the deadline IS the assertion,
+/// so raising it deletes the test:
+/// `repair::side_fetch_tests`'s 20 s, which is what makes a side pool
+/// that never dials a STARVED verdict rather than a 300 s watchdog
+/// timeout; `smart::tests::a_hanging_trash_call_does_not_hold_the_caller`'s
+/// 5 s, whose subject is `run_bounded` giving up; and
+/// `serve::daemon::daemon_tests::index_read_tests`' 10 s, whose subject
+/// is `index_read_checked` answering `Saturated` instead of parking.
+/// The first is named in the handoff; the other two are not, and both
+/// are spelled `elapsed() < Duration` rather than `Instant::now() +
+/// Duration`, so the fingerprint that found the first cannot see them.
+pub(crate) const NO_PROGRESS: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A Daemon over a temp directory: `dir/out` as the download root,
 /// `dir/spool` as the spool, `dir/settings.json` for settings (created
 /// on demand by the seed helpers). No sockets, no spawned tasks, no
@@ -100,6 +181,9 @@ pub(crate) fn test_daemon(dir: &Path) -> Arc<Daemon> {
         out_root: std::sync::RwLock::new(out_root),
         move_completed: std::sync::RwLock::new(None),
         move_completed_cats: std::sync::RwLock::new(Vec::new()),
+        // TODO 317: opt-in and OFF by default. See `Daemon::write_through`.
+        write_through: AtomicBool::new(false),
+        write_through_cats: Mutex::new(Vec::new()),
         spool: spool.clone(),
         cfg_path: config.clone(),
         cats: Mutex::new(DEFAULT_CATS.iter().map(|s| s.to_string()).collect()),

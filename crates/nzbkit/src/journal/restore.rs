@@ -261,7 +261,7 @@ pub const PARTIAL_SUFFIX: &str = ".nzbfast-partial";
 pub fn quarantine_partials(out_dir: &Path, payload: &[String]) -> (Vec<String>, Vec<String>) {
     let paths: Vec<PathBuf> = payload
         .iter()
-        .map(|n| out_dir.join(sanitize_filename(n)))
+        .map(|n| crate::disk::join_out_name(out_dir, &crate::disk::sanitize_out_name(n)))
         .collect();
     quarantine_paths(&paths)
 }
@@ -279,11 +279,65 @@ pub fn quarantine_paths(paths: &[PathBuf]) -> (Vec<String>, Vec<String>) {
         let Some(name) = from.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
+        // DELIBERATELY `exists()`, decided under the 31 Aug 2026
+        // rename-occupancy census. This tests the SOURCE, which is a
+        // different question from the destination one this file's
+        // `unquarantine_partials` asks: "is there a payload here to take
+        // out of circulation". A link at a volume's name is not this
+        // job's payload, and skipping it is the conservative answer -
+        // where quarantining a resolving link renames the LINK aside and
+        // is reversible, so neither arm destroys anything. Nothing is
+        // gained by sharpening it and the entry question would be the
+        // wrong one to ask.
         if name.ends_with(PARTIAL_SUFFIX) || !from.exists() {
             continue;
         }
         let mut to = from.clone().into_os_string();
         to.push(PARTIAL_SUFFIX);
+        // NO OCCUPANCY TEST ON THE DESTINATION, DECIDED under the same
+        // 31 Aug 2026 rename-occupancy census as the source test above,
+        // and unlike `unquarantine_partials` below, which grew one.
+        // `rename` REPLACES an existing regular file in silence
+        // (measured on APFS that day), so this line does discard an
+        // earlier `<name>.nzbfast-partial` when it finds one. Three
+        // things make that the right answer rather than a missing guard.
+        //
+        // 1. THE ENGINE ALONE CANNOT REACH THE STATE. This is the only
+        //    writer of the suffix, and it requires the base name to
+        //    exist and removes it in the same rename;
+        //    `unquarantine_partials` runs unconditionally at the top of
+        //    every attempt (`build_intake`, before `Journal::open`) and
+        //    removes the suffixed name whenever the base one is free. So
+        //    at an attempt boundary the two coexist only if a SECOND
+        //    writer put a file at the base name - the case that
+        //    function's own header names, a re-add into an occupied
+        //    directory or a copy the user made.
+        // 2. IN THAT CASE THE LOSER'S BYTES ARE ALREADY DEAD. What kept
+        //    it suffixed is the unquarantine DECLINING, and `restore`
+        //    addresses payloads by their recorded base name, never the
+        //    suffixed one - so it was invisible to the restore that ran
+        //    minutes ago and every article whose bytes live in it has
+        //    been refetched by the attempt now failing. Keeping it keeps
+        //    bytes nothing can address, and hands the next restore a
+        //    file the newest records do not describe, which is the
+        //    seeded-with-the-wrong-bytes harm `unquarantine_partials`
+        //    declines FOR. The narrow cost of newest-wins - an attempt
+        //    that died early leaving less than the one before it - is
+        //    bandwidth, and it is the cheaper side.
+        // 3. EVERY ALTERNATIVE COSTS MORE. Refusing leaves the holed
+        //    payload wearing its real name, which is the false artifact
+        //    this whole mechanism exists to prevent. A second suffix is
+        //    never restored (`strip_suffix` matches one) and never
+        //    cleaned, so it is permanent clutter in the download folder,
+        //    which is what `PARTIAL_SUFFIX`'s own doc is about.
+        //
+        // NOR DOES IT WANT the `symlink_metadata` guard the unquarantine
+        // side just gained, and the asymmetry is the point: the BASE
+        // name is user vocabulary and a link at it is somebody's
+        // library, where the suffixed name is ours alone and nothing but
+        // this line has ever written one. A directory at the
+        // destination is refused by the kernel (`IsADirectory`, measured
+        // the same day) and reported in `failed`, never swallowed.
         match std::fs::rename(from, PathBuf::from(to)) {
             Ok(()) => done.push(name),
             Err(_) => failed.push(name),
@@ -307,29 +361,201 @@ pub fn quarantine_paths(paths: &[PathBuf]) -> (Vec<String>, Vec<String>) {
 /// Returns the names it restored.
 pub fn unquarantine_partials(out_dir: &Path) -> Vec<String> {
     let mut back = Vec::new();
-    let Ok(rd) = std::fs::read_dir(out_dir) else {
-        return back;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        let Some(n) = p.file_name().and_then(|n| n.to_str()) else {
+    // WALKS SUBDIRECTORIES, because `quarantine_partials` WRITES into
+    // them: since the relpath-preserve ruling its paths come from
+    // `join_out_name(out_dir, sanitize_out_name(n))`, so a tree-preserved
+    // payload is parked at `out_dir/VIDEO_TS/x.vob.nzbfast-partial`. A
+    // top-level `read_dir` never saw it, and the consequence is the one
+    // this function's own header states: the file stays invisible to
+    // `restore`, every article whose bytes live in it is refetched, and
+    // the `.nzbfast-partial` is left behind for good (30 Aug 2026 sweep).
+    //
+    // Depth-capped by `disk::MAX_DEPTH` ITSELF - the same constant that
+    // decides how many components `sanitize_out_name` will ever produce
+    // - so a symlinked or hostile tree cannot walk forever and the two
+    // move together. It was a hand-copied literal until 31 Aug 2026,
+    // which meant raising that budget left this walk short of exactly
+    // the trees it would then have to find: the partial goes invisible
+    // again and every article whose bytes are in it refetches, the
+    // defect above. A deepest preserved name is MAX_DEPTH components,
+    // of which the last is the leaf, so the deepest directory this must
+    // read sits at MAX_DEPTH - 1.
+    //
+    // `symlink_metadata` keeps the walk off links entirely, the same
+    // refusal `create_out_dirs` makes on the way in.
+    let mut stack: Vec<(PathBuf, usize)> = vec![(out_dir.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
-        let Some(base) = n.strip_suffix(PARTIAL_SUFFIX) else {
-            continue;
-        };
-        if base.is_empty() {
-            continue;
-        }
-        let dest = out_dir.join(base);
-        if dest.exists() {
-            continue;
-        }
-        if std::fs::rename(&p, &dest).is_ok() {
-            back.push(base.to_string());
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(md) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if md.is_dir() {
+                if depth + 1 < crate::disk::MAX_DEPTH {
+                    stack.push((p, depth + 1));
+                }
+                continue;
+            }
+            if !md.is_file() {
+                continue; // a symlink is never ours to restore
+            }
+            let Some(n) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(base) = n.strip_suffix(PARTIAL_SUFFIX) else {
+                continue;
+            };
+            if base.is_empty() {
+                continue;
+            }
+            let dest = p.with_file_name(base);
+            // `symlink_metadata`, the same question the walk above
+            // already asks on the way IN, and this line was the one
+            // place in the function that asked the other one. The header
+            // promises that a base name something else already holds is
+            // left alone and the quarantined copy is not clobbered;
+            // `Path::exists` FOLLOWS symlinks and answers false on any
+            // error, so a link at the base name read as free and the
+            // `fs::rename` below removed it - rename removes whatever
+            // ENTRY is at its destination and never resolves it.
+            //
+            // Declining costs a REFETCH of the articles whose bytes are
+            // in the quarantined file, which this function's own header
+            // describes as the ordinary consequence of a file staying
+            // invisible to `restore`. That is bandwidth. The link's
+            // target string is the only record of where it pointed and
+            // nothing brings it back, so the harms are not symmetric.
+            // Argued in full at `tv_rename` in
+            // `nzbfast/src/smart/filing.rs`.
+            //
+            // AND IT IS A CLAIM RATHER THAN A LOOK since 31 Aug 2026,
+            // under `occupancy-claim-the-rest-of-the-class`. The
+            // `lstat` was a check before a use: MEASURED on the sibling
+            // guard in `nzbfast`'s `unpack::published_names::publish`,
+            // it covered about 1% of its own interval and 96.8% of
+            // concurrent arrivals that got the name landed inside the
+            // gap. `create_new` answers `AlreadyExists` over a regular
+            // file, a dangling link, a link out of the directory and a
+            // directory - the same four answers the `lstat` gave - so
+            // the claim IS this guard, taken atomically.
+            //
+            // Plain `create_new` and not `disk::open_out_leaf_under`,
+            // per the argument at `tv_rename` in
+            // `nzbfast/src/smart/filing.rs`: the rename below resolves
+            // its destination by path, so a bound claim would ask a
+            // stricter question than the operation it guards and refuse
+            // a job directory reached through a symlink.
+            //
+            // A claim that fails for any other reason - the directory
+            // gone, a read-only volume - takes the same arm as a taken
+            // name, which is what the discarded `rename` result already
+            // did with it: the partial stays quarantined and its
+            // articles refetch.
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&dest)
+                .is_err()
+            {
+                continue;
+            }
+            if std::fs::rename(&p, &dest).is_ok() {
+                // The out_dir-relative name, so the caller's set matches
+                // the `S`/`M` records and `Frag.file`, which all carry
+                // the tree form.
+                back.push(crate::disk::out_name_of(out_dir, &dest));
+            } else {
+                // Our own placeholder. Left behind it is a zero-byte
+                // file at the base name, which `restore` would then
+                // trust as the volume file - a length no fragment can
+                // sit at - and which every later run reads as the name
+                // being taken, so the quarantined bytes could never come
+                // back.
+                let _ = std::fs::remove_file(&dest);
+            }
         }
     }
     back
+}
+
+/// Does the article's on-disk payload still hash to the commitment its
+/// record carries? (X5-02, 30 Aug 2026.)
+///
+/// **`None` is a refusal, not a pass.** A record with no commitment
+/// cannot be authenticated, so its article refetches - which is the
+/// point of the row, and it is what a journal an older binary wrote
+/// looks like. The cost of that is one resume, once, after an upgrade;
+/// the cost of the other answer is shipping whatever happens to be at
+/// the right offsets with the right length.
+///
+/// `art_src` is parallel to `frags` and says where each fragment's bytes
+/// physically are NOW, which is the only thing that makes one function
+/// serve all four fragment shapes: an identity fragment and a
+/// re-encrypted crypto one are read from the slot's own file, a copy
+/// source is read from the source (its bytes are about to be copied
+/// verbatim, so hashing either end is the same question), and a
+/// materialised copy is read from the destination it was just written
+/// to.
+///
+/// Fragments are hashed in VOLUME ORDER because that is payload order: a
+/// yEnc part covers one contiguous range of the posted file, and the
+/// fragments partition exactly that range, so concatenating them by
+/// ascending `vol_off` reconstructs the bytes the crc was taken over.
+/// The record's own fragment order is not that, and must not be assumed
+/// to be.
+///
+/// TWO THINGS IT DELIBERATELY DOES NOT CLAIM, stated rather than left to
+/// be found. It is a crc32, so it is a commitment against a CRASH, a
+/// half-written file and an accidental external edit - not a MAC: a
+/// writer who can rewrite a job's payload can rewrite the journal beside
+/// it, and the journal was never a boundary against one (they could
+/// equally delete it, or rewrite the finished output). And it costs one
+/// extra read of every admitted byte at RESUME time - never on the
+/// download path, where the number is one the decode already computed -
+/// which is local disk against a network refetch, the trade this whole
+/// mechanism exists to keep winning.
+fn article_authentic(
+    out_dir: &Path,
+    frags: &[Frag],
+    art_src: &[(std::sync::Arc<str>, u64)],
+    crc: Option<u32>,
+    buf: &mut [u8],
+) -> bool {
+    let Some(want) = crc else {
+        return false;
+    };
+    if art_src.len() != frags.len() {
+        // Every fragment shape pushes its source; a mismatch means this
+        // function is reading a list it does not understand, and the
+        // safe answer to that is the refusal, never the admission.
+        return false;
+    }
+    let mut order: Vec<usize> = (0..frags.len()).collect();
+    order.sort_by_key(|&i| frags[i].vol_off);
+    let mut open: HashMap<&str, Option<File>> = HashMap::new();
+    let mut hasher = crc32fast::Hasher::new();
+    for i in order {
+        let (name, off) = &art_src[i];
+        let src = open
+            .entry(&**name)
+            .or_insert_with(|| File::open(out_dir.join(&**name)).ok());
+        let Some(src) = src.as_ref() else {
+            return false;
+        };
+        let mut done = 0u64;
+        while done < frags[i].len {
+            let n = crate::disk::chunk_len(frags[i].len - done, buf.len());
+            if crate::disk::read_exact_at(src, &mut buf[..n], off + done).is_err() {
+                return false;
+            }
+            hasher.update(&buf[..n]);
+            done += n as u64;
+        }
+    }
+    hasher.finalize() == want
 }
 
 /// Rebuild the volume files a resume run works with from a placement
@@ -524,6 +750,7 @@ pub fn restore_for(
             frags,
             crypto_frag,
             crypto,
+            crc,
         } in &rec.articles
         {
             if *crypto && crypto_verdict.get(&(slot, id.as_str())) != Some(&true) {
@@ -555,6 +782,15 @@ pub fn restore_for(
                     // nothing to move, but only if the file predates us AND
                     // was long enough to hold the span. A shorter file cannot
                     // be holding these bytes, whatever the journal says.
+                    //
+                    // LENGTH ALONE admits a FOREIGN file too: when
+                    // `unquarantine_partials` declined this base name
+                    // because something else already occupied it, `dest_len`
+                    // is that stranger's length, not the quarantined
+                    // payload's. Reachable, and left safe by the crc32
+                    // check below rather than by anything here - see
+                    // `identity_against_a_foreign_file_at_the_base_name_still_refuses_on_crc`
+                    // in journal.rs (claim `restore-for-foreign-identity-fragments`).
                     let held = dest_len.is_some_and(|n| f.file_off.saturating_add(f.len) <= n);
                     if !held {
                         all_ok = false;
@@ -627,6 +863,32 @@ pub fn restore_for(
                     all_ok = false;
                     break;
                 }
+                // This is the ONE branch that writes the fragment rather
+                // than leaving it where it is, so its bytes are now in
+                // the DESTINATION and that is where the X5-02 check must
+                // read them. Recorded here so `art_src` stays parallel
+                // to `frags` for every fragment shape; `sources` is
+                // appended only when `!materialize_volumes`, which is
+                // exactly when this branch does not run, so nothing the
+                // replay reads changes.
+                art_src.push((self_name.clone(), f.vol_off));
+            }
+            // X5-02: the admission above proves the bytes are REACHABLE
+            // - the file opens and is long enough. It does not prove
+            // they are the bytes the wire sent, and length was the whole
+            // test. Two ways that was wrong, both measured on the tree
+            // this fixes: a span whose bytes were replaced at the same
+            // length was admitted and shipped, and so was a PREALLOCATED
+            // HOLE - full length, no bytes - which needs no adversary at
+            // all, being exactly what a crash between the preallocation
+            // and the write leaves behind. With no PAR2 behind the job
+            // nothing downstream can notice either.
+            let mut unauthenticated = false;
+            if all_ok && !article_authentic(out_dir, frags, &art_src, *crc, &mut buf) {
+                all_ok = false;
+                unauthenticated = true;
+                out.dropped_unauthenticated.0 += 1;
+                out.dropped_unauthenticated.1 += frags.iter().map(|f| f.len).sum::<u64>();
             }
             if all_ok {
                 out.ids.insert(id.clone());
@@ -640,7 +902,7 @@ pub fn restore_for(
                     sources.append(&mut art_src);
                 }
                 restored_here = true;
-            } else {
+            } else if !unauthenticated {
                 // TODO 309(b): the article had a placement record and
                 // this restore refused it, so its bytes go back on the
                 // wire. Every `break` above lands here, and all of them
@@ -650,6 +912,13 @@ pub fn restore_for(
                 // an article is admitted only when EVERY fragment is,
                 // so a half-readable article refetches entire and the
                 // honest figure is all of its fragments.
+                //
+                // The X5-02 refusal is a DIFFERENT fact - the bytes are
+                // there and are not the right bytes - so it has its own
+                // counter and is held out here rather than folded in.
+                // Same reasoning `dropped_crypto` is kept separate for:
+                // the two are answered differently by whoever reads
+                // them.
                 out.dropped_source.0 += 1;
                 out.dropped_source.1 += frags.iter().map(|f| f.len).sum::<u64>();
             }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file subject="&quot;cut.rar&quot; yEnc (1/2)" poster="p@news.example" date="1">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments><segment bytes="10" number="1">a@news.example</segment>

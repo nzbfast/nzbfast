@@ -2298,6 +2298,7 @@ mod store_tests {
         let page = |summary: bool, limit: usize| {
             let q = super::super::history::HistQuery {
                 failed_only: false,
+                status: None,
                 category: None,
                 ids: None,
                 search: None,

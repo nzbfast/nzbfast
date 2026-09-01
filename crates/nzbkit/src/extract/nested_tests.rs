@@ -815,12 +815,32 @@ fn nested_prevalence_counts_grouped_demote() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A 6-deep store chain: levels 0-4 map through the child chain; the
-/// child AT the depth cap is created disabled, so the level-5 archive
-/// materializes as an ordinary file. No error, no fallback noise. The
-/// cap is a per-chain setting: at a cap of 3 the level-3 archive is
-/// the one left materialized, proving the deepest layer materializes
-/// wherever the cap lands - it is never a hard failure.
+/// A 6-deep STORE chain, and the rule that a stored layer does not
+/// spend a level of the depth cap.
+///
+/// This test pinned the opposite until `c0b1c788a` (31 Aug 2026), which
+/// made the cap count COMPRESSING layers only: it is a
+/// decompression-bomb backstop, and a stored layer is the same bytes
+/// with a header on the front, so it cannot expand. That commit changed
+/// `extract/mod.rs` and `extract/config.rs` and did not come back here,
+/// so this test went on asserting the old contract and reddened
+/// `linux-tests`, `unit-one-process` and `windows-unit` on main - one
+/// defect, three jobs. The assertions below are the NEW contract.
+///
+/// So a store-only ladder now maps all the way down whatever the cap
+/// says, at the default cap AND at an explicitly configured shallower
+/// one. That is the point of the change (a real 10-deep store ladder in
+/// the bench corpus went manual-intervention 9/12 to auto-complete
+/// 12/12), and it is why `set_nested_max_depth` no longer binds a
+/// stored chain: the operator knob is a bomb guard, and this is not a
+/// bomb. What DOES bound a store ladder is
+/// `NESTED_MAX_DEPTH_HARD_CEILING`, pinned by
+/// `nested_store_ladder_stops_at_the_hard_ceiling` below.
+///
+/// `fixtures::rar5_volume` builds STORE members only, so this chain
+/// cannot be rebuilt as a compressing one to keep the old assertion -
+/// the cap-lands-here property is exercised on a compressing layer by
+/// the fallback and demotion tests above, not here.
 #[test]
 fn nested_depth_cap_materializes() {
     let data = payload(50_000, 85);
@@ -828,8 +848,7 @@ fn nested_depth_cap_materializes() {
         fixtures::rar5_volume(&[(name, inner.len() as u64, inner, false, false)])
     };
     // A 6-deep store chain: outer(a1) < a2 < a3 < a4 < a5 < payload.
-    // Extracting akN yields ak(N+1); the archive produced AT the cap
-    // is the one left materialized.
+    // Extracting akN yields ak(N+1).
     let payload_rar = wrap("payload.bin", &data);
     let c5 = wrap("a5.rar", &payload_rar);
     let c4 = wrap("a4.rar", &c5);
@@ -837,8 +856,8 @@ fn nested_depth_cap_materializes() {
     let c2 = wrap("a2.rar", &c3);
     let outer = wrap("a1.rar", &c2);
 
-    // Default cap (5): the level-5 extraction yields a5.rar, whose own
-    // (depth-5) child is disabled, so a5.rar = payload_rar materializes.
+    // Default cap (5): every layer is stored, so none of them spends a
+    // level and the chain maps to the payload itself.
     let dir = tmpdir("nesteddepth");
     let ex = Extractor::new(&dir, 1, true);
     feed(&ex, 0, "outer.rar", &outer, 7000, 12);
@@ -846,14 +865,16 @@ fn nested_depth_cap_materializes() {
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert_eq!(
         rep.extracted,
-        vec![("a5.rar".to_string(), payload_rar.len() as u64)]
+        vec![("payload.bin".to_string(), data.len() as u64)]
     );
-    assert_eq!(std::fs::read(dir.join("a5.rar")).unwrap(), payload_rar);
-    assert_eq!(dir_files(&dir), vec!["a5.rar".to_string()]);
+    assert_eq!(std::fs::read(dir.join("payload.bin")).unwrap(), data);
+    assert_eq!(dir_files(&dir), vec!["payload.bin".to_string()]);
     std::fs::remove_dir_all(&dir).unwrap();
 
-    // Configured shallower cap (3): the SAME chain now leaves a3.rar
-    // (= c4) materialized - the cap is honoured, still no failure.
+    // Configured shallower cap (3): the SAME chain still reaches the
+    // payload. The knob counts compressing layers, and there are none -
+    // it is not ignored here, it has nothing to charge. A test that
+    // wants the knob to bind needs a layer that actually compresses.
     let dir3 = tmpdir("nesteddepth3");
     let ex3 = Extractor::new(&dir3, 1, true);
     ex3.set_nested_max_depth(3);
@@ -862,11 +883,74 @@ fn nested_depth_cap_materializes() {
     assert!(rep3.fallbacks.is_empty(), "{:?}", rep3.fallbacks);
     assert_eq!(
         rep3.extracted,
-        vec![("a3.rar".to_string(), c4.len() as u64)]
+        vec![("payload.bin".to_string(), data.len() as u64)]
     );
-    assert_eq!(std::fs::read(dir3.join("a3.rar")).unwrap(), c4);
-    assert_eq!(dir_files(&dir3), vec!["a3.rar".to_string()]);
+    assert_eq!(std::fs::read(dir3.join("payload.bin")).unwrap(), data);
+    assert_eq!(dir_files(&dir3), vec!["payload.bin".to_string()]);
     std::fs::remove_dir_all(&dir3).unwrap();
+}
+
+/// The bound on the store exemption: a store ladder deeper than
+/// [`NESTED_MAX_DEPTH_HARD_CEILING`] materializes AT the ceiling.
+///
+/// `c0b1c788a` (31 Aug 2026) stopped charging stored layers against the
+/// depth cap, because a stored layer cannot be a decompression bomb.
+/// Its own comment says that is "right about the BOMB and would be
+/// wrong as an open licence" - a store ladder a million levels deep
+/// inflates no byte and still costs a real extractor, real buffers and
+/// real scratch per level - and names the hard ceiling as the backstop
+/// for that residue. NOTHING TESTED IT: `NESTED_MAX_DEPTH_HARD_CEILING`
+/// was referenced only at its own clamp site in `extract/mod.rs`, so
+/// the clamp could have been dropped, inverted or made unreachable and
+/// every suite would have stayed green while the exemption became the
+/// open licence that comment refuses. Written while un-redding the
+/// three test jobs that same commit left red on
+/// `nested_depth_cap_materializes` above.
+///
+/// The expected name is DERIVED from the constant rather than spelled
+/// `L64.rar`, so raising or lowering the ceiling moves this test with
+/// it instead of leaving a magic number that passes for the wrong
+/// reason. Materializing is the whole point: it is never a hard
+/// failure, so `fallbacks` must stay empty.
+#[test]
+fn nested_store_ladder_stops_at_the_hard_ceiling() {
+    let data = payload(1_000, 91);
+    let wrap = |name: &str, inner: &[u8]| {
+        fixtures::rar5_volume(&[(name, inner.len() as u64, inner, false, false)])
+    };
+    // Deeper than the ceiling, so the clamp is the thing that stops it
+    // and not the end of the ladder.
+    let depth = NESTED_MAX_DEPTH_HARD_CEILING + 6;
+    let mut cur = wrap("payload.bin", &data);
+    let mut at_ceiling = Vec::new();
+    for i in (1..=depth).rev() {
+        if i == NESTED_MAX_DEPTH_HARD_CEILING {
+            // The bytes that SHOULD be left on disk. Captured BEFORE the
+            // wrap, not after: `wrap` returns the archive CONTAINING an
+            // entry called `L64.rar`, while the file materialized under
+            // that name is that entry's CONTENT - the ladder as it stood
+            // one level down. Capturing after passes the name assertion
+            // and fails the byte one by exactly a header.
+            at_ceiling = cur.clone();
+        }
+        cur = wrap(&format!("L{i:02}.rar"), &cur);
+    }
+    let want = format!("L{NESTED_MAX_DEPTH_HARD_CEILING:02}.rar");
+
+    let dir = tmpdir("nestedceil");
+    let ex = Extractor::new(&dir, 1, true);
+    feed(&ex, 0, "outer.rar", &cur, 7000, 12);
+    let rep = ex.finish().unwrap();
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(dir_files(&dir), vec![want.clone()]);
+    // Not just the NAME: the bytes left behind are the whole remaining
+    // ladder, which is what "materializes" has to mean here - a name
+    // check alone passes on a truncated or empty file.
+    let got = std::fs::read(dir.join(&want)).unwrap();
+    assert_eq!(got.len(), at_ceiling.len());
+    assert_eq!(got, at_ceiling);
+    assert_eq!(rep.extracted, vec![(want, at_ceiling.len() as u64)]);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The rollout gates: NZBFAST_NO_NESTED_ONEPASS=1 turns routing off

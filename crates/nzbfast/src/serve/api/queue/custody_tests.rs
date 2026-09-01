@@ -1,9 +1,9 @@
 //! Custody tests for the queue's write verbs: what a delete, a retry
 //! and a recategorise may do to a record another lane already owns.
 //!
-//! A sibling file rather than an inline `mod` because queue.rs sits on
-//! the size gate's file ceiling (TODO 106): test code moves out, the
-//! baseline does not move up.
+//! A sibling file rather than an inline `mod`, for the size gate
+//! (TODO 106): test code moves out of `serve/api/queue.rs`, the baseline
+//! does not move up.
 
 use super::*;
 use crate::serve::testutil::test_daemon;

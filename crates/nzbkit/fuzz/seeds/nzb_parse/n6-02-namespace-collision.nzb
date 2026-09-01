@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb" xmlns:x="urn:example:extension">
+  <file poster="p@news.example" date="1" subject="&quot;movie.mkv&quot; yEnc (1/1)" x:subject="&quot;decoy.vol000+10.par2&quot; yEnc">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments><segment bytes="100" number="1" x:bytes="999999">a@news.example</segment></segments>
+  </file>
+  <file poster="p@news.example" date="1" x:subject="&quot;decoy.vol000+10.par2&quot; yEnc" subject="&quot;movie2.mkv&quot; yEnc (1/1)">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments><segment x:number="7" bytes="100" number="1">b@news.example</segment></segments>
+  </file>
+  <x:file subject="&quot;not-really-a-file.mkv&quot; yEnc">
+    <x:segments><x:segment bytes="5" number="1">c@news.example</x:segment></x:segments>
+  </x:file>
+</nzb>

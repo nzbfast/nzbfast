@@ -307,5 +307,4 @@ async fn unpack_failure_retries_without_refetching() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

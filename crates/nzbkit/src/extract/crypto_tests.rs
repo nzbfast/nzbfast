@@ -869,20 +869,24 @@ fn instream_journal_restores_posted_bytes_for_resume() {
         ex.set_password("hunter2");
         // Mirror main.rs: D records park until their span's seam
         // bytes are physically on disk (usually one article later).
-        let mut pending: Vec<(String, Vec<Frag>)> = Vec::new();
+        let mut pending: Vec<(String, Vec<Frag>, u32)> = Vec::new();
         for i in 0..n_arts - 2 {
             let s = i * art;
             let e = (s + art).min(vol.len());
             let id = format!("<a{i}@t>");
+            // X5-02's commitment over exactly the POSTED bytes - see
+            // `run_journaled` for why that is the right number on the
+            // crypto path.
+            let crc = crc32fast::hash(&vol[s..e]);
             let p = ex
                 .write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
                 .unwrap();
             match p {
-                Persist::PlacedCrypto(frags) => pending.push((id, frags)),
+                Persist::PlacedCrypto(frags) => pending.push((id, frags, crc)),
                 Persist::Placed(_) => panic!("crypto span must journal as D, not R"),
                 Persist::No | Persist::Held(_) => {}
             }
-            pending.retain(|(id, frags)| {
+            pending.retain(|(id, frags, crc)| {
                 if ex.crypto_span_on_disk(frags) {
                     let ev = ex.drain_crypto_events();
                     journal.record_crypto_events(&ev);
@@ -894,6 +898,7 @@ fn instream_journal_restores_posted_bytes_for_resume() {
                         vol.len() as u64,
                         frags,
                         &ex.crypto_frag_mask(frags),
+                        Some(*crc),
                     );
                     d_ids.push(id.clone());
                     false
@@ -1719,9 +1724,17 @@ fn run_journaled(
     arts: impl Iterator<Item = (usize, usize, usize)>,
 ) -> Vec<String> {
     let mut ids = Vec::new();
-    let mut pending: Vec<(String, Vec<Frag>)> = Vec::new();
+    // The parked `D`'s content commitment rides with it, exactly as
+    // `workers.rs`'s `PendingD` carries it: the record is written when
+    // the seam settles, long after these bytes are gone.
+    let mut pending: Vec<(String, Vec<Frag>, u32)> = Vec::new();
     for (i, s, e) in arts {
         let id = format!("<a{i}@t>");
+        // X5-02's commitment over exactly the POSTED bytes. It is the
+        // right number on the crypto path too: the restore re-encrypts
+        // the on-disk plaintext, so what reaches the check is the
+        // ciphertext that arrived.
+        let crc = crc32fast::hash(&vol[s..e]);
         match ex
             .write(0, "v.rar", vol.len() as u64, s as u64, &vol[s..e])
             .unwrap()
@@ -1734,13 +1747,14 @@ fn run_journaled(
                     "v.rar",
                     vol.len() as u64,
                     &frags,
+                    Some(crc),
                 );
                 ids.push(id);
             }
-            Persist::PlacedCrypto(frags) => pending.push((id, frags)),
+            Persist::PlacedCrypto(frags) => pending.push((id, frags, crc)),
             Persist::No | Persist::Held(_) => {}
         }
-        pending.retain(|(id, frags)| {
+        pending.retain(|(id, frags, crc)| {
             if ex.crypto_span_on_disk(frags) {
                 journal.record_crypto_events(&ex.drain_crypto_events());
                 journal.record_placed_crypto(
@@ -1751,6 +1765,7 @@ fn run_journaled(
                     vol.len() as u64,
                     frags,
                     &ex.crypto_frag_mask(frags),
+                    Some(*crc),
                 );
                 ids.push(id.clone());
                 false
@@ -2058,15 +2073,23 @@ fn a_plaintext_once_output_keeps_its_route_across_a_restart() {
 #[test]
 fn a_file_the_journal_claims_under_both_routes_refetches_its_d_articles() {
     let dir = tmpdir("158-2-contradiction");
-    std::fs::write(dir.join("movie.mkv"), payload(200_000, 5)).unwrap();
+    let mkv = payload(200_000, 5);
+    std::fs::write(dir.join("movie.mkv"), &mkv).unwrap();
     std::fs::write(dir.join("v.rar"), payload(200_000, 6)).unwrap();
     let salt = "00".repeat(16);
+    // X5-02: the `R` article's own commitment, over exactly the bytes
+    // its one fragment names. Written out by hand like the rest of this
+    // journal, so the test says what a REAL journal says - without it
+    // `<a2@t>` refetches for the wrong reason (no commitment) and the
+    // contradiction this test is about goes unmeasured.
+    let a2 = crc32fast::hash(&mkv[40_000..40_000 + 32_768]);
     let text = format!(
         "nzbfast-journal v1 d41d8cd98f00b204e9800998ecf8427e\n\
          S 0 200000 v.rar\n\
          F 0 movie.mkv\n\
          E {salt} 12 {salt} 150000 - movie.mkv\n\
          D 0 0:0:5000:32768 <a1@t>\n\
+         H {a2:08x} <a2@t>\n\
          R 0 0:40000:45000:32768 <a2@t>\n"
     );
     std::fs::write(dir.join(".nzbfast.journal"), text).unwrap();
@@ -2084,4 +2107,71 @@ fn a_file_the_journal_claims_under_both_routes_refetches_its_d_articles() {
     assert!(restored.plaintext_outputs.is_empty());
     assert_eq!(restored.wire_outputs.get("movie.mkv"), Some(&32768));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Read-only sweep finding 4 (31 Aug 2026): the ciphertext ROUTE LATCH
+/// keys on the out_dir-relative output name, at the stamp AND at the
+/// lookup.
+///
+/// Its own sibling map `crypto_files` was moved onto `out_name_of` by
+/// the 30 Aug 2026 sweep, whose comment at `crypto_state_for` carries
+/// the whole argument; `ciphertext_files` and `resumed_plaintext` were
+/// left on `file_name()`. Two things that costs. `seed_resumed_routes`
+/// inserts the JOURNAL's names, which are `sanitize_out_name`'s tree
+/// form, so after a resume every encrypted member carrying a directory
+/// missed the lookup and could re-latch plaintext-once over ciphertext
+/// a prior run had already committed. And two encrypted members sharing
+/// a basename in different directories collapsed onto ONE latch.
+///
+/// Both halves are pinned, because they fail independently: the first
+/// assertion goes red when the STAMP reverts, the second when the
+/// LOOKUP does.
+#[test]
+fn the_ciphertext_route_latch_keys_on_the_tree_relative_name() {
+    let name = "VIDEO_TS/movie.mkv";
+    // The `rar a -htb` shape - a BLAKE2sp digest with no CRC32 beside
+    // it - which nothing here can adjudicate, so the gate refuses to
+    // decrypt in-stream and the span takes the ciphertext route.
+    let plain = payload(120_000, 81);
+    let mut f = fixtures::encrypt_file("right", &plain, 53);
+    f.with_hash = true;
+    f.with_crc = false;
+    let vol = fixtures::rar5_volume_enc(&[(name, &f, 0..f.cipher.len(), false, false)], None);
+    let dir = tmpdir("relpath-cipher-latch");
+    let ex = Extractor::new(&dir, 1, true);
+    ex.set_password("right");
+    feed(&ex, 0, "v.rar", &vol, 7000, 81);
+    assert!(
+        ex.inner.lock_ok().ciphertext_files.contains(name),
+        "the stamp keyed on a basename: {:?}",
+        ex.inner.lock_ok().ciphertext_files
+    );
+    let rep = ex.finish().unwrap();
+    assert!(!rep.fallbacks.is_empty(), "the digest set must demote");
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // The LOOKUP half, as a resume sees it: a set that satisfies every
+    // plaintext-once condition, with the route pre-latched under the
+    // journal's own spelling exactly as `seed_resumed_routes` inserts
+    // it. The gate must find that latch and refuse.
+    let plain = payload(120_000, 82);
+    let mut f2 = fixtures::encrypt_file("right", &plain, 54);
+    f2.with_crc = true;
+    let vol2 = fixtures::rar5_volume_enc(&[(name, &f2, 0..f2.cipher.len(), false, false)], None);
+    let dir2 = tmpdir("relpath-cipher-consult");
+    let ex2 = Extractor::new(&dir2, 1, true);
+    ex2.set_password("right");
+    ex2.inner
+        .lock_ok()
+        .ciphertext_files
+        .insert(name.to_string());
+    feed(&ex2, 0, "v.rar", &vol2, 7000, 82);
+    assert!(
+        !ex2.inner.lock_ok().crypto_files.contains_key(name),
+        "plaintext-once latched over an output the journal says is owed \
+         ciphertext - the gate looked the latch up by basename"
+    );
+    let rep2 = ex2.finish().unwrap();
+    assert!(rep2.decrypted.is_empty(), "{:?}", rep2.decrypted);
+    std::fs::remove_dir_all(&dir2).unwrap();
 }

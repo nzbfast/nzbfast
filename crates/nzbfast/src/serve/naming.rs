@@ -300,10 +300,78 @@ impl Daemon {
         // Teach the repost table. Only from a job we can actually name -
         // filing a fingerprint under an obfuscated stem would hand every
         // future repost of these bytes the same non-answer, permanently.
+        //
+        // AND ONLY AT THE TIER THAT ACTUALLY PROVED IT (W7-02). This
+        // guard is a SHAPE test: `stem_is_a_name` asks whether a string
+        // looks like a name, never whether that name was proved, and
+        // every one of a crossed FileDesc name, a stray release's SFV
+        // entry, a decoy set's name and a bare subject parse looks
+        // perfectly like one. So what is recorded beside the name is
+        // what stands behind it, and the table decides for itself
+        // whether that is enough to displace or to contest what it
+        // already holds. srrdb is the one rung here with a byte-level
+        // proof (the archive header's own CRC32 of an inner file);
+        // everything else - the posted stem, a Matroska Title - is an
+        // unverified claim ABOUT these bytes, which is the weak tier by
+        // name. (The table's own earlier answer used to be a third
+        // member of that list and is now refused outright - see below.)
+        // Crediting any of them higher would launder weak evidence
+        // into strong, the same line the set_claim above draws.
+        //
+        // AND NEVER FROM THE TABLE'S OWN ANSWER (W7-14). `id.src ==
+        // "par-hash"` is the one case where `best` is not a fact this
+        // job established - it is what the table just said - so
+        // teaching it back adds no evidence, only SPREAD. One `prints`
+        // vector feeds both the lookup and the teach, and the lookup
+        // may answer off a single member: release Z arrives obfuscated
+        // with members p1..p5, only p1 collides with an earlier release
+        // X's 16 KiB head, so the table answers "X" with nothing to
+        // disagree with - and the teach then filed p2..p5, which are
+        // Z's OWN fingerprints, under X's name. Four fresh fingerprints
+        // poisoned by one collision, with no bytes of X anywhere near
+        // this job. W7-01..04 bounded that (a `Par2SetId` proof of Z
+        // corrects them) and did not close it: an honest WEAK naming of
+        // Z later is EQUAL rank, so it can only CONTEST, never correct,
+        // and the fingerprints of a release nothing ever proves end up
+        // refused rather than right.
+        //
+        // What is given up is a second-order recall gain, and it was
+        // MEASURED before it was given up. If Z really is a repost of
+        // X then Z's members ARE X's bytes, so the table already holds
+        // what it holds; the echo only ever ADDS members X's own teach
+        // did not cover, so that a third post sharing one of THOSE
+        // resolves. Against that: a wrong name filed permanently, at a
+        // tier only a proof can lift, against bytes nothing has ever
+        // named. The trade is asymmetric, and the census says the
+        // upside is not merely small but unobserved - 2,329 rows over
+        // 473 releases and 12.8 days of a real index, and every one of
+        // the 473 acquired all of its fingerprints in a SINGLE teach
+        // (max within-name `at` spread: 0 seconds). Nothing has ever
+        // spread. `research/PAR-HASH-COLLISION-CENSUS-2026-08-31.md`.
+        //
+        // Note what this deliberately does NOT do: it does not stop
+        // teaching. The common good case the 2026-07-28 gap analysis
+        // argues for - a job named from its OWN .nzb whose repost later
+        // arrives obfuscated - has `id.src` empty and is untouched, as
+        // are srrdb and mkv-title, which are first-hand reads of these
+        // bytes rather than the table quoting itself.
+        //
+        // The other remedy on offer - teach the echo at a tier strictly
+        // BELOW the row that answered - was read and REFUSED rather
+        // than deferred. `Adjacency` is the only thing under
+        // `Hash16kLen`, `par_hash_lookup` does not filter by tier at
+        // all, so an Adjacency row would still NAME a repost - which
+        // the ladder says it may never do - and teaching lookup to skip
+        // it makes the rows write-only, which is a cost with no reader.
         #[cfg(feature = "indexer")]
-        if !prints.is_empty() && release::stem_is_a_name(best) {
+        if !prints.is_empty() && id.src != "par-hash" && release::stem_is_a_name(best) {
+            let tier = if id.src == "srrdb" {
+                nzbkit::index::NameEvidence::Crc32Len
+            } else {
+                nzbkit::index::NameEvidence::Hash16kLen
+            };
             self.with_index_for_tail(nzo_id, |ix| {
-                ix.par_hash_remember(&prints, best, &parsed.key, unix_now())
+                ix.par_hash_remember(&prints, best, &parsed.key, unix_now(), tier)
                     .ok()
             });
         }
@@ -561,3 +629,8 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests;
+
+/// The repost table's round trip: what a later arrival of the SAME
+/// bytes is told, when an earlier job already named that fingerprint.
+#[cfg(all(test, feature = "indexer"))]
+mod repost_tests;

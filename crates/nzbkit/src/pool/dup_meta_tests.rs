@@ -55,6 +55,7 @@ fn work(id: &str) -> Work {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -202,25 +203,30 @@ fn two_servers_agreeing_on_an_undeclared_part_stand_the_gate_down() {
         (server("p"), PoolConfig::default()),
         (server("q"), PoolConfig::default()),
     ];
+    // File 0 throughout, and NOT `work()`'s unscoped default: the
+    // stand-down is keyed by file and an unscoped request may not
+    // earn one (`PartLatch::scoped`), so a rig written on the
+    // sentinel would be asserting the gate stands down on a shape
+    // where it must not.
     let (sh, _) = Shared::new(
         vec![
             ArticleReq {
                 id: "<a@x>".into(),
                 age_days: 0,
                 part: 1,
-                file: u32::MAX,
+                file: 0,
             },
             ArticleReq {
                 id: "<b@x>".into(),
                 age_days: 0,
                 part: 2,
-                file: u32::MAX,
+                file: 0,
             },
             ArticleReq {
                 id: "<c@x>".into(),
                 age_days: 0,
                 part: 3,
-                file: u32::MAX,
+                file: 0,
             },
         ],
         &servers,
@@ -234,6 +240,7 @@ fn two_servers_agreeing_on_an_undeclared_part_stand_the_gate_down() {
         let mut w = work(id);
         w.ord = ord;
         w.part = part;
+        w.file = 0;
         sh.stash_handed(&w, ctx_for(&servers, from), 0);
     };
     // A split-brain shape first: server p hands a wrong part, the steer
@@ -352,6 +359,126 @@ fn a_latched_file_does_not_stand_the_gate_down_for_another_file() {
     assert_eq!(sh.part_latch.steers.load(Ordering::Relaxed), 2);
 }
 
+/// F-09 residue (31 Aug 2026): `u32::MAX` is [`ArticleReq::file`]'s
+/// "unscoped" sentinel - a side fetch, a probe - and it is the ABSENCE
+/// of a file index, not one. Every unscoped request in a run shares
+/// that single value, so a set keyed BY file must not admit it: one
+/// request's two-backbone agreement would otherwise stand the gate down
+/// for every other unscoped request beside it, which is the run-wide
+/// scope F-09 removed, reinstated at a ONE-request bar on whatever set
+/// happened to be batched together. `repair::volume_reqs` batches every
+/// recovery volume of a fetch into one request vector, so that set is
+/// par2 recovery data.
+///
+/// Latent rather than live when this was written: the only production
+/// caller of `note_decoded` is `get::workers`, whose requests all carry
+/// a real slot index, and every unscoped producer runs on a pool with
+/// `crc_steer` off, so nothing reaches this seam. It is pinned here
+/// because that is a property of the CALLERS - and of a strip
+/// (`strip_side_pool_seams`) made for an unrelated reason - and not of
+/// the latch.
+///
+/// Both halves are asserted, because they fail differently: EARNING is
+/// what poisons the bucket for the requests beside it, and INHERITING
+/// is what a later request does with the poison.
+#[test]
+fn an_unscoped_request_can_neither_earn_nor_inherit_a_stand_down() {
+    let servers = vec![
+        (server("p"), PoolConfig::default()),
+        (server("q"), PoolConfig::default()),
+    ];
+    let req = |id: &str, part: u32| ArticleReq {
+        id: id.into(),
+        age_days: 0,
+        part,
+        file: u32::MAX,
+    };
+    let (sh, _) = Shared::new(vec![req("<a@x>", 1), req("<b@x>", 2)], &servers);
+    sh.workers_live.store(2, Ordering::Release);
+    sh.alive[0].fetch_add(1, Ordering::AcqRel);
+    sh.alive[1].fetch_add(1, Ordering::AcqRel);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    // `work()` already defaults `file` to the sentinel; spelled out so
+    // the subject of the test cannot drift with that helper.
+    let deliver = |id: &str, ord: u32, part: u32, from: usize| {
+        let mut w = work(id);
+        w.ord = ord;
+        w.part = part;
+        w.file = u32::MAX;
+        sh.stash_handed(&w, ctx_for(&servers, from), 0);
+    };
+    // Two disjoint backbones agree on `<a@x>`'s undeclared part. The
+    // per-ID evidence stands, so the body is OWNED - refusing the
+    // stand-down must not turn this into a steer that comes back the
+    // same way forever - but nothing is recorded.
+    deliver("<a@x>", 0, 1, 0);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(7) }),
+        DecodeAck::Steered
+    ));
+    sh.steer_inbox.lock_ok().clear();
+    deliver("<a@x>", 0, 1, 1);
+    assert!(matches!(
+        ctl.note_decoded("<a@x>", DecodeReport::Clean { part: Some(7) }),
+        DecodeAck::Owned
+    ));
+    assert!(
+        !sh.part_latch.any_off(),
+        "an unscoped request cannot EARN a stand-down: it is not a file"
+    );
+    assert!(
+        !sh.part_latch.is_off(u32::MAX),
+        "and the sentinel is never a latched key"
+    );
+    // The next unscoped request in the same batch - a different
+    // recovery volume of the same fetch - is still gated, and steers.
+    deliver("<b@x>", 1, 2, 0);
+    assert!(
+        matches!(
+            ctl.note_decoded("<b@x>", DecodeReport::Clean { part: Some(9) }),
+            DecodeAck::Steered
+        ),
+        "an unscoped request cannot INHERIT a neighbour's stand-down"
+    );
+    assert!(
+        !sh.steer_inbox.lock_ok().is_empty(),
+        "and its refetch really is issued"
+    );
+    assert_eq!(sh.part_latch.steers.load(Ordering::Relaxed), 2);
+    // The two doors are pinned SEPARATELY from here down, because each
+    // guard alone hides a mutation of the other: with the WRITE
+    // refused the sentinel can never be in the set, so the read guard
+    // is unfalsifiable through `note_decoded` - and a guard no test can
+    // kill is a guard no test is checking (the trap CLAUDE.md's
+    // cfg-safety gate entry records in its own words).
+    //
+    // The WRITE door, while `off` is still empty, so `any_off` - the
+    // ledger's "gate stood down" line, read by `pool::saturation` -
+    // carries the assertion too.
+    assert!(
+        !sh.part_latch.stand_down(u32::MAX),
+        "the sentinel cannot be recorded, and stand_down says so"
+    );
+    assert!(
+        !sh.part_latch.any_off(),
+        "so the ledger does not report a stand-down that never happened"
+    );
+    // A REAL file index in the same run is unaffected.
+    assert!(sh.part_latch.stand_down(0), "a real file still latches");
+    assert!(sh.part_latch.is_off(0));
+    // The READ door on its own. `off` is reachable from any sibling
+    // module of `pool` - the call site in `note_decoded` wrote it
+    // directly until 31 Aug 2026 - so the read must refuse the sentinel
+    // whatever put it there rather than lean on the write guard.
+    sh.part_latch.off.lock_ok().insert(u32::MAX);
+    assert!(
+        !sh.part_latch.is_off(u32::MAX),
+        "the sentinel is never a latched key, however it reached the set"
+    );
+    assert!(sh.part_latch.is_off(0), "and a real file is unaffected");
+}
+
 /// Bug sweep 22 Aug 2026: the "two servers agree" tell has to check the
 /// second deliverer's backbone, not assume it. A tail fan-out dup on the
 /// FIRST server (or a sibling on its backbone) can win the re-claim
@@ -364,12 +491,14 @@ fn a_same_backbone_repeat_of_the_wrong_part_does_not_latch() {
         (server("p"), PoolConfig::default()),
         (server("q"), PoolConfig::default()),
     ];
+    // File 0, not `work()`'s unscoped default: this rig ends on a
+    // stand-down, which an unscoped request may not earn.
     let (sh, _) = Shared::new(
         vec![ArticleReq {
             id: "<a@x>".into(),
             age_days: 0,
             part: 1,
-            file: u32::MAX,
+            file: 0,
         }],
         &servers,
     );
@@ -383,6 +512,7 @@ fn a_same_backbone_repeat_of_the_wrong_part_does_not_latch() {
         w.ord = 0;
         w.part = 1;
         w.dup = dup;
+        w.file = 0;
         sh.stash_handed(&w, ctx_for(&servers, from), 0);
     };
     deliver(0, false);

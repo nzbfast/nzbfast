@@ -139,5 +139,5 @@ if [ "$1" -eq 0 ] && [ -d /var/lib/nzbfast ]; then
 fi
 
 %changelog
-* @@RPMDATE@@ nzbfast <releases@nzbfast.com> - @@VERSION@@-@@RELEASE@@
+* @@RPMDATE@@ nzbfast <nzbfast@pm.me> - @@VERSION@@-@@RELEASE@@
 - BETA packaging of nzbfast @@VERSION@@ for RPM distributions.

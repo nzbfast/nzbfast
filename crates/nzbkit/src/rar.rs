@@ -367,6 +367,83 @@ pub fn crypt_probe(path: &std::path::Path) -> Option<CryptProbe> {
     })
 }
 
+/// Does this on-disk volume PROVE that every entry it holds is STORED?
+///
+/// The disk twin of the in-stream `Inner::saw_store && !saw_compressed`
+/// latch, and it exists because the nested depth cap is enforced at TWO
+/// independent sites. The stream side learns an entry's `Method` from
+/// this same mapper as the articles arrive; the disk post-pass walks
+/// files that are already on disk and had no such evidence at all, so a
+/// resumed or disk-only job charged a stored layer against a cap that
+/// exists to bound DECOMPRESSION - see `nested_cap_after_store_layer`.
+///
+/// POSITIVE EVIDENCE ONLY, the same direction and for the same reason:
+/// the failure mode of getting this backwards is a bomb guard that does
+/// not guard. Every one of these is a `false`, and the caller must treat
+/// `false` as "unknown", never as "compressed":
+///   * anything that is not a readable RAR volume (a zip, a 7z, a tar, a
+///     `.rar` whose signature was destroyed, an unreadable file);
+///   * any blocker at all - a compressed entry sets `MapBlocker::NotStore`
+///     and stops the walk, and so do encrypted headers, a bad password
+///     and a corrupt block;
+///   * an encrypted entry, whose plaintext this parser never sees;
+///   * a mapping that did not COMPLETE, because entries past the point it
+///     stopped are entries nobody has looked at;
+///   * a volume with no non-directory entry to judge.
+///
+/// It reads HEADERS, not data: the walk seeks past each member's data
+/// area, so a healthy single-entry store volume costs about two reads
+/// whatever its size, and the walk is bounded on hostile input. The
+/// caller pays this once per archive per nested level, immediately
+/// before extracting those same archives in full.
+///
+/// Deliberately NOT `classify_rar_head`, which reads a 512 KiB prefix and
+/// judges `entries.first()` alone. That is enough for the prevalence
+/// tally it feeds and is not enough to grant an exemption: a volume
+/// whose first entry stores would read as store-only there whatever
+/// followed it. What actually catches that here is the BLOCKER, not the
+/// loop below - the mapper refuses a compressed entry with
+/// `MapBlocker::NotStore` and stops, so the volume never reaches
+/// `complete` and the walk stops with it. An exemption granted on absent
+/// evidence is the guard that does not guard.
+pub fn volume_is_store_only(path: &std::path::Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(size) = f.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    let mut m = VolumeMapper::new(size);
+    feed_headers_incrementally(&mut f, size, &mut m);
+    // `complete` is the load-bearing one and it subsumes the other two
+    // today: the mapper is built with NO password, so a crypt record or
+    // an encrypted entry raises a blocker, and every blocker stops the
+    // parse short of the end. They are spelled out anyway because the
+    // question each answers is different, and a future mapper that
+    // learned to finish a volume it could not fully read would make the
+    // difference matter. Nothing here is a second guard on the same
+    // fact for a caller to lean on - `complete` is.
+    if m.blocker.is_some() || !m.complete || m.crypt_seen.is_some() {
+        return false;
+    }
+    let mut saw = false;
+    for e in &m.entries {
+        if e.encrypted || e.crypt.is_some() {
+            return false;
+        }
+        if e.is_dir {
+            // A directory entry carries no data and no method worth
+            // reading, exactly as the in-stream latch treats it.
+            continue;
+        }
+        if e.method != Method::Store {
+            return false;
+        }
+        saw = true;
+    }
+    saw
+}
+
 /// Feed a mapper the HEADER regions of `f` incrementally, seeking PAST each
 /// member's data area (the parser advances its cursor over member payload
 /// without needing those bytes). Unlike a single fixed-size prefix read,

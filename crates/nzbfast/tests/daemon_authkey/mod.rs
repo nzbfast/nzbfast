@@ -147,7 +147,6 @@ async fn apikey_reveal_and_rotate_need_the_api_key() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Codex sweep 2, 3 Aug H1 and M1: the /api body contract.
@@ -268,7 +267,6 @@ async fn every_api_post_body_is_read_before_the_key_decision() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The add-only key's tier, from a push extension's point of view. NZB
@@ -405,7 +403,6 @@ async fn add_only_key_answers_extension_probes_but_nothing_more() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The other half of a rotation: the write that FAILS. On a full disk or a
@@ -488,7 +485,6 @@ async fn a_rotation_that_cannot_be_persisted_says_so() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
         rot.contains("\"status\":true"),
@@ -549,7 +545,6 @@ async fn jsonrpc_add_only_key_cannot_control_queue() {
     .await;
     let port = d.port;
 
-    let dir2 = dir.clone();
     tokio::task::spawn_blocking(move || {
         fn b64(data: &[u8]) -> String {
             const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -601,7 +596,6 @@ async fn jsonrpc_add_only_key_cannot_control_queue() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir2);
 }
 
 /// Security regression: the add-only `nzbkey` must not reach arbitrary
@@ -695,5 +689,4 @@ async fn bootstrap_hatch_cannot_write_a_setting_other_than_the_apikey() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

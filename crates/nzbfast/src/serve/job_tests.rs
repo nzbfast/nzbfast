@@ -70,6 +70,64 @@ fn choose_out_dir_active_climbs_without_replace() {
     assert_eq!(replaces, None);
 }
 
+/// The climb's rungs have to be writable, and the base being writable
+/// does not make them so.
+///
+/// `dir_stem` arrives capped at 255 bytes - `Daemon::enqueue` and
+/// `refile_out_dir` both spell it through `sanitize_filename_capped`, and
+/// `an_overlong_job_name_still_gets_a_writable_directory` in
+/// `tests_jobs.rs` pins that end. `.2` on top of a name AT the cap is 257
+/// bytes and every `mkdir` under it is `ENAMETOOLONG` (measured on APFS
+/// 31 Aug 2026: 255 creates, 256 does not), so the FIRST collision handed
+/// a job a directory it could not have - and a collision is the ordinary
+/// case this ladder exists for, not a corner.
+///
+/// That pin could not see it because its claim never collides, which is
+/// the general shape: a cap tested at the base says nothing about a name
+/// composed onto the base.
+#[test]
+fn choose_out_dir_climbs_to_a_directory_the_disk_will_create() {
+    let root = std::env::temp_dir().join(format!(
+        "nzbfast-climbcap-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let stem = nzbkit::disk::sanitize_filename_capped(&"L".repeat(400));
+    assert_eq!(stem.len(), 255, "the premise moved");
+    let base = root.join(&stem);
+
+    // The canonical directory is taken, so the job climbs.
+    let (dir, replaces) = choose_out_dir(&base, &stem, &|p| {
+        if p == base {
+            DirClaim::Active
+        } else {
+            DirClaim::Free
+        }
+    });
+    assert_ne!(dir, base, "it must climb");
+    assert_eq!(replaces, None, "an ACTIVE claimant is not replaced");
+    // The assertion the byte count is standing in for everywhere else.
+    std::fs::create_dir_all(&dir).expect("the climbed directory must be creatable");
+    assert_eq!(dir.parent(), Some(root.as_path()), "still a sibling");
+
+    // Nothing that works today moves: inside the cap the rung is still
+    // the plain `format!`, byte for byte.
+    let short = root.join("Show");
+    let (plain, _) = choose_out_dir(&short, "Show", &|p| {
+        if p == short {
+            DirClaim::Active
+        } else {
+            DirClaim::Free
+        }
+    });
+    assert_eq!(plain, root.join("Show.2"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn choose_out_dir_multi_step_climb_keeps_base_replace() {
     // Payload at base, Active at .2: climbs to .3, still replacing base.

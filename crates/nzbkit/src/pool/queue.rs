@@ -38,16 +38,65 @@ pub(super) struct PartLatch {
     /// Files ([`Work::file`]) whose gate has stood down: two backbones
     /// agreed that file's numbering is synthesized. Per FILE, not per
     /// run (F-09): one mislabelled file must not switch off the wrong-
-    /// part check for every other file in the job.
+    /// part check for every other file in the job. Reached only through
+    /// [`PartLatch::is_off`] and [`PartLatch::stand_down`], which is
+    /// what keeps the unscoped sentinel out of it - see
+    /// [`PartLatch::scoped`].
     pub(super) off: std::sync::Mutex<HashSet<u32>>,
     /// Part-mismatch steers issued (each one an extra BODY).
     pub(super) steers: AtomicU64,
 }
 
 impl PartLatch {
-    /// Has this file's gate stood down?
+    /// Is this [`Work::file`] a file at all? `u32::MAX` is
+    /// [`ArticleReq::file`]'s "unscoped" sentinel - a side fetch, a
+    /// probe - and it is not a file index, it is the ABSENCE of one.
+    /// Every unscoped request in a run shares that one value, so
+    /// admitting it to a set keyed BY file would make one request's
+    /// two-backbone agreement stand the gate down for every other
+    /// unscoped request beside it: F-09's run-wide latch by another
+    /// name, at a one-request bar, on whatever set happened to be
+    /// batched together. So an unscoped request can neither EARN a
+    /// stand-down nor INHERIT one, and pays its own refetch per
+    /// article - which is the honest price of not knowing which file
+    /// the evidence belongs to. The per-ID evidence still stands: an
+    /// agreed refetch is OWNED either way (see `note_decoded`), so the
+    /// cost is bounded at one extra body per id and never a loop.
+    ///
+    /// `pool::park` opts the same sentinel out of the holds machinery
+    /// (`FilePark::defers`, `group_of`) for the same reason and by the
+    /// same test.
+    ///
+    /// UNREACHABLE TODAY, and that is a property of the callers rather
+    /// than of this type, so it is guarded here instead of relied on:
+    /// the only production caller of `QueueControl::note_decoded` is
+    /// `get::workers`, whose requests all carry a real slot index
+    /// (`get::plan`), while every unscoped producer - the three
+    /// `repair::volume_reqs` side fetches, the post tool, nettools -
+    /// runs on a pool whose `crc_steer` is off, so nothing is ever
+    /// stashed in `Shared::handed` and this seam never runs. Verified
+    /// 31 Aug 2026. What makes it true for the side fetches is
+    /// `repair::sidefetch::strip_side_pool_seams` (pinned by
+    /// `a_steer_config_side_fetch_still_completes`), and that strip
+    /// clears `crc_steer` for an unrelated reason - the 7 Aug 2026
+    /// daemon wedge, where the side consumer's missing verdict parked
+    /// every delivery forever - so it is a coincidence this file may
+    /// not lean on.
+    const fn scoped(file: u32) -> bool {
+        file != u32::MAX
+    }
+
+    /// Has this file's gate stood down? Never for an unscoped request.
     pub(super) fn is_off(&self, file: u32) -> bool {
-        self.off.lock_ok().contains(&file)
+        Self::scoped(file) && self.off.lock_ok().contains(&file)
+    }
+
+    /// Two disjoint backbones proved this file's segment numbering is
+    /// synthesized: stand its gate down. True only the FIRST time, so
+    /// the caller logs once; false for an unscoped request, which
+    /// cannot earn one.
+    pub(super) fn stand_down(&self, file: u32) -> bool {
+        Self::scoped(file) && self.off.lock_ok().insert(file)
     }
 
     /// Has ANY file's gate stood down (the ledger summary)?
@@ -108,6 +157,7 @@ impl Shared {
                     prebyte_expiries: w.prebyte_expiries,
                     soft_430: w.soft_430,
                     recheck_430: 0,
+                    recheck_at: 0,
                     fenced: false,
                     rearms: w.rearms,
                     ladder: false,
@@ -821,6 +871,14 @@ impl QueueControl {
     /// `Owned`: the consumer processes the body exactly as if this
     /// seam did not exist. The requeue itself goes through
     /// `Shared::steer_inbox`, never the tokio queue lock.
+    ///
+    /// "No elsewhere" is the ONE obstacle that no longer finalizes,
+    /// since 31 Aug 2026: a failed CRC with no eligible peer is re-asked
+    /// from the server that just served it, under the run's
+    /// [`REASK_WASTE_CAP`] budget, because a corrupt article otherwise
+    /// got no second ask of any kind while a genuinely missing one was
+    /// requeued and could still complete. A part mismatch is excluded by
+    /// name; the block below says why.
     pub fn note_decoded(&self, id: &str, report: DecodeReport) -> DecodeAck {
         let Some(sh) = self
             .shared
@@ -851,6 +909,13 @@ impl QueueControl {
             sh.complete_one();
             DecodeAck::Owned
         };
+        // Same-server re-ask budget: a body whose own CRC passed hands
+        // the unit its re-ask spent back, so only the asks that come
+        // back bad AGAIN ever deplete it (see `REASK_WASTE_CAP`).
+        // Judged on the CRC alone and not on the part gate below: the
+        // budget is about whether a second ask fixes DAMAGE, and a
+        // re-asked body that decodes clean did.
+        sh.settle_reask(id, matches!(report, DecodeReport::Clean { .. }));
         let mut got_part = None;
         let why = match report {
             DecodeReport::Bad { why } => why,
@@ -874,7 +939,7 @@ impl QueueControl {
                             if first_part == got && first_group & h.group_bits == 0
                     );
                     if agreed {
-                        if sh.part_latch.off.lock_ok().insert(h.work.file)
+                        if sh.part_latch.stand_down(h.work.file)
                             && let Some(l) = &sh.live
                         {
                             l.note(
@@ -928,24 +993,59 @@ impl QueueControl {
         // most once (`dup_servers`), and the fold above stops the
         // pickers re-racing from this group.
         let charged = !h.dup_copy;
-        // `h.spent` is the pre-claim routing evidence (see the field
-        // doc): the provisional claim that delivered this body already
-        // dropped the live entry, so asking the live map alone here
-        // reads "nobody else can have it" for exactly the fill peers a
-        // spent primary opened the tier for.
-        if charged
-            && (!sh.other_can_take_with(&w, h.server, h.spent)
-                || !sh.crc_retried.lock_ok().insert(w.id.clone()))
-        {
-            if dbg {
-                info!(
-                    target: "crc-steer",
-                    "{id}: own (elsewhere={} already={})",
-                    sh.other_can_take_with(&w, h.server, h.spent),
-                    sh.crc_retried.lock_ok().contains(id)
-                );
+        if charged {
+            // One decode-seam requeue per id, ever, whether it goes to a
+            // peer or back to the deliverer. Asked FIRST, ahead of the
+            // routing question below, so a re-ask the budget refuses
+            // does not also spend the per-id pass it never used.
+            if !sh.crc_retried.lock_ok().insert(w.id.clone()) {
+                if dbg {
+                    info!(target: "crc-steer", "{id}: own (already steered once)");
+                }
+                return finalize(&sh);
             }
-            return finalize(&sh);
+            // `h.spent` is the pre-claim routing evidence (see the field
+            // doc): the provisional claim that delivered this body
+            // already dropped the live entry, so asking the live map
+            // alone here reads "nobody else can have it" for exactly the
+            // fill peers a spent primary opened the tier for.
+            //
+            // With no eligible peer the article is re-asked from the
+            // server that just served it badly, which is what
+            // `next_work` does with a `tried_fail` bit nobody else can
+            // take (see `Work::tried_fail`: "with none left the failing
+            // server may retry it itself"). Until 31 Aug 2026 this arm
+            // OWNED the damage instead, so a corrupt body got no second
+            // ask of any kind while a genuinely MISSING one was requeued
+            // and could still complete - and on a single-server install
+            // that was EVERY corrupt article. The two commonest
+            // corruptions are not the same fault, which is why asking
+            // the same server again is worth a fetch: a damaged article
+            // in the spool answers the same bytes forever, and a broken
+            // cache node behind a load balancer answers a fraction of
+            // requests badly. `REASK_WASTE_CAP` is what separates them,
+            // by charging only the asks that come back bad again.
+            //
+            // NOT for a part mismatch (`got_part`), and that carve-out is
+            // the whole reason this is safe to turn on for a peerless
+            // fleet: a mismatch is a disagreement about IDENTITY between
+            // the NZB's segment numbering and this backbone, so the same
+            // backbone re-states it, every time, for every article of
+            // that file. The `part_latch` stand-down that ends it needs
+            // a DIFFERENT group to agree (see the arm above), which a
+            // single server can never provide. So a mismatch still needs
+            // a peer or nothing.
+            let elsewhere = sh.other_can_take_with(&w, h.server, h.spent);
+            if !elsewhere && !(got_part.is_none() && sh.take_reask(&w.id)) {
+                if dbg {
+                    info!(
+                        target: "crc-steer",
+                        "{id}: own (no elsewhere, part_mismatch={} reask budget spent)",
+                        got_part.is_some()
+                    );
+                }
+                return finalize(&sh);
+            }
         }
         // NO tokio queue lock here (see the `steer_inbox` field doc):
         // the Work goes into the inbox, which workers drain into the

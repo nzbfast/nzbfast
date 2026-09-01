@@ -623,14 +623,23 @@ impl Extractor {
             // still holds its own Arc and would park on this frontier
             // for ever; `abandon` is the only thing that ever tells it
             // otherwise (see [`FileWriter::abandon`]).
-            w.abandon();
-            let _ = std::fs::remove_file(&w.path);
-            let name = w
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
+            // `abandon_close`, never a bare `abandon`: the stream
+            // picker, `routed_plain` and the spill lists hold clones of
+            // this Arc, and an unlink under a clone's open handle pins
+            // the whole preallocated file until process exit (51.2 GB
+            // on the 30 Aug 2026 live incident). Closing through the
+            // shared state ends it for every clone at once, and the
+            // returned path is where the file lives NOW - a
+            // verified-name publish may have renamed it under us.
+            let gone = w.abandon_close();
+            let _ = std::fs::remove_file(&gone);
+            // Release the name the writer CLAIMED - the out_dir-relative
+            // form, which for a tree-preserved member carries its
+            // directories ("VIDEO_TS/x.vob"). The bare file name would
+            // release somebody ELSE'S key, or nothing at all: 30 Aug 2026
+            // sweep, and the identical abandon in `deliver.rs` was
+            // already spelled this way with that same reason on it.
+            let name = out_name_of(&inner.out_dir, &w.path);
             inner
                 .names_taken
                 .lock_ok()

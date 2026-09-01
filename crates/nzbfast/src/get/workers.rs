@@ -15,7 +15,19 @@ use tracing::{debug, info, warn};
 
 /// Plaintext-once (`D`) journal record parked until its seam bytes are
 /// on disk: (slot, article id, name, size, frags).
-pub(super) type PendingD = (usize, Arc<str>, String, u64, Vec<nzbkit::extract::Frag>);
+/// A parked `D` record: (slot, id, name, size, fragments, content
+/// commitment). The last field is X5-02's verified pcrc32, taken at
+/// DECODE and carried across the park because the record is written
+/// later - once the seam slivers land - and the number is not
+/// recoverable by then.
+pub(super) type PendingD = (
+    usize,
+    Arc<str>,
+    String,
+    u64,
+    Vec<nzbkit::extract::Frag>,
+    Option<u32>,
+);
 
 /// Article parked on a [`nzbkit::extract::Persist::Held`] return: some
 /// of its bytes were parked in the extractor for a later re-feed
@@ -36,6 +48,10 @@ pub(super) struct ParkedR {
     /// Plain fragments already on disk when the article arrived (the
     /// partially-held case; empty for a whole-span hold).
     pub(super) frags: Vec<nzbkit::extract::Frag>,
+    /// X5-02's content commitment - the verified pcrc32 taken at DECODE.
+    /// Carried across the park because the record is written when the
+    /// hold drains, which is long after the bytes are gone from RAM.
+    pub(super) crc: Option<u32>,
     /// Journals as a bare `record(id)` like the Placed arm does for the
     /// par2 main, instead of an `R` placement.
     pub(super) par2_main: bool,
@@ -186,7 +202,7 @@ pub(super) fn flush_pending_r(
                     f.rebase_identity(name);
                 }
             }
-            journal.record_placed(p.sidx, &p.id, slot_file, &p.name, p.size, &frags);
+            journal.record_placed(p.sidx, &p.id, slot_file, &p.name, p.size, &frags, p.crc);
         }
         done.push((p.sidx, p.off, end));
         false
@@ -258,6 +274,7 @@ fn complete_crypto(
         p.size,
         &bare,
         &mask,
+        p.crc,
     );
     true
 }
@@ -281,14 +298,12 @@ pub(super) struct DecodeCtx {
     pub(super) decoded_bytes: Arc<AtomicU64>,
     pub(super) fetch_done: Arc<AtomicU64>,
     pub(super) decode_errors: Arc<AtomicU64>,
-    pub(super) retention_excluded: Arc<CauseSplit>,
-    pub(super) missing_430: Arc<CauseSplit>,
-    pub(super) takedown_430: Arc<CauseSplit>,
-    pub(super) unasked_430: Arc<CauseSplit>,
+    /// The loss ledgers, as one value: see [`LossLedgers`]. This is the
+    /// WRITE end of them - `get::tail` is the read end - and it carries
+    /// the bundle for the same reason, `note_missing_cause` below
+    /// having taken four of them positionally.
+    pub(super) loss: LossLedgers,
     pub(super) unasked_noted: Arc<std::sync::atomic::AtomicBool>,
-    pub(super) transport_failed: Arc<CauseSplit>,
-    pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
-    pub(super) decode_error_sample: crate::diag::DecodeSampleCell,
     pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) verifier: Arc<nzbkit::live::LiveVerifier>,
     pub(super) extractor: Arc<nzbkit::extract::Extractor>,
@@ -313,6 +328,11 @@ pub(super) struct DecodeCtx {
     /// it a corrupt body on a delegated slot is invisible until the
     /// verifier's block hash, past steer time.
     pub(super) crc_steer: bool,
+    /// Body-encryption spike: the job's decryption context (password,
+    /// per-slot segmentIndex bases, derived-key cache), None unless
+    /// `NZBFAST_YENC_CRYPT=1` and the job can support it - see
+    /// [`nzbkit::yencrypt::JobCrypt::for_job`] and [`decode_and_decrypt`].
+    pub(super) yencrypt: Option<std::sync::Arc<nzbkit::yencrypt::JobCrypt>>,
 }
 
 /// One loss-cause ledger, counted separately for PAYLOAD and RECOVERY
@@ -506,6 +526,200 @@ fn drain_outcome_batch(
     batch
 }
 
+/// Journal every parked `D` whose plaintext-once bytes have physically
+/// settled, leaving the rest parked for a later pass.
+///
+/// `E`/`K`/`T` facts go FIRST, so a record can never precede the
+/// parameters that restore it - an orphaned `D` is unrestorable and
+/// refetches, which is safe but is a resume nobody needed to pay for.
+///
+/// One function because this was written out TWICE, byte-identical: in
+/// the decode loop's per-article pass and again at the end of the
+/// network phase. They are the same rule at two moments, and a pair of
+/// copy-paste siblings is one edit away from disagreeing - which the
+/// X5-02 commitment made concrete, since the `crc` field had to be
+/// threaded through both. Extracted while adding it, rather than
+/// threaded through twice.
+fn flush_pending_d(
+    pending_d: &std::sync::Mutex<Vec<PendingD>>,
+    extractor: &nzbkit::extract::Extractor,
+    journal: &nzbkit::journal::Journal,
+) {
+    let mut pd = pending_d.lock_ok();
+    if pd.is_empty() {
+        return;
+    }
+    let ev = extractor.drain_crypto_events();
+    journal.record_crypto_events(&ev);
+    pd.retain(|(sidx, id, name, size, frags, crc)| {
+        if extractor.crypto_span_on_disk(frags) {
+            journal.record_placed_crypto(
+                *sidx,
+                id,
+                extractor.slot_file_info(*sidx),
+                name,
+                *size,
+                frags,
+                &extractor.crypto_frag_mask(frags),
+                *crc,
+            );
+            false
+        } else {
+            true
+        }
+    });
+}
+
+/// Clamp the decoded payload to what the article itself declares, then
+/// take the X5-02 commitment over what survived. Returns the (possibly
+/// cleared) wire CRC for [`nzbkit::extract::Extractor::write_verified`]
+/// and the commitment for the journal.
+///
+/// The two are ONE step because the order between them is the whole
+/// correctness of both: the clamp is what invalidates the posted CRC,
+/// and the commitment has to be taken AFTER it or it describes bytes
+/// that were dropped. Split across the caller, that ordering is a
+/// convention; here it is the signature. It also keeps
+/// `decode_consumer_loop` under its size ceiling, which is the size
+/// gate doing its job rather than an inconvenience.
+fn clamp_and_commit(
+    out: &mut Vec<u8>,
+    dec: &nzbkit::yenc::Meta,
+    wire_crc: Option<u32>,
+) -> (Option<u32>, u32) {
+    let mut article_crc = wire_crc;
+    clamp_to_declared_size(out, dec, &mut article_crc);
+    (article_crc, content_commitment(article_crc, out))
+}
+
+/// X5-02's content commitment for one article: the crc32 the journal
+/// records so a resume can tell bytes that ARRIVED from bytes that
+/// merely have the right length.
+///
+/// **Prefer the verified pcrc32, but never depend on there being one.**
+/// That distinction is the whole of this function, and getting it wrong
+/// is silent: `verified_article_crc` is `None` in three ordinary cases -
+/// the post carried no `pcrc32`/`crc32` at all, the CRC check was
+/// DELEGATED rather than performed here, or the bare-LF scalar fallback
+/// enforced it internally without surfacing the value - and on top of
+/// those, [`clamp_to_declared_size`] clears it whenever it truncates,
+/// because the posted CRC then covers bytes we did not keep. A journal
+/// that recorded `None` in any of those refetches that article on every
+/// resume.
+///
+/// **The delegated case is not a corner, and that is why this function
+/// exists.** `LiveVerifier::delegates_integrity` is true exactly when a
+/// PAR2 set is active over the slot with full-block MD5 - the ORDINARY
+/// shape of a PAR2-backed download - and the decode then skips the
+/// pcrc32 pass on purpose (M32 perf) and surfaces no value. Taking the
+/// wire number alone would therefore have left every payload article of
+/// such a job uncommitted, and turned its resume into a complete
+/// refetch. That was the first cut of this change; it was caught by
+/// mutation rather than by review, and no fixture in the tree reddens
+/// for it - the kill9 resume tests are PAR2-backed and still pass with
+/// the fallback removed, because their sets do not reach the delegated
+/// path. So the pins are `commitment_tests` below and nzbkit's
+/// `an_unverified_article_offers_no_crc_to_reuse`, which is what
+/// establishes that `None` is reachable at all. Do not read a green
+/// e2e run as evidence this fallback is unnecessary.
+///
+/// Measured 30 Aug 2026 on the dev Mac at load 25: `crc32fast` runs at
+/// 26.5 GB/s over 683 KB buffers, so the fallback is about 4% of ONE
+/// core at a 1 GB/s download rate - and it only runs when the wire gave
+/// us nothing to reuse. The bytes are already in RAM and already hot.
+///
+/// Both arms are the same quantity: CRC-32/ISO-HDLC over exactly the
+/// decoded payload. `rapidyenc`'s value is compared against the header
+/// the poster wrote, and `yenc::decode` checks that same header with
+/// `crc32fast`, so the two agree by construction - see
+/// `yenc_simd::tests::the_verified_article_crc_is_the_crc32_the_extractor_composes`.
+fn content_commitment(article_crc: Option<u32>, out: &[u8]) -> u32 {
+    article_crc.unwrap_or_else(|| crc32fast::hash(out))
+}
+
+/// Decode, then - body-encryption spike (`NZBFAST_YENC_CRYPT=1`, see
+/// `nzbkit::yencrypt`) - decrypt and authenticate an `=yencryption`
+/// article in place, so everything downstream of the decode sees
+/// plaintext exactly as it would on an unencrypted post. Kept out of
+/// `decode_consumer_loop` for its size ceiling, and because the rules
+/// here are about the ARTICLE, not the loop:
+///   - an encrypted article on a job with no decryption context is a
+///     per-article decode error (`EncryptedUnsupported`), which lands on
+///     the same refetch/repair machinery as any corrupt body;
+///   - a failed Poly1305 tag is `DecryptAuth`, same machinery;
+///   - the wire pcrc32 covered the CIPHERTEXT, so its VALUE must not be
+///     reused once the buffer is plaintext (`verified_article_crc` goes
+///     None and the commitment re-hashes), while `crc_checked` is set -
+///     the tag authenticated these exact bytes, which is strictly
+///     stronger than the CRC it replaces.
+fn decode_and_decrypt(
+    raw: &[u8],
+    out: &mut Vec<u8>,
+    verify_crc: bool,
+    crypt: Option<&std::sync::Arc<nzbkit::yencrypt::JobCrypt>>,
+    sidx: usize,
+    id: &str,
+) -> Result<(nzbkit::yenc::Meta, nzbkit::yenc_simd::DecodeIntegrity), nzbkit::yenc::YencError> {
+    // Control-lines pre-pass (the same draft's FF1 half): an article
+    // whose first line is not `=ybegin` may be a control-encrypted
+    // block, and a successful trial decrypt rewrites it into an
+    // ordinary article - possibly still body-encrypted - so everything
+    // below runs unchanged. None means "not ours to rewrite": the
+    // original bytes fall through and fail with the decoder's own
+    // named error, same as any malformed article. The segmentIndex
+    // comes from the message-id (there is no `=ypart` to read before
+    // the rewrite), which is why this needs `id` and not just `sidx`.
+    let restored;
+    let raw = match crypt.and_then(|c| c.control_decrypt_article(id, raw)) {
+        Some(r) => {
+            restored = r;
+            &restored[..]
+        }
+        None => raw,
+    };
+    let (dec, mut integrity) = nzbkit::yenc_simd::decode_into_integrity(raw, out, verify_crc)?;
+    if let Some(enc) = dec.encryption {
+        let crypt = crypt.ok_or(nzbkit::yenc::YencError::EncryptedUnsupported)?;
+        let key = crypt.key_for(&enc.salt);
+        let seg = crypt.segment_index(sidx, dec.part);
+        if !nzbkit::yencrypt::decrypt_segment(&key, seg, &enc.tag, out) {
+            return Err(nzbkit::yenc::YencError::DecryptAuth);
+        }
+        integrity.verified_article_crc = None;
+        integrity.crc_checked = true;
+    }
+    Ok((dec, integrity))
+}
+
+/// Drop any bytes an article writes past its OWN declared file size,
+/// truncating `out` in place and returning the article CRC that still
+/// applies (`None` once truncated).
+///
+/// `=ybegin size=` is THIS article's claim of the whole-file length, and
+/// its `=ypart` range must fall within it - a legitimate part of a larger
+/// file would declare the larger size. A part whose decoded bytes run
+/// past its own declared size is self-contradictory: a malformed or
+/// hostile post. On the no-set path (no PAR2/FileDesc) nothing downstream
+/// truncated the bogus tail, so a rogue trailing part declaring a huge
+/// `begin` ballooned the delivered file far past its declared size while
+/// the job still reported a clean download. Clamping to the article's own
+/// size can never drop legitimate bytes on any path; a truncated span is
+/// no longer vouched by the whole-article CRC.
+fn clamp_to_declared_size(
+    out: &mut Vec<u8>,
+    dec: &nzbkit::yenc::Meta,
+    article_crc: &mut Option<u32>,
+) {
+    if dec.file_size == 0 {
+        return;
+    }
+    let room = dec.file_size.saturating_sub(dec.offset()) as usize;
+    if out.len() > room {
+        out.truncate(room);
+        *article_crc = None;
+    }
+}
+
 /// Everything one decode consumer thread does: drain outcome batches
 /// off the shared channel, yEnc-decode, write through the extractor,
 /// feed the verifier, keep the journal and the PAR2 activation race
@@ -526,14 +740,8 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         decoded_bytes,
         fetch_done,
         decode_errors,
-        retention_excluded,
-        missing_430,
-        takedown_430,
-        unasked_430,
+        loss,
         unasked_noted,
-        transport_failed,
-        transport_sample,
-        decode_error_sample,
         disk_full_sample,
         verifier,
         extractor,
@@ -548,6 +756,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
         throttle_mbps,
         throttle_t0,
         crc_steer,
+        yencrypt,
     } = ctx;
     let par2 = Par2Race {
         slots: &slots,
@@ -604,7 +813,14 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                     // hash, past steer time. The forced CRC is the
                     // steer's entire marginal cost.
                     let delegated = verifier.delegates_integrity(sidx) && !crc_steer;
-                    match nzbkit::yenc_simd::decode_into_integrity(&raw, &mut out, !delegated) {
+                    match decode_and_decrypt(
+                        &raw,
+                        &mut out,
+                        !delegated,
+                        yencrypt.as_ref(),
+                        sidx,
+                        &id,
+                    ) {
                         Ok((dec, integrity)) => {
                             // TODO 114: report the verdict (the pool
                             // does the expected-part comparison). A
@@ -623,6 +839,8 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             // This article is now accounted for,
                             // whatever the write below makes of it.
                             fetch_done.fetch_add(nbytes, Ordering::Relaxed);
+                            let (article_crc, commitment) =
+                                clamp_and_commit(&mut out, &dec, integrity.verified_article_crc);
                             let crc_checked = integrity.crc_checked;
                             // Borrowed, not cloned: this runs per article on
                             // every decode thread, and the only consumers that
@@ -641,16 +859,25 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             // posted name; `dec.name` still goes to the
                             // verifier below as the set-match key.
                             let name: &str = slot.write_name(&dec.name);
+                            // M4-70 across a crash: a CONTESTED slot's
+                            // tally has to outlive this run, or a resume
+                            // rebuilds it empty and the decoy name
+                            // stands. Empty for every ordinary slot.
+                            journal.record_name_votes(sidx, &slot.contested_records(&dec.name));
                             // Issue #14: the offset-0 article of a
                             // payload-classified slot decoding to
                             // the PAR2 packet magic identifies
                             // recovery data with certainty (nothing
                             // else starts with it). Reclassify NOW,
                             // before the scheduler fetches any more
-                            // of the volume.
+                            // of the volume. A short PREFIX in front
+                            // of the magic does not hide it (M4-65) -
+                            // `head_is_packet_file` is the one
+                            // predicate the disk walk and the repair
+                            // catalog sniff with too.
                             if !slot.is_par2()
                                 && dec.offset() == 0
-                                && out.starts_with(nzbkit::par2::MAGIC)
+                                && nzbkit::par2::head_is_packet_file(&out)
                             {
                                 reclassify_sniffed_par2(
                                     &sniff,
@@ -680,12 +907,14 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                 // The checked pcrc32 over exactly these
                                 // bytes: a STORE span that is this whole
                                 // article composes from it instead of
-                                // hashing them again.
-                                integrity.verified_article_crc,
+                                // hashing them again. `None` when the span
+                                // was clamped above (the CRC covered the
+                                // full over-long payload, not the prefix).
+                                article_crc,
                             ) {
                                 Err(e) => {
                                     warn!(target: "get", "write {name}: {e}");
-                                    note_write_fault(&decode_error_sample, name, &e);
+                                    note_write_fault(&loss.decode_error_sample, name, &e);
                                     decode_errors.fetch_add(1, Ordering::Relaxed);
                                     slot.errors.fetch_add(1, Ordering::Relaxed);
                                     // The storage itself ran out under the
@@ -740,6 +969,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                                     name,
                                                     dec.file_size,
                                                     frags,
+                                                    Some(commitment),
                                                 );
                                             }
                                         }
@@ -756,6 +986,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                                 name.to_string(),
                                                 dec.file_size,
                                                 frags.clone(),
+                                                Some(commitment),
                                             ));
                                         }
                                         // Bytes of this span were parked
@@ -775,6 +1006,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                                     len: out.len() as u64,
                                                     frags: frags.clone(),
                                                     par2_main: slot.is_par2_main,
+                                                    crc: Some(commitment),
                                                 });
                                             }
                                         }
@@ -782,32 +1014,8 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                                     }
                                     flush_pending_r(&pending_r, &extractor, &journal);
                                     // Flush every parked D whose bytes
-                                    // have settled; E/K/T facts go first
-                                    // so the records they support are
-                                    // never orphaned.
-                                    {
-                                        let mut pd = pending_d.lock_ok();
-                                        if !pd.is_empty() {
-                                            let ev = extractor.drain_crypto_events();
-                                            journal.record_crypto_events(&ev);
-                                            pd.retain(|(sidx, id, name, size, frags)| {
-                                                if extractor.crypto_span_on_disk(frags) {
-                                                    journal.record_placed_crypto(
-                                                        *sidx,
-                                                        id,
-                                                        extractor.slot_file_info(*sidx),
-                                                        name,
-                                                        *size,
-                                                        frags,
-                                                        &extractor.crypto_frag_mask(frags),
-                                                    );
-                                                    false
-                                                } else {
-                                                    true
-                                                }
-                                            });
-                                        }
-                                    }
+                                    // have settled.
+                                    flush_pending_d(&pending_d, &extractor, &journal);
                                     decoded_bytes.fetch_add(out.len() as u64, Ordering::Relaxed);
                                     if let Some(mbps) = throttle_mbps {
                                         let target = decoded_bytes.load(Ordering::Relaxed) as f64
@@ -901,7 +1109,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                             }
                             fetch_done.fetch_add(nbytes, Ordering::Relaxed);
                             warn!(target: "get", "decode error ({id}): {e}");
-                            note_corrupt_fault(&decode_error_sample, &e);
+                            note_corrupt_fault(&loss.decode_error_sample, &e);
                             decode_errors.fetch_add(1, Ordering::Relaxed);
                             slot.errors.fetch_add(1, Ordering::Relaxed);
                         }
@@ -951,19 +1159,12 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                     // here because here is the only place the slot is
                     // still in hand - see `CauseSplit`.
                     let rec = is_recovery_article(&id, &id_to_slot, &slots);
-                    note_missing_cause(
-                        cause,
-                        rec,
-                        &retention_excluded,
-                        &missing_430,
-                        &takedown_430,
-                        &unasked_430,
-                        &unasked_noted,
-                    );
+                    note_missing_cause(cause, rec, &loss, &unasked_noted);
                     par2.article_lost(&id, &id_to_slot, &fetch_done);
                 }
                 FetchOutcome::Failed { id, code, error } => {
-                    transport_failed.add(is_recovery_article(&id, &id_to_slot, &slots));
+                    loss.transport_failed
+                        .add(is_recovery_article(&id, &id_to_slot, &slots));
                     // TODO 307 item 1: the pool now says WHICH KIND of
                     // failure this was as a value, so a reader no longer
                     // has to parse the sentence to learn it.
@@ -992,7 +1193,7 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
                     //
                     // Logged with the sample and not per article: on a
                     // dead link that would be one line per segment.
-                    let mut sample = transport_sample.lock_ok();
+                    let mut sample = loss.transport_sample.lock_ok();
                     if sample.is_none() {
                         let kind = crate::failkind::fail_kind_of(Some(code), &error);
                         debug!(
@@ -1015,8 +1216,11 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
 /// the one thing a count cannot.
 ///
 /// A free function rather than three arms inline: `decode_consumer_loop`
-/// is at its size-gate ceiling, and this is the classification of a
-/// loss, which is a subject of its own.
+/// SAT at its size-gate ceiling when this was hoisted out, and this is
+/// the classification of a loss, which is a subject of its own. Past
+/// tense on purpose - the hoist is what bought the margin, so a
+/// present-tense claim here is false the moment it is written (that
+/// function measures 470 of 500 on 31 Aug 2026).
 ///
 /// `Unasked` is counted EXACTLY as `Gone` is, on purpose. `missing_430`
 /// is what the repair planner and every verdict gate read, and moving a
@@ -1028,18 +1232,22 @@ pub(super) fn decode_consumer_loop(ctx: DecodeCtx) {
 /// (27 Aug sweep finding 8). Wiring that into the failure summary's
 /// copy is its own change with its own wording to settle; the typed
 /// cause is the only reading of it that does not go through a sentence.
+///
+/// The ledgers arrive as one value ([`LossLedgers`]) rather than as
+/// four `&CauseSplit` in a row, and that is the point: four identical
+/// references accept any permutation of themselves without a word from
+/// the compiler, and this is the function that DECIDES which ledger a
+/// loss lands in. A swap here misfiles the loss at the moment it is
+/// charged, so nothing downstream can ever tell.
 fn note_missing_cause(
     cause: nzbkit::pool::MissingCause,
     rec: bool,
-    retention_excluded: &CauseSplit,
-    missing_430: &CauseSplit,
-    takedown_430: &CauseSplit,
-    unasked_430: &CauseSplit,
+    loss: &LossLedgers,
     unasked_noted: &std::sync::atomic::AtomicBool,
 ) {
     let takedown = match cause {
         nzbkit::pool::MissingCause::Retention => {
-            retention_excluded.add(rec);
+            loss.retention_excluded.add(rec);
             return;
         }
         nzbkit::pool::MissingCause::Gone { takedown } => takedown,
@@ -1047,7 +1255,7 @@ fn note_missing_cause(
             // The share the failure summary needs to tell a departure
             // from a dead post. Charged BESIDE `missing_430` below and
             // never instead of it - see `diag::LossCauses::unasked_430`.
-            unasked_430.add(rec);
+            loss.unasked_430.add(rec);
             // Once per run, not once per article: a post that outlives
             // a server is hundreds of articles wide and this is one
             // fact about the run, not one fact about each of them.
@@ -1063,12 +1271,12 @@ fn note_missing_cause(
             takedown
         }
     };
-    missing_430.add(rec);
+    loss.missing_430.add(rec);
     // The hint rides its own counter so the failure summary can say
     // "removed", and stays inside missing_430 for everything else - a
     // takedown is still a refusal.
     if takedown {
-        takedown_430.add(rec);
+        loss.takedown_430.add(rec);
     }
 }
 
@@ -1748,29 +1956,7 @@ pub(super) async fn drain_network(
     // Final D-record flush: seams that closed after the last article's
     // own flush pass settle now; anything still RAM-held refetches on
     // resume, which is exactly the truthful record.
-    {
-        let mut pd = pending_d.lock_ok();
-        if !pd.is_empty() {
-            let ev = extractor.drain_crypto_events();
-            journal.record_crypto_events(&ev);
-            pd.retain(|(sidx, id, name, size, frags)| {
-                if extractor.crypto_span_on_disk(frags) {
-                    journal.record_placed_crypto(
-                        *sidx,
-                        id,
-                        extractor.slot_file_info(*sidx),
-                        name,
-                        *size,
-                        frags,
-                        &extractor.crypto_frag_mask(frags),
-                    );
-                    false
-                } else {
-                    true
-                }
-            });
-        }
-    }
+    flush_pending_d(pending_d, extractor, journal);
     let elapsed = t0.elapsed();
     ticker.abort();
     watchdog.abort();
@@ -1852,6 +2038,54 @@ pub(super) async fn drain_network(
     Ok((elapsed, password))
 }
 
+/// The five loss ledgers the failure summary is built from, plus the
+/// two first-error samples that illustrate them.
+///
+/// ONE VALUE, built once in [`build_counters`] and never re-assembled,
+/// because all five are `Arc<CauseSplit>` and every consumer of them is
+/// a positional argument list. Any two swapped compiles clean and
+/// misfiles a whole loss class: a flaky provider reported as a
+/// takedown, all the way out to the indexer failure report. That is not
+/// a hypothetical - `spawn_decode_consumers` carried exactly that
+/// hazard across 32 positional arguments until 31 Aug 2026
+/// (`a2529f9ee`), and `get::tail`'s `finish_run` and `finish_job`
+/// carried it for another day after that.
+///
+/// NESTED INSIDE [`Counters`] rather than flat in it, and that is
+/// load-bearing rather than tidy: the orchestrator moves `counters.tx`
+/// into `run_fetch`, so `&counters` is a borrow of a partially-moved
+/// value from there on and cannot be handed to the tail. A borrow of
+/// one FIELD still can, which is what lets the bundle reach the two
+/// functions that most need it.
+///
+/// Do NOT explode this back out into positional parameters, and do not
+/// re-assemble it field by field at a call site - a hand-built copy
+/// puts the swap straight back, just louder.
+///
+/// `Clone` because the decode fleet takes one per thread; every field
+/// is a handle, so a clone shares the same ledgers. `Default` is the
+/// all-empty set the `finish_job` cases pass when the ledgers are not
+/// what they are about - safe here where a blank `Census` is not,
+/// because an empty ledger is a truthful "nothing was charged".
+#[derive(Clone, Default)]
+pub(super) struct LossLedgers {
+    /// Segments the pool never asked anyone for: outside every
+    /// configured server's retention window.
+    pub(super) retention_excluded: Arc<CauseSplit>,
+    /// A real 430 verdict from a complete fleet.
+    pub(super) missing_430: Arc<CauseSplit>,
+    /// Of those, the ones whose refusal SAID the article was removed.
+    pub(super) takedown_430: Arc<CauseSplit>,
+    /// And of those, the ones no COMPLETE fleet ever voted on.
+    pub(super) unasked_430: Arc<CauseSplit>,
+    /// The provider flaked, which is the opposite remedy to a takedown.
+    pub(super) transport_failed: Arc<CauseSplit>,
+    /// First transport error seen, for the failure summary to quote.
+    pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
+    /// First decode error seen, same purpose.
+    pub(super) decode_error_sample: crate::diag::DecodeSampleCell,
+}
+
 /// The fetch-outcome channel, the shared progress/error counters and
 /// first-error samples, the slow-disk consumer throttle, the M15b
 /// backfill cell, and the runtime handle the decode threads use for
@@ -1862,14 +2096,9 @@ pub(super) struct Counters {
     pub(super) rx: Arc<std::sync::Mutex<tokio::sync::mpsc::Receiver<nzbkit::pool::FetchOutcome>>>,
     pub(super) decoded_bytes: Arc<AtomicU64>,
     pub(super) decode_errors: Arc<AtomicU64>,
-    pub(super) retention_excluded: Arc<CauseSplit>,
-    pub(super) missing_430: Arc<CauseSplit>,
-    pub(super) takedown_430: Arc<CauseSplit>,
-    pub(super) unasked_430: Arc<CauseSplit>,
+    /// The loss ledgers, nested rather than flat: see [`LossLedgers`].
+    pub(super) loss: LossLedgers,
     pub(super) unasked_noted: Arc<std::sync::atomic::AtomicBool>,
-    pub(super) transport_failed: Arc<CauseSplit>,
-    pub(super) transport_sample: Arc<std::sync::Mutex<Option<String>>>,
-    pub(super) decode_error_sample: crate::diag::DecodeSampleCell,
     pub(super) disk_full_sample: Arc<std::sync::Mutex<Option<String>>>,
     pub(super) throttle_mbps: Option<f64>,
     pub(super) throttle_t0: Instant,
@@ -1992,14 +2221,16 @@ pub(super) fn build_counters(
         rx,
         decoded_bytes,
         decode_errors,
-        retention_excluded,
-        missing_430,
-        takedown_430,
-        unasked_430,
+        loss: LossLedgers {
+            retention_excluded,
+            missing_430,
+            takedown_430,
+            unasked_430,
+            transport_failed,
+            transport_sample,
+            decode_error_sample,
+        },
         unasked_noted,
-        transport_failed,
-        transport_sample,
-        decode_error_sample,
         disk_full_sample,
         throttle_mbps,
         throttle_t0,
@@ -2014,40 +2245,43 @@ pub(super) fn build_counters(
 /// [`decode_consumer_loop`] over a DecodeCtx built from these shared
 /// handles. Returns the join handles and the shared pending-D cell the
 /// drain pass flushes.
+///
+/// [`Counters`] arrives WHOLE rather than field by field, and that is
+/// the one thing here worth reading twice (31 Aug 2026). Sixteen of
+/// this function's parameters were fields of that one struct, and five
+/// of them - `retention_excluded`, `missing_430`, `takedown_430`,
+/// `unasked_430`, `transport_failed` - are the same `Arc<CauseSplit>`
+/// type, so any two swapped at the call site compiled clean and
+/// misfiled a whole loss class in the failure summary. Passing the
+/// bundle takes that hazard away entirely, and it is why the
+/// orchestrator no longer destructures `Counters` onto inline names the
+/// way it does the other phase bundles: the fields it still reads
+/// itself are spelled `counters.x` there. Do NOT explode this back out.
+///
+/// Those five now live one level down, in [`LossLedgers`], so the same
+/// bundle can also reach `get::tail`'s `finish_run` and `finish_job` -
+/// which took them positionally for another day after this fix landed.
+/// The nesting's own reasoning is at that struct.
 #[expect(clippy::too_many_arguments)]
 pub(super) fn spawn_decode_consumers(
     decoders: usize,
-    rx: &Arc<std::sync::Mutex<tokio::sync::mpsc::Receiver<nzbkit::pool::FetchOutcome>>>,
+    c: &Counters,
     buf_pool: &Arc<nzbkit::pool::BufPool>,
     out_pool: &Arc<nzbkit::pool::BufPool>,
     slots: &[Arc<FileSlot>],
     id_to_slot: &Arc<crate::unpack::IdSlots>,
     seek_names: &Arc<SeekCtl>,
-    decoded_bytes: &Arc<AtomicU64>,
     fetch_done: &Arc<AtomicU64>,
-    decode_errors: &Arc<AtomicU64>,
-    retention_excluded: &Arc<CauseSplit>,
-    missing_430: &Arc<CauseSplit>,
-    takedown_430: &Arc<CauseSplit>,
-    unasked_430: &Arc<CauseSplit>,
-    unasked_noted: &Arc<std::sync::atomic::AtomicBool>,
-    transport_failed: &Arc<CauseSplit>,
-    transport_sample: &Arc<std::sync::Mutex<Option<String>>>,
-    decode_error_sample: &crate::diag::DecodeSampleCell,
-    disk_full_sample: &Arc<std::sync::Mutex<Option<String>>>,
     verifier: &Arc<nzbkit::live::LiveVerifier>,
     extractor: &Arc<nzbkit::extract::Extractor>,
     shape_said: &Arc<std::sync::atomic::AtomicBool>,
     par2_outstanding: &Arc<std::sync::atomic::AtomicUsize>,
     journal: &Arc<nzbkit::journal::Journal>,
-    backfill: &Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<u64>>>>,
     sniff: &Arc<SniffCtl>,
     replay: &Arc<super::rig::ReplayPending>,
     queue_ctl: &Arc<nzbkit::pool::QueueControl>,
-    rt: &tokio::runtime::Handle,
-    throttle_mbps: Option<f64>,
-    throttle_t0: Instant,
     crc_steer: bool,
+    yencrypt: &Option<std::sync::Arc<nzbkit::yencrypt::JobCrypt>>,
 ) -> (
     Vec<std::thread::JoinHandle<()>>,
     Arc<std::sync::Mutex<Vec<PendingD>>>,
@@ -2073,7 +2307,7 @@ pub(super) fn spawn_decode_consumers(
     let n_decoders = decoders.max(1).min(nzbkit::mem::cpu_workers());
     for i in 0..n_decoders {
         let ctx = DecodeCtx {
-            rx: rx.clone(),
+            rx: c.rx.clone(),
             pending_d: pending_d.clone(),
             pending_r: pending_r.clone(),
             pool: buf_pool.clone(),
@@ -2081,31 +2315,26 @@ pub(super) fn spawn_decode_consumers(
             slots: slots.to_vec(),
             id_to_slot: Arc::clone(id_to_slot),
             seek_names: seek_names.clone(),
-            decoded_bytes: decoded_bytes.clone(),
+            decoded_bytes: c.decoded_bytes.clone(),
             fetch_done: fetch_done.clone(),
-            decode_errors: decode_errors.clone(),
-            retention_excluded: retention_excluded.clone(),
-            missing_430: missing_430.clone(),
-            takedown_430: takedown_430.clone(),
-            unasked_430: unasked_430.clone(),
-            unasked_noted: unasked_noted.clone(),
-            transport_failed: transport_failed.clone(),
-            transport_sample: transport_sample.clone(),
-            decode_error_sample: decode_error_sample.clone(),
-            disk_full_sample: disk_full_sample.clone(),
+            decode_errors: c.decode_errors.clone(),
+            loss: c.loss.clone(),
+            unasked_noted: c.unasked_noted.clone(),
+            disk_full_sample: c.disk_full_sample.clone(),
             verifier: verifier.clone(),
             extractor: extractor.clone(),
             shape_said: shape_said.clone(),
             par2_outstanding: par2_outstanding.clone(),
             journal: journal.clone(),
-            backfill: backfill.clone(),
+            backfill: c.backfill.clone(),
             sniff: sniff.clone(),
             replay: replay.clone(),
             queue_ctl: queue_ctl.clone(),
-            rt: rt.clone(),
-            throttle_mbps,
-            throttle_t0,
+            rt: c.rt.clone(),
+            throttle_mbps: c.throttle_mbps,
+            throttle_t0: c.throttle_t0,
             crc_steer,
+            yencrypt: yencrypt.clone(),
         };
         let thread = std::thread::Builder::new()
             .name(format!("decode-{i}"))
@@ -2155,6 +2384,10 @@ pub(super) fn spawn_tail_watchers(
     // §146: the tail give-up's standing order to the spec prefetch, in
     // recovery slices - see the two spawns' parameter docs.
     let tail_demand = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // §146 starvation signal: TRUE once the spec-prefetch ladder can
+    // never deliver another slice, so the give-up's veto stops being a
+    // wait for it. See both spawns' parameter docs.
+    let ladder_over = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let spec_prefetch_task: Option<tokio::task::JoinHandle<()>> = {
         let allowed = match hub {
             Some(h) => h.spec_prefetch.load(Ordering::Relaxed),
@@ -2171,8 +2404,16 @@ pub(super) fn spawn_tail_watchers(
             &prefetched,
             &prefetch_stop,
             &tail_demand,
+            &ladder_over,
         )
     };
+    if spec_prefetch_task.is_none() {
+        // No ladder exists at all (prefetch disallowed, no main pool,
+        // or the post declares no recovery volumes) - nothing will
+        // ever raise `on_hand` from this side, and the give-up must
+        // not wait for a task that was never spawned.
+        ladder_over.store(true, Ordering::Release);
+    }
     // PAR2-race experiment (dark): see spawn_par_race.
     let par_race_task = spawn_par_race(
         slots,
@@ -2197,6 +2438,7 @@ pub(super) fn spawn_tail_watchers(
         nzb,
         out_dir,
         &tail_demand,
+        &ladder_over,
     );
     TailWatchers {
         prefetched,
@@ -2204,6 +2446,70 @@ pub(super) fn spawn_tail_watchers(
         spec_prefetch_task,
         par_race_task,
         tail_giveup_task,
+    }
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use super::*;
+
+    /// X5-02: EVERY article gets a commitment, whatever the wire gave
+    /// us. This is the pin for the gap that nearly shipped - the first
+    /// cut recorded `integrity.verified_article_crc` straight through,
+    /// and that is `None` for a post with no `pcrc32`, for a delegated
+    /// check, for the bare-LF fallback, and for every clamped article.
+    /// Each of those would have refetched on every resume, which is the
+    /// full-refetch outcome the commitment exists to avoid.
+    #[test]
+    fn every_article_gets_a_commitment_verified_or_computed() {
+        let out: Vec<u8> = (0..9_000u32).map(|i| (i % 251) as u8).collect();
+        let own = crc32fast::hash(&out);
+
+        // Nothing from the wire: computed over exactly these bytes.
+        assert_eq!(content_commitment(None, &out), own);
+        // A verified pcrc32 IS that same quantity, so reusing it and
+        // computing it are the same number - which is what makes the
+        // fallback safe rather than merely cheap.
+        assert_eq!(content_commitment(Some(own), &out), own);
+        // And the wire value is preferred when present: a (contrived)
+        // disagreement resolves to the wire's, because that is the one
+        // the decode actually checked the bytes against.
+        assert_eq!(content_commitment(Some(0xDEAD_BEEF), &out), 0xDEAD_BEEF);
+    }
+
+    /// A clamped article commits to what was KEPT, not to what the
+    /// poster declared. `clamp_to_declared_size` clears the wire CRC
+    /// precisely because it no longer describes the bytes on disk, and
+    /// the computed fallback is what makes that safe instead of
+    /// unresumable.
+    #[test]
+    fn a_clamped_article_commits_to_the_bytes_it_kept() {
+        // A real decode, because `Meta`'s offset fields are nzbkit's own
+        // and a hand-built one would be testing a struct literal rather
+        // than the path this runs on. The post DECLARES 5 000 bytes and
+        // delivers 9 000 - self-contradictory, which is what the clamp
+        // exists for.
+        let payload: Vec<u8> = (0..9_000u32).map(|i| (i % 251) as u8).collect();
+        let art = nzbkit::yenc::encode("a.bin", 5_000, Some((1, 1)), 1, &payload);
+        let mut out = Vec::new();
+        let (dec, integrity) =
+            nzbkit::yenc_simd::decode_into_integrity(&art, &mut out, true).unwrap();
+        assert_eq!(out.len(), 9_000, "the over-long payload decodes whole");
+        let mut article_crc = integrity.verified_article_crc;
+        assert!(
+            article_crc.is_some(),
+            "the fixture must carry a checked pcrc32, or the clamp has \
+             nothing to clear and this test proves nothing"
+        );
+        clamp_to_declared_size(&mut out, &dec, &mut article_crc);
+        assert_eq!(out.len(), 5_000, "the over-long tail is dropped");
+        assert_eq!(article_crc, None, "the posted CRC no longer applies");
+        assert_eq!(
+            content_commitment(article_crc, &out),
+            crc32fast::hash(&out),
+            "the commitment covers the truncated span, so the article \
+             still resumes"
+        );
     }
 }
 
@@ -2232,23 +2538,14 @@ mod missing_cause_tests {
     /// clause silent on every real run.
     #[test]
     fn an_unasked_loss_is_charged_beside_the_refusal_it_still_is() {
-        let (missing, takedown, unasked) = (
-            CauseSplit::default(),
-            CauseSplit::default(),
-            CauseSplit::default(),
-        );
+        // Named fields, so the four ledgers cannot be transposed here
+        // either - which is the whole reason the function takes them as
+        // one value. `.payload()` is then read off the SAME handle the
+        // charge went to.
+        let led = LossLedgers::default();
+        let (missing, takedown, unasked) = (&led.missing_430, &led.takedown_430, &led.unasked_430);
         let noted = std::sync::atomic::AtomicBool::new(false);
-        let note = |cause| {
-            note_missing_cause(
-                cause,
-                false,
-                &CauseSplit::default(),
-                &missing,
-                &takedown,
-                &unasked,
-                &noted,
-            )
-        };
+        let note = |cause| note_missing_cause(cause, false, &led, &noted);
         note(MissingCause::Gone { takedown: false });
         note(MissingCause::Unasked {
             takedown: false,
@@ -2267,17 +2564,8 @@ mod missing_cause_tests {
         );
         // Retention is the one cause that is NOT a refusal: it returns
         // before any of the three counters above.
-        let retention = CauseSplit::default();
-        note_missing_cause(
-            MissingCause::Retention,
-            false,
-            &retention,
-            &missing,
-            &takedown,
-            &unasked,
-            &noted,
-        );
-        assert_eq!(retention.payload(), 1);
+        note_missing_cause(MissingCause::Retention, false, &led, &noted);
+        assert_eq!(led.retention_excluded.payload(), 1);
         assert_eq!(missing.payload(), 3);
     }
 
@@ -2289,11 +2577,7 @@ mod missing_cause_tests {
     /// summary clause prints.
     #[test]
     fn a_recovery_articles_unasked_loss_is_not_payload() {
-        let (missing, takedown, unasked) = (
-            CauseSplit::default(),
-            CauseSplit::default(),
-            CauseSplit::default(),
-        );
+        let led = LossLedgers::default();
         let noted = std::sync::atomic::AtomicBool::new(false);
         note_missing_cause(
             MissingCause::Unasked {
@@ -2301,15 +2585,12 @@ mod missing_cause_tests {
                 dark: 1,
             },
             true,
-            &CauseSplit::default(),
-            &missing,
-            &takedown,
-            &unasked,
+            &led,
             &noted,
         );
-        assert_eq!(unasked.payload(), 0);
-        assert_eq!(unasked.recovery(), 1);
-        assert_eq!(missing.recovery(), 1);
+        assert_eq!(led.unasked_430.payload(), 0);
+        assert_eq!(led.unasked_430.recovery(), 1);
+        assert_eq!(led.missing_430.recovery(), 1);
     }
 }
 
@@ -2397,9 +2678,11 @@ mod cause_split_tests {
         Arc::new(FileSlot {
             hint: hint.into(),
             hint_is_posted_name: nzbkit::release::stem_is_a_name(hint),
+            yenc_votes: Default::default(),
             name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main: par2,
             sample_skipped: false,
+            par2_name_demoted: Default::default(),
             par2_sniffed: AtomicBool::new(false),
             total_segments: 1,
             remaining: AtomicUsize::new(0),
@@ -2467,3 +2750,9 @@ mod spec_ladder_tests;
 
 #[cfg(test)]
 mod damage_projection_tests;
+
+// Y4: the two recovery-slice COUNTERS against the one selection
+// predicate. Here rather than beside either of them because this is the
+// only scope that can see both halves at once.
+#[cfg(test)]
+mod slice_len_tests;

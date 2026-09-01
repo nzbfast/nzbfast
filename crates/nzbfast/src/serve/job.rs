@@ -537,6 +537,24 @@ pub struct Job {
     /// a mid-move kill never strands them elsewhere. Persisted so a
     /// restart re-queues the move instead of forgetting it.
     pub move_pending: bool,
+    /// TODO 317 (GitHub #67): this job downloaded STRAIGHT INTO its
+    /// category's destination, so it owes no move at completion and
+    /// its `out_dir` is deliberately outside the download root.
+    ///
+    /// Decided once at enqueue and persisted, which is TODO 317's own
+    /// rule - the destination is fixed at job start and a later
+    /// settings or category change applies from the next job. It has
+    /// to be a record rather than a re-read of the setting, and the
+    /// failure if it were not is sharp: a job started with
+    /// write-through on and finishing after it was turned off would be
+    /// handed to the mover, whose relative path is
+    /// `strip_prefix(out_dir())` - which does not match - so it would
+    /// fall back to `category/<folder>` and move the payload from the
+    /// destination to a second folder underneath it.
+    ///
+    /// Absent on every record written before TODO 317, which reads as
+    /// false - true of all of them.
+    pub write_through: bool,
     /// §296: the files this job has already copied to the completed
     /// folder while the rest of it was still downloading, as they stood
     /// when the copy was taken.
@@ -1147,6 +1165,57 @@ pub(super) fn finalize_cleanup_exts(d: &Daemon) -> Vec<String> {
     e
 }
 
+/// Retire the article journal a daemon run left behind, now that this
+/// job's outcome is recorded somewhere a restart can read it.
+///
+/// X5-03 OF THE 30 Aug 2026 ADVERSARIAL-ROW SET, the daemon half:
+/// journal retirement and terminal completion must be ONE crash
+/// transaction. The engine used to unlink the journal the instant its
+/// finish verified (`get::tail::finish_job`), which is correct for the
+/// CLI and wrong here - the daemon's own record does not become terminal
+/// until this tail ends, so a SIGKILL in between left the payload
+/// byte-exact on disk, the journal gone, and the persisted row saying
+/// `Finishing`, which `job_wire`'s wildcard state arm restores as
+/// `Queued`. Measured 31 Aug 2026: the job re-ran, had nothing to resume
+/// from, asked for 44 bodies that a taken-down post refused, and filed
+/// `Failed` over an output directory holding the finished release - which
+/// is what an *arr reads. The engine now keeps it for us
+/// (`get::JournalOwner::Caller`) and this is where it goes.
+///
+/// CALLED EXACTLY HERE, and the position is the whole fix rather than a
+/// detail of it. It is the first statement past the `save_queue` that
+/// persisted `finalizing = true`, which is:
+///
+///  * the first DURABLE write after the network phase, and the one that
+///    takes the row out of the resume-from-journal regime - from here a
+///    crash restores it Failed-with-files-preserved rather than Queued,
+///    which is `restore_records`' own deliberate anti-half-import
+///    answer, so nothing downstream needs this file any more;
+///  * inside a window the marker itself makes EXCLUSIVE - `retry`
+///    refuses a record carrying it, so no new generation can appear
+///    across it (see the marker's own note above). That is what stands
+///    in for the generation test `Journal::remove` does through its own
+///    open handle, which nothing here holds;
+///  * BEFORE any rename, filing or move, so `out_dir` is still the
+///    directory the journal is actually in. After `finalize_payload` the
+///    record has been re-pointed at wherever the payload went.
+///
+/// A crash between that write and this unlink costs a lingering journal
+/// and nothing else, which `nzbkit::journal::Journal::remove`'s own doc
+/// already calls always safe: "at worst a file the next run resumes
+/// correctly from".
+///
+/// Silent and best-effort BY DESIGN. Ordinarily there is nothing here at
+/// all - a CLI-owned run retired its own, an insurance bank never
+/// reaches this function (`postproc::run_tail`'s insurance arm re-queues
+/// the row and returns), and a failed job keeps its journal for the
+/// retry. Failing to unlink leaves a hidden dotfile that the sweeps, the
+/// namer and the manifest all already ignore as ours, and that a later
+/// run resumes correctly from; it is not worth a line on the row.
+fn retire_deferred_journal(out_dir: &Path) {
+    let _ = std::fs::remove_file(out_dir.join(nzbkit::journal::JOURNAL_LEAF));
+}
+
 /// [`finalize_completed`], fenced to the round of the record's life the
 /// caller started on (`Daemon::record_generation`).
 ///
@@ -1319,6 +1388,7 @@ pub(super) async fn finalize_completed_gen(
                 "post-processing skipped: the queue file could not be written".to_string();
             return;
         }
+        retire_deferred_journal(&out2);
         // Cloned handle for the blocking finalize (the caller still
         // needs its own for park()/script).
         let d3 = d.clone();
@@ -1426,7 +1496,15 @@ pub(super) async fn finalize_completed_gen(
             // attempt on this job cost, this one starts at the first
             // rung rather than inheriting a spent retry budget.
             j.move_attempts = 0;
-            j.move_pending = !needs_pw && d.move_destination_configured(&j.category);
+            // TODO 317: a write-through job is ALREADY at the
+            // destination, so it owes the mover nothing. Gated on the
+            // job's own record and not on the live setting, for the
+            // reason `Job::write_through` gives: the mover cannot
+            // derive a relative path for a payload that is not under
+            // the download root, and would relocate it into a folder
+            // beneath itself.
+            j.move_pending =
+                !needs_pw && !j.write_through && d.move_destination_configured(&j.category);
             // Recorded even when it changed no filename: an IMDb id with
             // no better name is still the thing that lets the history
             // row link to what it actually is.
@@ -1584,7 +1662,8 @@ impl DupeExempt<'_> {
 
     /// Widen to [`Self::Anybody`] when `yes`. The `hold_for` spare's
     /// road into the same suppression, kept out of `enqueue_as`'s body
-    /// because that function sits on the size gate's ceiling.
+    /// because `enqueue_as` was at 500 of the size gate's 500-line
+    /// ceiling on 25 Aug 2026.
     pub(crate) fn or_anybody(self, yes: bool) -> Self {
         if yes { Self::Anybody } else { self }
     }
@@ -1981,19 +2060,6 @@ pub(super) fn priority_name(p: i32) -> &'static str {
 /// not choose one, and it is the default of our own `priority=` parsing.
 pub(crate) const SAB_DEFAULT_PRIORITY: i32 = -100;
 
-/// The priority a job actually gets on the way into the queue.
-///
-/// The sentinel has to be resolved HERE, not left on the record. `pick_job`
-/// orders by the stored number, so a stored -100 sorted BELOW Low (-1) and
-/// even below a held Duplicate (-3) - while `priority_name` (the dashboard,
-/// the SAB queue API, the *arrs) labelled that same job "Normal". A job the
-/// user had explicitly demoted to Low therefore ran before the jobs the UI
-/// said were Normal, which is precisely backwards.
-///
-/// -2 is SAB's "add paused" flag rather than a priority; the caller sets
-/// `paused` from it and the job itself is Normal. There is no per-category
-/// default priority in this daemon (the categories API reports -100 for
-/// every category), so the default is Normal.
 /// M14f alternative: held below everything until the original fails. Its
 /// own priority rather than a flag, so ordering and the API's priority
 /// vocabulary both keep working; `Daemon::held_as_duplicate` reads it back
@@ -2010,6 +2076,19 @@ pub(crate) fn sab_pp_param(pp: Option<&str>) -> Option<i64> {
         .filter(|p| (0..=3).contains(p))
 }
 
+/// The priority a job actually gets on the way into the queue.
+///
+/// The sentinel has to be resolved HERE, not left on the record. `pick_job`
+/// orders by the stored number, so a stored -100 sorted BELOW Low (-1) and
+/// even below a held Duplicate (-3) - while `priority_name` (the dashboard,
+/// the SAB queue API, the *arrs) labelled that same job "Normal". A job the
+/// user had explicitly demoted to Low therefore ran before the jobs the UI
+/// said were Normal, which is precisely backwards.
+///
+/// -2 is SAB's "add paused" flag rather than a priority; the caller sets
+/// `paused` from it and the job itself is Normal. There is no per-category
+/// default priority in this daemon (the categories API reports -100 for
+/// every category), so the default is Normal.
 pub(crate) fn enqueue_priority(requested: i32, duplicate: bool) -> i32 {
     if duplicate {
         DUPE_PRIORITY
@@ -2241,7 +2320,7 @@ pub(super) fn remove_job_files(
     // meant a re-queued job (retry) claimed its shared season folder as
     // private and a later delete-with-files took the whole season.
     if filed {
-        let d = crate::smart::delete_filed_episode(out_dir, name, tail);
+        let d: crate::smart::FiledDelete = crate::smart::delete_filed_episode(out_dir, name, tail);
         info!(
             target: "files",
             "{name}: TV-filed - removed {} file(s) from {}, siblings left intact",
@@ -2358,16 +2437,28 @@ pub(super) fn filed_stem(j: &Job) -> &str {
 /// `remove_dir_all`.
 pub(crate) struct DeleteRecord {
     pub nzo_id: String,
+    /// The job's display name - what SAB's `search=` narrowing matches
+    /// against (`name LIKE ?` in `database.remove_with_status`).
+    pub name: String,
     pub state: JobState,
     pub out_dir: PathBuf,
     /// TV-filed: `out_dir` is the shared season folder, claimed by every
     /// episode in it.
     pub filed: bool,
-    /// Waiting for the user's password. Complete on paper - every byte
-    /// arrived, so `state` is Completed - but the payload is still packed
-    /// and only this record carries the 🔑 that unlocks it. A
-    /// "clear the finished ones" sweep must leave it where it is.
+    /// Waiting for the user's password. Usually Complete on paper - every
+    /// byte arrived, but the payload is still packed - though a job whose
+    /// unpack failed for want of a password stays `Failed` with this set
+    /// too (`settle_locked_failure`'s "raise the 🔑" branch): the drawer
+    /// offers a password field instead of "show the folder", and this
+    /// record is the only thing carrying that offer. Either way, a bulk
+    /// sweep must leave it where it is.
     pub locked: bool,
+    /// The row PUBLISHES as Failed, whatever `state` says - see
+    /// [`crate::serve::history::publishes_as_failed`]. Carried rather
+    /// than derived here because the §96 storage-deleted test reads
+    /// `move_pending`, `origin` and the filesystem, and this struct is a
+    /// snapshot taken under the history lock.
+    pub published_failed: bool,
 }
 
 /// One history record's fate under a `mode=history&name=delete` call.
@@ -2403,25 +2494,51 @@ pub(crate) struct HistoryDelete {
 ///
 /// `value` selects: an nzo_id, a comma list of them, or one of the bulk
 /// words - `all`, `failed`, or `completed`. `completed` is the dashboard's
-/// one-click "Clear completed": it is deliberately NARROWER than the
-/// history card's Completed filter chip, which counts password-locked
-/// records too (they finish downloading, so their state IS Completed).
-/// Sweeping those away would take the only 🔑 the user has with them, so
-/// they stay, exactly as failures do.
+/// one-click "Clear completed" and `failed` its "Clear failed": both are
+/// deliberately NARROWER than their filter chips, which count
+/// password-locked records too - a Completed job whose payload is still
+/// packed, or (`settle_locked_failure`) a Failed one whose only named
+/// remedy is a password nobody has supplied yet. Sweeping either away
+/// would take the only 🔑 the user has with them, so both bulk words
+/// leave a locked record exactly where it is; only an explicit ✕ (or
+/// `value=all`) removes one.
 ///
 /// `queue_dirs` is every live queue job's directory (all of them survive a
 /// history delete).
 pub(crate) fn plan_history_delete(
     records: &[DeleteRecord],
     value: &str,
+    search: Option<&str>,
     queue_dirs: &[PathBuf],
 ) -> Vec<HistoryDelete> {
     let doomed: Vec<bool> = records
         .iter()
         .map(|r| {
-            value == "all"
-                || (value == "failed" && r.state == JobState::Failed)
-                || (value == "completed" && r.state == JobState::Completed && !r.locked)
+            // SAB threads `search` into the three CLASS SWEEPS only -
+            // `archive_with_status(status, search)` /
+            // `remove_with_status(status, search)` - and its per-id
+            // branch never reads it. Ignoring it entirely, which is
+            // what this did until 31 Aug 2026, turns
+            // `value=all&search=Alpha` into "delete the whole history":
+            // live-confirmed on a four-row store, all four gone where
+            // SAB removes the two that matched. An unread filter on a
+            // DELETE does not fail, it destroys more than was asked
+            // for. See `sab_search_matches` for what the match is and
+            // which of SAB's wildcards are deliberately not honoured.
+            // CLASSIFIED ON THE PUBLISHED WORD and never on `state`
+            // (read-only sweep finding 13, 31 Aug 2026): a §96
+            // storage-deleted row renders `"Failed"`, so "Clear failed"
+            // has to take it and "Clear completed" has to leave it. The
+            // raw state gave both the opposite answer, which is a bulk
+            // DELETE disagreeing with the word on the row it removes.
+            let swept = (value == "all"
+                || (value == "failed" && r.published_failed && !r.locked)
+                || (value == "completed"
+                    && r.state == JobState::Completed
+                    && !r.published_failed
+                    && !r.locked))
+                && crate::serve::api::queue::sab_search_matches(&r.name, search);
+            swept
                 // Trimmed: the caller's busy guard trims the same list,
                 // so an untrimmed match here left " nzo_2" passing the
                 // guard and then deleting nothing.

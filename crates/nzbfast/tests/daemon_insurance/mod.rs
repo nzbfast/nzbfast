@@ -148,7 +148,6 @@ async fn insurance_off_a_paused_row_fetches_nothing() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The decay A/B. One takedown, two deferred rows: the banked one
@@ -343,7 +342,6 @@ async fn banked_row_survives_the_takedown_the_deferred_row_does_not() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Every file under `root`, recursively.

@@ -255,10 +255,24 @@ fn m_get_config(
             // category an *arr may be configured against too.
             d.client_cats()
                 .iter()
-                .map(|c| {
+                .enumerate()
+                .map(|(i, c)| {
                     let m = meta.get(c).cloned().unwrap_or_default();
                     json!({
                         "name": c,
+                        // SAB's `ConfigCat.get_dict` writes seven keys on
+                        // every category and we wrote five: `order` and
+                        // `newzbin` were absent outright, which is GH #69's
+                        // absent-key half in the payload the *arrs and
+                        // every remote app read to fill a dropdown.
+                        // Identical in 4.5.0, 5.1.2 and develop (read
+                        // 30 Aug 2026). `order` is the position in the list
+                        // we just handed over, which is what SAB's is;
+                        // `newzbin` is a dead Newzbin-era tag list SAB still
+                        // serializes as a string, so the honest value is
+                        // empty rather than absent.
+                        "order": i,
+                        "newzbin": "",
                         "dir": if !m.dir.is_empty() {
                             m.dir
                         } else if c == "*" {

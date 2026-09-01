@@ -57,6 +57,11 @@
 //! which runs real SQL rather than sleeping, because a sleep is the one
 //! thing a progress callback cannot interrupt.
 
+// The forward guard on the repeating-payload trap, and the waiver that
+// says a fixture is deliberately in it. A sibling the way `harness` is,
+// and reached from `harness::DaemonLog`'s own Drop, so every daemon this
+// binary starts is read whether or not the suite looks at its log.
+mod adoptguard;
 mod harness;
 mod scratch;
 
@@ -285,6 +290,23 @@ fn held_index_lock_does_not_wedge_the_api() {
         "seed visible before the hold: {fresh}"
     );
 
+    // Prime `/` too, for the same reason and before any hold is armed.
+    // Its page is built once per process and cached (`SHELL_CACHE` in
+    // serve/webasset.rs), so the FIRST request pays a build - the
+    // substitutions over 1.4 MB of HTML, an FNV over the result and a
+    // level-6 deflate of that - which is a fixed process-lifetime
+    // constant and not contention. Measured 31 Aug 2026 against a debug
+    // daemon on a Core Ultra 9 laptop (Windows 11, MSVC), with nothing
+    // else touching it: 2537 ms cold against 252-277 ms warm. Sampled
+    // cold that sits between the two bounds below, so the loop would
+    // report a starved pool on a box whose pool was idle. Priming it
+    // HERE rather than beside the loop matters: a genuinely starved
+    // daemon must miss the timed bound and say so, not exhaust `http`'s
+    // retries at a warm-up. The same trap cost
+    // dashboard_load::five_tabs_cannot_starve_the_pool a permanent red
+    // on that box; the comment there carries the full measurement.
+    let _ = http(port, "/");
+
     // The synthetic 62s batch, scaled to 15s of test time. It answers
     // {"held": true} only after the sleep, so join() doubles as proof
     // the lock really was held while we measured below.
@@ -390,28 +412,6 @@ fn held_index_lock_does_not_wedge_the_api() {
     assert_eq!(after["releases"], 8, "fresh path after the hold: {after}");
 }
 
-/// The 2 Aug 2026 wedge: the SAME silence as 28 Jul, one mutex further
-/// along.
-///
-/// The 28 Jul fix moved the query endpoints off the read-write mutex and
-/// onto a dedicated read-only connection, on the stated assumption that
-/// "every hold of THIS mutex is a short query". On a 32M-release index
-/// that assumption failed: `wall2` spent 85s on its card COUNT and
-/// `wall_tip` 76s on a full scan, each holding that one connection, so
-/// every other query handler queued behind it - and a queued request
-/// holds the HTTP worker that is waiting. Eight of those and the daemon
-/// answered nothing at all: `mode=version`, which touches no database,
-/// timed out at 45s while the process sat there logging happily.
-///
-/// Reproduced against the live 45 GB index before this was written:
-/// eight concurrent wall2 calls, and then `/` and `mode=version` both
-/// returned nothing for the duration.
-///
-/// What must hold now, and what this pins: however many slow reads are
-/// in flight, the number of workers they can occupy is capped, so the
-/// rest of the API is untouched. Past `INDEX_READ_CONNS` a read is told
-/// the index is busy INSTEAD of queueing - the worker goes back to the
-/// pool rather than waiting out the slow query.
 /// A handler that reads the index TWICE has to stay honest on the
 /// SECOND read too. `rar_name` did not: its classification read used
 /// `index_read_checked` and reported busy, then its file-rows read used
@@ -465,6 +465,28 @@ fn a_busy_second_read_is_not_a_missing_release() {
     assert_ne!(r["error"], "no such release", "{r}");
 }
 
+/// The 2 Aug 2026 wedge: the SAME silence as 28 Jul, one mutex further
+/// along.
+///
+/// The 28 Jul fix moved the query endpoints off the read-write mutex and
+/// onto a dedicated read-only connection, on the stated assumption that
+/// "every hold of THIS mutex is a short query". On a 32M-release index
+/// that assumption failed: `wall2` spent 85s on its card COUNT and
+/// `wall_tip` 76s on a full scan, each holding that one connection, so
+/// every other query handler queued behind it - and a queued request
+/// holds the HTTP worker that is waiting. Eight of those and the daemon
+/// answered nothing at all: `mode=version`, which touches no database,
+/// timed out at 45s while the process sat there logging happily.
+///
+/// Reproduced against the live 45 GB index before this was written:
+/// eight concurrent wall2 calls, and then `/` and `mode=version` both
+/// returned nothing for the duration.
+///
+/// What must hold now, and what this pins: however many slow reads are
+/// in flight, the number of workers they can occupy is capped, so the
+/// rest of the API is untouched. Past `INDEX_READ_CONNS` a read is told
+/// the index is busy INSTEAD of queueing - the worker goes back to the
+/// pool rather than waiting out the slow query.
 #[test]
 fn a_slow_index_read_cannot_starve_the_http_pool() {
     let dir = scratch("readpool");
@@ -480,6 +502,23 @@ fn a_slow_index_read_cannot_starve_the_http_pool() {
         Some(8),
         "seed visible before the holds: {s}"
     );
+
+    // Prime `/` too, for the same reason and before any hold is armed.
+    // Its page is built once per process and cached (`SHELL_CACHE` in
+    // serve/webasset.rs), so the FIRST request pays a build - the
+    // substitutions over 1.4 MB of HTML, an FNV over the result and a
+    // level-6 deflate of that - which is a fixed process-lifetime
+    // constant and not contention. Measured 31 Aug 2026 against a debug
+    // daemon on a Core Ultra 9 laptop (Windows 11, MSVC), with nothing
+    // else touching it: 2537 ms cold against 252-277 ms warm. Sampled
+    // cold that sits between the two bounds below, so the loop would
+    // report a starved pool on a box whose pool was idle. Priming it
+    // HERE rather than beside the loop matters: a genuinely starved
+    // daemon must miss the timed bound and say so, not exhaust `http`'s
+    // retries at a warm-up. The same trap cost
+    // dashboard_load::five_tabs_cannot_starve_the_pool a permanent red
+    // on that box; the comment there carries the full measurement.
+    let _ = http(port, "/");
 
     // Twelve concurrent slow reads - more than the 8 HTTP workers, so in
     // the pre-fix daemon this is the wedge exactly. Only INDEX_READ_CONNS

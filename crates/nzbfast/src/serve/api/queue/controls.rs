@@ -226,23 +226,29 @@ fn fire_delete_abort(d: &Arc<Daemon>, stopped: &[String]) -> bool {
 /// follow. SAB moves the row on a priority write; now so do we. Both
 /// priority arms (the SAB facade and the JSON-RPC GroupSetPriority)
 /// call this after `apply_priority` lands, under the same queue lock.
+///
+/// Answers the row's index in the queue afterwards, which is what SAB's
+/// `mode=queue&name=priority` publishes as `position`
+/// (`NzbQueue.__set_priority` returns the new index; its `-1` means the
+/// id was not there). `None` where nothing moved - the id is unknown, or
+/// the row is not Queued and keeps its place - and the priority arm
+/// turns that into the index the row is still at, so `-1` keeps SAB's
+/// one meaning.
 pub(in crate::serve) fn reposition_for_priority(
     q: &mut std::collections::VecDeque<Arc<Mutex<Job>>>,
     id: &str,
-) {
-    let Some(from) = q.iter().position(|j| j.lock_ok().nzo_id == id) else {
-        return;
-    };
+) -> Option<usize> {
+    let from = q.iter().position(|j| j.lock_ok().nzo_id == id)?;
     let prio = {
         let g = q[from].lock_ok();
         // Only a queued row moves: the active download's position is
         // where the work is, and the switch arm refuses to move it too.
         if g.state != JobState::Queued {
-            return;
+            return Some(from);
         }
         g.priority
     };
-    let Some(job) = q.remove(from) else { return };
+    let job = q.remove(from)?;
     let to = q
         .iter()
         .position(|j| {
@@ -251,6 +257,7 @@ pub(in crate::serve) fn reposition_for_priority(
         })
         .unwrap_or(q.len());
     q.insert(to, job);
+    Some(to)
 }
 
 pub(in crate::serve) fn apply_priority(d: &Arc<Daemon>, g: &mut Job, prio: i32) -> bool {
@@ -279,4 +286,94 @@ pub(in crate::serve) fn apply_priority(d: &Arc<Daemon>, g: &mut Job, prio: i32) 
         h.waived = true;
     }
     true
+}
+
+/// SAB's `search=` narrowing, for the two arms where ignoring it
+/// DESTROYS more than the caller asked for.
+///
+/// `mode=queue&name=delete&value=all&search=X`,
+/// `mode=queue&name=purge&search=X` and
+/// `mode=history&name=delete&value=all|failed|completed&search=X` all
+/// narrow the sweep to jobs whose name matches. Neither arm read the
+/// parameter until 31 Aug 2026, and an unread filter on a DELETE does
+/// not fail - it deletes everything. Live-confirmed on both: a four-row
+/// history answered `value=all&search=Alpha` by removing all four, and a
+/// three-row queue answered `value=all&search=Alpha` by removing all
+/// three, where SAB removes the one that matched.
+///
+/// A case-insensitive substring of the job's name, which is
+/// `NzbQueue.remove_all`'s rule exactly (`search in
+/// nzo.final_name.lower()`). SAB's HISTORY half goes through
+/// `database.convert_search`, which additionally reads `*` as a
+/// wildcard and `^` / `$` as anchors; those are treated literally here,
+/// and that is the safe direction on purpose - a pattern we do not
+/// understand matches FEWER rows and deletes less, never more. It is
+/// also deliberately narrower than `HistQuery`'s read-side search, which
+/// also matches the category, the identity name and the filed base: a
+/// filter that is wider than SAB's on a read shows extra rows, and on a
+/// delete destroys extra jobs.
+///
+/// An absent or blank `search` is no filter at all, as in SAB.
+pub(in crate::serve) fn sab_search_matches(name: &str, search: Option<&str>) -> bool {
+    match search.map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(needle) => name.to_lowercase().contains(&needle.to_lowercase()),
+    }
+}
+
+/// The `search=` a queue/history write arm was given, blank treated as
+/// absent - the one place the parameter is read, so both arms cannot
+/// drift on its spelling.
+pub(in crate::serve) fn search_param(
+    params: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    params
+        .get("search")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The queue rows a `delete` / `purge` request names: the `value` id
+/// list (or every row, for `value=all` and for `purge`, which SAB
+/// defines as exactly that), narrowed by [`sab_search_matches`].
+///
+/// Resolved ONCE, up front, and the arm then works off the set rather
+/// than re-testing the request string per row. Three things come out of
+/// that. The `search` narrowing has somewhere to live at all - it needs
+/// the job NAME, which the id-keyed predicates the arm hands to
+/// `poke_sidecar` and `cancel_tail_fetches` never see. The set is the
+/// `nzo_ids` SAB answers with. And a row that arrives BETWEEN the
+/// request and the `retain` is not swept by a `value=all` the user
+/// issued before it existed, which the old per-row test would have
+/// taken.
+pub(in crate::serve) fn delete_targets(
+    d: &Arc<Daemon>,
+    value: &str,
+    all: bool,
+    search: Option<&str>,
+) -> std::collections::HashSet<String> {
+    d.queue
+        .lock_ok()
+        .iter()
+        .filter_map(|j| {
+            let g = j.lock_ok();
+            // `search` narrows the SWEEP only, never an explicit id
+            // list - SAB threads it into `remove_all` and not into
+            // `remove_multiple`, so a client that sends both gets the
+            // ids it named. Applying it to a list would only ever
+            // delete less, but "I named this id and it was skipped" is
+            // its own surprise.
+            if all {
+                sab_search_matches(&g.name, search).then(|| g.nzo_id.clone())
+            } else {
+                // Trimmed, like the caller's busy guard: a comma list
+                // with spaces in it ("nzo_1, nzo_2") otherwise matched
+                // the guard and not the action.
+                value
+                    .split(',')
+                    .any(|v| v.trim() == g.nzo_id)
+                    .then(|| g.nzo_id.clone())
+            }
+        })
+        .collect()
 }

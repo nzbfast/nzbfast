@@ -83,6 +83,12 @@
 
 use super::*;
 
+// N6-07 (the NZB front-door addendum, step 3): the same numbered byte
+// split posted with UNQUOTED subjects, which is where the set loses its
+// grouping name. Here rather than beside e2e.rs's own children because
+// that file is on its size-gate limit; the subject is this one's.
+mod n607;
+
 /// Uniform byte split, exactly what hjsplit and `split -b` produce:
 /// every part the split size, the last one the remainder.
 fn split_parts(arch: &[u8], n: usize) -> Vec<&[u8]> {

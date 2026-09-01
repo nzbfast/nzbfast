@@ -63,6 +63,25 @@ pub(crate) fn watch_fail_id(path: &std::path::Path) -> String {
 /// the dashboard switches on. `"rejected"` is the sixth: an `enqueue`
 /// error, i.e. the only case besides `truncated` where the file really
 /// could not be used.
+///
+/// F6, CHECKED AND DELIBERATELY NOT GIVEN A SEVENTH STATE (the
+/// zero-declared-bytes handoff, claim `nzb-zero-bytes-downstream`). A
+/// `NzbError::TooLarge` refusal - a STRUCTURAL ceiling in
+/// `nzbkit::nzb::limits`, not a syntax problem - lands here as
+/// `"rejected"`, so the strip prints this module's generic "couldn't be
+/// read" with the daemon's own reason beside it, and the file did in
+/// fact read perfectly. That is the very class this module's own header
+/// argues about, one state further along, so a seventh kind with its
+/// own sentence is the obvious answer and it was priced and declined:
+/// every one of those ceilings is sized so nothing real reaches it
+/// (`MAX_SEGMENTS` is 1,000,000 against a largest real fixture of
+/// 11,060, and each constant states its own margin), so the population
+/// that ever sees the sentence is somebody handed a hostile or corrupt
+/// manifest - for whom "couldn't be read", with the dimension named
+/// immediately after it, is both true enough and the more useful
+/// framing. A new UI string is also 27 catalogue translations under
+/// CI's i18n gate, spent on a sentence essentially nobody reads. Revisit
+/// only if a ceiling is ever LOWERED to a figure real posts approach.
 pub(crate) fn watch_fail_kind(msg: &str) -> &'static str {
     if msg == watchfail::TRUNCATED {
         "truncated"
@@ -161,24 +180,90 @@ fn quarantine_rejected(
         .to_string();
     let mut dest = qdir.join(&name);
     let mut n = 1u32;
-    while dest.exists() && n < 1000 {
-        n += 1;
-        dest = qdir.join(format!("{} ({n}).nzb", name.trim_end_matches(".nzb")));
+    // `symlink_metadata` on both tests below, because both are asking
+    // whether an ENTRY holds the name and `Path::exists` answers whether
+    // one RESOLVES: it follows symlinks and reports false on any error,
+    // so a link in `rejected/` - dangling, or onto a share that is not
+    // mounted - read as free. `rename(2)` then removed it, which is the
+    // overwrite the doc comment above promises never happens, of an
+    // entry the USER put in a folder this daemon only ever adds to.
+    // Same decision, same APFS measurement and the same harms as
+    // `tv_rename` in `smart/filing.rs`, where it is argued in full.
+    // Here it is also the cheaper half: the ladder is FOR stepping past
+    // a taken name, so this costs one suffix and nothing else.
+    //
+    // AND IT IS A CLAIM RATHER THAN A LOOK, 31 Aug 2026, under claim
+    // `occupancy-claim-the-rest-of-the-class`. The `lstat` was a check
+    // before a use: MEASURED on the sibling guard in
+    // `unpack/published_names.rs` it covered about 1% of its own
+    // interval, and 96.8% of concurrent arrivals that got the name
+    // landed inside the gap. `create_new` answers `AlreadyExists` over
+    // a regular file, a dangling link, a link out of the directory and
+    // a directory - the same four answers the `lstat` gave - so the
+    // claim IS the test, taken atomically.
+    //
+    // THIS IS THE ONE DOOR OF THE NINE WHERE THE CLAIM AND THE LADDER
+    // ARE THE SAME MOVE, and it is why this reads as a loop rather
+    // than a substitution: `AlreadyExists` is exactly the signal to
+    // take the next suffix, so the winning rung is the one whose claim
+    // SUCCEEDED, which no later arrival can take away. The two `lstat`
+    // sites collapse into one loop because the fallback needs the same
+    // claim: a name found free by looking is not a name held.
+    //
+    // Plain `create_new` and not `disk::open_out_leaf_under`, per
+    // `tv_rename` in `smart/filing.rs`: the rename below resolves its
+    // destination by path, and `rejected/` sits under a watch root the
+    // user is free to reach through a symlink.
+    //
+    // A claim that fails for any OTHER reason is the folder being
+    // unusable - no write right on the share, a read-only mount - and
+    // it goes out as the error it is, which is what the rename below
+    // would have done with it.
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+        {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if n < 1000 {
+                    n += 1;
+                    dest = qdir.join(format!("{} ({n}).nzb", name.trim_end_matches(".nzb")));
+                    continue;
+                }
+                // The counter ran out with every candidate taken.
+                // Falling through renamed ONTO " (1000)" - POSIX
+                // replaces that incumbent (a different bad file the
+                // user has not seen), Windows errors and leaves this
+                // one re-scanned forever. Uniquify by clock instead;
+                // nanoseconds cannot collide with the counter names or
+                // realistically with each other. Claimed too, and a
+                // claim that fails here goes OUT rather than falling
+                // through to a rename: the doc comment above promises
+                // this never overwrites, and one improbable collision
+                // does not buy the right to break that.
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                dest = qdir.join(format!("{} ({nanos}).nzb", name.trim_end_matches(".nzb")));
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&dest)?;
+                break;
+            }
+            Err(e) => return Err(e),
+        }
     }
-    if dest.exists() {
-        // The counter ran out with every candidate taken. Falling
-        // through renamed ONTO " (1000)" - POSIX replaces that
-        // incumbent (a different bad file the user has not seen),
-        // Windows errors and leaves this one re-scanned forever.
-        // Uniquify by clock instead; nanoseconds cannot collide with
-        // the counter names or realistically with each other.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        dest = qdir.join(format!("{} ({nanos}).nzb", name.trim_end_matches(".nzb")));
+    if let Err(e) = std::fs::rename(p, &dest) {
+        // Our own placeholder. Left behind it is a zero-byte .nzb in
+        // the folder the user opens to see what was rejected, and the
+        // ladder above would step past it forever.
+        let _ = std::fs::remove_file(&dest);
+        return Err(e);
     }
-    std::fs::rename(p, &dest)?;
     // Best-effort: the move is the point; the note is a courtesy for
     // whoever opens the folder without the dashboard.
     let _ = std::fs::write(
@@ -743,6 +828,99 @@ pub(in crate::serve) fn spawn_watch_folder(daemon: &Arc<Daemon>) {
 mod tests {
     use super::{WATCH_REJECT_DIR, quarantine_rejected};
 
+    /// The 31 Aug 2026 rename-occupancy census: the ladder above is
+    /// looking for a FREE name, and `Path::exists` answers whether one
+    /// RESOLVES. A link in `rejected/` - dangling, or onto a share that
+    /// is not mounted - read as free, and `rename(2)` removes whatever
+    /// ENTRY is at its destination, so the user's link was deleted and
+    /// this reject took its name. The portable half is the same refusal
+    /// over an ordinary file, which held before this decision too, so
+    /// the windows-unit shards run the ladder and the change stays
+    /// specific to what a symlink does.
+    #[test]
+    fn the_quarantine_ladder_steps_past_a_name_an_entry_already_holds() {
+        let root = std::env::temp_dir().join(format!("nzbfast-quar-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let qdir = root.join(WATCH_REJECT_DIR);
+        std::fs::create_dir_all(&qdir).unwrap();
+        std::fs::write(qdir.join("bad.nzb"), b"an earlier reject").unwrap();
+        let src = root.join("bad.nzb");
+        std::fs::write(&src, b"the new reject").unwrap();
+        let dest = quarantine_rejected(&root, &src, "test").expect("quarantine");
+        assert_eq!(dest, qdir.join("bad (2).nzb"));
+        assert_eq!(
+            std::fs::read(qdir.join("bad.nzb")).unwrap(),
+            b"an earlier reject"
+        );
+
+        #[cfg(unix)]
+        {
+            let root =
+                std::env::temp_dir().join(format!("nzbfast-quar-link-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let qdir = root.join(WATCH_REJECT_DIR);
+            std::fs::create_dir_all(&qdir).unwrap();
+            let taken = qdir.join("bad.nzb");
+            std::os::unix::fs::symlink(qdir.join("on-the-nas"), &taken).unwrap();
+            let src = root.join("bad.nzb");
+            std::fs::write(&src, b"the new reject").unwrap();
+            let dest = quarantine_rejected(&root, &src, "test").expect("quarantine");
+            assert_eq!(
+                dest,
+                qdir.join("bad (2).nzb"),
+                "a dangling link holds the name, so the ladder steps past it"
+            );
+            assert!(
+                std::fs::symlink_metadata(&taken)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the user's link must still be a link"
+            );
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The FALLBACK past the counter, which the ladder pin above cannot
+    /// reach: with the ladder correct, that test never gets here, so a
+    /// revert of this line survives it. Two guards either of which
+    /// suffices make both unfalsifiable (`b71c37e33`), so the 1000th
+    /// name is the LINK here and every earlier one is a plain file - the
+    /// loop exhausts its counter and this line is the only thing left
+    /// between the user's link and `rename`.
+    #[cfg(unix)]
+    #[test]
+    fn the_counters_last_name_is_not_overwritten_when_an_entry_holds_it() {
+        let root = std::env::temp_dir().join(format!("nzbfast-quar-last-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let qdir = root.join(WATCH_REJECT_DIR);
+        std::fs::create_dir_all(&qdir).unwrap();
+        std::fs::write(qdir.join("bad.nzb"), b"incumbent 1").unwrap();
+        for n in 2..1000u32 {
+            std::fs::write(qdir.join(format!("bad ({n}).nzb")), b"incumbent").unwrap();
+        }
+        let last = qdir.join("bad (1000).nzb");
+        std::os::unix::fs::symlink(qdir.join("on-the-nas"), &last).unwrap();
+
+        let src = root.join("bad.nzb");
+        std::fs::write(&src, b"the new reject").unwrap();
+        let dest = quarantine_rejected(&root, &src, "test").expect("quarantine");
+        assert_ne!(
+            dest, last,
+            "the counter's last name is held by an entry, so the clock name is used"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the new reject");
+        assert!(
+            std::fs::symlink_metadata(&last)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the user's link must still be a link"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// L4 sweep 10 Aug (Codex L3): with "bad.nzb" through "bad
     /// (1000).nzb" all taken, the collision loop used to exit while the
     /// chosen destination still existed - POSIX rename then REPLACED
@@ -768,6 +946,80 @@ mod tests {
         assert_eq!(
             std::fs::read(qdir.join("bad (1000).nzb")).unwrap(),
             b"incumbent"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The ladder does not just LOOK for a free name, it CLAIMS one, so
+    /// a rung taken while the quarantine is running cannot be renamed
+    /// over.
+    ///
+    /// The case above asks WHICH QUESTION the ladder asks, and the
+    /// `symlink_metadata` it carried until 31 Aug 2026 answers that
+    /// exactly as `create_new` does. What separates them is the gap
+    /// behind the answer, so this has to race: see `crate::renameclaim`
+    /// for the measurement and for why the arrival hunts the rename
+    /// rather than sweeping a fixed span. VERIFIED red with this door
+    /// alone reverted to the `lstat` ladder.
+    ///
+    /// The trial resets the whole quarantine folder rather than the one
+    /// rung, or the ladder climbs across trials and the arrival is
+    /// racing a rung nobody is asking for. It is recreated immediately,
+    /// because the adversary has to be able to answer `AlreadyExists`
+    /// rather than `NotFound` for its verdict to classify the trial.
+    #[test]
+    fn a_quarantine_rung_created_beside_the_ladder_is_never_renamed_over() {
+        let root = std::env::temp_dir().join(format!("nzbfast-quar-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let qdir = root.join(WATCH_REJECT_DIR);
+        std::fs::create_dir_all(&qdir).unwrap();
+        let src = root.join("bad.nzb");
+        let target = qdir.join("bad.nzb");
+        crate::renameclaim::never_renames_over_a_neighbour(
+            &target,
+            300,
+            || {
+                let _ = std::fs::remove_dir_all(&qdir);
+                std::fs::create_dir_all(&qdir).unwrap();
+                std::fs::write(&src, b"the new reject").unwrap();
+            },
+            || {
+                let _ = quarantine_rejected(&root, &src, "test");
+            },
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A rename that FAILS after the claim succeeded must take the
+    /// placeholder with it.
+    ///
+    /// This is the ONE door of the nine on the 31 Aug census where that
+    /// arm is reachable without a seam, and it is reachable because the
+    /// source is the CALLER'S path rather than one this function found:
+    /// the watch scan and the quarantine are two steps, so a file the
+    /// user deleted in between is an ordinary shape and not a
+    /// contrivance. The claim succeeds, `rename(2)` answers NotFound,
+    /// and what must not survive is a zero-byte .nzb sitting in the
+    /// folder the user opens to see what was rejected - which the
+    /// ladder above would then step past for good.
+    ///
+    /// The other eight doors' removal arms are unpinned and
+    /// `smart/renameclaim_tests.rs` says why at length.
+    #[test]
+    fn a_quarantine_whose_rename_fails_leaves_no_placeholder_behind() {
+        let root =
+            std::env::temp_dir().join(format!("nzbfast-quar-residue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let qdir = root.join(WATCH_REJECT_DIR);
+        let gone = root.join("bad.nzb");
+
+        let e = quarantine_rejected(&root, &gone, "test").expect_err("the source is not there");
+        assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+        assert!(
+            !qdir.join("bad.nzb").exists(),
+            "the claim's own placeholder outlived the rename that failed: a \
+             zero-byte reject is what the ladder then steps past for good"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

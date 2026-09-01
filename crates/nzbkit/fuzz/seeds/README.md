@@ -18,6 +18,74 @@ Two kinds of thing live here, and they are replayed by the same step:
 
 Note either below.
 
+- `nzb_parse/` (19 files / 33 KB, 30 Aug 2026) - a SEED CORPUS, not a
+  repro, and the second kind of entry above: an NZB is XML, so every arm
+  worth reaching sits behind a well-formed element tree that libFuzzer's
+  mutations find about as often as they find a CRC. Measured that day,
+  INITED: 110 edges cold, 1,318 seeded; after a 60 s burst, 861 cold
+  against 2,102 seeded. Four of the files are realistic posting shapes (a
+  multi-file release, a PAR2-bearing set with an index and three
+  recovery-volume spellings, an unquoted split archive, an obfuscated
+  hash-named post); the rest are one per confirmed row of the 30 Aug 2026
+  parser/front-door addendum, named `n6-NN-*` after the row. The
+  `../README.md` recipe used to point at `../testdata/nzb/*.nzb` instead,
+  and that is NOT the same thing and measurably worse: libFuzzer takes
+  `max_len` from the largest corpus unit, so the 84,880-byte garbled
+  fixture halves the burst's exec count and the 1.18 MiB
+  undefined-entity fixture is far past that. Both of those shapes are
+  carried here by seeds under 600 bytes.
+  The ordinary-test twins are in
+  `crates/nzbkit/tests/integration/fuzz_seed_corpus.rs`, and they are
+  split deliberately: SETTLED outcomes (an undefined entity refused, the
+  HTML latin-1 set resolved, CDATA and comment-split text re-joined) are
+  asserted by result, while the N6-01..N6-08 seeds are asserted only to
+  still CARRY their shape. That was written while those rows were open;
+  both lanes have since landed (`dd479f9b4`, `97e4dea88`, 30 Aug 2026)
+  and each row is pinned by its own deterministic regression in
+  `crates/nzbkit/src/nzb_tests.rs`. The split STAYS anyway, and for a
+  better reason than the original one: this file checks that a SEED
+  still carries the shape it was committed for, and putting a second
+  copy of each row's outcome assertion here would be two places to keep
+  in step for no coverage.
+
+- `nzb_semantic/` (18 files / 613 bytes, 31 Aug 2026) - a SEED CORPUS,
+  and the only one here whose files are not inputs to a parser at all.
+  That target reads its bytes as a stream of CHOICES, so a seed is a
+  choice stream: the first byte picks the arm, the next few pick the
+  shape, and the rest are style flags. They are named for what they
+  select and every one was VERIFIED to select it (a temporary probe
+  build printing the resolved family, 31 Aug 2026) rather than computed
+  and assumed.
+  Eight `break-N-*` files are one per `Schema` violation the hostile arm
+  can spell, six `long-*` are one per capped field at a length that
+  crosses its own ceiling, and four `nzbc-*` are the two N6-09 COUNT
+  ceilings in both element spellings. The SEGMENT pair keeps the cheap
+  default-namespace style in both spellings and the prefixed style rides
+  the FILES pair instead, which is a tenth of the cost and exercises the
+  identical counter - the ceiling is one check on a match arm that takes
+  `Event::Start` and `Event::Empty` together, so the spellings part
+  company downstream of it rather than at it.
+  The `nzbc-*` four are the ones that need explaining. Those documents
+  run to NINETEEN MEGABYTES - 1,000,001 segments, or 100,001 files -
+  so the target puts them behind a four-byte magic AND a per-process
+  BUDGET, and the budget is not caution: with the magic alone, measured
+  that day, the four seeds took a 60 s burst from 1,557 exec/s to 287,
+  because libFuzzer keeps them and then mutates around them and a mutant
+  that leaves four bytes alone rebuilds the whole document. With the
+  budget it is 1,594 exec/s and the ceilings are still reached at
+  INITED, which for a state space of one is the stronger guarantee
+  anyway: a ceiling that regressed fails in the first seconds of every
+  run rather than at some point in a campaign.
+  The ordinary-test twin is
+  `fuzz_seed_corpus.rs::the_nzb_semantic_seeds_still_select_a_hostile_arm`.
+  It is weaker than the other twins on this page and says so: a choice
+  stream means nothing outside the target, so what it can hold is the
+  selector arithmetic, mirrored. What it catches is the failure that
+  actually happens - a seed that silently starts selecting the legal
+  arm after the arm order moves, leaving every hostile family
+  unreachable at INITED while the run still prints a hundred thousand
+  execs.
+
 - `rar_name_probe/crash-f064a660a000d079ef552779894d5aa9ba76d15c` - a
   RAR4 main header declaring `head_size` 7 while carrying `MHD_COMMENT`,
   whose CRC range is a fixed 13 bytes: the probe's truncated-half feed

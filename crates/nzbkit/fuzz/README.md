@@ -11,7 +11,33 @@ Needs nightly + `cargo install cargo-fuzz`.
 - `yenc_decode`  - the SIMD yEnc decoder (`yenc_simd::decode`) plus the
   scalar reference (`yenc::decode`) on RAW bytes. Complements the in-repo
   round-trip lite fuzzer, which never feeds the decoder malformed input.
-- `nzb_parse`    - `Nzb::parse` (XML).
+- `nzb_parse`    - `Nzb::parse` (XML) on RAW bytes. Its corpus is
+  COMMITTED (`seeds/nzb_parse/`, 19 files / 33 KB, added 30 Aug 2026):
+  an NZB is XML, and every interesting arm sits behind a well-formed
+  element tree that random bytes reach about as often as they reach a
+  CRC. Measured that day, INITED: 110 edges cold, 1,322 seeded; after a
+  60 s burst, 861 cold against 2,102 seeded.
+- `nzb_semantic` - the SEMANTIC oracle over the same parser, and the
+  only NZB target that can see a manifest REWRITE (addendum row N6-14).
+  `nzb_parse` asks whether the parser crashed; this one asks whether it
+  told the truth. It reads the fuzzer's bytes as a stream of CHOICES
+  that build a manifest, renders that manifest to XML three times under
+  independently chosen but semantically equivalent styles (attribute
+  order, named versus numeric character references, CDATA versus text, a
+  comment splitting a text node, formatting whitespace, prefixed versus
+  default namespace, apostrophe delimiters, section order), and asserts
+  that all three parse to the SAME `Nzb` and that every declared file
+  and segment is accounted for. All three `EMIT_*` flags it shipped with
+  are retired (31 Aug 2026) - two of those shapes are ordinary legal
+  input now and the third became a refusal; the head of the target says
+  which and why the third did not simply flip.
+  Since 31 Aug 2026 it also carries the HOSTILE arm, which is the only
+  thing in either NZB target that reaches a REFUSAL on purpose: the
+  `Schema` breaks (a wrong root, a second root, a core element where the
+  grammar has no slot for it), asserted to be refused identically under
+  all three styles, and the N6-09 ceilings. Its corpus is COMMITTED
+  (`seeds/nzb_semantic/`, 18 files / 613 bytes) and those seeds are
+  CHOICE STREAMS rather than XML - see `seeds/README.md`.
 - `nzblnk_parse` - `nzblnk::parse` + `looks_like` on pasted text. Also
   asserts the two agree about whether a string IS a link: the dashboard
   gates on `looks_like` and the daemon then runs `parse`, so a
@@ -65,10 +91,18 @@ starts from valid inputs and reaches the decode paths fast:
         cp "$f" "corpus/rar_extract/$(printf '%s' "${f##*fixtures/}" | tr / _)"
       done
     cp ../tests/fixtures/par2/*.par2                  corpus/par2_parse/
-    # nzb_parse had no seeding recipe at all until 27 Aug 2026, despite
-    # three real fixtures sitting right there: a truncated body, a
-    # garbled element and a GitHub nzbget#699 undefined-entity repro.
-    cp ../testdata/nzb/*.nzb                          corpus/nzb_parse/
+    # nzb_parse's corpus is COMMITTED since 30 Aug 2026 (seeds/nzb_parse/
+    # is replayed by fuzz-smoke.yml's generic seeds/ loop, so CI gets it
+    # too), and a recipe pointing at ../testdata/nzb is NOT the same
+    # thing. Measured that day over 60 s bursts: committed seeds alone
+    # (33 KB, largest unit 14 KB) reach 2,102 edges; adding the two
+    # smaller testdata fixtures on top reaches 2,072 - WORSE - because
+    # libFuzzer takes `max_len` from the largest corpus unit, so an
+    # 84,880-byte fixture drops the burst from 120k execs to 54k. The
+    # 1.18 MiB undefined-entity fixture is far past that; its shape is
+    # carried by a 448-byte seed instead. Copy testdata for a long
+    # CAMPAIGN with an explicit `-max_len`, not for a burst.
+    cp seeds/nzb_parse/*                              corpus/nzb_parse/
     # yenc_decode's corpus is COMMITTED (seeds/yenc_decode/, 11 files /
     # 44 KB, added 27 Aug 2026) for the reason the 25 Jul entry below
     # describes: corpus/ is gitignored, so "seed it before you fuzz"

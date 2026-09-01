@@ -150,60 +150,74 @@ fn art_names_are_flat_and_safe() {
     assert_eq!(art_name("t:severance", true), "t_severance.bd.jpg");
 }
 
-/// The thumbnails are art too, and forgetting them is invisible at the
-/// point where a new poster is written.
+/// Nothing bounds a title key, so `art_name` has to bound itself - and
+/// the number it holds back has to cover every decoration the rest of
+/// the daemon composes onto its result, not just its own `.jpg`.
 ///
-/// `/art/thumb_<name>` is generated from the full poster on first
-/// request and cached on disk under a name of its own, so a title whose
-/// poster is replaced in place - a fixed identity, a hand-picked
-/// upload - keeps serving the OLD picture on the grid until the
-/// derivative goes. The card's `?v=<checked>` query is a browser-cache
-/// buster; the route strips the query before it joins the filename.
+/// An obfuscated post with no recognisable furniture token makes its
+/// whole release stem the title, and Usenet subjects routinely carry
+/// 100-250 characters. Every name built off one such stem has to be a
+/// component a filesystem will take: 255 bytes on APFS and ext4, and a
+/// string's UTF-8 byte length is never below its UTF-16 unit length, so
+/// the byte bound covers NTFS too. The upload staging name is the other
+/// half of this and is pinned where it is built, in
+/// `serve::api::wall`'s `an_art_name_leaves_room_for_its_staging_name` -
+/// this module cannot see that function.
 #[test]
-fn dropping_a_titles_art_takes_its_thumbnails() {
-    let dir = std::env::temp_dir().join(format!("nzbfast-art-drop-{}", std::process::id()));
+fn art_names_leave_room_for_every_decoration() {
+    // No furniture token anywhere, so the whole subject stem is the key.
+    let long = format!("m:{}:2024", "a b.c-d_e".repeat(40));
+    assert!(long.len() > 255, "the fixture has to reach the cap");
+    let dir = std::env::temp_dir().join(format!("nzbfast-art-cap-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let files = |key: &str| -> Vec<String> {
-        let mut names: Vec<String> = [false, true]
-            .iter()
-            .flat_map(|bd| {
-                let n = art_name(key, *bd);
-                [format!("thumb_{n}"), n]
-            })
-            .collect();
-        names.sort();
-        names
-    };
-    let seed = || {
-        for key in ["t:severance", "t:other"] {
-            for n in files(key) {
-                std::fs::write(dir.join(n), b"jpeg").unwrap();
+    for key in [long.as_str(), "m:the matrix:1999"] {
+        for backdrop in [false, true] {
+            let n = art_name(key, backdrop);
+            // The `/art/` route's lazy derivative, composed onto this
+            // result by `serve::http::route_art` and written with a bare
+            // `fs::write` - so it has to fit as much as the poster does.
+            for composed in [n.clone(), format!("thumb_{n}")] {
+                assert!(composed.len() <= 255, "{composed} is {}", composed.len());
+                // The bytes, not the arithmetic: a name this says is fine
+                // has to be one a real filesystem creates.
+                std::fs::write(dir.join(&composed), b"jpeg")
+                    .unwrap_or_else(|e| panic!("{composed}: {e}"));
             }
+            // Servable: `/art/` allows ASCII alphanumerics, `_` and `.`,
+            // so the `-` `cap_component` joins its hash tag on with is
+            // exactly what would make a capped poster unreachable. That
+            // filter is `serve::apiutil::art_name_ok`, which this module
+            // cannot see; its character class is restated here.
+            assert!(
+                n.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'),
+                "{n} is not a name the /art/ route will serve"
+            );
         }
-    };
-    let live = |key: &str| -> Vec<String> {
-        files(key)
-            .into_iter()
-            .filter(|n| dir.join(n).is_file())
-            .collect()
-    };
-
-    // Replacing a poster keeps the full-size files (they are about to be
-    // overwritten) and drops only the stale derivatives.
-    seed();
-    drop_art_thumbs(&dir, "t:severance");
-    assert_eq!(
-        live("t:severance"),
-        ["t_severance.bd.jpg", "t_severance.jpg"]
-    );
-
-    // "This title's art is wrong" drops all four.
-    drop_art(&dir, "t:severance");
-    assert!(live("t:severance").is_empty());
-    // And never a neighbour's, whatever the key looked like.
-    assert_eq!(live("t:other").len(), 4);
+    }
     std::fs::remove_dir_all(&dir).unwrap();
+
+    // Deterministic across restarts - `drop_art` and the stored index row
+    // both recompute this - and still distinct for two keys that agree on
+    // every byte the truncation keeps.
+    assert_eq!(art_name(&long, false), art_name(&long, false));
+    assert_ne!(
+        art_name(&long, false),
+        art_name(&format!("{long} two"), false)
+    );
+    // The poster and the backdrop of one title share ONE capped stem, so
+    // the `thumb_` strip in `route_art` finds its source either way.
+    assert_eq!(
+        art_name(&long, true).strip_suffix(".bd.jpg"),
+        art_name(&long, false).strip_suffix(".jpg"),
+    );
+    // And an ordinary key is untouched, byte for byte: the cap is a
+    // no-op for everything but the obfuscated tail of the distribution.
+    assert_eq!(
+        art_name("m:the matrix:1999", false),
+        "m_the_matrix_1999.jpg"
+    );
 }
 
 #[test]

@@ -5,8 +5,10 @@
 //! We keep the model deliberately close to the wire format; scheduling
 //! concepts (server tiers, block accounting) live elsewhere.
 
-use quick_xml::events::Event;
-use quick_xml::{Reader, XmlVersion};
+use quick_xml::NsReader;
+use quick_xml::XmlVersion;
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::name::ResolveResult;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NzbError {
@@ -31,6 +33,132 @@ pub enum NzbError {
     /// [`Nzb::parse`].
     #[error("NZB uses an undefined entity: &{0};")]
     UnknownEntity(String),
+    /// The document is well-formed XML but is not a well-formed NZB: a
+    /// wrong root, a second root, or a core element somewhere the NZB
+    /// grammar has no place for it. Refused rather than salvaged - see
+    /// the context stack in [`Nzb::parse`], and TODO N6-03.
+    #[error("NZB schema violation: {0}")]
+    Schema(String),
+    /// A structural ceiling in [`limits`] was reached. Carries what was
+    /// exceeded and the ceiling, never the offending value: the point of
+    /// refusing is to stop building, so there is nothing to report.
+    ///
+    /// N6-09: the HTTP body cap is on request BYTES and says nothing
+    /// about manifest STRUCTURE, so a legal 256 MiB upload can declare
+    /// ~13.4 million segments (measured: 20 wire bytes is the smallest
+    /// legal `<segment>a</segment>`) and the parser alone retains ~48
+    /// bytes per segment (measured on this tree, release profile, over
+    /// 100k/500k/1m/2m). That is ~640 MB of parser residency from ONE
+    /// in-cap request, before the plan adds its own slots, request
+    /// vectors and bracketed ids.
+    #[error("NZB exceeds the {0} limit ({1})")]
+    TooLarge(&'static str, usize),
+}
+
+/// Structural ceilings applied while parsing, so a hostile manifest is
+/// refused rather than built. See [`NzbError::TooLarge`] for the
+/// measurement these are sized against; each one is stated here with
+/// the real-world figure it clears, because a limit nobody can justify
+/// is a limit the next reader raises to make a report go away.
+pub mod limits {
+    /// Most `<file>` entries. MEASURED over a 270-document field
+    /// corpus on 2026-08-30 - the census written up at `child_ctx`:
+    /// median 11, p99 202, largest 574 - a UHD remux.
+    /// The three fixtures in this repo top out at 89, which is why
+    /// this comment used to name that number and why it was three
+    /// orders of magnitude out. 100k is 174x the largest real one and
+    /// bounds the file vector at ~11 MB of `NzbFile` structs.
+    pub const MAX_FILES: usize = 100_000;
+    /// Most `<segment>` entries in the whole document, counting the
+    /// refused ones - the refusal path allocates nothing but must not
+    /// become the way past this.
+    ///
+    /// A 1m-segment post is ~750 GB at a realistic 768 KB article, or
+    /// 16 TB at the 16 MB ceiling `Nzb::geometry_bytes` already
+    /// assumes; the body cap permits 13.4m, so this binds 13x below
+    /// the wire.
+    ///
+    /// The other half of that sentence used to read "90x above
+    /// anything real", off the 11,060 the largest fixture in this repo
+    /// declares. MEASURED over the same 270-document field corpus:
+    /// median 1,391, p90 25,113, p99 108,348, largest **157,639**, and
+    /// 44 of the 270 are over 11,060. So the real headroom is 6.3x,
+    /// not 90x. Still ample, and left where it is - but a reader
+    /// sizing anything else off "anything real" must use 157,639.
+    pub const MAX_SEGMENTS: usize = 1_000_000;
+    /// Longest `subject`, `poster` or `<meta>` value. A document
+    /// carrying a longer one is refused rather than truncated, because
+    /// truncating a subject silently renames the file it describes.
+    ///
+    /// "Four times any real subject" is what this used to say, and the
+    /// same 270-document field corpus measured under [`MAX_SEGMENTS`]
+    /// says 12.6x: longest subject 326 bytes (median 103, p99 218),
+    /// longest poster 148, longest `<meta>` value 260.
+    pub const MAX_FIELD: usize = 4096;
+    /// Longest message-id or group name, and NOT an arbitrary number:
+    /// RFC 3977 3.1 caps an NNTP command line at 512 octets, so a
+    /// longer one can never be spelled as `BODY <id>` or `GROUP name`.
+    /// Over-length is therefore unfetchable rather than malformed, and
+    /// takes the same route as a wire-unsafe one - `dropped_segments`
+    /// for an id, silently dropped for a group.
+    pub const MAX_WIRE_TOKEN: usize = 512;
+    /// Total retained text across every subject, poster, group,
+    /// message-id and meta value. `MAX_FILES` x `MAX_FIELD` alone is
+    /// 410 MB, so the per-field caps do not bound the document on their
+    /// own. 64 MiB is 54x the largest real fixture's whole file.
+    pub const MAX_TEXT_BYTES: usize = 64 << 20;
+}
+
+/// XML 1.0 production 3 `S`: space, tab, CR, LF - and nothing else.
+///
+/// N6-06: Rust's [`str::trim`] uses the Unicode `White_Space` property,
+/// which is far wider than the four characters XML calls formatting
+/// whitespace. That difference is invisible on ordinary input and
+/// silently REWRITES explicit data on hostile input: a message-id
+/// written `&#xa0;real@news.example` was trimmed to `real@news.example`
+/// and the wrong article was fetched, a `<meta type="password">` of
+/// `&#xa0;secret&#x2003;` became `secret` and extraction used the wrong
+/// password, and a group name was rewritten the same way. A producer
+/// writing a character reference at a field boundary MEANT that
+/// character; only element-formatting space is ours to remove.
+///
+/// What survives the trim is then judged, not accepted: a U+00A0 left
+/// on a message-id or group name fails [`is_wire_safe`] (NBSP is
+/// `char::is_whitespace`), so the segment is charged to
+/// `dropped_segments` and the group is dropped - refused honestly
+/// rather than fetched under a fabricated key.
+fn trim_xml_space(s: &str) -> &str {
+    s.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+}
+
+/// Append `piece` to an accumulating field, refusing to grow it past
+/// `cap`. `false` means the field has overflowed and `dst` was left
+/// alone - the caller latches that in [`Over`] and refuses the field at
+/// its close.
+///
+/// N6-09: element TEXT is where a manifest's memory is unbounded even
+/// with the segment and file ceilings in place, because one
+/// `<segment>` body can be the whole request. Stopping at the cap is
+/// what makes the refusal cheap: nothing past it is ever held.
+fn push_capped(dst: &mut String, piece: &str, cap: usize) -> bool {
+    if piece.len() > cap.saturating_sub(dst.len()) {
+        return false;
+    }
+    dst.push_str(piece);
+    true
+}
+
+/// Which of the three accumulating text fields has hit
+/// [`limits::MAX_FIELD`] and stopped growing. Latched rather than acted
+/// on immediately because the value is then a PREFIX by construction,
+/// and a prefix is refused at the field's close rather than retained -
+/// half a password is a wrong password, and half a message-id is an
+/// article nobody posted.
+#[derive(Default)]
+struct Over {
+    meta: bool,
+    group: bool,
+    segment: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +344,324 @@ fn html_latin1_entity(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The namespace an element resolved into, in a form that outlives the
+/// event that carried it: `ResolveResult` borrows the reader, and the
+/// ROOT's namespace has to survive every later comparison.
+#[derive(Clone, Debug)]
+enum Ns {
+    /// No default namespace in scope - what most field NZBs are, and
+    /// what every unprefixed attribute is by XML rule.
+    Nothing,
+    Uri(String),
+    /// A prefix with no declaration in scope. Deliberately equal to
+    /// NOTHING, itself included: an undeclared prefix names no
+    /// vocabulary, so it can never be the core one.
+    Unknown,
+}
+
+impl Ns {
+    fn of(r: &ResolveResult) -> Ns {
+        match r {
+            ResolveResult::Unbound => Ns::Nothing,
+            ResolveResult::Bound(n) => Ns::Uri(n.as_ref().to_string()),
+            ResolveResult::Unknown(_) => Ns::Unknown,
+        }
+    }
+}
+
+// NOT derived, and not `Eq` either: `Unknown != Unknown` is the point,
+// which is not a reflexive relation. See the variant's own note.
+impl PartialEq for Ns {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Ns::Nothing, Ns::Nothing) => true,
+            (Ns::Uri(a), Ns::Uri(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// One open element on the parse stack. The NZB grammar is small enough
+/// to name in full, and naming it in full is what makes "a core tag in
+/// the wrong place" answerable at all: the old parser kept a bare depth
+/// counter plus one `cur_file`/`cur_segment`, so nesting silently
+/// OVERWROTE the outer entry (N6-03).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ctx {
+    Nzb,
+    Head,
+    Meta,
+    File,
+    Groups,
+    Group,
+    Segments,
+    Segment,
+    /// Somebody else's vocabulary - an extension element. Ignored
+    /// wholesale, itself and every descendant.
+    Foreign,
+}
+
+impl Ctx {
+    fn name(self) -> &'static str {
+        match self {
+            Ctx::Nzb => "nzb",
+            Ctx::Head => "head",
+            Ctx::Meta => "meta",
+            Ctx::File => "file",
+            Ctx::Groups => "groups",
+            Ctx::Group => "group",
+            Ctx::Segments => "segments",
+            Ctx::Segment => "segment",
+            Ctx::Foreign => "a namespace extension",
+        }
+    }
+}
+
+/// Element names the NZB grammar reserves. A core-namespace element
+/// wearing one of these somewhere the grammar has no place for it is
+/// REFUSED rather than ignored, because ignoring is how a declared file
+/// disappears: `<x:file><segments><segment>…` has core-namespace
+/// segments (an unprefixed name takes the DEFAULT namespace, which the
+/// root declared) hanging off an element that is not a file, and there
+/// is no honest reading of that. Refusing is the completion rule's
+/// other half - accepted accurately or refused honestly.
+const RESERVED: [&str; 8] = [
+    "nzb", "head", "meta", "file", "groups", "group", "segments", "segment",
+];
+
+/// The context a child element opens, or `None` to refuse the document.
+///
+/// THE EXACT-PARENT RULE IS MEASURED, NOT ASSUMED. N6-03 landed this
+/// table against synthetic inputs and the three `.nzb` fixtures this
+/// repo owns, and the shapes most likely to be a real DIALECT rather
+/// than a hostile document are the two where an exact parent is
+/// demanded: `<group>` written straight under `<file>` with no
+/// `<groups>`, and `<segment>` under `<file>` with no `<segments>`.
+/// Both are refused here, and refusing a dialect refuses a download
+/// the user can see is fine.
+///
+/// So they were counted. 270 unique documents on 2026-08-30 - 253 real
+/// manifests off the indexers in use, byte-for-byte as fetched, plus
+/// the 17 NZB fixtures the SABnzbd and NZBGet projects publish - 224.6
+/// MB of XML, 118 distinct structural signatures, at least nine
+/// generator families (newznab, nZEDb, NZBgeek, Binsearch, NZBIndex,
+/// NewsbinPro, yEncBin Poster, JBinUp, and 91 documents carrying no
+/// generator stamp at all). EVERY ONE PARSES. The full core edge set
+/// the corpus writes is exactly the eight this table allows, and the
+/// count of `<file>`-to-`<group>`, `<file>`-to-`<segment>`, foreign
+/// wrappers of core children, second roots and non-`<nzb>` roots is
+/// ZERO in all 270. Nothing here was loosened, on evidence.
+///
+/// The sample's own weakness, stated because a census that implies
+/// coverage it lacks is worse than none: 253 of the 270 are one
+/// household's download history, so they are the mainstream
+/// Newznab-family sites that household subscribes to and not the long
+/// tail of small, regional or single-topic ones. A wrapper-less
+/// `<group>` turning up in the field later is answered by relaxing
+/// THESE TWO EDGES ONLY to a parent-chain test ("is a `File` anywhere
+/// below me on the stack"). It is never answered by relaxing the root,
+/// second-root or nesting arms: those four are the ones that were
+/// silently losing files, so a hit there is a broken or hostile
+/// manifest and not a dialect.
+fn child_ctx(parent: Ctx, local: &str, is_core: bool) -> Option<Ctx> {
+    if !is_core {
+        return Some(Ctx::Foreign);
+    }
+    let allowed = match (parent, local) {
+        (Ctx::Nzb, "head") => Some(Ctx::Head),
+        (Ctx::Nzb, "file") => Some(Ctx::File),
+        (Ctx::Head, "meta") => Some(Ctx::Meta),
+        (Ctx::File, "groups") => Some(Ctx::Groups),
+        (Ctx::File, "segments") => Some(Ctx::Segments),
+        (Ctx::Groups, "group") => Some(Ctx::Group),
+        (Ctx::Segments, "segment") => Some(Ctx::Segment),
+        _ => None,
+    };
+    if allowed.is_some() {
+        return allowed;
+    }
+    if RESERVED.contains(&local) {
+        return None;
+    }
+    Some(Ctx::Foreign)
+}
+
+/// Is this attribute part of the core NZB vocabulary?
+///
+/// Core NZB attributes are UNPREFIXED, always: an unprefixed attribute
+/// takes NO namespace in XML (the default `xmlns` does not reach
+/// attributes), so "no prefix" is the whole test and no resolver call is
+/// needed. A prefixed one belongs to whoever declared that prefix and is
+/// ignored - including the vanishingly rare case of a prefix bound to
+/// the core namespace itself, which costs nothing because it can only
+/// ever be a second spelling of a value the unprefixed attribute already
+/// carries. What it BUYS is N6-02: `x:subject="decoy.vol000+10.par2"`
+/// no longer overwrites `subject="movie.mkv"`, in either attribute
+/// order, so one manifest has one reading.
+fn core_attr<'a>(a: &'a quick_xml::events::attributes::Attribute<'a>) -> Option<&'a str> {
+    // Split by hand rather than through `key.local_name()`: that returns
+    // a `LocalName` BY VALUE and its `AsRef<str>` borrows the temporary,
+    // so the local name cannot outlive the call.
+    let qname: &'a str = a.key.as_ref();
+    match qname.split_once(':') {
+        Some(_) => None,
+        None => Some(qname),
+    }
+}
+
+fn attr_value(a: &quick_xml::events::attributes::Attribute) -> Result<String, NzbError> {
+    Ok(
+        a.normalized_value_with(XmlVersion::Implicit1_0, 128, html_latin1_entity)?
+            .into_owned(),
+    )
+}
+
+fn file_attrs(e: &BytesStart) -> Result<NzbFile, NzbError> {
+    let mut f = NzbFile::default();
+    for attr in e.attributes() {
+        let attr = attr?;
+        let Some(name) = core_attr(&attr) else {
+            continue;
+        };
+        match name {
+            // N6-09: refused, never truncated - a shortened subject is a
+            // different filename, and every namer downstream would
+            // believe it.
+            "subject" | "poster" => {
+                let v = attr_value(&attr)?;
+                if v.len() > limits::MAX_FIELD {
+                    return Err(NzbError::TooLarge(
+                        "subject/poster length",
+                        limits::MAX_FIELD,
+                    ));
+                }
+                if name == "subject" {
+                    f.subject = v;
+                } else {
+                    f.poster = v;
+                }
+            }
+            "date" => f.date = trim_xml_space(&attr_value(&attr)?).parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    Ok(f)
+}
+
+/// The `<segment …>` attribute read. Returns the segment, and whether a
+/// numeric attribute was PRESENT and would not parse - the caller
+/// charges that one to `dropped_segments` at `</segment>`.
+fn segment_attrs(e: &BytesStart) -> Result<(Segment, bool), NzbError> {
+    // N6-08: `bytes` and `number` are REQUIRED by the NZB DTD, and both used
+    // to be `parse().unwrap_or(0)` - so `bytes="abc"`, `bytes="-5"`, a value
+    // one past `u64::MAX` and an absent attribute all became a perfectly
+    // ordinary declared ZERO. Nothing downstream can tell that apart from a
+    // producer saying the article is empty: `total_bytes()` under-reports the
+    // job, every plan offset and seek estimate derives from these bytes, and a
+    // file whose `enc_total` collapses to 0 has its whole byte-range mapping
+    // SKIPPED (`streamhub`'s `enc_total > 0` guard).
+    //
+    // So an attribute that is PRESENT and does not parse is refused rather
+    // than zeroed. The segment is still DECLARED: it goes to
+    // `dropped_segments` at `</segment>`, which is precisely that field's
+    // contract (a segment the parser refused, whose bytes the file still
+    // owes), so the job repairs or fails instead of finishing green over a
+    // hole.
+    //
+    // AN ABSENT ATTRIBUTE IS NOT REFUSED, and that is the line this rule
+    // turns on rather than a softening of it. This repo already has an
+    // explicit, tested position on the no-`bytes=` post: "0 posted bytes
+    // means unknown, not zero", with `Nzb::geometry_bytes` as the ceiling
+    // that replaces the byte claim (`repair::sidefetch::volume_prealloc_cap`
+    // and its `an_nzb_without_byte_attributes_is_bounded_by_its_geometry`).
+    // Refusing that shape would break a posting convention the codebase
+    // supports on purpose. Silence is an honest unknown the product already
+    // models; a NONSENSE value is a claim, and turning a claim into a valid
+    // zero is the defect.
+    //
+    // An EXPLICIT `0` is accepted for the same reason. `bytes` is documented
+    // as approximate - the yEnc header is the authority - and `number` 0 is
+    // the pool's own spelling of "part unknown" (`ArticleReq::part`), where
+    // the part-mismatch gate stands down.
+    let mut seg = Segment {
+        number: 0,
+        bytes: 0,
+        message_id: String::new(),
+    };
+    let mut bad_attr = false;
+    for attr in e.attributes() {
+        let attr = attr?;
+        let Some(name) = core_attr(&attr) else {
+            continue;
+        };
+        match name {
+            "bytes" => match trim_xml_space(&attr_value(&attr)?).parse::<u64>() {
+                Ok(v) => seg.bytes = v,
+                Err(_) => bad_attr = true,
+            },
+            "number" => match trim_xml_space(&attr_value(&attr)?).parse::<u32>() {
+                Ok(v) => seg.number = v,
+                Err(_) => bad_attr = true,
+            },
+            _ => {}
+        }
+    }
+    Ok((seg, bad_attr))
+}
+
+fn meta_type(e: &BytesStart) -> Result<String, NzbError> {
+    for attr in e.attributes() {
+        let attr = attr?;
+        if core_attr(&attr) == Some("type") {
+            let raw = attr_value(&attr)?;
+            if raw.len() > limits::MAX_FIELD {
+                return Err(NzbError::TooLarge("meta type length", limits::MAX_FIELD));
+            }
+            // Still a generic `trim()`, and deliberately so: a meta TYPE
+            // is a vocabulary token this parser matches against
+            // ("password"), not data it hands anybody. Trimming it
+            // widely cannot rewrite a secret - the VALUE is what N6-06
+            // is about, and that one takes `trim_xml_space`.
+            return Ok(raw.trim().to_lowercase());
+        }
+    }
+    Ok(String::new())
+}
+
+/// Append a text fragment to whichever field the INNERMOST open element
+/// is, and to nothing otherwise. Shared by the Text, CData and
+/// GeneralRef arms so the three cannot drift on which field they feed.
+fn accumulate(
+    ctx: Option<&Ctx>,
+    text: &str,
+    cur_meta: &mut Option<(String, String)>,
+    cur_group: &mut Option<String>,
+    cur_segment: &mut Option<Segment>,
+    over: &mut Over,
+) {
+    // N6-09: every append is capped at `limits::MAX_FIELD` and the
+    // overflow is latched, because ONE element's text can be the whole
+    // request - the segment and file ceilings say nothing about it.
+    match ctx {
+        Some(Ctx::Meta) => {
+            if let Some((_, v)) = cur_meta.as_mut() {
+                over.meta |= !push_capped(v, text, limits::MAX_FIELD);
+            }
+        }
+        Some(Ctx::Group) => {
+            if let Some(g) = cur_group.as_mut() {
+                over.group |= !push_capped(g, text, limits::MAX_FIELD);
+            }
+        }
+        Some(Ctx::Segment) => {
+            if let Some(seg) = cur_segment.as_mut() {
+                over.segment |= !push_capped(&mut seg.message_id, text, limits::MAX_FIELD);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl Nzb {
     // Attribute values go through XML attribute-value normalization, on
     // purpose. A comment here used to claim the opposite - that the
@@ -230,7 +676,15 @@ impl Nzb {
     // normalization leaves alone - both halves are pinned by
     // `subject_whitespace_is_normalized_per_xml_spec`.
     pub fn parse(xml: &[u8]) -> Result<Nzb, NzbError> {
-        let mut reader = Reader::from_reader(xml);
+        // An NsReader, not a plain Reader, and that is the whole of
+        // N6-02. Dispatch used to be on `local_name()` alone, so an
+        // unrelated namespace extension was indistinguishable from core
+        // vocabulary: `<x:file>` parsed as a file, and
+        // `subject="movie.mkv" x:subject="decoy.vol000+10.par2"` ended
+        // with the decoy - reversing the attribute order reversed the
+        // parsed name AND the FileKind, so one manifest had two
+        // readings and the payload was the one that lost.
+        let mut reader = NsReader::from_reader(xml);
         // NOT trim_text(true): quick-xml would trim each text EVENT, and
         // entities split one value into several events - the spaces
         // around `&amp;` in a password vanished. Every consuming arm
@@ -248,76 +702,157 @@ impl Nzb {
         // groups out of one ("alt.bin&amp;ary" became `alt.bin` + `ary`,
         // neither of which exists).
         let mut cur_group: Option<String> = None;
-        // quick-xml reports Eof, not an error, when the input ends with
-        // elements still open - a truncated NZB would otherwise "parse"
-        // as whatever files happened to close before the cut, and the
-        // shrunken manifest finishes green with data missing.
-        let mut depth: usize = 0;
+        // The document's core namespace, taken from the ROOT rather than
+        // pinned to the newzbin URI: a field NZB that declares a variant
+        // xmlns (or none at all - most hand-written ones) must keep
+        // parsing, and "core vocabulary is whatever the root is in" is
+        // the rule that still gives an extension prefix somewhere else
+        // to be. `None` until the root is read.
+        let mut core_ns: Option<Ns> = None;
+        // The open element chain. Replaces the bare `depth` counter,
+        // which could only answer "are we inside something" - so a
+        // `<file>` nested in a `<file>` REPLACED the outer one and lost
+        // it, a `<segment>` nested in a `<segment>` did the same with no
+        // `dropped_segments` charge, a lone `<file>` under a non-NZB
+        // wrapper was accepted, and two concatenated `<nzb>` roots
+        // merged into one manifest (N6-03). It also still answers the
+        // question `depth` was there for: quick-xml reports Eof, not an
+        // error, when the input ends with elements still open, and a
+        // truncated NZB would otherwise "parse" as whatever files
+        // happened to close before the cut - the shrunken manifest
+        // finishes green with data missing.
+        let mut stack: Vec<Ctx> = Vec::new();
+        let mut root_done = false;
+        // N6-09: structural budget, counted as the document is READ so a
+        // hostile manifest is refused while it is being built rather
+        // than after. `declared_segments` counts REFUSED segments too,
+        // since a refusal allocates nothing and must not be the way
+        // past the ceiling.
+        let mut declared_segments: usize = 0;
+        let mut text_bytes: usize = 0;
+        let mut over = Over::default();
         let mut buf = Vec::new();
 
         loop {
-            match reader.read_event_into(&mut buf)? {
-                Event::Start(e) => {
-                    depth += 1;
-                    match e.local_name().as_ref() {
-                        "file" => {
-                            let mut f = NzbFile::default();
-                            for attr in e.attributes() {
-                                let attr = attr?;
-                                let val = attr.normalized_value_with(
-                                    XmlVersion::Implicit1_0,
-                                    128,
-                                    html_latin1_entity,
-                                )?;
-                                match attr.key.local_name().as_ref() {
-                                    "subject" => f.subject = val.into_owned(),
-                                    "poster" => f.poster = val.into_owned(),
-                                    "date" => f.date = val.trim().parse().unwrap_or(0),
-                                    _ => {}
-                                }
-                            }
-                            cur_file = Some(f);
+            let (ns, ev) = reader.read_resolved_event_into(&mut buf)?;
+            match ev {
+                // `Event::Empty` used to reach ONLY the `<segment/>`
+                // arm, so a self-closing `<file subject="x.rar"/>`
+                // beside a healthy file parsed as ONE file: the declared
+                // name charged no `dropped_segments`, the plan built no
+                // slot, and every later count was self-consistent
+                // without it - a payload named in the manifest, never
+                // mentioned again, job green (N6-01). Both shapes take
+                // the same path now; an empty element simply pushes no
+                // context and closes immediately.
+                Event::Start(ref e) | Event::Empty(ref e) => {
+                    let empty = matches!(ev, Event::Empty(_));
+                    let ns = Ns::of(&ns);
+                    let local_owned = e.local_name();
+                    let local = local_owned.as_ref();
+                    let ctx = if stack.is_empty() {
+                        if root_done {
+                            return Err(NzbError::Schema(
+                                "document has more than one root element".into(),
+                            ));
                         }
-                        "group" => cur_group = Some(String::new()),
-                        "meta" => {
-                            let mut ty = String::new();
-                            for attr in e.attributes() {
-                                let attr = attr?;
-                                if attr.key.local_name().as_ref() == "type" {
-                                    ty = attr
-                                        .normalized_value_with(
-                                            XmlVersion::Implicit1_0,
-                                            128,
-                                            html_latin1_entity,
-                                        )?
-                                        .trim()
-                                        .to_lowercase();
-                                }
-                            }
-                            cur_meta = Some((ty, String::new()));
+                        if local != "nzb" {
+                            return Err(NzbError::Schema(format!(
+                                "root element is <{local}>, not <nzb>"
+                            )));
                         }
-                        "segment" => {
-                            let mut seg = Segment {
-                                number: 0,
-                                bytes: 0,
-                                message_id: String::new(),
-                            };
-                            for attr in e.attributes() {
-                                let attr = attr?;
-                                let val = attr.normalized_value_with(
-                                    XmlVersion::Implicit1_0,
-                                    128,
-                                    html_latin1_entity,
-                                )?;
-                                match attr.key.local_name().as_ref() {
-                                    "bytes" => seg.bytes = val.trim().parse().unwrap_or(0),
-                                    "number" => seg.number = val.trim().parse().unwrap_or(0),
-                                    _ => {}
-                                }
+                        core_ns = Some(ns);
+                        Ctx::Nzb
+                    } else {
+                        let is_core = core_ns.as_ref() == Some(&ns);
+                        let parent = *stack.last().expect("stack is non-empty here");
+                        match child_ctx(parent, local, is_core) {
+                            Some(c) => c,
+                            None => {
+                                return Err(NzbError::Schema(format!(
+                                    "<{local}> is not allowed inside <{}>",
+                                    parent.name(),
+                                )));
                             }
-                            cur_segment = Some(seg);
+                        }
+                    };
+                    match ctx {
+                        Ctx::File => {
+                            if files.len() >= limits::MAX_FILES {
+                                return Err(NzbError::TooLarge("file count", limits::MAX_FILES));
+                            }
+                            let mut f = file_attrs(e)?;
+                            text_bytes = text_bytes
+                                .saturating_add(f.subject.len())
+                                .saturating_add(f.poster.len());
+                            if text_bytes > limits::MAX_TEXT_BYTES {
+                                return Err(NzbError::TooLarge(
+                                    "total text",
+                                    limits::MAX_TEXT_BYTES,
+                                ));
+                            }
+                            if empty {
+                                // Exactly `<file …></file>` with no
+                                // segments, which the `</file>` arm
+                                // below already charges one missing
+                                // segment for.
+                                f.dropped_segments = 1;
+                                files.push(f);
+                            } else {
+                                cur_file = Some(f);
+                            }
+                        }
+                        Ctx::Group if !empty => {
+                            cur_group = Some(String::new());
+                            over.group = false;
+                        }
+                        Ctx::Meta if !empty => {
+                            cur_meta = Some((meta_type(e)?, String::new()));
+                            over.meta = false;
+                        }
+                        Ctx::Segment => {
+                            // N6-09: counted in BOTH spellings, and the
+                            // self-closing one allocates nothing - which
+                            // is exactly why it must be counted, or the
+                            // cheapest legal segment is the one that
+                            // walks past the ceiling.
+                            declared_segments += 1;
+                            if declared_segments > limits::MAX_SEGMENTS {
+                                return Err(NzbError::TooLarge(
+                                    "segment count",
+                                    limits::MAX_SEGMENTS,
+                                ));
+                            }
+                            if empty {
+                                // Self-closing elements never pair with
+                                // an End, and `expand_empty_elements` is
+                                // off, so `<segment ... />` reached
+                                // neither the Start nor the End arm: a
+                                // declared segment vanished with nothing
+                                // counted, which is exactly what
+                                // `dropped_segments` exists to prevent
+                                // (the same segment written `<segment
+                                // …></segment>` does count). It carries
+                                // no message-id by construction, so
+                                // there is nothing to fetch - only
+                                // something to declare.
+                                if let Some(f) = cur_file.as_mut() {
+                                    f.dropped_segments += 1;
+                                }
+                            } else {
+                                let (seg, bad) = segment_attrs(e)?;
+                                over.segment = bad;
+                                cur_segment = Some(seg);
+                            }
                         }
                         _ => {}
+                    }
+                    if empty {
+                        if ctx == Ctx::Nzb {
+                            root_done = true;
+                        }
+                    } else {
+                        stack.push(ctx);
                     }
                 }
                 Event::Text(t) => {
@@ -328,20 +863,13 @@ impl Nzb {
                     // trimming ate the spaces around them - a password
                     // of `secret &amp; more` decoded to `secret&more`
                     // and extraction used the wrong password.
-                    if cur_segment.is_none()
-                        && let Some((_, v)) = cur_meta.as_mut()
-                    {
-                        v.push_str(&text);
-                        buf.clear();
-                        continue;
-                    }
-                    if cur_segment.is_none()
-                        && let Some(g) = cur_group.as_mut()
-                    {
-                        g.push_str(&text);
-                        buf.clear();
-                        continue;
-                    }
+                    //
+                    // Gated on the INNERMOST context rather than on
+                    // "some accumulator is open", so text inside a
+                    // namespace extension nested in a core element -
+                    // `<segment>id<x:note>junk</x:note></segment>` -
+                    // cannot append to the core field (N6-02).
+                    //
                     // Message-ids accumulate UNTRIMMED like meta values,
                     // trimmed once at </segment>: per-fragment trimming ate
                     // the spaces around entities, so an id declared with
@@ -349,9 +877,14 @@ impl Nzb {
                     // dropped_segments) was silently rewritten into a
                     // fabricated id that passed is_wire_safe and was
                     // fetched as something never posted.
-                    if let Some(seg) = cur_segment.as_mut() {
-                        seg.message_id.push_str(&text);
-                    }
+                    accumulate(
+                        stack.last(),
+                        &text,
+                        &mut cur_meta,
+                        &mut cur_group,
+                        &mut cur_segment,
+                        &mut over,
+                    );
                 }
                 Event::CData(c) => {
                     // quick-xml emits `<![CDATA[...]]>` as its own event,
@@ -370,28 +903,17 @@ impl Nzb {
                     // it produced a WRONG meta password or a message-id that
                     // was never posted. Pinned by
                     // `cdata_with_a_latin1_byte_is_refused_not_corrupted`.
+                    //
+                    // Same accumulation rules as Text above.
                     let raw = c.into_inner();
-                    // Same rule as Text above: meta fragments stay
-                    // untrimmed until </meta>.
-                    if cur_segment.is_none()
-                        && let Some((_, v)) = cur_meta.as_mut()
-                    {
-                        v.push_str(&raw);
-                        buf.clear();
-                        continue;
-                    }
-                    if cur_segment.is_none()
-                        && let Some(g) = cur_group.as_mut()
-                    {
-                        g.push_str(&raw);
-                        buf.clear();
-                        continue;
-                    }
-                    // Same rule as Text above: accumulate untrimmed,
-                    // whole-value trim at </segment>.
-                    if let Some(seg) = cur_segment.as_mut() {
-                        seg.message_id.push_str(&raw);
-                    }
+                    accumulate(
+                        stack.last(),
+                        &raw,
+                        &mut cur_meta,
+                        &mut cur_group,
+                        &mut cur_segment,
+                        &mut over,
+                    );
                 }
                 Event::GeneralRef(r) => {
                     // Entities inside text arrive as their own event
@@ -423,20 +945,27 @@ impl Nzb {
                             },
                         }
                     };
-                    if let Some(seg) = cur_segment.as_mut() {
-                        seg.message_id.push_str(&resolved);
-                    } else if let Some((_, v)) = cur_meta.as_mut() {
-                        v.push_str(&resolved);
-                    } else if let Some(g) = cur_group.as_mut() {
-                        // Groups accumulate like meta values - see
-                        // `cur_group`.
-                        g.push_str(&resolved);
-                    }
+                    accumulate(
+                        stack.last(),
+                        &resolved,
+                        &mut cur_meta,
+                        &mut cur_group,
+                        &mut cur_segment,
+                        &mut over,
+                    );
                 }
-                Event::End(e) => {
-                    depth = depth.saturating_sub(1);
-                    match e.local_name().as_ref() {
-                        "file" => {
+                Event::End(_) => {
+                    // The name is not consulted: quick-xml has already
+                    // proven this End matches the open Start (it errors
+                    // on a mismatch), so the STACK says what closed -
+                    // and the stack is what knows whether that `<file>`
+                    // was a core file or an extension's.
+                    let Some(ctx) = stack.pop() else {
+                        return Err(NzbError::Schema("stray closing tag".into()));
+                    };
+                    match ctx {
+                        Ctx::Nzb => root_done = true,
+                        Ctx::File => {
                             if let Some(mut f) = cur_file.take() {
                                 // Segments arrive in document order which is not
                                 // guaranteed to be part order.
@@ -450,7 +979,7 @@ impl Nzb {
                                 // finished GREEN having written nothing for that
                                 // name, and repair never ran because nothing was
                                 // missing. Same reasoning as the self-closing
-                                // `<segment/>` arm below: there is nothing to
+                                // `<segment/>` arm above: there is nothing to
                                 // fetch, only something to DECLARE - so declare
                                 // it, and the file either repairs through PAR2
                                 // or fails the job.
@@ -460,28 +989,74 @@ impl Nzb {
                                 files.push(f);
                             }
                         }
-                        "group" => {
+                        Ctx::Group => {
+                            let over = std::mem::take(&mut over.group);
                             if let Some(g) = cur_group.take()
                                 && let Some(f) = cur_file.as_mut()
                             {
-                                let g = g.trim();
-                                if !g.is_empty() && is_wire_safe(g) {
+                                // N6-06: `trim_xml_space`, not `trim()`.
+                                // A boundary `&#xa0;` used to vanish and
+                                // the rewritten name was sent as
+                                // `GROUP <name>`; now it survives, fails
+                                // `is_wire_safe`, and the group is
+                                // dropped the way every other unusable
+                                // group name is. N6-09: over-length is
+                                // the same verdict - RFC 3977 3.1 caps
+                                // the command line, so a longer name can
+                                // never be spelled on the wire.
+                                let g = trim_xml_space(g.as_str());
+                                if !over
+                                    && !g.is_empty()
+                                    && g.len() <= limits::MAX_WIRE_TOKEN
+                                    && is_wire_safe(g)
+                                {
+                                    text_bytes = text_bytes.saturating_add(g.len());
+                                    if text_bytes > limits::MAX_TEXT_BYTES {
+                                        return Err(NzbError::TooLarge(
+                                            "total text",
+                                            limits::MAX_TEXT_BYTES,
+                                        ));
+                                    }
                                     f.groups.push(g.to_string());
                                 }
                             }
                         }
-                        "meta" => {
+                        Ctx::Meta => {
+                            let over = std::mem::take(&mut over.meta);
                             if let Some((ty, val)) = cur_meta.take() {
                                 // One whole-value trim, replacing the old
                                 // per-fragment trims: element-formatting
                                 // whitespace goes, interior spaces stay.
-                                let val = val.trim().to_string();
-                                if !ty.is_empty() && !val.is_empty() {
+                                //
+                                // N6-06: XML `S` only. This value is the
+                                // archive PASSWORD on the convention
+                                // every newznab site uses, and a generic
+                                // Unicode trim rewrote
+                                // `&#xa0;secret&#x2003;` to `secret` -
+                                // a correct password turned into a wrong
+                                // one, silently, with extraction then
+                                // failing for a reason nothing reports.
+                                // A producer who writes a character
+                                // reference at the boundary meant it.
+                                let val = trim_xml_space(val.as_str()).to_string();
+                                // N6-09: an over-length value stopped
+                                // accumulating, so what is held is a
+                                // PREFIX. Dropped rather than retained:
+                                // half a password is a wrong password.
+                                if !over && !ty.is_empty() && !val.is_empty() {
+                                    text_bytes = text_bytes.saturating_add(ty.len() + val.len());
+                                    if text_bytes > limits::MAX_TEXT_BYTES {
+                                        return Err(NzbError::TooLarge(
+                                            "total text",
+                                            limits::MAX_TEXT_BYTES,
+                                        ));
+                                    }
                                     meta.push((ty, val));
                                 }
                             }
                         }
-                        "segment" => {
+                        Ctx::Segment => {
+                            let bad = std::mem::take(&mut over.segment);
                             if let (Some(f), Some(mut seg)) =
                                 (cur_file.as_mut(), cur_segment.take())
                             {
@@ -489,10 +1064,38 @@ impl Nzb {
                                 // element-formatting whitespace goes,
                                 // interior whitespace stays and fails
                                 // is_wire_safe into dropped_segments.
-                                let id = seg.message_id.trim();
-                                if !id.is_empty() && is_wire_safe(id) {
+                                //
+                                // N6-06: `trim_xml_space`, not `trim()`.
+                                // `&#xa0;real@news.example` used to be
+                                // rewritten to `real@news.example` and
+                                // FETCHED under that key - a different
+                                // article from the one declared. The
+                                // NBSP now survives, `is_wire_safe`
+                                // refuses it, and the segment is charged
+                                // as one that can never be fetched.
+                                let id = trim_xml_space(seg.message_id.as_str());
+                                // N6-09: RFC 3977 3.1 caps an NNTP
+                                // command line at 512 octets, so a
+                                // longer id can never be spelled as
+                                // `BODY <id>`. Unfetchable takes the
+                                // same route as wire-unsafe.
+                                // N6-08: `bad` is a required numeric
+                                // attribute that was present and would
+                                // not parse.
+                                if !bad
+                                    && !id.is_empty()
+                                    && id.len() <= limits::MAX_WIRE_TOKEN
+                                    && is_wire_safe(id)
+                                {
                                     if id.len() != seg.message_id.len() {
                                         seg.message_id = id.to_string();
+                                    }
+                                    text_bytes = text_bytes.saturating_add(seg.message_id.len());
+                                    if text_bytes > limits::MAX_TEXT_BYTES {
+                                        return Err(NzbError::TooLarge(
+                                            "total text",
+                                            limits::MAX_TEXT_BYTES,
+                                        ));
                                     }
                                     f.segments.push(seg);
                                 } else {
@@ -503,23 +1106,8 @@ impl Nzb {
                         _ => {}
                     }
                 }
-                // Self-closing elements never pair with an End, and
-                // `expand_empty_elements` is off, so `<segment ... />`
-                // reached neither the Start nor the End arm: a declared
-                // segment vanished with nothing counted, which is
-                // exactly what `dropped_segments` exists to prevent (the
-                // same segment written `<segment …></segment>` does
-                // count). It carries no message-id by construction, so
-                // there is nothing to fetch - only something to declare.
-                Event::Empty(e) => {
-                    if e.local_name().as_ref() == "segment"
-                        && let Some(f) = cur_file.as_mut()
-                    {
-                        f.dropped_segments += 1;
-                    }
-                }
                 Event::Eof => {
-                    if depth > 0 {
+                    if !stack.is_empty() {
                         return Err(NzbError::Truncated);
                     }
                     break;
@@ -647,70 +1235,361 @@ impl NzbFile {
     }
 
     pub fn kind(&self) -> FileKind {
-        let name = self
-            .filename_hint()
-            .unwrap_or(&self.subject)
-            .to_ascii_lowercase();
-        // The name must END at ".par2" to be a PAR2 file at all - either
-        // there and then, or with the raw subject carrying on after
-        // whitespace (kind() falls back to the whole subject when
-        // nothing is quoted). A mere `contains` also caught payload
-        // whose name continues past the extension, so
-        // "extras.vol-10.par2-sample.mkv" was classified PAR2 rather
-        // than data. Same whitespace rule as `par2_vol_suffix`, for the
-        // same reason (14 Aug sweep).
-        let is_par2 = name.match_indices(".par2").any(|(i, _)| {
-            let rest = &name[i + ".par2".len()..];
-            rest.is_empty() || rest.starts_with(char::is_whitespace)
-        });
-        if !is_par2 {
-            return FileKind::Data;
-        }
-        // Anything with .par2 that doesn't wear a recovery-volume
-        // suffix is the index. The suffix rule lives in
-        // `par2_vol_suffix`, shared with `extract::release_stem`.
-        if par2_vol_suffix(&name).is_some() {
-            FileKind::Par2Volume
-        } else {
-            FileKind::Par2Main
-        }
+        self.classify().kind()
+    }
+
+    /// [`Self::kind`], keeping the name and the rule it was decided
+    /// under. Take this rather than `kind()` whenever the answer to
+    /// "which file is this" is followed by a question about the same
+    /// name's SHAPE - the set stem, the volume suffix - so the two
+    /// cannot be asked under different rules. See [`SubjectClass`].
+    pub fn classify(&self) -> SubjectClass<'_> {
+        classify_subject_detail(&self.subject)
     }
 }
 
 /// The quoted filename in a subject: the first `"…"` run that looks like
-/// a filename (contains a dot), else the first non-empty quoted run.
+/// a filename (contains a dot) AND whose own kind is the one
+/// [`classify_subject`] reached for the subject as a whole, else the
+/// first dotted run, else the first non-empty quoted run.
 /// Posts like `"S01E01" - "Show.part01.rar" yEnc (1/2)` put a decoy
 /// first - taking quote #1 unconditionally misclassified the file.
+///
+/// T5: the agreeing-run clause is what the first-dotted-run rule could
+/// not do. On the N6-04 ambiguity class - two or more dotted runs whose
+/// own kinds DISAGREE, so the subject answers `Data` - the first dotted
+/// run can be the recovery-volume name while the file is payload:
+/// `"label.vol000+50.par2" - "Movie.mkv"` named the slot, the per-file
+/// API row, the donor key and the FileDesc length lookup after a volume
+/// that the classifier had already refused to treat as one. Preferring a
+/// run that agrees with the final kind names `Movie.mkv` instead. It is
+/// inert everywhere else BY CONSTRUCTION: with no disagreement the first
+/// dotted run agrees by definition and is picked exactly as before, and
+/// where nothing agrees (`"a.par2" - "b.vol000+50.par2"`, Par2Main
+/// against Par2Volume) the old rule is the fallback. It cannot help the
+/// mirror shape `"Show.S01E01" - "Show.vol000+50.par2"`, where both runs
+/// are plausible names and the label agrees with `Data` first - no
+/// par2-awareness in a PICK can separate those two.
+///
+/// The rule lives HERE and not in [`NzbFile::filename_hint`] because two
+/// callers reach the pick without it - `index::ingest::quoted_name` and
+/// `faultplan::vol_first_block` - and a rule spelled twice is the
+/// hand-copied-twin class `role_of` was found in.
+///
+/// N6-10: a candidate the OUTPUT-NAME policy cannot carry is skipped,
+/// not returned. `unquoted_filename` has capped its candidate at 255
+/// bytes since it was written; this one had no cap at all, so a
+/// 5,000-byte quoted name parsed, planned, and downloaded, and failed
+/// only when the leaf was created - after the network work, at the
+/// filesystem, with a message about a name nobody can read. The rule is
+/// [`crate::disk::name_within_limits`] rather than a second number
+/// invented here: ONE policy, the one `sanitize_relpath_for` already
+/// enforces (255 bytes per component, 511 in all), asked at the front
+/// door instead of at materialization.
+///
+/// Skipped, not fatal: the scan continues, so a subject whose first
+/// dotted quote is unusable can still be named by a later one, and a
+/// subject with nothing usable falls to `unquoted_filename` and then to
+/// the plan's `fileNNN` placeholder - which is unique per slot, so the
+/// refusal is collision-safe by construction.
 pub fn quoted_filename(s: &str) -> Option<&str> {
-    let mut first: Option<&str> = None;
+    let runs = quoted_runs(s);
+    let usable = || {
+        runs.iter()
+            .copied()
+            .filter(|n| crate::disk::name_within_limits(n))
+    };
+    let kind = classify_runs(&runs, s).kind();
+    usable()
+        .find(|n| n.contains('.') && classify_one(&n.to_ascii_lowercase(), true) == kind)
+        .or_else(|| usable().find(|n| n.contains('.')))
+        .or_else(|| usable().next())
+}
+
+/// Every quoted run in a subject, trimmed, in order, empties dropped.
+///
+/// Split out of [`quoted_filename`] because classification needs the
+/// WHOLE list and the name pick needs one entry: one run has to be
+/// chosen for the NAME, and no single run may decide the KIND, which is
+/// what [`classify_subject`] exists to say. Since T5 the pick asks that
+/// rule too, so both readers start from this list.
+///
+/// F2, a KNOWN divergence, deliberately left standing: the trim here is
+/// Rust's Unicode `White_Space` trim, where N6-06 moved the message-id,
+/// group and password fields onto [`trim_xml_space`] (XML production 3
+/// `S` only) because a character reference written at a field boundary
+/// was MEANT. A quoted `"&#xa0;movie.mkv"` therefore loses its NBSP
+/// here. It stays because the divergence is contained - on-disk names
+/// and every identity key fold through `sanitize_out_name`, which strips
+/// the boundary space on both sides of every compare, and the only
+/// observable difference is a raw-name compare (`described_length`, the
+/// name ladder) that fails CLOSED either way, unlike N6-06's fields
+/// which fetched a wrong article under a fabricated key. A bare
+/// `trim_xml_space` swap also has a degenerate case: a run of only
+/// Unicode whitespace stops being empty, so it becomes a candidate and
+/// hands the slot a name that sanitizes to `unnamed`, strictly worse
+/// than today's unique `fileNNN`. See
+/// `research/FILENAME-HINT-CENSUS-2026-08-31.md` section 5 for the full
+/// read and for what evidence would change the answer - do not "fix"
+/// this by reflex in the next N6-06-style sweep.
+fn quoted_runs(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
     let mut rest = s;
     while let Some(a) = rest.find('"') {
         let after = &rest[a + 1..];
         let Some(b) = after.find('"') else { break };
         let name = after[..b].trim();
         if !name.is_empty() {
-            if name.contains('.') {
-                return Some(name);
-            }
-            first.get_or_insert(name);
+            out.push(name);
         }
         rest = &after[b + 1..];
     }
-    first
+    out
 }
 
-/// A filename read from a subject that quotes NOTHING - the shape issue
-/// #55's album was posted in: `10-Track Name-8c63a701.flac (1/0)`, the
-/// real name in the clear with a `(part/total)` counter after it.
+/// Where does this lowercased name END at `.par2`, if it does? The byte
+/// offset of the terminating occurrence, or `None`.
 ///
-/// Strict on purpose, because the subjects this must NOT match are the
-/// prose ones (`Great Album Name yEnc (1/15)`): after cutting the
-/// ` yEnc` marker, stripping trailing `(n/m)` counters and leading
-/// `[..]`/`(..)` index tags, the WHOLE remainder must end in a real
-/// extension - a dot, then 2 to 5 alphanumerics with at least one
-/// letter - or the answer is None. The letter requirement is what keeps
-/// a trailing year (`Movie.2026 (1/3)`) from reading as a file.
-pub fn unquoted_filename(s: &str) -> Option<&str> {
+/// `isolated` says whether the name has already been cut out of its
+/// subject by quotes. It has NOT when `kind()` falls back to the whole
+/// raw subject, where `.par2` is legitimately followed by ` yEnc (1/2)`
+/// - so whitespace ends the name there. It HAS when the name came from
+/// between a pair of quotes, and there `.par2` must be terminal: a
+/// quoted `"ordinary.par2 notes.txt"` is one filename that merely
+/// CONTAINS `.par2`, and reading the raw-subject rule onto it classified
+/// a payload as the recovery index (N6-05).
+///
+/// THE ONE HOME OF THE TERMINAL RULE, and `pub` for that reason rather
+/// than for a caller's convenience. `check::multiple_par2_sets` wrote
+/// the same two-clause test out a second time to recover a Main's stem,
+/// with a comment saying the two had to agree - which is how
+/// `faultplan::role_of` began, and it was still a hand-copied twin of
+/// `NzbFile::kind` months later when N6-04 and N6-05 turned out to be
+/// live in both. An OFFSET rather than a bool because that is what the
+/// second copy actually wanted: the stem is everything in front of it.
+/// `tools/par2-rule-gate.py` refuses the third copy.
+pub fn par2_name_end(lower: &str, isolated: bool) -> Option<usize> {
+    lower
+        .match_indices(".par2")
+        .find(|(i, _)| {
+            let rest = &lower[i + ".par2".len()..];
+            rest.is_empty() || (!isolated && rest.starts_with(char::is_whitespace))
+        })
+        .map(|(i, _)| i)
+}
+
+fn classify_one(lower: &str, isolated: bool) -> FileKind {
+    // The name must END at ".par2" to be a PAR2 file at all - either
+    // there and then, or with the raw subject carrying on after
+    // whitespace. A mere `contains` also caught payload whose name
+    // continues past the extension, so "extras.vol-10.par2-sample.mkv"
+    // was classified PAR2 rather than data (14 Aug sweep).
+    if par2_name_end(lower, isolated).is_none() {
+        return FileKind::Data;
+    }
+    // Anything with .par2 that doesn't wear a recovery-volume suffix is
+    // the index. The suffix rule lives in `vol_suffix`, shared with
+    // `extract::release_stem` through `par2_vol_suffix`.
+    if vol_suffix(lower, isolated).is_some() {
+        FileKind::Par2Volume
+    } else {
+        FileKind::Par2Main
+    }
+}
+
+/// THE classification rule: what role does this subject claim?
+///
+/// One function, called by [`NzbFile::kind`] and by
+/// `faultplan::role_of`, which used to be a hand-copied twin of it.
+///
+/// A subject may quote more than one filename-looking name, and the old
+/// rule took the first dotted one as authority for the KIND as well as
+/// the name. That is the wrong direction of wrong (N6-04): a
+/// `"label.vol000+50.par2" - "Movie.mkv"` post classified as a recovery
+/// volume, and `build_fetch_plan` gives a non-bootstrap volume NO SLOT
+/// - so the payload named right there in the manifest was never
+/// fetched, nothing was ever missing, and the job finished green.
+/// `"label.par2" - "Movie.mkv"` did the same through Par2Main, which
+/// excludes the file from normal payload verification.
+///
+/// So candidates must AGREE. Every dotted quoted run is classified on
+/// its own, and a disagreement answers `Data` - the only answer that
+/// cannot lose a file, since the cost of calling a recovery volume
+/// payload is bandwidth and the cost of the reverse is the download.
+/// One candidate still decides alone, which is what keeps a decoy-first
+/// post like `"S01E01" - "Show.vol000+50.par2"` a volume: an undotted
+/// run is a label, not a filename, exactly as before.
+pub fn classify_subject(subject: &str) -> FileKind {
+    classify_subject_detail(subject).kind()
+}
+
+/// [`classify_subject`], keeping the NAME it judged and the RULE it
+/// judged that name under.
+///
+/// THE POINT OF THE STRUCT is that `isolated` must not be re-derived
+/// downstream. A reader that gates on [`FileKind`] and then asks the
+/// public [`par2_vol_suffix`] - the RAW-SUBJECT rule, unconditionally -
+/// is asking a looser question than the one that produced the kind it
+/// gated on, so the two can disagree about the same string. They did:
+/// a quoted `"a.vol-10.par2 x.par2"` is `Par2Main` here (the isolated
+/// rule refuses a volume suffix whose tail carries on past `.par2`),
+/// while `par2_vol_suffix` answers `Some(1)` and hands the reader the
+/// stem `a` - so `check::multiple_par2_sets` folded it into a genuinely
+/// separate `a.par2` set, saw one set where there are two, and left the
+/// declared-count cap live over a set no probe had sized. Measured on
+/// this tree 30 Aug 2026; the regression is
+/// `check_tests::a_quoted_par2_with_a_trailing_par2_is_its_own_set`.
+///
+/// THE T3 GATE AND THIS ARE COMPLEMENTS, and the state of the tree the
+/// morning they met is the argument for both. `tools/par2-rule-gate.py`
+/// refuses a SECOND WRITING of the terminal test, and found the one in
+/// `multiple_par2_sets`; folding that copy onto [`par2_name_end`] fixed
+/// the Main arm of this defect and left the VOLUME arm - the branch
+/// that actually fires on the name above - still asking
+/// `par2_vol_suffix`. A gate against restating the rule cannot see a
+/// reader CALLING the right function with the wrong `isolated`, because
+/// there is no second copy to find; only carrying the decision closes
+/// that.
+///
+/// So the answers a reader needs are METHODS here rather than a second
+/// call to a free function: [`Self::vol_suffix`] and
+/// [`Self::par2_stem`] apply this classification's own rule to this
+/// classification's own name, and there is nothing left for a reader to
+/// get wrong. [`par2_vol_suffix`] stays public for the callers that
+/// genuinely hold a real filename off disk or out of the index rather
+/// than a subject - `extract::release_stem` and `scan.rs` - where the
+/// isolated/raw distinction does not arise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubjectClass<'a> {
+    kind: FileKind,
+    name: &'a str,
+    isolated: bool,
+}
+
+impl<'a> SubjectClass<'a> {
+    /// The role the subject claims.
+    pub fn kind(&self) -> FileKind {
+        self.kind
+    }
+
+    /// The name the kind was decided on: the first dotted quoted run,
+    /// else the first quoted run, else the whole raw subject. Borrowed
+    /// out of the subject in its ORIGINAL case; every offset this type
+    /// hands back indexes it, which is sound in either case because
+    /// ASCII lowercasing never changes a byte's length.
+    ///
+    /// This is [`quoted_filename`]'s answer for every name a real post
+    /// carries, and deliberately not that call: it applies the
+    /// OUTPUT-NAME policy (N6-10, 255 bytes a component) and this does
+    /// not, so a subject whose only quoted run is over-length answers
+    /// `None` there and sent the reader to the raw subject - under the
+    /// RAW rule - for a name the classifier had judged isolated.
+    /// Reading the name off the classification closes that seam too.
+    /// T5's agreeing-run clause cannot part them either: it picks among
+    /// the runs whose own kind EQUALS the subject's answer, and this is
+    /// the run that set that answer.
+    pub fn name(&self) -> &'a str {
+        self.name
+    }
+
+    /// Had the classified name already been cut out of its subject by
+    /// quotes? See [`par2_name_end`] for what turns on it.
+    pub fn isolated(&self) -> bool {
+        self.isolated
+    }
+
+    /// Where the recovery-volume suffix starts in [`Self::name`], under
+    /// the rule that produced [`Self::kind`]. `Some` exactly when the
+    /// kind is [`FileKind::Par2Volume`].
+    pub fn vol_suffix(&self) -> Option<usize> {
+        if self.kind != FileKind::Par2Volume {
+            return None;
+        }
+        vol_suffix(&self.name.to_ascii_lowercase(), self.isolated)
+    }
+
+    /// The PAR2 SET stem this name declares: the text before `.vol…`
+    /// for a recovery volume, before `.par2` for an index. `None` for
+    /// [`FileKind::Data`], and `Some` - possibly EMPTY, for an
+    /// anonymous `.vol-01.par2` with no prefix at all - for either PAR2
+    /// kind, by construction: a kind is only ever PAR2 because
+    /// [`par2_name_end`] answered `Some` on this same name under this
+    /// same rule.
+    ///
+    /// The private `vol_suffix` rather than [`Self::vol_suffix`], so
+    /// the two arms are literally the two branches `classify_one` took:
+    /// a `Par2Main` is a name for which that call answered `None`, so
+    /// the fallback to the `.par2` offset is not a second opinion, it
+    /// is the same one.
+    pub fn par2_stem(&self) -> Option<&'a str> {
+        if self.kind == FileKind::Data {
+            return None;
+        }
+        let lower = self.name.to_ascii_lowercase();
+        let end = par2_name_end(&lower, self.isolated)?;
+        Some(&self.name[..vol_suffix(&lower, self.isolated).unwrap_or(end)])
+    }
+}
+
+/// See [`SubjectClass`].
+pub fn classify_subject_detail(subject: &str) -> SubjectClass<'_> {
+    classify_runs(&quoted_runs(subject), subject)
+}
+
+/// [`classify_subject`] over runs already extracted, so the NAME pick in
+/// [`quoted_filename`] can ask this rule without walking the subject a
+/// second time. The rule itself lives here and nowhere else: the pick
+/// consulting a private copy of the par2-terminal test is the
+/// hand-copied-twin class `role_of` was already found in (N6-04).
+///
+/// It hands back the whole [`SubjectClass`] rather than the bare kind,
+/// so the NAME it judged and the `isolated` flag it judged under leave
+/// the classifier with the verdict instead of being re-derived by each
+/// reader (T2). Callers wanting only the kind take `.kind()`.
+fn classify_runs<'a>(runs: &[&'a str], subject: &'a str) -> SubjectClass<'a> {
+    let at = |kind, name, isolated| SubjectClass {
+        kind,
+        name,
+        isolated,
+    };
+    let mut dotted = runs.iter().copied().filter(|n| n.contains('.'));
+    if let Some(first) = dotted.next() {
+        let kind = classify_one(&first.to_ascii_lowercase(), true);
+        for other in dotted {
+            if classify_one(&other.to_ascii_lowercase(), true) != kind {
+                return at(FileKind::Data, first, true);
+            }
+        }
+        return at(kind, first, true);
+    }
+    // Quotes but no dot in any of them: `quoted_filename` falls through
+    // to its own last arm and answers the first run, so classify exactly
+    // that - it is still an isolated name. (Exactly: the first run it
+    // finds USABLE, since N6-10; this branch reads `runs` unfiltered, so
+    // a first run too long to be an output name is classified here and
+    // not named there. T5's agreeing-run clause cannot reach this branch
+    // at all - it only ever picks among DOTTED runs, and there are none.)
+    if let Some(first) = runs.first() {
+        return at(classify_one(&first.to_ascii_lowercase(), true), first, true);
+    }
+    at(
+        classify_one(&subject.to_ascii_lowercase(), false),
+        subject,
+        false,
+    )
+}
+
+/// A subject's bare filename CANDIDATE: the decoration - a trailing
+/// ` yEnc`, stacked `(n/m)` counters, leading `[01/30]` index tags - taken
+/// off, and the output-name policy applied, with no judgement yet about
+/// whether the extension makes it a filename.
+///
+/// Split out of [`unquoted_filename`] for N6-07's set-level reading
+/// ([`set_resolved_hints`]), which has to ask the same question of a
+/// subject the per-subject rule REFUSED. Spelling the stripping a second
+/// time there is how two copies of one rule start; this repo has the
+/// scars.
+fn unquoted_candidate(s: &str) -> Option<&str> {
     // The yEnc marker ends the name; everything after it is decoration.
     let mut head = match s.find(" yEnc") {
         Some(i) => &s[..i],
@@ -763,13 +1642,198 @@ pub fn unquoted_filename(s: &str) -> Option<&str> {
     if name.is_empty() || name.len() > 255 || name.contains('"') {
         return None;
     }
+    Some(name)
+}
+
+/// A filename read from a subject that quotes NOTHING - the shape issue
+/// #55's album was posted in: `10-Track Name-8c63a701.flac (1/0)`, the
+/// real name in the clear with a `(part/total)` counter after it.
+///
+/// Strict on purpose, because the subjects this must NOT match are the
+/// prose ones (`Great Album Name yEnc (1/15)`): after cutting the
+/// ` yEnc` marker, stripping trailing `(n/m)` counters and leading
+/// `[..]`/`(..)` index tags, the WHOLE remainder must end in a real
+/// extension - a dot, then 2 to 5 alphanumerics with at least one
+/// letter - or the answer is None. The letter requirement is what keeps
+/// a trailing year (`Movie.2026 (1/3)`) from reading as a file.
+pub fn unquoted_filename(s: &str) -> Option<&str> {
+    let name = unquoted_candidate(s)?;
     let dot = name.rfind('.')?;
     let (stem, ext) = (&name[..dot], &name[dot + 1..]);
-    let ext_ok = !stem.is_empty()
-        && (2..=5).contains(&ext.len())
+    if stem.is_empty() {
+        return None;
+    }
+    if real_extension(ext) {
+        return Some(name);
+    }
+    // N6-07: a SPLIT-PART tail. `release.zip.001`, `movie.7z.001`,
+    // `archive.rar.001`, `Movie.mkv.001` and bare `movie.001` all
+    // failed the letter test above and came back `None`, so the plan
+    // named every part `fileNNN` and threw the grouping name away -
+    // while `splitjoin`, `nzbkit::zip` and the top-level e2e all
+    // support these shapes downstream. A naming loss, not a capability
+    // gap, and one that costs the set the ONE thing that identifies its
+    // members as belonging together.
+    //
+    // Two readings, because a lone subject has no set to lean on the
+    // way `splitjoin::numeric_tail` does (that one gets a contiguous
+    // run, a width agreement and a magic check before it commits):
+    //
+    //  * a numeric tail BEHIND a real extension is unambiguous -
+    //    nothing writes `Movie.mkv.001` except a splitter - so any
+    //    1-4 digit tail is taken, matching `numeric_tail`'s own width
+    //    (wider than 4 "is not a split tail, it is a name that happens
+    //    to end in digits");
+    //
+    //  * a BARE numeric tail is taken only when it is ZERO-PADDED
+    //    (`.001`, `.01`, `.010`). That is the discriminator the
+    //    existing letter rule was standing in for: it keeps a trailing
+    //    year out (`Movie.2026`, the case that comment names), and a
+    //    bitrate or a resolution with it (`Album.320`, `Show.480`),
+    //    while every splitter in the wild pads. `.100` and up in a
+    //    3-digit set are what a lone subject cannot settle - and
+    //    that is where this function stops rather than where the
+    //    job does: a set past part 99 is named by
+    //    `set_resolved_hints`, which sees every file at once, and
+    //    the measurement that made it necessary is in its doc.
+    let digits = (1..=4).contains(&ext.len()) && ext.bytes().all(|c| c.is_ascii_digit());
+    if !digits {
+        return None;
+    }
+    let padded = ext.len() >= 2 && ext.starts_with('0');
+    let behind_real_ext = stem
+        .rfind('.')
+        .is_some_and(|d| !stem[..d].is_empty() && real_extension(&stem[d + 1..]));
+    (padded || behind_real_ext).then_some(name)
+}
+
+/// The BARE numeric split tail of a candidate name: `sunset.100` ->
+/// (`sunset`, 100, 3). `None` for everything [`unquoted_filename`]
+/// already settles on the subject alone - a tail behind a real
+/// extension, a tail wider than any splitter writes, a name with no
+/// numeric tail at all - so this answers exactly the question the SET is
+/// needed for and nothing else.
+fn bare_numeric_tail(name: &str) -> Option<(&str, u32, usize)> {
+    let dot = name.rfind('.')?;
+    let (stem, ext) = (&name[..dot], &name[dot + 1..]);
+    if stem.is_empty() || !(1..=4).contains(&ext.len()) || !ext.bytes().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    if stem
+        .rfind('.')
+        .is_some_and(|d| !stem[..d].is_empty() && real_extension(&stem[d + 1..]))
+    {
+        return None;
+    }
+    Some((stem, ext.parse().ok()?, ext.len()))
+}
+
+/// Posted names for a WHOLE file list - [`NzbFile::filename_hint_lenient`]
+/// per file, plus the one answer a single subject cannot give.
+///
+/// N6-07 takes a BARE numeric tail only when it is ZERO-PADDED, because
+/// a lone `movie.100` is spelled exactly like a bitrate or a resolution
+/// and the subject carries nothing that separates them. In a 3-digit
+/// split set that is the whole tail past part 99, so a 101-part
+/// `sunset.001`..`.101` came out named for 99 parts and placeholdered
+/// for two - and that PARTIAL naming is worse than naming none of them,
+/// which is the measurement this function exists for (31 Aug 2026, a
+/// bare-numeric 101-part set posted under hash yEnc names):
+///
+/// * before N6-07 nothing was named, no set was declared, no set was
+///   collected on disk, and the job left all 101 parts alone;
+/// * after it, parts 1..99 were named, `splitjoin::collect_sets` saw a
+///   contiguous run from 1, joined NINETY-NINE parts into a `sunset`
+///   nothing can open ("no end-of-central-directory record") and
+///   DELETED them, leaving the two placeholders beside it.
+///
+/// Both outcomes are a broken job; the second also destroys the parts a
+/// person would have salvaged by hand, so it is a regression and not
+/// merely a miss.
+///
+/// The SET is what settles it, which is what the row's own follow-up
+/// said: a base carrying a ZERO-PADDED tail has been proven a split set
+/// by a name no bitrate can wear, and an unpadded tail is admitted when
+/// it EXTENDS that run by one - `.100` needs `.099`, and `.101` then
+/// needs the `.100` just admitted. A bitrate or a resolution has no such
+/// run behind it and is untouched.
+///
+/// Extending the run, rather than merely sharing the base, is what keeps
+/// the rule from costing anything. Matching the base alone would promote
+/// an `Album.320` sitting beside a genuine `Album.001`..`.099` set, and
+/// BOTH consumers refuse a set with a hole in it (`get::vrig` declares a
+/// zip split only on a gapless `1..=n`, `splitjoin::collect_sets` wants
+/// a contiguous run from 1) - so one stray file would have taken a
+/// 99-part set that joins correctly today and stopped it joining at all.
+/// Extension cannot do that: an admitted index is always the one the run
+/// was missing.
+///
+/// STATED LIMIT, because it is a decision and not an oversight: a set
+/// written at width 1 (`movie.1`..`movie.9`) has no padded member to
+/// anchor on, so none of it is named and every part keeps the
+/// placeholder. That is uniform - the partial naming above is the thing
+/// that hurts - and it is what the tree did before N6-07, so nothing
+/// regresses. Closing it needs evidence a lone subject does not carry:
+/// a contiguous run alone would promote `Movie.1` / `Movie.2` sequel
+/// numbering, which is the class the padding rule exists to refuse.
+pub fn set_resolved_hints(files: &[NzbFile]) -> Vec<Option<&str>> {
+    type Key = (String, usize);
+    let mut hints: Vec<Option<&str>> = files.iter().map(NzbFile::filename_hint_lenient).collect();
+    // Indices a ZERO-PADDED name has already proven, per (base, width).
+    let mut runs: std::collections::HashMap<Key, std::collections::BTreeSet<u32>> =
+        std::collections::HashMap::new();
+    for h in hints.iter().flatten() {
+        if let Some((base, idx, width)) = bare_numeric_tail(h)
+            && width >= 2
+            && h[h.len() - width..].starts_with('0')
+        {
+            runs.entry((base.to_ascii_lowercase(), width))
+                .or_default()
+                .insert(idx);
+        }
+    }
+    if runs.is_empty() {
+        return hints;
+    }
+    let mut cands: Vec<(Key, u32, usize)> = Vec::new();
+    for (i, h) in hints.iter().enumerate() {
+        if h.is_some() {
+            continue;
+        }
+        let Some(cand) = unquoted_candidate(&files[i].subject) else {
+            continue;
+        };
+        if let Some((base, idx, width)) = bare_numeric_tail(cand) {
+            let key = (base.to_ascii_lowercase(), width);
+            if runs.contains_key(&key) {
+                cands.push((key, idx, i));
+            }
+        }
+    }
+    // By key, then by INDEX, so a run only ever extends one part at a
+    // time: `.100` needs `.099`, and `.101` then needs the `.100` this
+    // loop just admitted.
+    cands.sort_unstable();
+    for (key, idx, i) in cands {
+        let seen = runs.get_mut(&key).expect("every key came from `runs`");
+        if idx > 0 && seen.contains(&(idx - 1)) {
+            seen.insert(idx);
+            hints[i] = unquoted_candidate(&files[i].subject);
+        }
+    }
+    hints
+}
+
+/// A real filename extension: 2-5 alphanumerics carrying at least one
+/// LETTER. Split out of [`unquoted_filename`] so N6-07's split-part
+/// reading can ask the same question of the extension BEHIND a numeric
+/// tail (`release.zip.001` -> is `zip` real?) rather than spelling the
+/// rule a second time.
+fn real_extension(ext: &str) -> bool {
+    (2..=5).contains(&ext.len())
         && ext.bytes().all(|c| c.is_ascii_alphanumeric())
-        && ext.bytes().any(|c| c.is_ascii_alphabetic());
-    ext_ok.then_some(name)
+        && ext.bytes().any(|c| c.is_ascii_alphabetic())
 }
 
 /// Byte offset of the recovery-volume suffix in a PAR2 filename, or
@@ -794,6 +1858,14 @@ pub fn unquoted_filename(s: &str) -> Option<&str> {
 ///   numbers a release, not a volume, and single-digit is that
 ///   convention's home ground.
 pub fn par2_vol_suffix(name: &str) -> Option<usize> {
+    vol_suffix(name, false)
+}
+
+/// [`par2_vol_suffix`], plus the caller's answer to "has this name
+/// already been cut out of its subject?". See [`par2_name_end`] - the
+/// whitespace tail below is a RAW-SUBJECT allowance and must not reach
+/// an isolated quoted filename.
+fn vol_suffix(name: &str, isolated: bool) -> Option<usize> {
     let lower = name.to_ascii_lowercase();
     let vol = lower.rfind(".vol")?;
     let rest = &lower[vol + 4..];
@@ -832,7 +1904,7 @@ pub fn par2_vol_suffix(name: &str) -> Option<usize> {
         // silently never fetched and the job still reported complete
         // (14 Aug sweep).
         Some("") => Some(vol),
-        Some(t) if t.starts_with(char::is_whitespace) => Some(vol),
+        Some(t) if !isolated && t.starts_with(char::is_whitespace) => Some(vol),
         _ => None,
     }
 }
@@ -883,775 +1955,5 @@ pub fn par2_vol_count(name: &str) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Real NZBIndex-generated NZB (nzbget issue #699): subjects carry
-    /// `&auml;`, an HTML latin-1 entity undefined in XML. nzbget
-    /// rejected it ("Reference to undefined entity"); SABnzbd accepts.
-    /// We resolve the latin-1 set so these download.
-    #[test]
-    fn html_latin1_entities_in_attributes_resolve() {
-        let xml = include_bytes!("../testdata/nzb/gh-nzbget699-undefined-entity.nzb");
-        let nzb = Nzb::parse(xml).expect("latin-1 entity NZB parses");
-        assert!(!nzb.files.is_empty());
-        let with_auml: Vec<_> = nzb
-            .files
-            .iter()
-            .filter(|f| f.subject.contains("geschändeten"))
-            .collect();
-        assert!(
-            !with_auml.is_empty(),
-            "&auml; should resolve to ä in subjects: {:?}",
-            nzb.files[0].subject
-        );
-        assert!(
-            nzb.files.iter().all(|f| !f.subject.contains("&auml;")),
-            "no subject may keep the raw entity"
-        );
-    }
-
-    /// A latin-1 byte anywhere in the document is REFUSED, and CDATA is the
-    /// arm where that is a change rather than a restatement.
-    ///
-    /// Measured 28 Aug 2026 against quick-xml 0.41 and 0.42 side by side, in
-    /// the pass that took the bump. A bad byte in a `subject=` or in element
-    /// text already failed the parse under 0.41 - every content accessor
-    /// decoded strictly - so those two are unchanged. CDATA was the outlier:
-    /// this arm read it with `String::from_utf8_lossy`, so the byte arrived
-    /// as U+FFFD and the parse SUCCEEDED with a corrupted value. That is the
-    /// worst of the three outcomes for the two things CDATA actually carries
-    /// here - a meta password that is now silently wrong, and a message-id
-    /// that was never posted. 0.42 validates when it builds the event, so all
-    /// three shapes now agree: refuse the document.
-    ///
-    /// Do NOT "fix" a report of this by reintroducing a lossy read, and do
-    /// not reach for a lossy pre-transcode of the whole input either - that
-    /// would also start ACCEPTING the latin-1 subjects this parser has always
-    /// refused, which is a product decision and not a bump.
-    #[test]
-    fn cdata_with_a_latin1_byte_is_refused_not_corrupted() {
-        let mut xml = br#"<?xml version="1.0"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head><meta type="password"><![CDATA[stra"#
-            .to_vec();
-        // 0xDF is `ß` in latin-1 and is not a valid UTF-8 sequence.
-        xml.push(0xDF);
-        xml.extend_from_slice(
-            br#"e]]></meta></head>
-  <file subject="s" poster="p" date="1700000000">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments><segment bytes="1" number="1">a@example.com</segment></segments>
-  </file>
-</nzb>"#,
-        );
-        let err = Nzb::parse(&xml).expect_err("a latin-1 byte in CDATA must refuse the document");
-        // It arrives as `Xml`, not as a separate encoding variant: see the
-        // note on `NzbError::Xml`.
-        assert!(
-            matches!(err, NzbError::Xml(_)),
-            "encoding failures surface as NzbError::Xml since quick-xml 0.42, got {err:?}"
-        );
-
-        // The same document with the byte spelled as UTF-8 still parses, so
-        // this test cannot pass by refusing CDATA in general.
-        let ok = String::from_utf8(
-            xml.iter()
-                .map(|&b| if b == 0xDF { b'x' } else { b })
-                .collect::<Vec<_>>(),
-        )
-        .expect("ascii-ised fixture is utf-8");
-        let nzb = Nzb::parse(ok.as_bytes()).expect("the well-formed twin parses");
-        assert_eq!(nzb.password(), Some("straxe"));
-    }
-
-    /// The same entities must resolve in element text (message-ids, meta
-    /// values), where they arrive as GeneralRef events - and an entity
-    /// outside the latin-1 table must still fail the parse: tolerance is
-    /// scoped to the known HTML set, not entities in general.
-    #[test]
-    fn html_latin1_entities_in_text_resolve_unknown_still_rejected() {
-        let xml = br#"<?xml version="1.0"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head><meta type="password">stra&szlig;e</meta></head>
-  <file subject="s" poster="p" date="1700000000">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments><segment bytes="1" number="1">a@example.com</segment></segments>
-  </file>
-</nzb>"#;
-        let nzb = Nzb::parse(xml).expect("parses");
-        assert_eq!(nzb.password(), Some("straße"));
-
-        let unknown = br#"<?xml version="1.0"?>
-<nzb><file subject="x&bogus;y" poster="p" date="1">
-  <groups><group>a.b</group></groups>
-  <segments><segment bytes="1" number="1">a@b.c</segment></segments>
-</file></nzb>"#;
-        assert!(
-            Nzb::parse(unknown).is_err(),
-            "entities outside the latin-1 table must still reject"
-        );
-    }
-
-    /// A message-id whose declared character content carries interior
-    /// whitespace (an entity splits the text, so it arrives as separate
-    /// fragments) is wire-unsafe and owed to `dropped_segments`.
-    /// Per-fragment trimming used to eat the spaces around the entity
-    /// and hand back a FABRICATED id that passed `is_wire_safe` - the
-    /// manifest then counted a fetched-and-missing article instead of an
-    /// unfetchable declared segment. Ids get the same
-    /// accumulate-then-trim-once treatment meta values and groups got.
-    #[test]
-    fn an_entity_split_id_with_interior_whitespace_drops_instead_of_rewriting() {
-        let xml = br#"<?xml version="1.0"?>
-<nzb><file subject="s" poster="p" date="1">
-  <groups><group>a.b</group></groups>
-  <segments>
-    <segment bytes="1" number="1">abc &amp;def@news.example</segment>
-    <segment bytes="1" number="2"> ok@news.example </segment>
-  </segments>
-</file></nzb>"#;
-        let nzb = Nzb::parse(xml).expect("parses");
-        let f = &nzb.files[0];
-        assert_eq!(
-            f.dropped_segments, 1,
-            "the whitespace-carrying id is declared-but-unfetchable, never rewritten"
-        );
-        assert_eq!(
-            f.segments
-                .iter()
-                .map(|s| s.message_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["ok@news.example"],
-            "element-formatting whitespace still trims off a clean id"
-        );
-    }
-
-    /// Three ways a well-formed NZB used to be quietly rewritten rather
-    /// than parsed or refused. All three are silent-data shapes: nothing
-    /// logged, nothing counted, a green job with the wrong bytes.
-    #[test]
-    fn undefined_entities_and_self_closing_segments_do_not_rewrite_the_manifest() {
-        // 1. An undefined entity inside a message-id was DROPPED, so the
-        // id parsed as a different, non-existent article.
-        let in_text = br#"<?xml version="1.0"?>
-<nzb><file subject="s" poster="p" date="1">
-  <groups><group>a.b</group></groups>
-  <segments><segment bytes="1" number="1">abc&bogus;def@news.example</segment></segments>
-</file></nzb>"#;
-        let err = Nzb::parse(in_text).expect_err("an undefined entity in text must reject");
-        assert!(
-            matches!(&err, NzbError::UnknownEntity(name) if name == "bogus"),
-            "{err:?}"
-        );
-
-        // 2. An entity in a group name split it into two invented names.
-        let split_group = br#"<?xml version="1.0"?>
-<nzb><file subject="s" poster="p" date="1">
-  <groups><group>alt.bin&amp;ary</group></groups>
-  <segments><segment bytes="1" number="1">a@b.c</segment></segments>
-</file></nzb>"#;
-        let nzb = Nzb::parse(split_group).expect("parses");
-        assert_eq!(
-            nzb.files[0].groups,
-            vec!["alt.bin&ary".to_string()],
-            "one group element is one group name"
-        );
-
-        // 3. A self-closing segment vanished without being counted, so
-        // the manifest shrank in silence.
-        let empty_seg = br#"<?xml version="1.0"?>
-<nzb><file subject="s" poster="p" date="1">
-  <groups><group>a.b</group></groups>
-  <segments>
-    <segment bytes="700000" number="1">a@b.c</segment>
-    <segment bytes="700000" number="2"/>
-  </segments>
-</file></nzb>"#;
-        let nzb = Nzb::parse(empty_seg).expect("parses");
-        assert_eq!(nzb.files[0].segments.len(), 1);
-        assert_eq!(
-            nzb.files[0].dropped_segments, 1,
-            "a declared segment we cannot fetch must be counted, not lost"
-        );
-
-        // 4. And the same file with NO segment element at all. The plan
-        // took that as a slot owing nothing - total 0, remaining 0,
-        // missing 0 - so the census never called it incomplete and the
-        // job finished GREEN with nothing on disk under that name, and
-        // no repair, because nothing was missing.
-        let no_segs = br#"<?xml version="1.0"?>
-<nzb>
-  <file subject="declared but empty" poster="p" date="1">
-    <groups><group>a.b</group></groups>
-    <segments></segments>
-  </file>
-  <file subject="the real one" poster="p" date="1">
-    <groups><group>a.b</group></groups>
-    <segments><segment bytes="700000" number="1">a@b.c</segment></segments>
-  </file>
-</nzb>"#;
-        let nzb = Nzb::parse(no_segs).expect("parses");
-        assert_eq!(nzb.files.len(), 2, "the file is kept, not dropped");
-        assert!(nzb.files[0].segments.is_empty());
-        assert_eq!(
-            nzb.files[0].dropped_segments, 1,
-            "a file that declares no segment at all owes ONE unfetchable one"
-        );
-        assert_eq!(
-            nzb.files[1].dropped_segments, 0,
-            "and a healthy file beside it is untouched"
-        );
-    }
-
-    /// Soak corpus strictness guards: entity tolerance must not loosen
-    /// the parser elsewhere. An element name starting with a digit
-    /// (crashed nzbget, their issue #744 shape) and a document truncated
-    /// mid-element both stay rejected.
-    #[test]
-    fn garbled_and_truncated_nzbs_still_rejected() {
-        let garbled = include_bytes!("../testdata/nzb/synth-744-garbled-element.nzb");
-        assert!(
-            Nzb::parse(garbled).is_err(),
-            "element name starting with a digit must reject"
-        );
-        let truncated = include_bytes!("../testdata/nzb/synth-truncated.nzb");
-        assert!(
-            Nzb::parse(truncated).is_err(),
-            "document truncated mid-element must reject"
-        );
-    }
-
-    /// A message-id carrying CR/LF would end our `BODY <id>` command and start
-    /// the attacker's next command on the user's authenticated, paid provider
-    /// session (POST/IHAVE among them), and desync every pipelined reply after
-    /// it. Both routes into the id are covered: numeric char refs, which
-    /// quick-xml resolves to the real control characters, and a CDATA body,
-    /// which can hold the raw bytes. Such segments are dropped at parse.
-    #[test]
-    fn segments_with_crlf_message_ids_are_dropped() {
-        let xml = br#"<?xml version="1.0"?>
-<nzb>
-  <file subject="x" poster="p" date="1700000000">
-    <groups><group>alt.binaries.test&#13;&#10;POST</group></groups>
-    <segments>
-      <segment bytes="1" number="1">a@b&#13;&#10;POST&#13;&#10;c@d</segment>
-      <segment bytes="1" number="2"><![CDATA[e@f
-POST]]></segment>
-      <segment bytes="1" number="3">clean@example.com</segment>
-    </segments>
-  </file>
-</nzb>"#;
-        let nzb = Nzb::parse(xml).expect("parses");
-        let f = &nzb.files[0];
-        assert_eq!(
-            f.segments.len(),
-            1,
-            "only the clean segment may survive: {:?}",
-            f.segments
-        );
-        assert_eq!(f.segments[0].message_id, "clean@example.com");
-        for seg in &f.segments {
-            assert!(
-                is_wire_safe(&seg.message_id),
-                "unsafe id survived: {:?}",
-                seg.message_id
-            );
-        }
-        // The group name takes the same route into `GROUP {name}`.
-        assert!(
-            f.groups.iter().all(|g| is_wire_safe(g)),
-            "unsafe group survived: {:?}",
-            f.groups
-        );
-        // The drop must not silently shrink the manifest: the caller
-        // has to learn two declared segments can never be fetched, or a
-        // hostile NZB completes green with a zero-filled file.
-        assert_eq!(f.dropped_segments, 2);
-    }
-
-    /// XML entities split a meta value into separate text events, and
-    /// trimming each fragment ate the spaces AROUND the entity: a
-    /// password of `secret &amp; more` decoded to `secret&more`, and
-    /// extraction then used a password that never existed. Only the
-    /// whole assembled value may be trimmed.
-    #[test]
-    fn entities_in_meta_values_keep_their_neighbouring_spaces() {
-        let xml = br#"<?xml version="1.0"?>
-<nzb>
-  <head>
-    <meta type="password">  secret &amp; more </meta>
-    <meta type="title">a &lt;b&gt; c</meta>
-  </head>
-  <file subject="x" poster="p" date="1700000000">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="1" number="1">clean@example.com</segment>
-    </segments>
-  </file>
-</nzb>"#;
-        let nzb = Nzb::parse(xml).expect("parses");
-        assert_eq!(nzb.password(), Some("secret & more"));
-        let title = nzb
-            .meta
-            .iter()
-            .find(|(t, _)| t == "title")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(title, Some("a <b> c"));
-    }
-
-    /// A file whose EVERY segment is refused still parses (the NZB is
-    /// not empty), but it must carry the refusal count: with zero
-    /// segments and zero dropped it would enter the downloader with
-    /// nothing to fetch, nothing missing, and finish green having
-    /// written no bytes at all.
-    #[test]
-    fn a_file_of_only_unsafe_segments_records_the_drops() {
-        let xml = br#"<?xml version="1.0"?>
-<nzb>
-  <file subject="x" poster="p" date="1700000000">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="1" number="1">a@b&#13;&#10;POST&#13;&#10;c@d</segment>
-    </segments>
-  </file>
-</nzb>"#;
-        let nzb = Nzb::parse(xml).expect("parses");
-        let f = &nzb.files[0];
-        assert!(f.segments.is_empty());
-        assert_eq!(f.dropped_segments, 1);
-    }
-
-    fn sample() -> &'static [u8] {
-        br#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <file poster="poster@example.com" date="1700000000" subject="Big Release [1/3] - &quot;release.part1.rar&quot; yEnc (1/2)">
-    <groups>
-      <group>alt.binaries.test</group>
-      <group>alt.binaries.misc</group>
-    </groups>
-    <segments>
-      <segment bytes="750000" number="2">seg2@news.example</segment>
-      <segment bytes="750000" number="1">seg1@news.example</segment>
-    </segments>
-  </file>
-  <file poster="poster@example.com" date="1700000001" subject="Big Release [2/3] - &quot;release.par2&quot; yEnc (1/1)">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="50000" number="1">par2main@news.example</segment>
-    </segments>
-  </file>
-  <file poster="poster@example.com" date="1700000002" subject="Big Release [3/3] - &quot;release.vol000+01.par2&quot; yEnc (1/1)">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments>
-      <segment bytes="100000" number="1">par2vol@news.example</segment>
-    </segments>
-  </file>
-</nzb>"#
-    }
-
-    #[test]
-    fn meta_password_entities_resolved() {
-        // No <head> at all → None.
-        assert_eq!(Nzb::parse(sample()).unwrap().password(), None);
-        // Entities inside the password ("s3cret&amp;pw") arrive as their
-        // own GeneralRef events and must be stitched back in.
-        let with_head = String::from_utf8_lossy(sample()).replace(
-            "<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">",
-            "<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <head>\n    <meta type=\"title\">Big Release</meta>\n    <meta type=\"PASSWORD\">s3cret&amp;pw</meta>\n  </head>",
-        );
-        let nzb = Nzb::parse(with_head.as_bytes()).unwrap();
-        assert_eq!(nzb.password(), Some("s3cret&pw"));
-        assert_eq!(nzb.files.len(), 3, "head must not disturb file parsing");
-    }
-
-    #[test]
-    fn parses_files_groups_segments() {
-        let nzb = Nzb::parse(sample()).unwrap();
-        assert_eq!(nzb.files.len(), 3);
-
-        let f = &nzb.files[0];
-        assert_eq!(f.poster, "poster@example.com");
-        assert_eq!(f.date, 1700000000);
-        assert_eq!(f.groups, vec!["alt.binaries.test", "alt.binaries.misc"]);
-        assert_eq!(f.segments.len(), 2);
-        // Sorted by part number despite reversed document order.
-        assert_eq!(f.segments[0].number, 1);
-        assert_eq!(f.segments[0].message_id, "seg1@news.example");
-        assert_eq!(f.segments[1].number, 2);
-        assert_eq!(f.filename_hint(), Some("release.part1.rar"));
-    }
-
-    #[test]
-    fn cdata_segment_id_and_group_preserved() {
-        // A CDATA-wrapped message-id / group must not be silently dropped
-        // (quick-xml emits it as Event::CData, a distinct event).
-        let xml = br#"<?xml version="1.0"?>
-<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <file poster="x" date="0" subject="&quot;a.rar&quot; yEnc (1/1)">
-    <groups><group><![CDATA[alt.binaries.cdata]]></group></groups>
-    <segments>
-      <segment bytes="750000" number="1"><![CDATA[seg-cdata@news.example]]></segment>
-    </segments>
-  </file>
-</nzb>"#;
-        let nzb = Nzb::parse(xml).unwrap();
-        assert_eq!(nzb.files.len(), 1);
-        let f = &nzb.files[0];
-        assert_eq!(f.segments.len(), 1, "CDATA segment must not be dropped");
-        assert_eq!(f.segments[0].message_id, "seg-cdata@news.example");
-        assert_eq!(f.groups, vec!["alt.binaries.cdata"]);
-    }
-
-    #[test]
-    fn classifies_par2_roles() {
-        let nzb = Nzb::parse(sample()).unwrap();
-        assert_eq!(nzb.files[0].kind(), FileKind::Data);
-        assert_eq!(nzb.files[1].kind(), FileKind::Par2Main);
-        assert_eq!(nzb.files[2].kind(), FileKind::Par2Volume);
-    }
-
-    #[test]
-    fn classifies_dash_range_volumes() {
-        // Range-style names ("vol000-001" … "vol127-199", end-exclusive)
-        // are recovery volumes, not extra copies of the main index - a
-        // Par2Main misclassification pulls the whole recovery set (GBs)
-        // ahead of the data and buffers it in memory.
-        let mut f = NzbFile {
-            subject: r#"< Rel > - "Rel.vol127-199.par2" yEnc (01/99)"#.to_string(),
-            ..NzbFile::default()
-        };
-        assert_eq!(f.kind(), FileKind::Par2Volume);
-        f.subject = r#"< Rel > - "Rel.vol000-001.par2" yEnc (1/1)"#.to_string();
-        assert_eq!(f.kind(), FileKind::Par2Volume);
-        // Bare-ordinal volumes: NOTHING before the dash, zero-padded
-        // ("Rel.vol-01.par2" … "Rel.vol-09.par2" - playWEB, NORViNE,
-        // GRACE posts, measured live 13 Aug 2026). Both spellings of
-        // the old rule demanded digits there, so these classified
-        // Par2Main and the whole recovery set (7.5 GB on one measured
-        // 42 GiB post) was fetched eagerly.
-        f.subject = r#"< Rel > - "Fightland.S01E01.1080p.AMZN.WEB-DL.DD+5.1.H.264-playWEB.vol-01.par2" yEnc (1/13)"#.to_string();
-        assert_eq!(f.kind(), FileKind::Par2Volume);
-        // A dash in the release name alone must not demote the index.
-        f.subject = r#"< Rel > - "Some.Film.2026.H.265-GRP.par2" yEnc (1/1)"#.to_string();
-        assert_eq!(f.kind(), FileKind::Par2Main);
-        f.subject = r#"< Rel > - "Some.Film-GRP.vol.par2" yEnc (1/1)"#.to_string();
-        assert_eq!(f.kind(), FileKind::Par2Main);
-        f.subject = r#"< Rel > - "Rel.volume-2.par2" yEnc (1/1)"#.to_string();
-        assert_eq!(f.kind(), FileKind::Par2Main);
-        // A compilation numbered "Vol-3" is a release name, not a
-        // recovery ordinal - single digit after the dash stays an index.
-        f.subject = r#"< Rel > - "VA.Best.Hits.Vol-3.par2" yEnc (1/1)"#.to_string();
-        assert_eq!(f.kind(), FileKind::Par2Main);
-    }
-
-    #[test]
-    fn filename_hint_skips_decoy_quotes() {
-        // A quoted non-filename before the real one ("S01E01" here) made
-        // kind() classify a recovery volume as Data - eager-fetching it.
-        let f = NzbFile {
-            subject: r#""S01E01" - "Show.vol000+50.par2" yEnc (1/60)"#.to_string(),
-            ..NzbFile::default()
-        };
-        assert_eq!(f.filename_hint(), Some("Show.vol000+50.par2"));
-        assert_eq!(f.kind(), FileKind::Par2Volume);
-        // No dotted quoted run at all → first non-empty run still wins.
-        let g = NzbFile {
-            subject: r#"post "some label" yEnc (1/2)"#.to_string(),
-            ..NzbFile::default()
-        };
-        assert_eq!(g.filename_hint(), Some("some label"));
-    }
-
-    /// Issue #55's exact posting shape: no quotes anywhere, the real
-    /// filename in the clear with a `(part/total)` counter after it.
-    /// The quoted read answers None and the slot was named `fileNNN`,
-    /// the real name discarded - the lenient read is what plan uses.
-    #[test]
-    fn unquoted_subject_filenames_are_recovered() {
-        for (subject, want) in [
-            // The reporter's track and its per-track PAR2 set.
-            (
-                "10-Track Name-8c63a701.flac (1/0)",
-                Some("10-Track Name-8c63a701.flac"),
-            ),
-            (
-                "01-Other One-ea8f7cf8.flac.par2 (1/0)",
-                Some("01-Other One-ea8f7cf8.flac.par2"),
-            ),
-            (
-                "01-Other One-ea8f7cf8.flac.vol00+01.par2 (1/0)",
-                Some("01-Other One-ea8f7cf8.flac.vol00+01.par2"),
-            ),
-            // The yEnc marker ends the name; index tags strip.
-            ("release.part01.rar yEnc (1/2)", Some("release.part01.rar")),
-            ("[01/30] - foo.rar (1/5)", Some("foo.rar")),
-            // Prose subjects must NOT read as filenames: no extension,
-            // or a trailing year where an extension would be.
-            ("Great Album Name yEnc (1/15)", None),
-            ("Movie Title 2026 (1/3)", None),
-            ("Movie.2026 (1/3)", None),
-            ("(1/0)", None),
-            ("", None),
-        ] {
-            assert_eq!(unquoted_filename(subject), want, "subject: {subject:?}");
-        }
-        // A quoted name still wins over anything unquoted beside it,
-        // and the lenient method is quoted-first.
-        let f = NzbFile {
-            subject: r#"decoy.flac - "real.part1.rar" yEnc (1/2)"#.to_string(),
-            ..NzbFile::default()
-        };
-        assert_eq!(f.filename_hint_lenient(), Some("real.part1.rar"));
-        let g = NzbFile {
-            subject: "10-Track Name-8c63a701.flac (1/0)".to_string(),
-            ..NzbFile::default()
-        };
-        assert_eq!(g.filename_hint(), None, "the quoted read stays narrow");
-        assert_eq!(
-            g.filename_hint_lenient(),
-            Some("10-Track Name-8c63a701.flac")
-        );
-        // ...and kind() still classifies the unquoted PAR2 subjects off
-        // the raw-subject fallback, exactly as before this existed.
-        let p = NzbFile {
-            subject: "01-Other One-ea8f7cf8.flac.vol00+01.par2 (1/0)".to_string(),
-            ..NzbFile::default()
-        };
-        assert_eq!(p.kind(), FileKind::Par2Volume);
-    }
-
-    /// A hostile .nzb can name its volumes anything. `u64::MAX` parses,
-    /// and used to be cast straight to `usize` and added into the
-    /// pre-flight recovery budget - two such volumes overflowed the sum
-    /// (panic in a debug build, a wrapped attacker-chosen budget in
-    /// release, which then chose the REPAIRABLE / IMPOSSIBLE verdict).
-    /// The file must stay classified as a recovery volume, because a
-    /// volume never gets a download slot; only the COUNT goes unknown.
-    #[test]
-    fn absurd_declared_slice_counts_are_undeclared_not_sizes() {
-        assert_eq!(par2_vol_count("Rel.vol0+18446744073709551615.par2"), None);
-        assert_eq!(par2_vol_count("Rel.vol0-18446744073709551615.par2"), None);
-        // Above u64 entirely: already None via the parse, pinned so the
-        // two paths keep agreeing.
-        assert_eq!(par2_vol_count("Rel.vol0+184467440737095516150.par2"), None);
-        // Truncated to 1 on a 32-bit target before `try_from`.
-        assert_eq!(par2_vol_count("Rel.vol0+4294967297.par2"), None);
-        // Still a volume: classification is par2_vol_suffix's question.
-        assert_eq!(
-            par2_vol_suffix("Rel.vol0+18446744073709551615.par2"),
-            Some(3)
-        );
-        // Real shapes, including the largest ones anyone posts, unchanged.
-        assert_eq!(par2_vol_count("Rel.vol012+10.par2"), Some(10));
-        assert_eq!(par2_vol_count("x.vol10000+12345.par2"), Some(12345));
-        assert_eq!(par2_vol_count("x.vol0+32768.par2"), Some(32768));
-    }
-
-    #[test]
-    fn vol_count_both_conventions() {
-        assert_eq!(par2_vol_count("Rel.vol012+10.par2"), Some(10));
-        assert_eq!(par2_vol_count("Rel.vol127-199.par2"), Some(72));
-        assert_eq!(par2_vol_count("Rel.vol000-001.par2"), Some(1));
-        assert_eq!(par2_vol_count("Rel.vol003-007.par2"), Some(4));
-        assert_eq!(par2_vol_count("Rel.par2"), None);
-        assert_eq!(par2_vol_count("Rel-GRP.par2"), None);
-        assert_eq!(par2_vol_count("Rel.volume-2.par2"), None);
-        // Bare ordinal: IS a volume (par2_vol_suffix), but its name
-        // declares no slice count - callers fall back to estimates,
-        // exactly like the nameless obfuscated path.
-        assert_eq!(par2_vol_count("Rel.vol-01.par2"), None);
-        assert_eq!(par2_vol_suffix("Rel.vol-01.par2"), Some(3));
-        assert_eq!(par2_vol_suffix("Rel.vol-09.par2"), Some(3));
-        assert_eq!(par2_vol_suffix("Rel.vol012+10.par2"), Some(3));
-        assert_eq!(par2_vol_suffix("Rel.vol127-199.par2"), Some(3));
-        // Not volumes: non-numeric field before the separator, spelt-out
-        // "volume", a bare index, a single-digit compilation number.
-        assert_eq!(par2_vol_suffix("Rel.volume-2.par2"), None);
-        assert_eq!(par2_vol_suffix("Some.Film-GRP.vol.par2"), None);
-        assert_eq!(par2_vol_suffix("Some.Film.2026.H.265-GRP.par2"), None);
-        assert_eq!(par2_vol_suffix("VA.Best.Hits.Vol-3.par2"), None);
-        // The suffix must sit at the end of the name (or right before
-        // .par2) - "Vol-52" mid-name is a title, not a volume.
-        assert_eq!(par2_vol_suffix("VA.Hits.Vol-52.2CD-2023-GRP.par2"), None);
-        // kind() falls back to the RAW SUBJECT when nothing is quoted,
-        // so the rule must see through a " yEnc (n/m)" tail after .par2.
-        assert_eq!(par2_vol_suffix("set.vol000+01.par2 yEnc (1/1)"), Some(3));
-        assert_eq!(par2_vol_suffix("set.vol-01.par2 yEnc (1/1)"), Some(3));
-        assert_eq!(par2_vol_suffix("set.par2 yEnc (1/1)"), None);
-        // ...but ONLY whitespace ends the name. A quoted filename that
-        // carries on past .par2 is a DATA file: classifying it as a
-        // volume costs it its download slot, and the job then completes
-        // without the payload it never fetched (14 Aug sweep).
-        assert_eq!(par2_vol_suffix("x.vol-10.par2.bak"), None);
-        assert_eq!(par2_vol_suffix("extras.vol-10.par2-sample.mkv"), None);
-        assert_eq!(par2_vol_suffix("set.vol000+01.par2.txt"), None);
-    }
-
-    /// The same rule where it actually decides a download: `kind()`.
-    #[test]
-    fn a_quoted_name_continuing_past_par2_stays_data() {
-        let file = |subject: &str| NzbFile {
-            subject: subject.to_string(),
-            ..Default::default()
-        };
-        // The genuine shapes still classify as they did.
-        assert_eq!(
-            file("Rel [2/3] - \"rel.vol-01.par2\" yEnc (1/1)").kind(),
-            FileKind::Par2Volume
-        );
-        assert_eq!(
-            file("Rel [1/3] - \"rel.par2\" yEnc (1/1)").kind(),
-            FileKind::Par2Main
-        );
-        // A quoted payload name that merely CONTAINS the pattern is data
-        // and must keep its slot.
-        assert_eq!(
-            file("Rel [3/3] - \"extras.vol-10.par2-sample.mkv\" yEnc (1/1)").kind(),
-            FileKind::Data
-        );
-        assert_eq!(
-            file("Rel [3/3] - \"rel.vol-10.par2.bak\" yEnc (1/1)").kind(),
-            FileKind::Data
-        );
-    }
-
-    /// One answer to "which par2 file do I fetch to get the critical
-    /// packets", shared by the download path and pre-flight.
-    ///
-    /// The download path needs it because an obfuscated post ships
-    /// volumes and no index, and it bootstraps the set from the smallest
-    /// one. Pre-flight needs it because the Main packet is the only
-    /// place the block size is written down, and a `.vol-NN.par2` budget
-    /// cannot be sized without it. The 15 Aug post was both cases at
-    /// once: seven `.vol-NN` volumes, no index, and the smallest of them
-    /// a 41,901-byte file that turned out to hold Main + FileDesc + IFSC
-    /// and not one recovery slice.
-    #[test]
-    fn the_par2_seed_is_the_cheapest_file_carrying_the_critical_packets() {
-        let file = |subject: &str, bytes: u64| NzbFile {
-            subject: subject.to_string(),
-            segments: vec![Segment {
-                number: 1,
-                bytes,
-                message_id: format!("{bytes}@x"),
-            }],
-            ..Default::default()
-        };
-        let nzb = |files: Vec<NzbFile>| Nzb {
-            files,
-            meta: Vec::new(),
-        };
-
-        // An index beats every volume, however small the volumes are.
-        let with_index = nzb(vec![
-            file("\"rel.mkv\" yEnc (1/1)", 3_000_000),
-            file("\"rel.vol000+02.par2\" yEnc (1/1)", 900),
-            file("\"rel.par2\" yEnc (1/1)", 40_000),
-        ]);
-        assert_eq!(with_index.par2_seed_file(), Some(2));
-
-        // No index: the smallest volume, which is the 15 Aug shape.
-        let obfuscated = nzb(vec![
-            file("\"rel.mkv\" yEnc (1/1)", 3_332_350_599),
-            file("\"rel.vol-05.par2\" yEnc (1/1)", 26_869_479),
-            file("\"rel.vol-01.par2\" yEnc (1/1)", 41_901),
-            file("\"rel.vol-02.par2\" yEnc (1/1)", 1_708_175),
-        ]);
-        assert_eq!(obfuscated.par2_seed_file(), Some(2));
-
-        // A par2 file with no segments cannot be fetched, so it is not
-        // the seed however small it looks.
-        let mut empty_index = file("\"rel.par2\" yEnc (1/1)", 0);
-        empty_index.segments.clear();
-        let holed = nzb(vec![
-            empty_index,
-            file("\"rel.vol-01.par2\" yEnc (1/1)", 41_901),
-        ]);
-        assert_eq!(holed.par2_seed_file(), Some(1));
-
-        // A post with no par2 at all has no seed and no budget to size.
-        assert_eq!(
-            nzb(vec![file("\"rel.mkv\" yEnc (1/1)", 3_000_000)]).par2_seed_file(),
-            None
-        );
-    }
-
-    #[test]
-    fn minimality_accounting() {
-        let nzb = Nzb::parse(sample()).unwrap();
-        assert_eq!(nzb.total_bytes(), 1_650_000);
-        // Eager set skips the recovery volume.
-        assert_eq!(nzb.eager_bytes(), 1_550_000);
-    }
-
-    #[test]
-    fn parses_head_meta_password() {
-        let xml = br#"<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
-  <head>
-    <meta type="title">Big Release</meta>
-    <meta type="PASSWORD">s3cret pass</meta>
-    <meta type="category"></meta>
-  </head>
-  <file poster="p" date="1" subject="s">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments><segment bytes="1" number="1">a@b</segment></segments>
-  </file>
-</nzb>"#;
-        let nzb = Nzb::parse(xml).unwrap();
-        // Type is lowercased; empty-valued metas are dropped.
-        assert_eq!(
-            nzb.meta,
-            vec![
-                ("title".to_string(), "Big Release".to_string()),
-                ("password".to_string(), "s3cret pass".to_string()),
-            ]
-        );
-        assert_eq!(nzb.password(), Some("s3cret pass"));
-
-        let plain = Nzb::parse(sample()).unwrap();
-        assert_eq!(plain.password(), None);
-    }
-
-    /// The parser applies XML attribute-value normalization, and a
-    /// comment claimed for months that it did not. Both halves are
-    /// pinned here so the next reader can see the rule rather than the
-    /// claim: a LITERAL tab (or CR, or LF) inside an attribute is a
-    /// space by the time we see it, and a numeric character reference
-    /// survives untouched - that is the escape hatch a producer who
-    /// really means a tab has to use. Covers `subject` and `poster`
-    /// (one `<file>` attribute route) and `<meta type=>` (the other).
-    #[test]
-    fn subject_whitespace_is_normalized_per_xml_spec() {
-        let xml = b"<?xml version=\"1.0\"?>
-<nzb>
-  <head><meta type=\"pass\tword\">hunter2</meta></head>
-  <file subject=\"a\tb\r\nc\" poster=\"p\tq\" date=\"1700000000\">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments><segment bytes=\"1\" number=\"1\">a@b</segment></segments>
-  </file>
-  <file subject=\"a&#9;b\" poster=\"p\" date=\"1700000000\">
-    <groups><group>alt.binaries.test</group></groups>
-    <segments><segment bytes=\"1\" number=\"1\">c@d</segment></segments>
-  </file>
-</nzb>";
-        let nzb = Nzb::parse(xml).expect("parses");
-        // Literal tab -> space; CRLF is one space, not two.
-        assert_eq!(nzb.files[0].subject, "a b c");
-        assert_eq!(nzb.files[0].poster, "p q");
-        // A character reference is NOT normalization input, so it lands
-        // as the byte the producer asked for.
-        assert_eq!(nzb.files[1].subject, "a\tb");
-        // The meta `type=` attribute takes the same route (and is
-        // lowercased and trimmed after, which does not touch interior
-        // whitespace).
-        assert_eq!(nzb.meta[0].0, "pass word");
-    }
-
-    #[test]
-    fn rejects_empty() {
-        let err = Nzb::parse(br#"<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"></nzb>"#);
-        assert!(matches!(err, Err(NzbError::Empty)));
-    }
-}
+#[path = "nzb_tests.rs"]
+mod tests;

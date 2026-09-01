@@ -32,6 +32,47 @@ fn path_identity_key_folds_only_when_told_to() {
     }
 }
 
+/// M4-44: the same question one fold weaker. Every pair below is ONE
+/// file object on APFS (measured 31 Aug 2026) and was TWO keys under the
+/// `str::to_lowercase` this site used until then - so the colliding-target
+/// guard saw no collision and let one target's repair land over another's
+/// bytes, the adoption scan left the file holding the missing blocks in
+/// `exclude` and reported Unrepairable, and the spent-donor sweep could
+/// DELETE a target it had just written.
+///
+/// `name_identity_key` is checked too and is not the same test: it
+/// sanitizes first, so it has to fold what `sanitize_out_name` LEAVES.
+#[test]
+fn destination_identity_folds_the_way_the_volume_does() {
+    for (a, b) in [
+        ("/out/Straße.mkv", "/out/STRASSE.MKV"),
+        ("/out/ﬁle.txt", "/out/file.txt"),
+        ("/out/ſample.par2", "/out/sample.par2"),
+    ] {
+        assert_eq!(
+            path_identity_key(true, Path::new(a)),
+            path_identity_key(true, Path::new(b)),
+            "{a} and {b} name ONE object on a case-insensitive volume"
+        );
+        assert_ne!(
+            path_identity_key(false, Path::new(a)),
+            path_identity_key(false, Path::new(b)),
+            "{a} and {b} are distinct on a case-sensitive volume"
+        );
+    }
+    assert_eq!(
+        name_identity_key(true, "Straße.mkv"),
+        name_identity_key(true, "STRASSE.MKV")
+    );
+    // Over-folding costs a `.dup-<fid>` suffix on a correctly repaired
+    // file here, so it is cheap but not free: APFS keeps these apart and
+    // so must the fold.
+    assert_ne!(
+        path_identity_key(true, Path::new("/out/I.bin")),
+        path_identity_key(true, Path::new("/out/ı.bin"))
+    );
+}
+
 #[test]
 fn base_log_sequence_matches_the_spec() {
     let logs = input_base_logs(9).unwrap();

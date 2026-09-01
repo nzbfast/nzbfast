@@ -811,10 +811,12 @@ pub async fn remeasure(
 /// provider refuses the extras, workers bow out, and `granted` exposes
 /// the real ceiling). Distinct article slices per step so provider-side
 /// caching can't flatter the later steps.
+///
 /// `ceiling` is what a job would really be allowed to open on this server
 /// (the account limit, already reconciled with the global setting) - NOT
 /// the probe cap, which is deliberately higher so the knee can be found
 /// above a conservative config value. 0 disables the reopen check.
+///
 /// `on_progress(phase, conns, steps_so_far)` is called as the ladder
 /// works, so a caller can show it happening - and RETURNS false to stop
 /// it. The caller owns that decision because the caller owns the reason

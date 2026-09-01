@@ -15,6 +15,11 @@
 //!    recently opened - survive a shrink that would otherwise take them;
 //!  * the two new modes sit behind the FULL key, not the add-only NZB key.
 
+// The forward guard on the repeating-payload trap, and the waiver that
+// says a fixture is deliberately in it. A sibling the way `harness` is,
+// and reached from `harness::DaemonLog`'s own Drop, so every daemon this
+// binary starts is read whether or not the suite looks at its log.
+mod adoptguard;
 // The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
 // serve_blocking / wait_ready), one copy for every suite that spawns a
 // daemon.
@@ -155,6 +160,57 @@ fn live(port: u16) -> serde_json::Value {
 
 fn stats(port: u16) -> serde_json::Value {
     api(port, "mode=index_stats")
+}
+
+/// How long [`settle_index`] will wait for the daemon's startup index
+/// open to finish. See `integration/nzblnk.rs`'s copy of this constant
+/// for the measurement it is based on (60 s is an 11x margin over the
+/// longest settle seen under 8x concurrent load).
+const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Block until the daemon's index will answer a read.
+///
+/// `the_size_cap_never_touches_protected_releases` and
+/// `a_whole_category_watch_item_protects_the_whole_category` both seed
+/// their database with `seed_index` before the daemon starts, then read
+/// it back over `mode=index_browse` moments after the daemon's own port
+/// is ready. That goes through `Daemon::index_read_checked`, which
+/// before the daemon's first read-write open falls back to the write
+/// mutex on a BOUNDED 2 s wait and reports
+/// `{"busy":true,"error":"the index is busy - try again in a moment"}`
+/// rather than parking an HTTP worker on it (TODO 143's second half,
+/// TODO 166). Under box load that open is still running when this
+/// file's first browse call arrives, and the assertions below admit
+/// only the seeded rows.
+///
+/// This file's daemon carries no `--apikey`, so `key` is always "" -
+/// kept as a parameter to mirror `integration/nzblnk.rs::settle_index`
+/// exactly, which is duplicated here rather than shared because `http`
+/// itself is already duplicated per test module in this crate.
+/// An auth refusal PANICS rather than returning: a probe the daemon
+/// answers "API Key Incorrect" carries no `busy` flag, so it would exit
+/// the loop at once and disable the settle in silence.
+fn settle_index(port: u16, key: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        let last = http(
+            port,
+            &format!("/api?mode=index_search&q=nzbfastsettleprobe{key}&output=json"),
+        );
+        assert!(
+            !last.contains("API Key"),
+            "the settle probe was refused, so it was never settling anything:\n{last}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_default();
+        if v["busy"] != true {
+            return;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index never settled in {SETTLE_BUDGET:?}:\n{last}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +590,11 @@ fn the_size_cap_never_touches_protected_releases() {
     .unwrap();
 
     let d = serve(&dir);
+    // Before anything is asserted: rung 1 of the index_browse reads
+    // below is refused as busy while the daemon's own startup index
+    // open still holds the write mutex, and this test demands the
+    // real rows.
+    settle_index(d.port, "");
     assert_eq!(stats(d.port)["releases"].as_u64().unwrap(), 7);
 
     // Find the seeded rows' ids and keys through the API.
@@ -653,6 +714,11 @@ fn a_whole_category_watch_item_protects_the_whole_category() {
     }
 
     let d = serve(&dir);
+    // Before anything is asserted: rung 1 of the index_browse reads
+    // below is refused as busy while the daemon's own startup index
+    // open still holds the write mutex, and this test demands the
+    // real classification.
+    settle_index(d.port, "");
     assert_eq!(stats(d.port)["releases"].as_u64().unwrap(), 4);
     // The category really is installed, or the rest proves nothing.
     let all = api(d.port, "mode=index_browse&limit=200&all=1");

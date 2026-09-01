@@ -139,11 +139,23 @@ async fn an_absurd_pause_length_never_kills_an_http_worker() {
         // And the pause is real, and clamped rather than dropped: an
         // armed deadline a year out, not `null` and not a wrapped-round
         // instant in the past. `pause_int` is a STRING here (Dart's
-        // tryParse takes one - see remote_compat.rs).
+        // tryParse takes one - see remote_compat.rs), and since 31 Aug
+        // 2026 it is SAB's own `"minutes:seconds"` rather than bare
+        // whole minutes - see `serve::sabcompat::units::pause_int`. The
+        // MINUTES are what this test is about; the seconds field is
+        // parsed only so that a regression to some third format fails
+        // here rather than reading as a plausible number.
         assert_eq!(v["queue"]["paused"], serde_json::json!(true), "{q}");
-        let mins: u64 = v["queue"]["pause_int"]
+        let raw = v["queue"]["pause_int"]
             .as_str()
-            .unwrap_or_else(|| panic!("pause_int missing or not a string: {q}"))
+            .unwrap_or_else(|| panic!("pause_int missing or not a string: {q}"));
+        let (m, sec) = raw
+            .split_once(':')
+            .unwrap_or_else(|| panic!("pause_int is not minutes:seconds: {raw:?}: {q}"));
+        assert_eq!(sec.len(), 2, "seconds are zero-padded to two: {raw:?}: {q}");
+        sec.parse::<u64>()
+            .unwrap_or_else(|e| panic!("pause_int seconds are not a number: {e}: {q}"));
+        let mins: u64 = m
             .parse()
             .unwrap_or_else(|e| panic!("pause_int is not a number: {e}: {q}"));
         assert!(
@@ -161,5 +173,4 @@ async fn an_absurd_pause_length_never_kills_an_http_worker() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

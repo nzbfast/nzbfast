@@ -411,7 +411,19 @@ impl Index {
             .map(|d| (d.md5_16k.clone(), d.name.clone()))
             .collect();
         let title_key = crate::categories::classify(&title, &self.custom).key;
-        self.par_hash_remember(&pairs, &title, &title_key, now)?;
+        // At the Par2SetId tier, and that is not decoration: the gate
+        // above matched the candidate payload's own bytes against this
+        // set's FileDesc, so this is the strongest thing the repost
+        // table ever gets - and it is what lets a proof CORRECT a
+        // fingerprint some weaker lane named wrongly, which the old
+        // first-writer-wins table could not do at all.
+        self.par_hash_remember(
+            &pairs,
+            &title,
+            &title_key,
+            now,
+            super::NameEvidence::Par2SetId,
+        )?;
         let claim = super::NameClaim {
             name: title.clone(),
             evidence: super::NameEvidence::Par2SetId,

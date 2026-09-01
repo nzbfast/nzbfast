@@ -230,7 +230,6 @@ fn add_all_matches_survives_a_restart() {
     );
 
     drop(r2);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The other half of the same write: adding must not drop the other keys
@@ -258,7 +257,6 @@ fn add_all_matches_keeps_the_rest_of_settings() {
     );
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// BUG (MEDIUM): `sub=1` is the dashboard's "Only groups I scan" toggle,
@@ -305,5 +303,4 @@ fn add_all_matches_honours_the_only_i_scan_filter() {
     assert_eq!(j["added"], 5, "{j}");
 
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }

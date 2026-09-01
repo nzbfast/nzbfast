@@ -260,7 +260,25 @@ pub(in crate::serve) fn rename_arm(
 ) -> Value {
     let value = params.get("value").cloned().unwrap_or_default();
     let hit_id = |id: &str| value.split(',').any(|v| v.trim() == id);
-    let newname = params.get("value2").map(String::as_str).unwrap_or("");
+    // A rename with no new name is a REFUSAL, not a rename to nothing.
+    // `value2` was read with `unwrap_or("")` until 31 Aug 2026 and the
+    // empty string went all the way through: live-confirmed twice on a
+    // real daemon, `mode=queue&name=rename&value=<id>` with `value2`
+    // absent, and again with it present and empty, each answering
+    // `{"status": true}` and leaving the job called `unnamed`. The job's
+    // name is the only handle the user, the dashboard and an *arr have
+    // on the row, so this is a destroyed label under a success. SAB
+    // refuses both with `_MSG_NO_VALUE2` and touches nothing; the
+    // wording is SAB's so a client that surfaces the string says what
+    // SAB would say.
+    let newname = params
+        .get("value2")
+        .map(String::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if newname.is_empty() {
+        return json!({"status": false, "error": "expects two parameters"});
+    }
     let pw = params
         .get("value3")
         .map(String::as_str)
@@ -339,7 +357,23 @@ pub(in crate::serve) fn sort_arm(
 ) -> Value {
     let key = params.get("sort").map(String::as_str).unwrap_or("");
     let asc = params.get("dir").map(String::as_str) != Some("desc");
-    json!({"status": sort_queue(d, key, asc)})
+    // A refusal SAYS SOMETHING, the rule the two delete arms already
+    // carry at length. SAB's own arm splits the two ways this can fail
+    // and only one of them is the caller's typo: no `sort=` at all is
+    // `_MSG_NO_VALUE2`, while a key it does not know is accepted and
+    // sorts nothing. `sort_queue` is stricter on the second - false for
+    // a key neither client defines, so a typo is visible - and both
+    // answered a bare `{"status": false}` with nothing to print.
+    if key.is_empty() {
+        return json!({"status": false, "error": "expects two parameters"});
+    }
+    let ok = sort_queue(d, key, asc);
+    if ok {
+        json!({"status": true})
+    } else {
+        json!({"status": false,
+               "error": format!("`{key}` is not a sort key this queue understands")})
+    }
 }
 
 /// Sort the whole queue by one key. Serves SAB's

@@ -916,10 +916,52 @@ pub fn sabnzbd_ini_path(extra_dirs: &[&Path]) -> Option<std::path::PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+/// SAB's per-server `quota`: a float with an optional single-letter
+/// K/M/G/T/P suffix (case-insensitive, decimal multiples of 1000), or a
+/// bare byte count. Empty or unparsable input, or a value that is not
+/// strictly positive, maps to `None` - never an error, so an ini import
+/// never starts refusing configs it accepted yesterday.
+fn parse_sab_quota(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = match s.chars().last().filter(|c| c.is_ascii_alphabetic()) {
+        Some(unit) => {
+            let mult = match unit.to_ascii_uppercase() {
+                'K' => 1_000.0,
+                'M' => 1_000_000.0,
+                'G' => 1_000_000_000.0,
+                'T' => 1_000_000_000_000.0,
+                'P' => 1_000_000_000_000_000.0,
+                _ => return None,
+            };
+            (&s[..s.len() - unit.len_utf8()], mult)
+        }
+        None => (s, 1.0),
+    };
+    let v: f64 = num.trim().parse().ok()?;
+    if !v.is_finite() || v <= 0.0 {
+        return None;
+    }
+    let bytes = v * mult;
+    if bytes > u64::MAX as f64 {
+        return None;
+    }
+    Some(bytes as u64)
+}
+
 /// Parse the `[servers]` section of a SABnzbd configobj ini. Field
-/// mapping: ssl→tls, priority→level, retention→retention_days; servers
-/// with `enable = 0` are skipped. Everything else SAB stores per server
-/// (timeouts, ciphers, notes…) has no nzbfast equivalent and is ignored.
+/// mapping: ssl→tls, priority→level, retention→retention_days,
+/// quota→block_bytes; servers with `enable = 0` are skipped. Everything
+/// else SAB stores per server (timeouts, ciphers, notes…) has no
+/// nzbfast equivalent and is ignored - including `usage_at_start`,
+/// deliberately: SAB's own breach test is its lifetime usage counter
+/// (which we do not import) passing quota + usage_at_start, an offset
+/// against a counter that lives in SAB's stats file. Our usage ledger
+/// starts at zero at import, so `block_bytes = quota` is already the
+/// right threshold; there is nothing here for usage_at_start to adjust,
+/// so do not "complete" this mapping by pulling it in.
 pub fn parse_sabnzbd_ini(text: &str) -> Result<Vec<ServerConfig>, ConfigError> {
     use std::collections::HashMap;
 
@@ -946,7 +988,7 @@ pub fn parse_sabnzbd_ini(text: &str) -> Result<Vec<ServerConfig>, ConfigError> {
             level: get("priority").parse().unwrap_or(0),
             group: None,
             retention_days: get("retention").parse().unwrap_or(0),
-            block_bytes: None,
+            block_bytes: parse_sab_quota(get("quota")),
             block_account: false,
             bind_ip: None,
             socks5: None,
@@ -1623,6 +1665,8 @@ password = pw
 connections = 8
 priority = 1
 retention = 1200
+quota = 500G
+usage_at_start = 12000000000
 enable = 1
 [[old]]
 host = dead.example.com
@@ -1642,11 +1686,59 @@ x = y
         assert_eq!(s[0].password.as_deref(), Some("s3cr,et\"x"));
         assert_eq!(s[0].connections, 30);
         assert_eq!(s[0].level, 0);
+        assert_eq!(s[0].block_bytes, None, "no quota line means no block");
+        assert!(s[0].may_spend_on_measurement());
         assert_eq!(s[1].host, "fill.block.co");
         assert_eq!(s[1].port, 119);
         assert!(!s[1].tls);
         assert_eq!(s[1].level, 1);
         assert_eq!(s[1].retention_days, 1200);
+        // quota = 500G, decimal (not binary) multiples of 1000; the
+        // fixture's usage_at_start is present but must not shift this -
+        // it is deliberately unmapped, see parse_sabnzbd_ini's doc comment.
+        assert_eq!(s[1].block_bytes, Some(500_000_000_000));
+        assert!(!s[1].may_spend_on_measurement());
+    }
+
+    #[test]
+    fn sab_ini_quota_parses_units_and_refuses_garbage() {
+        let ini =
+            |quota_line: &str| format!("[servers]\n[[a]]\nhost = h\n{quota_line}\nenable = 1\n");
+        // No quota key at all.
+        assert_eq!(parse_sabnzbd_ini(&ini("")).unwrap()[0].block_bytes, None);
+        // Present but empty.
+        assert_eq!(
+            parse_sabnzbd_ini(&ini("quota =")).unwrap()[0].block_bytes,
+            None
+        );
+        // Not a number at all.
+        assert_eq!(
+            parse_sabnzbd_ini(&ini("quota = banana")).unwrap()[0].block_bytes,
+            None
+        );
+        // Zero and negative are not a block allowance.
+        assert_eq!(
+            parse_sabnzbd_ini(&ini("quota = 0")).unwrap()[0].block_bytes,
+            None
+        );
+        assert_eq!(
+            parse_sabnzbd_ini(&ini("quota = -5G")).unwrap()[0].block_bytes,
+            None
+        );
+        // Bare byte count, no suffix.
+        assert_eq!(
+            parse_sabnzbd_ini(&ini("quota = 123456")).unwrap()[0].block_bytes,
+            Some(123456)
+        );
+        // Lowercase suffix and a fractional value.
+        assert_eq!(
+            parse_sabnzbd_ini(&ini("quota = 0.5t")).unwrap()[0].block_bytes,
+            Some(500_000_000_000)
+        );
+        assert_eq!(
+            parse_sabnzbd_ini(&ini("quota = 2g")).unwrap()[0].block_bytes,
+            Some(2_000_000_000)
+        );
     }
 
     #[test]
@@ -1659,8 +1751,8 @@ x = y
 
     #[test]
     fn ini_extension_routes_to_sab_parser() {
-        let dir = std::env::temp_dir().join("nzbfast-cfg-test");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join("nzbfast-cfg-test"));
         let p = dir.join("sabnzbd.ini");
         std::fs::write(&p, SAB_INI).unwrap();
         let cfg = Config::load(&p).unwrap();
@@ -1673,10 +1765,11 @@ x = y
     /// a container.
     #[test]
     fn sab_ini_next_to_config_is_discovered() {
-        let dir = std::env::temp_dir().join("nzbfast-cfg-test-near");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join("nzbfast-cfg-test-near"),
+        );
         std::fs::write(dir.join("sabnzbd.ini"), SAB_INI).unwrap();
-        let found = sabnzbd_ini_path(&[dir.as_path()]).expect("extra dir searched");
+        let found = sabnzbd_ini_path(&[&*dir]).expect("extra dir searched");
         assert_eq!(found, dir.join("sabnzbd.ini"));
         let cfg = Config::load(&dir.join("config.local.json")).unwrap();
         assert_eq!(cfg.servers.len(), 2);
@@ -1695,8 +1788,9 @@ x = y
     /// refusal pinned here are the same situation read two ways.
     #[test]
     fn load_no_fallback_does_not_search_for_sabnzbd_ini() {
-        let dir = std::env::temp_dir().join("nzbfast-cfg-test-strict");
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join("nzbfast-cfg-test-strict"),
+        );
         std::fs::write(dir.join("sabnzbd.ini"), SAB_INI).unwrap();
         let missing = dir.join("config.local.json");
         // The fallback is intact for everyone else...
@@ -1732,13 +1826,15 @@ x = y
     /// would pass on CI and silently not run here.
     #[test]
     fn missing_config_falls_back_the_same_way_however_the_path_was_chosen() {
-        let dir = std::env::temp_dir().join("nzbfast-cfg-test-fallback-policy");
         // From scratch: the last case below writes a real config at one
         // of the paths the first case needs to be MISSING, and temp_dir
         // survives the test binary, so a second run inherited it and
-        // failed on the first assertion.
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        // failed on the first assertion. `attach` clears on entry, which
+        // is that guarantee, and removes on drop, which the hand-rolled
+        // version never did.
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join("nzbfast-cfg-test-fallback-policy"),
+        );
         std::fs::write(dir.join("sabnzbd.ini"), SAB_INI).unwrap();
         let sab = dir.join("sabnzbd.ini");
         let find = || Some(sab.clone());
@@ -2068,7 +2164,7 @@ pub fn parse_sabnzbd_categories(text: &str) -> ImportedCategories {
         // section name is what `cat_convert` matches on, so it wins when
         // `name` is absent.
         let display = map.get("name").filter(|s| !s.is_empty()).unwrap_or(name);
-        let cat = crate::disk::sanitize_filename(display);
+        let cat = crate::disk::sanitize_filename_capped(display);
         if cat.is_empty() {
             continue;
         }
@@ -2207,7 +2303,7 @@ pub fn parse_nzbget_categories(text: &str) -> ImportedCategories {
         }
 
         let name = m.get("name").map(String::as_str).unwrap_or("");
-        let cat = crate::disk::sanitize_filename(name);
+        let cat = crate::disk::sanitize_filename_capped(name);
         if cat.is_empty() {
             continue;
         }

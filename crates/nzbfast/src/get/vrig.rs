@@ -440,7 +440,7 @@ pub(super) fn install_seek(
         let mut slot_by_name = std::collections::HashMap::new();
         for &i in &vol_slots {
             slot_by_name
-                .entry(nzbkit::disk::sanitize_filename(&slots[i].hint))
+                .entry(nzbkit::disk::sanitize_out_name(&slots[i].hint))
                 .or_insert(i);
         }
         let slot_articles = std::mem::take(slot_arts);

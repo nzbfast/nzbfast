@@ -696,6 +696,18 @@ pub(super) fn set_nested_max_depth(
         // by the in-stream child chain and the disk post-pass. At the
         // cap the deepest layer materializes - never a failed job.
         // Applies to downloads started after the change.
+        //
+        // SHARED means one SETTING and not one BUDGET: the two sites
+        // enforce it independently, so a job that demotes mid-ladder
+        // spends this many levels in stream and then up to n - 1 more
+        // on disk. A user typing 5 gets a guard that stops at 9 layers
+        // on such a job. Deliberate - see
+        // `crate::unpack::TAIL_NESTED_ENTRY_DEPTH` for why one number
+        // across the demote cannot be made correct. The dashboard hint
+        // (`set.disk.nestdepth.hint`) still says the shorter thing; it
+        // is an English string with 27 catalogues behind it and no gate
+        // that reddens on a stale translation, so rewording it is a
+        // copy decision rather than a drive-by.
         let n = uint()?.clamp(1, 64);
         nzbkit::extract::set_nested_depth_cap(n as usize);
         (true, json!(n))
@@ -1646,6 +1658,33 @@ pub(super) fn set_move_completed_cats(
     })
 }
 
+/// TODO 317 (GitHub #67): the categories that download STRAIGHT INTO
+/// their destination ("tv, movies"; empty clears).
+///
+/// Names only - the destination itself is `move_completed_cats` or the
+/// global `move_completed`, so there is one destination map and this
+/// list only says which categories skip the move. Naming a category
+/// with no destination configured is ACCEPTED rather than refused, and
+/// that is deliberate in both directions: the two settings are edited
+/// in either order, and refusing here would make "set the destination,
+/// then turn write-through on" the only order that works. Such a rule
+/// simply has no effect until a destination exists
+/// ([`Daemon::writes_through`] requires both).
+///
+/// No filesystem check either, unlike [`set_move_completed_cats`]: this
+/// setting names no path, and the path it eventually applies to has
+/// already been probed by the setter that accepted it.
+pub(super) fn set_write_through_cats(
+    d: &Arc<Daemon>,
+    _name: &str,
+    v: &str,
+) -> std::result::Result<(bool, Value), String> {
+    let list = parse_cat_names(v);
+    let echo = list.join(", ");
+    *d.write_through_cats.lock_ok() = list;
+    Ok((true, json!(echo)))
+}
+
 pub(super) fn set_categories(
     d: &Arc<Daemon>,
     _name: &str,
@@ -1667,6 +1706,21 @@ pub(super) fn set_categories(
             let clean = nzbkit::disk::sanitize_filename(name);
             if clean.is_empty() {
                 return Err(format!("{name:?} is not a usable category name"));
+            }
+            // REFUSE here rather than cap, because this is a front door
+            // and there is somebody to tell: the category is being typed
+            // into settings, nothing has been downloaded under it yet,
+            // and a silently shortened name would not match what the
+            // client was configured with. Every DOWNSTREAM site that
+            // turns a category into a directory caps instead - it has no
+            // request left to fail. `disk::sanitize_filename_capped_for`
+            // carries the division; `name_within_limits` is the same
+            // refusal the NZB front door makes (N6-10).
+            if !nzbkit::disk::name_within_limits(&clean) {
+                return Err(format!(
+                    "{name:?} is too long to be a category name - a folder \
+                     name is limited to 255 bytes"
+                ));
             }
             set.insert(clean);
         }

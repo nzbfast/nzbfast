@@ -465,7 +465,11 @@ pub(crate) fn fail_kind(msg: &str) -> FailKind {
 const RECOVERY_CASUALTY_CLAUSE: &str = "the recovery data is what failed, not the payload";
 const RECOVERY_UNOBTAINABLE_CLAUSE: &str =
     "recovery volumes this repair needed could not be fetched";
-const RECOVERY_SHORTFALL_CLAUSE: &str = "recovery block(s) needed but the NZB only carries";
+// The span is deliberately the part BEFORE the figure and before the
+// optional "(recovery set <id>)" tag, so both spellings the producer can
+// emit carry it contiguously - see `repair::RepairShortfall::clause`.
+const RECOVERY_SHORTFALL_CLAUSE: &str =
+    "recovery block(s) needed but the recovery set that covers this damage carries only";
 
 /// Does this failure message carry positive evidence that the RECOVERY
 /// half of the post is what ended the job?

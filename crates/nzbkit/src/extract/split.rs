@@ -675,7 +675,12 @@ mod tests {
 
     /// Feed a declared split in the given part order; returns the
     /// extractor and its report.
-    fn run_split(tag: &str, inner: &[u8], n: usize, order: &[usize]) -> (PathBuf, ExtractReport) {
+    fn run_split(
+        tag: &str,
+        inner: &[u8],
+        n: usize,
+        order: &[usize],
+    ) -> (crate::testscratch::ScratchDir, ExtractReport) {
         let dir = tmpdir(tag);
         let parts = split_parts(&store_rar(inner), n);
         let ex = Extractor::new(&dir, n, true);
@@ -703,7 +708,6 @@ mod tests {
                 part_name(i)
             );
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Parts arriving ahead of the head park as pending Unknown slots
@@ -722,7 +726,6 @@ mod tests {
                 part_name(i)
             );
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The live verifier reads each POSTED part back by its own slot

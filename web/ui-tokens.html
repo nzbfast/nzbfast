@@ -221,6 +221,29 @@ window.nzbfastSyncThemeColor();
 :root[data-userbg]{--bg:var(--user-bg)}
 :root[data-usersurface]{--surface:var(--user-surface);--card:var(--user-surface);--panel:var(--user-surface)}
 :root[data-userfg]{--fg:var(--user-fg)}
+/* Header controls. The dashboard's header row and the wall's bar are
+   pills, chips and ghost buttons: transparent, --dim text, --line
+   border - so a chosen accent reached nothing but their focus ring and
+   the top of every page stayed grey whatever palette was picked ("the
+   main buttons on top lack personality ... colorize them like the
+   cards, background and text", r/usenet 31 Aug 2026).
+   Composed, not copied: one definition here covers all five theme
+   states AND a user's own Cards/Text colours, because --acc, --surface,
+   --fg and --line are already whatever the theme (or that user) says.
+   The accent is mixed IN rather than laid over, so it can never invert
+   a pair - the fills stay anchored to --surface and the text to --fg,
+   and the worst a wild accent can do is tint them. The three fills are
+   a deliberate ramp (rest, hover, current) and the two borders follow
+   it, so the marked destination is still the loudest control in the row
+   without needing a second colour to say so. */
+:root{
+  --ctl-bg:color-mix(in srgb,var(--acc) 8%,var(--surface));
+  --ctl-bg-hi:color-mix(in srgb,var(--acc) 16%,var(--surface));
+  --ctl-bg-on:color-mix(in srgb,var(--acc) 28%,var(--surface));
+  --ctl-line:color-mix(in srgb,var(--acc) 34%,var(--line));
+  --ctl-line-hi:color-mix(in srgb,var(--acc) 60%,var(--line));
+  --ctl-fg:color-mix(in srgb,var(--acc) 25%,var(--fg));
+}
 /* Font. OpenDyslexic is not shipped (it is a licensed download), so this
    picks the most legible stacks already on the machine rather than
    pretending to install one. */

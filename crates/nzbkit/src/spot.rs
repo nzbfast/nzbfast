@@ -832,10 +832,6 @@ pub struct SpotScanSummary {
     pub depth_left: u64,
 }
 
-/// Incremental OVER scan of a Spotnet group into the index DB. Resumes from
-/// the stored high-water mark (keyed `spots:<group>` so it never collides
-/// with a release-index scan of the same group; `server_host` is the host
-/// `conn` talks to - article numbers are per server, A8).
 /// Is this subject a Spotnet moderation record rather than a spot about
 /// a posting? These carry `DISPOSE <message-id> - <the spot's title>`,
 /// which is why they read like releases if they are stored.
@@ -848,6 +844,10 @@ pub fn is_moderation(subject: &str) -> bool {
     subject.trim_start().starts_with("DISPOSE ")
 }
 
+/// Incremental OVER scan of a Spotnet group into the index DB. Resumes from
+/// the stored high-water mark (keyed `spots:<group>` so it never collides
+/// with a release-index scan of the same group; `server_host` is the host
+/// `conn` talks to - article numbers are per server, A8).
 pub async fn scan_spots(
     conn: &mut Connection,
     ix: &mut Index,

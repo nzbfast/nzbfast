@@ -361,7 +361,6 @@ async fn the_post_processing_script_finishes_before_history_says_completed() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Build the `<nzb>` for one multi-segment file.
@@ -507,7 +506,6 @@ async fn a_metadata_only_job_finishes_its_script_before_history_says_completed()
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same ordering on the word `Failed`, through the second of the
@@ -632,7 +630,6 @@ async fn a_health_giveup_finishes_its_script_before_history_says_failed() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 192: an ORDERED CHAIN of NZBGet-contract scripts, and the env
@@ -865,5 +862,4 @@ async fn an_ordered_script_chain_runs_in_order_with_the_nzbget_contract() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

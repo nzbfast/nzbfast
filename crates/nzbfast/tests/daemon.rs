@@ -94,11 +94,25 @@ mod daemon_manifest;
 // `GET /metrics`: the Prometheus body, parsed the way a scraper parses
 // it, plus the credential rule and its opt-out switch (sibling dir).
 mod daemon_metrics;
+// X5-03: journal retirement and terminal completion as one crash
+// transaction, asked where the durable terminal state is - the queue
+// row (sibling dir, size gate).
+mod daemon_crashtx;
+
+// X5-12: a delete arriving ACROSS a synchronous resume replay - the
+// crash-transaction module's sibling row (sibling dir, size gate).
+mod daemon_replaydel;
+// The forward guard on the repeating-payload trap, and the waiver that
+// says a fixture is deliberately in it. A sibling the way `harness` is,
+// and reached from `harness::DaemonLog`'s own Drop, so every daemon this
+// binary starts is read whether or not the suite looks at its log.
+mod adoptguard;
 // The shared daemon launcher (free_port / KillOnDrop / DaemonLog /
 // serve / wait_ready), one copy for every suite that spawns a daemon.
 mod harness;
 mod playback_contract;
 // §73 phase 3 remux endpoint (sibling dir, size gate).
+mod payloads;
 mod preview_media;
 mod scratch;
 // M11 playback rigs (sibling dir, size gate).
@@ -113,8 +127,55 @@ use std::process::{Command, Stdio};
 
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 
-use harness::{Daemon, free_port, history_has, history_slot, queue_has, queue_slot};
+use harness::{
+    Daemon, any_held_behind_a_copy, free_port, held_behind_a_copy, history_has, history_slot,
+    queue_has, queue_slot,
+};
 
+/// The daemon suite's everyday filler. **It has NO position term, so
+/// the file is one 256-byte window written over and over** - and any
+/// two blocks a multiple of 256 bytes apart are byte-identical.
+///
+/// Measured (31 Aug 2026, follow-up 13a-4 out of
+/// `research/E2E-PARITY-BUDGET-CENSUS-2026-08-30.md`): over 400 kB at a
+/// 2,000-byte PAR2 block, 184 of 200 aligned blocks have an exact
+/// duplicate elsewhere in the SAME file, and every one of 200 has one
+/// somewhere at an unaligned offset. That is worse than `e2e.rs::payload`,
+/// whose self-period is at least 131,072 bytes. Two seeds are also the
+/// same window with a constant added, so 199 of 200 blocks of one are
+/// found inside another.
+///
+/// PAR2 repair's adoption scan matches blocks by CONTENT at any offset,
+/// and since follow-up 13a the last-resort escalation reaches identified
+/// DAMAGED targets too - so over these bytes a hole heals with no parity
+/// at all. Three `daemon_donor` legs whose whole premise was "this post
+/// CANNOT be repaired from its own bytes" were passing only because the
+/// engine was not allowed to look; the moment it was, leg A repaired
+/// itself out of its own file and Completed byte-exact.
+///
+/// Fine wherever nothing is damaged, which is 120 of its 121 call sites.
+/// Where a fixture damages a payload and then asserts a rebuilt/adopted
+/// count, a decline, or which mechanism healed the job, use
+/// `payloads::unique_payload` - the sibling module this binary and `e2e`
+/// share, whose header carries the measurement and the eleven private
+/// copies it replaced. Do NOT change this function without censusing the
+/// suite first: it is reached from ~125 call sites, and a fixture that
+/// depends on its COMPRESSIBILITY (a 256-byte window compresses to
+/// nothing, which is what makes a store-mode RAR fixture compress) would
+/// fail for a reason nobody would connect to this. The census behind
+/// that is mechanical rather than a reading: of 121 call sites only
+/// three are in a file that builds a PAR2 set at all
+/// (`daemon_repairhist` 2, `daemon_manifest` 1, `daemon_earlyfile` 1),
+/// and only ONE of those also damages the wire. It was in the class,
+/// and it is converted - see `daemon_repairhist::damaged_rar_release`.
+///
+/// That census was a READING, and since 31 Aug 2026 there is also a
+/// check. `adoptguard::refuse_a_solve_that_solved_nothing` reads every
+/// daemon this binary starts, at the moment the child is reaped, and
+/// refuses a repair that completed having rebuilt ZERO blocks from
+/// parity and adopted some - so a fixture that falls into this
+/// generator's trap is NAMED rather than green. It does not stop one
+/// being written; it stops one being written unnoticed.
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
         .map(|i| (i as u8).wrapping_mul(29).wrapping_add(seed))
@@ -745,7 +806,6 @@ async fn sonarr_style_cycle() {
         std::fs::read(dir.join("complete/tv/episode/episode.bin")).unwrap(),
         data
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Live repro 2026-07-20 (Seinfeld S08E05, 12,109 segments): a plain
@@ -918,7 +978,6 @@ async fn scrambled_segment_numbering_single_file() {
     .await
     .map(|out| assert_eq!(std::fs::read(&out).unwrap(), data, "output not byte-identical"))
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// UX audit 3 Aug (#10): the held-duplicate row has told the user to
@@ -1032,7 +1091,7 @@ async fn raising_a_held_duplicates_priority_releases_it() {
         let q = http(port, "/api?mode=queue&output=json", None);
         for id in [&held_id, &held2_id] {
             let held = queue_slot(&q, id);
-            assert_eq!(held["priority"], "Duplicate", "not held: {q}");
+            assert!(held_behind_a_copy(&held), "not held: {q}");
             assert_eq!(held["status"], "Paused", "a hold is a pause: {q}");
         }
 
@@ -1099,7 +1158,6 @@ async fn raising_a_held_duplicates_priority_releases_it() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M14k: RSS automation - the daemon polls a feed, filters with rules,
@@ -1216,7 +1274,6 @@ async fn rss_feed_auto_grabs() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A spent quota holds the queue, SAYS SO on the wire, and still lets a
@@ -1365,7 +1422,6 @@ async fn quota_hold_is_on_the_wire_and_force_still_runs() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M14g: an absurd --min-free threshold must hold every job in the queue.
@@ -1443,7 +1499,6 @@ async fn disk_guard_holds_queue() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Queue/history persistence: job records survive a daemon kill -9.
@@ -1603,7 +1658,6 @@ async fn queue_survives_restart() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// mode=restart_daemon re-execs the process in place, and the launchers
@@ -1683,7 +1737,6 @@ async fn restart_daemon_keeps_logging_to_the_same_file() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M23 Smart Folders + cleanup rules, end to end: rules set live via the
@@ -1869,7 +1922,6 @@ async fn smart_folders_and_cleanup() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 78: episode titles in TV renames, end to end.
@@ -2063,7 +2115,6 @@ async fn episode_titles_reach_a_filed_tv_rename() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Reported against 1.0.9: an F1 round finished as
@@ -2186,7 +2237,6 @@ async fn obfuscated_event_release_still_gets_named() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The other half of the F1 report: with rename_extra_words on (the
@@ -2301,7 +2351,6 @@ async fn obfuscated_event_release_keeps_its_words() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Drag-to-reorder: `mode=queue&name=switch&value=<nzo_id>&value2=<pos>`
@@ -2467,7 +2516,6 @@ async fn queue_switch_reorders() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Slow-job watchdog: a job whose articles live only on one SLOW server
@@ -2685,7 +2733,6 @@ async fn slow_single_server_job_deferred() {
         payload(3_000_000, 11),
         "deferred job payload differs after journal resume"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A taken-down post must not hold the queue. Every article of the
@@ -2900,7 +2947,6 @@ async fn gone_post_defers_so_the_queue_moves_on() {
         payload(1_600_000, 31),
         "the job that overtook the gone post should be byte-exact"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Idle-server prefetch: while job A grinds on the slow server (the fast
@@ -3081,7 +3127,6 @@ async fn idle_servers_prefetch_next_job() {
         payload(3_000_000, 21),
         "slow job payload differs"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Connection borrowing when the ONLY idle server is dead: one healthy
@@ -3318,7 +3363,6 @@ async fn prefetch_borrows_from_the_busy_server_when_no_healthy_idle() {
         payload(4_000_000, 71),
         "A payload differs"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M23e: pause stops the ACTIVE transfer, not just new jobs. The
@@ -3480,7 +3524,6 @@ async fn pause_suspends_active_download() {
         data,
         "resumed output not byte-identical"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Live settings changed via mode=config must survive a daemon restart:
@@ -3738,7 +3781,6 @@ async fn live_settings_survive_restart() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A daemon that cannot have the port it was given must leave the data
@@ -3819,8 +3861,15 @@ async fn a_daemon_that_loses_its_port_writes_nothing() {
         !out.status.success(),
         "the daemon claimed a port that was taken"
     );
-    let said =
-        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    // stdout/stderr are separate pipes with no shared clock - label the
+    // seam so a bare join can't be misread as one chronology, and keep
+    // the stdout-then-stderr order every other joining site in tests/
+    // uses. Copy the comment along with the string.
+    let said = format!(
+        "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         said.contains(&format!("bind 127.0.0.1:{taken}")),
         "a lost port must say so plainly: {said}"
@@ -3873,7 +3922,6 @@ async fn a_daemon_that_loses_its_port_writes_nothing() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A pause is a deliberate act, and a restart used to undo it silently:
@@ -4022,7 +4070,6 @@ async fn pause_survives_restart() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The two rename-punctuation toggles replaced behaviour that used to be
@@ -4094,7 +4141,6 @@ async fn rename_punctuation_defaults_split_fresh_installs_from_upgrades() {
         .await
         .unwrap();
     }
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// M32: a FIRST failure with missing articles gets
@@ -4273,7 +4319,6 @@ async fn auto_retry_fires_once_after_cooldown() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A zip post whose container cannot be READ (here: zip magic over
@@ -4428,7 +4473,6 @@ async fn zip_payload_post_fails_with_a_reason() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The other half, and the behaviour change: a REAL store+deflate zip
@@ -4567,7 +4611,6 @@ async fn zip_payload_post_unpacks_natively() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Find a file by EXTENSION anywhere under `root`. The auto-renamer both
@@ -4734,7 +4777,6 @@ async fn zip_sidecar_is_noted_and_survives_cleanup() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4876,7 +4918,6 @@ async fn archive_shape_is_live_in_the_queue_and_kept_in_history() {
         log.contains("volumes never touched disk [RAR5 · stored · one-pass]:"),
         "shape missing from the final summary:\n{log}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A retry must never be aimed at a directory another job has taken.
@@ -5041,7 +5082,6 @@ async fn retry_re_homes_off_a_completed_re_adds_folder() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Cancelling a download must not start the copy of it that was being
@@ -5178,7 +5218,10 @@ async fn cancelling_a_download_leaves_its_duplicate_held() {
         let orig_id = upload(&orig_xml, "Show.Name.S01E02.720p.WEB.nzb");
         let held_id = upload(&held_xml, "Show.Name.S01E02.1080p.WEB.nzb");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert_eq!(queue_slot(&q, &held_id)["priority"], "Duplicate", "not held: {q}");
+        assert!(
+            held_behind_a_copy(&queue_slot(&q, &held_id)),
+            "not held: {q}"
+        );
         http(port, "/api?mode=resume&output=json", None);
 
         // Cancel the original while it is actually transferring.
@@ -5210,9 +5253,8 @@ async fn cancelling_a_download_leaves_its_duplicate_held() {
 
         // The cancelled title's alternative is still held, and nothing
         // about the cancelled job reached history.
-        assert_eq!(
-            queue_slot(&q, &held_id)["priority"],
-            "Duplicate",
+        assert!(
+            held_behind_a_copy(&queue_slot(&q, &held_id)),
             "the cancelled download promoted its held duplicate: {q}"
         );
         assert!(
@@ -5233,7 +5275,6 @@ async fn cancelling_a_download_leaves_its_duplicate_held() {
         log.contains("[queue] active download stopped by user"),
         "the delete did not hit a running download:\n{log}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §44: an API-added job records WHICH client sent it, not just that
@@ -5333,7 +5374,6 @@ async fn the_client_that_added_a_job_is_named() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Categories are configuration, not a side effect of what has been
@@ -5442,7 +5482,6 @@ async fn categories_are_configurable_and_survive_a_restart() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Post-download synthesised naming is ON out of the box, is visible in
@@ -5520,7 +5559,6 @@ async fn synthesised_naming_defaults_on_and_its_off_switch_persists() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The container Title rung of the identity ladder, end to end and
@@ -5653,7 +5691,6 @@ async fn an_obfuscated_post_is_named_by_its_own_container() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Going offline stops the download that is ALREADY RUNNING, not just the
@@ -5845,7 +5882,6 @@ async fn going_offline_winds_down_the_running_download() {
         payload(4_000_000, 61),
         "payload differs after the offline wind-down and journal resume"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 65: "offline" is a promise the product makes in absolute terms -
@@ -6032,7 +6068,6 @@ async fn offline_outranks_force_and_a_client_resume() {
         data,
         "payload differs after the offline hold"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §73 phase 1: `/preview/probe/{nzo_id}` tells the dashboard what the
@@ -6221,7 +6256,6 @@ async fn preview_probe_reports_what_the_file_is() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same probe WHILE the download is still running - which is the
@@ -6342,7 +6376,6 @@ async fn preview_probe_answers_while_the_file_is_still_downloading() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Files the process `pid` currently holds open, or `None` on a box that
@@ -6563,7 +6596,6 @@ async fn preflight_health_badges_the_row_and_downloads_the_job_anyway() {
         old_data,
         "the red-badged payload differs"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §77 discipline: no probe traffic while a download is running, and one
@@ -6724,7 +6756,6 @@ async fn the_health_probe_stands_down_while_a_download_runs() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §77 optional auto-defer: a red verdict may REORDER the queue and
@@ -6903,7 +6934,6 @@ async fn health_auto_defer_reorders_and_never_removes() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Upload one NZB through the SAB addfile endpoint and return its id.
@@ -7095,7 +7125,6 @@ async fn the_queue_row_says_what_the_file_is_and_flags_a_mislabelled_one() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The pre feed end to end: a real relay socket to a stored row.
@@ -7269,7 +7298,6 @@ async fn the_three_plain_relay_formats_reach_the_feed_table() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Nested zip through the DAEMON, on a REAL archive pair.
@@ -7461,7 +7489,6 @@ async fn nested_zip_in_a_real_store_rar_extracts_through_the_daemon() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Codex H5: `mode=change_cat` validated the job was Queued, released
@@ -7600,7 +7627,6 @@ async fn change_cat_refuses_a_job_that_started_inside_its_window() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §96.3 give-up breaker, end to end: an *arr-originated job whose grab
@@ -7896,7 +7922,6 @@ async fn giveup_breaker_unmonitors_after_final_failure() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The queue payload's `activity` field (the "what is happening right
@@ -7996,7 +8021,6 @@ async fn queue_activity_field_reports_the_fetch_phase() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §129 4b: the queue payload's `whyslow` block - null while nothing
@@ -8119,18 +8143,26 @@ async fn whyslow_block_rides_the_queue_payload() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// SAB's binary `to_units` output, back to bytes: "998 B", "417 KB",
 /// "1.2 MB", "1.2 GB". None for anything else.
 fn sab_size_bytes(s: &str) -> Option<f64> {
     let (num, unit) = s.trim().split_once(' ')?;
+    // SAB's full `TAB_UNITS` ladder, not a prefix of it. This stopped
+    // at GB, and `sab_units` stopped there too until 31 Aug 2026 - so
+    // the two agreed by accident. Now that the formatter carries T and
+    // P, a queue big enough to reach one would land in the `None` arm
+    // and the caller's `if let Some(..)` would SKIP its assertion
+    // rather than fail it: a green line about a comparison that never
+    // happened.
     let mult = match unit.trim() {
         "B" => 1.0,
         "KB" => 1024.0,
         "MB" => 1024.0 * 1024.0,
-        "GB" => 1024.0 * 1024.0 * 1024.0,
+        "GB" => 1024.0f64.powi(3),
+        "TB" => 1024.0f64.powi(4),
+        "PB" => 1024.0f64.powi(5),
         _ => return None,
     };
     Some(num.parse::<f64>().ok()? * mult)
@@ -8361,7 +8393,6 @@ async fn the_finishing_tail_is_named_and_never_borrows_the_next_job_s_bar() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// UX §18: `move_completed` and the split-move field it introduced.
@@ -8501,7 +8532,6 @@ async fn a_completed_move_reports_its_destination_and_no_split() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Raising the Connections setting must beat a stored auto-tune knee.
@@ -8634,7 +8664,6 @@ async fn raising_connections_reopens_a_stored_low_knee() {
     assert_eq!(k["limit"], 24);
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Percent-encode a filesystem path for an API query value.
@@ -8784,7 +8813,6 @@ async fn a_finished_download_carries_the_configured_permissions() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 97's "Clear queue" button, from the daemon's side: the wildcard
@@ -8936,7 +8964,6 @@ async fn clear_queue_empties_every_row_and_counts_them() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §129 2b (decision 5): the *arr add contract against real
@@ -9032,7 +9059,6 @@ async fn arr_category_contract_priority_pp_and_script_are_honored() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 28: a RELATIVE `--out` must still be reported ABSOLUTE.
@@ -9128,5 +9154,4 @@ async fn a_relative_out_is_reported_absolute() {
     }
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }

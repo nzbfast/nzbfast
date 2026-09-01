@@ -83,6 +83,8 @@ mod plex;
 mod post_cmd;
 mod rarfix;
 mod ratelimit;
+#[cfg(test)]
+mod renameclaim;
 mod repair;
 mod resumeout;
 mod rss;
@@ -97,6 +99,8 @@ mod sizes;
 mod smart;
 mod splitjoin;
 mod srrdb;
+#[cfg(test)]
+mod testscratch;
 mod tools;
 mod unpack;
 mod unpackprog;
@@ -210,10 +214,14 @@ pub fn embedded_serve_opts(
 /// those two calls advertising a desktop one.
 fn embedded_budget(mem_limit: Option<u64>) -> nzbkit::mem::MemBudget {
     match mem_limit {
-        // `with_total` clamps to MemBudget::MIN and fits the address
-        // space, so a host that asks for 1 byte gets the 64 MB floor
-        // rather than an engine whose every tier rounds to nothing.
-        Some(bytes) => nzbkit::mem::MemBudget::with_total(bytes),
+        // Clamps to MemBudget::MIN and fits the address space, so a
+        // host that asks for 1 byte gets the 64 MB floor rather than an
+        // engine whose every tier rounds to nothing - and SAYS so, which
+        // it did not until 31 Aug 2026. An embedded host is the one
+        // caller that cannot see a `--mem-limit` it never typed, so a
+        // phone-sized figure silently becoming the floor is a budget
+        // nobody could have checked.
+        Some(bytes) => nzbkit::mem::MemBudget::from_user_limit(bytes, "the host's memory limit"),
         None => nzbkit::mem::MemBudget::auto(),
     }
 }

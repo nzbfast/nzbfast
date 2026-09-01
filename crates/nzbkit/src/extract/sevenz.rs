@@ -2555,12 +2555,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A span landing BELOW the trim point is the one delivery the
-    /// buffer cannot judge - those bytes are on disk, not in `data`, so
-    /// there is nothing to compare against. It is treated as a repair
-    /// rewrite: the file takes the new bytes (so the materialized
-    /// archive carries them) and the chase forfeits, because anything
-    /// the engine decoded from that range came from the old copy.
+    /// A span landing BELOW the trim point is judged against the DISK
+    /// copy - the spill wrote those bytes at identity offsets, so the
+    /// buffer's caller reads them back and compares. DIFFERING bytes
+    /// are a repair rewrite: the file takes the new bytes (so the
+    /// materialized archive carries them) and the chase forfeits,
+    /// because anything the engine decoded from that range came from
+    /// the old copy. The identical twin below pins the benign half.
     #[test]
     fn sevenz_span_below_the_trim_point_forfeits_and_corrects_the_file() {
         let f = noisy(24 << 20, 135);
@@ -2623,6 +2624,83 @@ mod tests {
             std::fs::read(dir.join("big.7z")).unwrap(),
             want,
             "the materialized archive kept the stale bytes"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The benign twin of the case above, and the windows-unit flake of
+    /// 28/30 Aug 2026 (runs 33191713092, 33320045978) pinned
+    /// deterministically: a redelivery of byte-IDENTICAL data below the
+    /// trim point is NOT a repair rewrite and must not forfeit the
+    /// chase. The multipart streaming test predelivers the last part's
+    /// tail (the promote ladder's shape) and then refeeds the same
+    /// range in its body loop; on a starved runner the engine sprints
+    /// to EOF and trims past the tail between two puts, so the refeed
+    /// landed below `base` and the old unconditional `mark_conflict`
+    /// demoted all three parts with "repair rewrote chased bytes".
+    /// The spilled copy is on disk at identity offsets, so the arm can
+    /// compare instead of assuming: identical bytes stream on, and the
+    /// sibling above pins that differing bytes still forfeit.
+    #[test]
+    fn sevenz_identical_redelivery_below_the_trim_point_streams_on() {
+        let f = noisy(24 << 20, 136);
+        let arch = sevenz_archive(
+            &[("F.bin", &f)],
+            Some(vec![sevenz_rust2::EncoderConfiguration::new(
+                sevenz_rust2::EncoderMethod::COPY,
+            )]),
+            false,
+        );
+        let dir = tmpdir("7z-trim-dup-refeed");
+        let ex = Arc::new(Extractor::new(&dir, 1, true));
+        ex.anchor();
+        ex.set_holds_cap(1);
+        let chunk = 256 << 10;
+        let high_base = feed_paced_tail_first(&ex, 0, "big.7z", &arch, chunk, 2 << 20, 4);
+        assert!(
+            high_base > 0,
+            "nothing was ever trimmed - the test proved nothing"
+        );
+        let base = ex.inner.lock().unwrap().slots[0]
+            .chase
+            .as_ref()
+            .unwrap()
+            .buf
+            .base();
+        // The same delivery as the sibling, with the ONE difference
+        // that decides the verdict: the bytes agree with what the trim
+        // spilled.
+        let at = (base / 2) as usize;
+        ex.write(
+            0,
+            "big.7z",
+            arch.len() as u64,
+            at as u64,
+            &arch[at..at + 8192],
+        )
+        .unwrap();
+        // Close the withheld gap so the decode can finish.
+        let tail_from = arch.len().saturating_sub(chunk * 2).max(chunk);
+        let gap = tail_from - chunk * 4;
+        ex.write(
+            0,
+            "big.7z",
+            arch.len() as u64,
+            gap as u64,
+            &arch[gap..tail_from],
+        )
+        .unwrap();
+        let rep = ex.finish().unwrap();
+        assert!(
+            rep.fallbacks.is_empty(),
+            "an identical refeed below the trim point demoted: {:?}",
+            rep.fallbacks
+        );
+        assert_eq!(std::fs::read(dir.join("F.bin")).unwrap(), f);
+        assert_eq!(
+            dir_files(&dir),
+            vec!["F.bin".to_string()],
+            "the container survived a clean stream"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

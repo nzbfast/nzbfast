@@ -69,8 +69,33 @@ impl Daemon {
     /// section, so the same holds for it.
     pub(super) fn wire_counters(&self, nzo_id: &str) -> Option<(u64, u64, u64)> {
         let owner = self.active_dl.lock_ok();
+        // F5: a TOTAL of 0 is the NZB having declared no `bytes=` at
+        // all, a shape this repo accepts on purpose and whose own
+        // parser comment reads it as "unknown, not zero"
+        // (`nzbkit::nzb`'s `<segment>` attribute block, and
+        // `Nzb::geometry_bytes`). This guard was `total.max(1)`, which
+        // is not a divide-by-zero defence - the only division is
+        // `slot_progress`'s `pct_of`, which already answers with
+        // `checked_div` - it is an unknown being turned into a
+        // measurement, and into the WORST one: it clamps `done` to 1
+        // and reports `(1, 1, 0)`, so the row read 100% with nothing
+        // left for the whole of a download that had barely started.
+        // Measured on the tree before this line changed: 5 MB fetched
+        // against an undeclared total answered `Some((1, 1, 0))`.
+        // "Pinned at 100% / 0 left with articles still in flight" is
+        // the exact defect `get::plan`'s own UX §15 comment records
+        // this pair being rebuilt to end, so this restores that
+        // position rather than taking a new one. An unknown total is
+        // reported AS unknown: `pct_of` then answers 0 and the
+        // remainder is 0, which is what every other unknown on this
+        // surface already renders as, and `done` is passed through
+        // truthfully rather than clamped against a total nobody has -
+        // which is also what `requeue_cost`'s refetch arm needs, since
+        // it reads that figure and was seeing 1.
         let arith = |done: u64, total: u64| {
-            let total = total.max(1);
+            if total == 0 {
+                return (done, 0, 0);
+            }
             (done.min(total), total, total.saturating_sub(done))
         };
         if owner.as_deref() == Some(nzo_id) {

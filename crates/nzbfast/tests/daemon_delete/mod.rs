@@ -291,7 +291,6 @@ async fn jsonrpc_delete_stops_a_prefetching_job() {
         !log.contains(&format!("[prefetch] {deleted} completed")),
         "the delete did not stop the prefetch:\n{log}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M5 (14 Aug sweep): the four NZBGet delete verbs carry four distinct
@@ -484,7 +483,6 @@ async fn nzbget_delete_variants_keep_their_own_contracts() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Delete a job, add the same release again, and it must DOWNLOAD - not
@@ -558,9 +556,18 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
             r.split("SABnzbd_nzo_").nth(1).unwrap().split('"').next()
                 .map(|s| format!("SABnzbd_nzo_{s}")).unwrap()
         };
-        // The queue as (name, priority) pairs, which is the whole
-        // question here: "Duplicate" is the held row.
-        let prios = || -> Vec<(String, String)> {
+        // The queue as (name, is it held) pairs, which is the whole
+        // question here.
+        //
+        // The hold is read off SAB's `labels` through
+        // `held_behind_a_copy`. These pairs used to carry the slot's
+        // `priority` string and test it against "Duplicate", which
+        // worked only because the facade published a held row's STATE
+        // in the field SAB reserves for its five interface priorities.
+        // It moved to `labels` on 31 Aug 2026; the question the pairs
+        // ask is unchanged, and a bool says it more directly than the
+        // word ever did.
+        let prios = || -> Vec<(String, bool)> {
             let q = http(port, "/api?mode=queue&output=json", None);
             let v: serde_json::Value = serde_json::from_str(&q).unwrap();
             v["queue"]["slots"]
@@ -570,7 +577,7 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
                 .map(|s| {
                     (
                         s["filename"].as_str().unwrap_or_default().to_string(),
-                        s["priority"].as_str().unwrap_or_default().to_string(),
+                        held_behind_a_copy(s),
                     )
                 })
                 .collect()
@@ -584,8 +591,8 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
         assert_eq!(
             prios(),
             vec![
-                (a.to_string(), "Normal".to_string()),
-                (b.to_string(), "Duplicate".to_string())
+                (a.to_string(), false),
+                (b.to_string(), true)
             ],
             "the premise: B is held as an alternative to A"
         );
@@ -601,11 +608,11 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
         upload(a);
         let after = prios();
         assert!(
-            after.iter().any(|(n, p)| n == a && p == "Normal"),
+            after.iter().any(|(n, held)| n == a && !held),
             "the re-add of a release the user just deleted must run: {after:?}"
         );
         assert!(
-            after.iter().any(|(n, p)| n == b && p == "Duplicate"),
+            after.iter().any(|(n, held)| n == b && *held),
             "...and the alternative behind it stays held, now against the new copy: {after:?}"
         );
 
@@ -616,7 +623,7 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
         upload(c);
         let after = prios();
         assert!(
-            after.iter().any(|(n, p)| n == c && p == "Duplicate"),
+            after.iter().any(|(n, held)| n == c && *held),
             "the mark is spent by the add it was made for: {after:?}"
         );
 
@@ -645,7 +652,7 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
         upload(d2);
         let after = prios();
         assert!(
-            after.iter().any(|(n, p)| n == d2 && p == "Duplicate"),
+            after.iter().any(|(n, held)| n == d2 && *held),
             "deleting a held alternative must not release the identity: {after:?}"
         );
     })
@@ -654,7 +661,6 @@ async fn a_deleted_release_added_again_is_not_held_as_its_own_duplicate() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The kept-files notice closes its own loop: "download it again" adds
@@ -802,9 +808,19 @@ async fn a_kept_files_notice_can_add_the_release_again() {
             v["queue"]["slots"][0]["filename"], stem,
             "the release must be back in the queue: {q}"
         );
+        // NOT `priority == "Normal"`, which is what this asked until
+        // 31 Aug 2026 and which a HELD row now satisfies too - the hold
+        // moved to SAB's `labels`, so testing the priority word here
+        // would pass on exactly the state it exists to refuse. The
+        // priority is still pinned, because "it came back at Normal and
+        // not at some other rung" is the other half of the claim.
+        assert!(
+            !held_behind_a_copy(&v["queue"]["slots"][0]),
+            "and running, not held behind the copy it replaces: {q}"
+        );
         assert_eq!(
             v["queue"]["slots"][0]["priority"], "Normal",
-            "and running, not held behind the copy it replaces: {q}"
+            "and at Normal, the rung a re-add gets: {q}"
         );
         assert_eq!(
             v["queue"]["delete_kept"].as_array().map(Vec::len),
@@ -817,7 +833,6 @@ async fn a_kept_files_notice_can_add_the_release_again() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §296 (sweep S9): a REST history delete takes back the copies the job
@@ -937,7 +952,6 @@ async fn a_history_delete_takes_back_the_published_copies() {
     .unwrap();
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// P2-1: a REST history delete over a store whose FILE cannot be
@@ -1119,6 +1133,21 @@ async fn a_history_delete_survives_a_store_that_refuses_the_append() {
             r.contains("\"status\":false"),
             "a delete that could not remove the record must not report success: {r}"
         );
+        // ...and it answers the SHAPE the arm's other four exits answer.
+        // This one is the only refusal a test can reach - the two `busy`
+        // ones need a concurrent move - so it is where the arm's one
+        // shape is pinned. An optional key is a key a client cannot
+        // declare, which is the absent-key class the write-arm audit
+        // (research/SAB-WRITE-ARM-SHAPES-2026-08-31.md) exists to close;
+        // adding `nzo_ids` to the two answers below and not here would
+        // have made that defect by hand.
+        let v: serde_json::Value = serde_json::from_str(&r).expect("JSON");
+        assert_eq!(v["removed"].as_u64(), Some(0), "nothing was removed: {r}");
+        assert_eq!(
+            v["nzo_ids"].as_array().map(Vec::len),
+            Some(0),
+            "every exit of this arm carries nzo_ids, empty when it acted on nothing: {r}"
+        );
         assert!(
             nzb3.exists(),
             "the retry .nzb went before the removal was durable"
@@ -1133,5 +1162,4 @@ async fn a_history_delete_survives_a_store_that_refuses_the_append() {
     .unwrap();
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -136,6 +136,15 @@ pub(super) fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
                 (None, None) if !cat.is_empty() => d.out_dir().join(cat),
                 (None, None) => d.out_dir(),
             }
+        } else if let Some(root) = d.write_through_root(cat) {
+            // TODO 317: a job that has NOT completed is recategorized
+            // by moving it now, so the category it moves INTO decides
+            // where it downloads for the rest of its life. Sending it
+            // to the download root instead would leave it there with
+            // its own `write_through` record still saying it owes no
+            // move - a payload that never reaches the destination and
+            // nothing to say why.
+            root
         } else if cat.is_empty() {
             d.out_dir()
         } else {
@@ -268,6 +277,17 @@ pub(super) fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
         g.category = cat.to_string();
         if let Some(p) = &moved {
             g.out_dir = p.clone();
+            // TODO 317: `out_dir` and `write_through` are one fact
+            // stated twice - where the payload is, and whether the
+            // mover still owes it a trip. The bytes have just moved, so
+            // the record moves with them. A COMPLETED job is not
+            // touched here: its arm above targets the destination
+            // directly whatever the write-through setting says, so it
+            // has arrived by the same route the mover would have taken
+            // and owes nothing either way.
+            if g.state != JobState::Completed {
+                g.write_through = d.write_through_root(cat).is_some();
+            }
         }
         // UX §18: a recategorize that stopped part way leaves the
         // payload in two directories, and `out_dir` has just followed
@@ -349,6 +369,16 @@ pub(super) fn history_change_cat(d: &Daemon, id: &str, cat: &str) -> Value {
 /// one-year history turns into a wedge.
 pub(super) struct HistQuery {
     pub failed_only: bool,
+    /// SAB's own `status=`: `clean_comma_separated_list(kwargs.get
+    /// ("status"))`, matched against the same word the row publishes
+    /// (`sab_history_status` - Moving/Completed/Failed/Queued, the set
+    /// our history already speaks). `None` matches every status, same
+    /// as SAB's `if statuses:` guard. `failed_only=1` OVERWRITES this to
+    /// `{"Failed"}` in `from_params`, exactly as SAB's own
+    /// `_api_history_default` does - "We ignore any other statuses,
+    /// having both doesn't make sense" - never additive with an
+    /// explicit `status=`.
+    pub status: Option<std::collections::HashSet<String>>,
     pub category: Option<String>,
     pub ids: Option<std::collections::HashSet<String>>,
     /// Case-insensitive substring over the names a user knows a
@@ -409,10 +439,27 @@ pub(super) const HISTORY_DEFAULT_LIMIT: usize = 500;
 
 impl HistQuery {
     pub(super) fn from_params(params: &std::collections::HashMap<String, String>) -> Self {
+        let failed_only = params.get("failed_only").map(String::as_str) == Some("1");
         HistQuery {
-            failed_only: params.get("failed_only").map(String::as_str) == Some("1"),
+            failed_only,
+            // SAB's `_api_history_default`: `failed_only` overwrites
+            // whatever `status=` named, it does not narrow it further.
+            status: if failed_only {
+                Some(std::iter::once("Failed".to_string()).collect())
+            } else {
+                comma_separated_set(params, "status")
+            },
+            // `cat` FIRST, then `category` - SAB's own
+            // `kwargs.get("cat") or kwargs.get("category")`, on both
+            // this mode and `mode=queue`, in 4.5.0 and 5.1.2 alike.
+            // Only `category` was read until 31 Aug 2026, so a client
+            // sending SAB's shorter spelling got an UNFILTERED history
+            // and no error - which is worse than a refusal, because
+            // "show me only this category" silently answered with
+            // everything.
             category: params
-                .get("category")
+                .get("cat")
+                .or_else(|| params.get("category"))
                 .filter(|c| !c.is_empty() && *c != "*")
                 .cloned(),
             ids: nzo_ids_param(params),
@@ -465,9 +512,17 @@ pub(super) fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Val
         d.alt_held_spares()
     };
     let (mut all, mut done, mut failed, mut locked) = (0usize, 0usize, 0usize, 0usize);
-    // What the header's one-click clear would take: Completed and not
-    // password-locked (locked rows survive the value=completed sweep).
+    // What the header's one-click "Clear completed" would take: Completed
+    // and not password-locked (locked rows survive the value=completed
+    // sweep - see `plan_history_delete`).
     let mut clearable = 0usize;
+    // Same question for "Clear failed": Failed and not password-locked. A
+    // Failed row can carry `password_required` too - `settle_locked_failure`
+    // sets it when an unpack failed for want of a password nobody has
+    // supplied yet - and that row is the only thing offering the 🔑, so
+    // `plan_history_delete`'s value=failed sweep spares it exactly as
+    // value=completed spares a locked Completed row.
+    let mut clearable_failed = 0usize;
     let mut matched = 0usize;
     let mut slots: Vec<Value> = Vec::new();
     for j in arcs.iter().rev() {
@@ -499,26 +554,57 @@ pub(super) fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Val
         }
         // Facets over the search/category set, BEFORE the failed_only
         // bucket narrows it - they are what the bucket chips display.
+        //
+        // CLASSIFIED ON THE WORD THE ROW PUBLISHES, never on the raw
+        // `JobState` - the same call `status=` was moved onto in
+        // `f2761fed8` and every render site already makes. The counters,
+        // `failed_only` and the bucket chips were all left on the raw
+        // state (read-only sweep finding 13, 31 Aug 2026), so a §96
+        // storage-deleted row - Completed on paper, its output folder
+        // deleted since, and published as `"Failed"` with the sentence
+        // saying why - was counted under `done`, excluded by
+        // `failed_only=1` and excluded by `bucket=failed`. The user saw
+        // a Failed row that "Show failed" then hid, and a chip count
+        // that disagreed with the rows under it.
+        let pub_failed = publishes_as_failed(&j);
         all += 1;
-        if j.state == JobState::Failed {
+        if pub_failed {
             failed += 1;
+            if !j.password_required {
+                clearable_failed += 1;
+            }
         } else {
             done += 1;
         }
         if j.password_required {
             locked += 1;
         }
-        if j.state == JobState::Completed && !j.password_required {
+        // `clearable` is what "Clear completed" would sweep, so it has to
+        // agree with `plan_history_delete`'s own `value=completed` rule -
+        // and that one no longer takes a row it publishes as Failed.
+        if j.state == JobState::Completed && !pub_failed && !j.password_required {
             clearable += 1;
         }
-        if q.failed_only && j.state != JobState::Failed {
+        if q.failed_only && !pub_failed {
             continue;
         }
         match q.bucket.as_deref() {
-            Some("done") if j.state != JobState::Completed => continue,
-            Some("failed") if j.state != JobState::Failed => continue,
+            Some("done") if j.state != JobState::Completed || pub_failed => continue,
+            Some("failed") if !pub_failed => continue,
             Some("locked") if !j.password_required => continue,
             _ => {}
+        }
+        // SAB's `status=`: a comma list matched against the same word
+        // the row publishes - `sab_history_status_published`, not the
+        // bare `sab_history_status`, or a `status=Completed` request
+        // could return a row whose own `"status"` key says `"Failed"`
+        // (§96's storage-deleted flip). `None` (no param, or
+        // `failed_only`'s own arm above already narrowed to Failed)
+        // matches everything.
+        if let Some(want) = &q.status
+            && !want.contains(sab_history_status_published(&j).1)
+        {
+            continue;
         }
         let idx = matched;
         matched += 1;
@@ -540,7 +626,7 @@ pub(super) fn history_page(d: &Daemon, q: &HistQuery, summary: bool) -> (Vec<Val
         });
     }
     let counts = json!({"all": all, "done": done, "failed": failed, "locked": locked,
-                        "clearable": clearable});
+                        "clearable": clearable, "clearable_failed": clearable_failed});
     (slots, matched, counts)
 }
 
@@ -633,15 +719,48 @@ fn sab_history_status(j: &Job) -> &'static str {
     }
 }
 
-fn history_summary(d: &Daemon, j: &Job) -> Value {
+/// [`sab_history_status`] with the §96 `storage_deleted` flip folded in:
+/// `(deleted, the word this crate actually PUBLISHES for the row)`.
+/// Filtering on the bare `sab_history_status` would let a row selected
+/// under `status=Completed` come back with its own `"status":
+/// "Failed"`, because the filter and the render would have disagreed
+/// about which word this row carries - so a `status=` filter matches
+/// against the SAME call every render site already makes.
+fn sab_history_status_published(j: &Job) -> (bool, &'static str) {
     let deleted = storage_deleted(j);
+    (
+        deleted,
+        if deleted {
+            "Failed"
+        } else {
+            sab_history_status(j)
+        },
+    )
+}
+
+/// Does this row PUBLISH as Failed - the one question every filter, chip
+/// count and bulk delete has to ask, rather than reading `state`.
+///
+/// Read-only sweep finding 13 (31 Aug 2026). `status=` was moved onto
+/// [`sab_history_status_published`] in `f2761fed8` and the rest were
+/// left behind, so a §96 storage-deleted row rendered `"Failed"` while
+/// `failed_only=1` hid it, `bucket=failed` excluded it, `delete&value=
+/// failed` left it and `value=completed` removed it. One door now, so
+/// the word a user reads and the word a filter acts on cannot part
+/// again.
+pub(crate) fn publishes_as_failed(j: &Job) -> bool {
+    sab_history_status_published(j).1 == "Failed"
+}
+
+fn history_summary(d: &Daemon, j: &Job) -> Value {
+    let (deleted, status) = sab_history_status_published(j);
     json!({
         "nzo_id": j.nzo_id,
         "name": j.name,
         "category": if j.category.is_empty() { "*" } else { &j.category },
-        "status": if deleted { "Failed" } else { sab_history_status(j) },
+        "status": status,
         "bytes": j.total_bytes,
-        "size": format!("{}B", sab_units(j.total_bytes as f64)),
+        "size": sab_units_b(j.total_bytes as f64),
         "completed": j.finished_unix.unwrap_or(0),
         "origin": j.origin,
         // Same rename as the facade row above: the count is `retries`
@@ -841,7 +960,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
         // §96 item 2: see `storage_deleted`. The same flip in both row
         // shapes, or the list and its drawer would disagree about one
         // record.
-        let deleted = storage_deleted(j);
+        let (deleted, status) = sab_history_status_published(j);
         json!({
             "nzo_id": j.nzo_id,
             "name": j.name,
@@ -849,7 +968,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
             "origin": j.origin,
             "nzb_path": j.nzb_path.to_string_lossy(),
             "category": if j.category.is_empty() { "*" } else { &j.category },
-            "status": if deleted { "Failed" } else { sab_history_status(j) },
+            "status": status,
             // §282 item 14: what this row replaced, why, and what replaced
             // it. Empty on every job that did neither, which is almost all
             // of them - the row renders the clause only when there is one.
@@ -967,7 +1086,7 @@ fn history_row(d: &Daemon, j: &Job, held: &[crate::serve::altcand::HeldSpare]) -
             "storage": j.out_dir.to_string_lossy(),
             "path": j.out_dir.to_string_lossy(),
             "bytes": j.total_bytes,
-            "size": format!("{}B", sab_units(j.total_bytes as f64)),
+            "size": sab_units_b(j.total_bytes as f64),
             // Stats (0 until a download actually ran): bytes ÷ secs
             // is the average network speed for this job.
             "downloaded_bytes": j.downloaded_bytes,

@@ -377,11 +377,27 @@ pub(super) async fn worker(
     // until this worker leaves, whichever way it leaves. A run without
     // a lease - the CLI, every test that does not opt in - takes the
     // old path verbatim.
+    //
+    // AS A CLASS (`lease_class`), because the cap is divided rather than
+    // handed out first-come: a download fleet stops one short of the
+    // account's number so a post-processing side pool always has a
+    // permit to dial on (`handoff::POST_PROCESS_RESERVE`). Neither class
+    // may exceed the account's own cap, so this is still the one place
+    // that bounds what the provider sees.
     let _permit = match &cfg.lease {
-        Some(l) if admitted => tokio::select! {
-            p = l.acquire() => Some(p),
-            _ = run_over(&mut fin, &shared) => None,
-        },
+        Some(l) if admitted => {
+            // Counted as OUR OWN parked worker for exactly as long as
+            // the lease counts it as a waiter, so a run whose last
+            // worker is held back by the reserve does not read as its
+            // own successor (`Shared::own_lease_waiters`). The guard
+            // wraps the select, which is what drops the acquire future
+            // when the run ends.
+            let _parked = shared.park_on_lease(ctx.idx);
+            tokio::select! {
+                p = l.acquire_as(cfg.lease_class) => Some(p),
+                _ = run_over(&mut fin, &shared) => None,
+            }
+        }
         _ => None,
     };
     let admitted = admitted && (cfg.lease.is_none() || _permit.is_some());
@@ -560,6 +576,14 @@ pub(super) async fn shed_pipeline(shared: &Shared, inflight: &mut VecDeque<Work>
         }
         shared.deregister_inflight(&w);
         if shared.done.lock_ok().contains(w.ord) {
+            // TODO 315: this Work leaves flight for good - a dup
+            // already emitted the outcome - so it is one of the
+            // places `take_recheck`'s doc calls out, not a requeue
+            // that keeps the slot. Missed by d431f397b; without it
+            // `recheck_held` never comes back down and the whole
+            // late-re-ask mechanism silently retires once
+            // `recheck_430_max` slots have leaked (30 Aug sweep).
+            shared.release_recheck(&w);
             continue; // a dup already emitted this article's outcome
         }
         if w.promoted {
@@ -698,6 +722,14 @@ pub(super) async fn requeue_or_fail(
             }
             shared.deregister_inflight(&w);
             if shared.done.lock_ok().contains(w.ord) {
+                // TODO 315: this Work leaves flight for good - a dup
+                // already emitted the outcome - so it is one of the
+                // places `take_recheck`'s doc calls out, not a requeue
+                // that keeps the slot. Missed by d431f397b; without it
+                // `recheck_held` never comes back down and the whole
+                // late-re-ask mechanism silently retires once
+                // `recheck_430_max` slots have leaked (30 Aug sweep).
+                shared.release_recheck(&w);
                 continue; // a dup already emitted this article's outcome
             }
             if charged {
@@ -718,6 +750,11 @@ pub(super) async fn requeue_or_fail(
                     if shared.note_spent(&w, ctx.bit) {
                         w.attempts = 0;
                     } else {
+                        // Terminal here too: the retry budget is spent
+                        // and no live server is owed a go, so this Work
+                        // never returns to the queue. Same slot debt as
+                        // the two drops above.
+                        shared.release_recheck(&w);
                         if shared.claim_done(&w.id, w.ord) {
                             failed.push(w.id);
                         }

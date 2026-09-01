@@ -37,7 +37,7 @@ LABEL org.opencontainers.image.title="nzbfast" \
       org.opencontainers.image.url="https://github.com/nzbfast/nzbfast" \
       org.opencontainers.image.documentation="https://github.com/nzbfast/nzbfast" \
       org.opencontainers.image.vendor="nzbfast" \
-      org.opencontainers.image.authors="nzbfast <releases@nzbfast.com>"
+      org.opencontainers.image.authors="nzbfast <nzbfast@pm.me>"
 
 # Config + data mount points (compose/NAS bind them). WORKDIR /config so
 # relative state (index.db) lands on the persisted config volume.

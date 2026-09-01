@@ -622,6 +622,322 @@ fn m_notify_test(
     })
 }
 
+/// SAB's `status["servers"]` - one object per CONFIGURED server, with
+/// the running job's own gauges laid over it.
+///
+/// Empty until 31 Aug 2026, on an install with two servers configured
+/// and downloading, so a SAB remote app's Servers pane was permanently
+/// blank on a working daemon. Type-correct, which is the only reason it
+/// was not one of the five crash shapes fixed beside it, but it is GH
+/// #69 finding 3's defect one mode over: a configured server absent
+/// from a payload that is about servers.
+///
+/// THE LIST COMES FROM THE CONFIG AND THE LIVE POOL ONLY DECORATES IT,
+/// and getting that backwards is finding 3's mistake made a second
+/// time. `hub.pool_live` belongs to the ACTIVE RUN and does not exist
+/// between jobs, so a list built FROM it answers `[]` again the moment
+/// nothing is downloading - which is most of the time, and is exactly
+/// when somebody opens the pane to find out why. A configured server
+/// that has never been dialled is still a configured server; it reports
+/// zero connections and no throughput, which is true, rather than
+/// vanishing.
+///
+/// ROWS ARE MATCHED BY `row_key`, NEVER BY HOSTNAME. Two accounts on
+/// one provider are supported and tested - a flat-rate account plus a
+/// small block fill at the same host is the ordinary shape - so a map
+/// keyed by host ALIASES them and hands one row's connections to the
+/// other. `nzbkit::pool::row_keys` carries the whole argument. The keys
+/// are minted here over the ENABLED servers because that is the list
+/// `get/plan.rs` hands the fleet build, which is what `LiveStats::
+/// for_servers` keyed the live rows from; `serve/tasks/tuner.rs` mints
+/// them the same way for the same reason. A row that fails to match -
+/// the config was edited under a running job, or a host was excluded
+/// for it - simply gets the idle answer, which is the safe direction.
+///
+/// WITHHELD FROM THE ADD-ONLY TIER, which is a decision about the tier
+/// and not about the shape. `status` and `fullstatus` are on that key's
+/// allowlist so a push extension's "test connection" button works, and
+/// its stated promise is a version string, paused/warning/disk numbers
+/// and the category names. A list of the user's provider hostnames is
+/// none of those. Our own tree answers the wider question both ways -
+/// `out_dir_for` above blanks the download path for this tier, while
+/// `sab_warnings` deliberately DOES name an exhausted provider's host
+/// to it, with a stated reason - so there is no house rule to appeal
+/// to, and whether the tier may see hostnames is J4 of
+/// `research/SAB-MODE-SHAPE-AUDIT-2026-08-31.md` - a product decision,
+/// deliberately left open. Today's `[]` is what that tier already gets,
+/// so filling the array for full-key callers changes nothing it can see. `daemon_facade` pins the empty
+/// answer so that whichever way J4 is settled, the change is deliberate
+/// and shows up in a diff.
+fn sab_servers(d: &Daemon, ctx: &ApiCtx<'_>) -> Vec<Value> {
+    if ctx.via_add_only {
+        return Vec::new();
+    }
+    // An unreadable config is an empty server list here, the same way
+    // `sab_warnings` treats it: either way there is nothing to report.
+    let Ok(cfg) = nzbkit::config::Config::load(ctx.cfg_path) else {
+        return Vec::new();
+    };
+
+    /// What the running job's fleet says about one configured row.
+    struct Live {
+        connected: u64,
+        bps: Option<f64>,
+        warning: String,
+        error: String,
+    }
+    // Everything copied out under the pool's lock and rendered after,
+    // the discipline `serve/metrics.rs::server_metrics` records: these
+    // gauges are written by the fetch path, so the shorter the hold the
+    // better.
+    let live: std::collections::HashMap<String, Live> = d
+        .hub
+        .pool_live
+        .lock_ok()
+        .as_ref()
+        .map(|l| {
+            l.servers
+                .iter()
+                // A hand-built `ServerLive` (the ring rigs use
+                // `..Default::default()`) carries no key. It can never
+                // equal a minted `N#host`, and two of them would
+                // collide with each other, so drop them rather than
+                // letting one decorate an unrelated row.
+                .filter(|s| !s.row_key.is_empty())
+                .map(|s| {
+                    // SAB's two strings for "this server is not well",
+                    // mapped onto its own split: `errormsg` is set when
+                    // the server is out of action, `warning` for the
+                    // transient case. A PERMANENT auth refusal is a
+                    // credential only the user can fix, so it is the
+                    // error; a live outage - unreachable, at capacity,
+                    // or a refusal that retrying may clear - is the
+                    // warning. Both are the provider's or the OS's own
+                    // words, never our paraphrase, for the reason
+                    // `ServerLive::refusal` gives at its own site.
+                    let refusal = s.refusal.lock_ok().clone();
+                    let error = refusal
+                        .as_ref()
+                        .filter(|r| r.permanent)
+                        .map(|r| r.line.clone())
+                        .unwrap_or_default();
+                    // Gated on `down_secs()` as well as the reason,
+                    // the way `outage::outages_in` gates it: the
+                    // reason outlives the episode it described. And
+                    // EXCLUSIVE with the error above - a permanent
+                    // refusal raises a refusal record AND a `refused`
+                    // outage carrying the same sentence, so filling
+                    // both fields would just print the provider's line
+                    // to the user twice.
+                    let warning = if error.is_empty() {
+                        s.down_secs()
+                            .and_then(|_| s.down_reason.lock_ok().clone())
+                            .map(|r| r.detail)
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    (
+                        s.row_key.clone(),
+                        Live {
+                            connected: s.connected.load(Ordering::Relaxed) as u64,
+                            bps: s.srv_rate_bps(),
+                            warning,
+                            error,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let enabled: Vec<usize> = cfg
+        .servers
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.enabled)
+        .map(|(i, _)| i)
+        .collect();
+    let keys = nzbkit::pool::row_keys(enabled.iter().map(|&i| cfg.servers[i].host.as_str()));
+    let mut key_of: Vec<Option<&str>> = vec![None; cfg.servers.len()];
+    for (k, &i) in keys.iter().zip(&enabled) {
+        key_of[i] = Some(k.as_str());
+    }
+
+    cfg.servers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let l = key_of[i].and_then(|k| live.get(k));
+            json!({
+                // SAB's `displayname`, which defaults to the host and is
+                // the only name a server has here.
+                "servername": s.host,
+                // SAB's `active` is false once it has taken a server out
+                // of the pool. A switched-off server stays configured
+                // and testable and never joins one, which is the same
+                // statement. Block-exhausted and job-excluded hosts are
+                // deliberately NOT folded in: `get/plan.rs`'s exclusion
+                // list carries three reasons and one of them is "busy
+                // with the active job", so reading it here would paint a
+                // perfectly healthy provider as deactivated. That
+                // condition reaches the user through `mode=warnings`,
+                // which names the host and says what to do about it.
+                "serveractive": s.enabled,
+                "serveractiveconn": l.map(|l| l.connected).unwrap_or(0),
+                // SAB's `threads` is the CONFIGURED count, not the live
+                // one - `serveractiveconn` beside it is the live half -
+                // so this stays the configured number even mid-run,
+                // where the tuner may be holding fewer.
+                "servertotalconn": s.connections,
+                // One entry per busy thread, each naming the article and
+                // job it is on. The pool keeps no per-worker article
+                // attribution to publish, and inventing rows would be
+                // worse than the empty list SAB itself sends for a
+                // server with nothing in flight.
+                "serverconnections": [],
+                "serverssl": s.tls,
+                // SAB fills this with the negotiated protocol and cipher
+                // once a session exists and leaves it `""` until then -
+                // an empty STRING, not null, which is the shape a client
+                // declaring a non-nullable field needs. We do not
+                // publish a per-server cipher, so it is always the
+                // before-connection value.
+                "serversslinfo": "",
+                // Null in SAB too until a connection exists and the
+                // address has been resolved. We keep no per-server
+                // resolved address to publish, so it stays null - which
+                // is a value SAB sends routinely and clients handle,
+                // rather than an invented address.
+                "serveripaddress": Value::Null,
+                "servercanonname": Value::Null,
+                "serverwarning": l.map(|l| l.warning.clone()).unwrap_or_default(),
+                "servererror": l.map(|l| l.error.clone()).unwrap_or_default(),
+                // Same convention as SAB's: 0 is the primary and a
+                // higher number is consulted later. `level` is that
+                // number here (M14e, NZBGet's "Level").
+                "serverpriority": s.level,
+                // SAB's per-server "deactivate this one when it
+                // misbehaves" flag, which is off by default there. No
+                // server here carries such a flag - a provider granting
+                // nothing is routed around and reported, never
+                // deactivated - so `false` is the true answer and is
+                // also what a default SAB install sends.
+                "serveroptional": false,
+                // A STRING, through SAB's `to_units` with no postfix
+                // ("0", "417 K", "1.4 M"), not a number. `sab_units` is
+                // the port; see its own doc for the three ways the
+                // hand-rolled version of this format was wrong.
+                //
+                // The windowed delivered rate, decayed to now, which is
+                // the quantity SAB's `BPSMeter.server_bps` holds. Zero
+                // with no run on the wire, and zero for a configured
+                // server this run has never asked for a body.
+                "serverbps": sab_units(l.and_then(|l| l.bps).unwrap_or(0.0)),
+            })
+        })
+        .collect()
+}
+
+/// The body BOTH `mode=status` and `mode=fullstatus` answer with.
+///
+/// SAB maps both mode names to the SAME function - `_api_table` has
+/// `("fullstatus", "")` and `("status", "")` both pointing at
+/// `_api_fullstatus` - so a client is entitled to read either and find
+/// the same object. We had two arms with two DIFFERENT key sets, each
+/// missing keys the other carried: `fullstatus` had no `warnings`,
+/// `have_warnings`, `pause_int`, `cache_art`, `cache_size`,
+/// `finishaction`, `servers` or `diskspace1_norm`, and `status` had no
+/// `diskspace2` or `speedlimit`. Each hole is GH #69's absent-key half
+/// - a statically-typed client dies on a missing non-nullable field -
+/// and which hole you met depended only on which of two spellings your
+/// client happened to send. NZB Donkey probes `mode=status` and NZB
+/// Unity probes `mode=fullstatus` (`serve/http.rs`), so both spellings
+/// have real callers.
+///
+/// The key set is SAB's `build_header` API half in full, plus
+/// `warnings` and `servers` from `build_status`, plus our two
+/// `complete_dir` spellings. That boundary is deliberate: the rest of
+/// `build_status` is measurements this daemon does not take (pystone,
+/// disk and internet speed probes), machine facts a remote app does not
+/// render (socks5 proxy, public IPv4/IPv6, dnslookup), and paths we
+/// decline to volunteer (logfile, configfn, webdir). Answering those
+/// with invented zeros would be worse than the absence, because unlike
+/// the header fields below there is no value that is TRUE of us.
+///
+/// `unlimited_abs_as_empty` is the one field the two arms still spell
+/// differently, and it is a deliberate deviation from SAB rather than an
+/// oversight - see the `fullstatus` arm. It is a parameter so that the
+/// divergence is one named argument rather than two whole payloads.
+fn sab_status_body(d: &Arc<Daemon>, ctx: &ApiCtx<'_>, unlimited_abs_as_empty: bool) -> Value {
+    // §91: one statvfs feeds both the low-disk warning's own sentence
+    // and the `diskspace1` figure beside it.
+    let (_, total_b) = disk_stat_walk(&d.out_dir()).unwrap_or((0, 0));
+    let free_now = free_bytes(&d.out_dir());
+    let warns = sab_warnings(d, ctx.cfg_path, ctx.via_add_only, free_now);
+    let free = free_now.unwrap_or(0) as f64 / 1e9;
+    let total = total_b as f64 / 1e9;
+    let line = d.line_speed.load(Ordering::Relaxed);
+    let abs = d.hub.rate.get();
+    json!({"status": {
+        // SAB's is `calc_age(START)` - a "2d"/"5h"/"13m" token, never a
+        // bare count. This answered a literal "0" until 31 Aug 2026,
+        // which is not a value that vocabulary can produce.
+        "uptime": sab_elapsed(d.boot_at.elapsed().as_secs() as i64),
+        "color_scheme": "",
+        "version": SAB_VERSION,
+        "paused": d.paused.load(Ordering::Relaxed),
+        // One pause switch here, where SAB has a second global for
+        // "paused including post-processing". Mirroring `paused` is the
+        // true answer for a daemon with one, and absent was the wrong
+        // one.
+        "paused_all": d.paused.load(Ordering::Relaxed),
+        "pause_int": pause_int(d),
+        "have_warnings": warns.len().to_string(),
+        "warnings": warns,
+        // One filesystem serves both of SAB's disks here.
+        "diskspace1": format!("{free:.2}"),
+        "diskspace2": format!("{free:.2}"),
+        // `sab_units` over the RAW byte count, exactly as the queue
+        // header does - GH #69's own fix, which was applied to the queue
+        // path and left behind here (read-only sweep finding 12, 31 Aug
+        // 2026). `format!("{free:.1} G")` over a GB figure prints
+        // "2000.0 G" for the 2 TB the queue calls "1.8 T", so one daemon
+        // reported two different disk figures to a client that reads
+        // `mode=status` rather than the queue header.
+        "diskspace1_norm": sab_units(free_now.unwrap_or(0) as f64),
+        "diskspace2_norm": sab_units(free_now.unwrap_or(0) as f64),
+        "diskspacetotal1": format!("{total:.2}"),
+        "diskspacetotal2": format!("{total:.2}"),
+        // Percentage of the line speed, "0" when either half is
+        // unknown - the queue body's convention.
+        "speedlimit": if line > 0 && abs > 0 {
+            format!("{}", (abs as f64 * 100.0 / line as f64).round() as u64)
+        } else {
+            "0".to_string()
+        },
+        "speedlimit_abs": if unlimited_abs_as_empty && abs == 0 {
+            String::new()
+        } else {
+            abs.to_string()
+        },
+        // Withheld from the add-only tier: config.rs already refuses to
+        // "volunteer its filesystem layout to every API caller", and a
+        // push extension needs the numbers, not the path.
+        "complete_dir": out_dir_for(d, ctx),
+        "completedir": out_dir_for(d, ctx),
+        "cache_art": "0",
+        "cache_size": "0 B",
+        "finishaction": Value::Null,
+        // No download quota here, so these are exactly what SAB reports
+        // for an install with none configured - not placeholders.
+        "quota": "0 B",
+        "have_quota": false,
+        "left_quota": "0 B",
+        "servers": sab_servers(d, ctx),
+    }})
+}
+
 fn m_status(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
@@ -629,35 +945,7 @@ fn m_status(
     ctx: &ApiCtx<'_>,
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
-    Some({
-        // §91: one statvfs feeds both the low-disk warning's own
-        // sentence and the `diskspace1` figure beside it.
-        let free_now = free_bytes(&d.out_dir());
-        let warns = sab_warnings(d, ctx.cfg_path, ctx.via_add_only, free_now);
-        let free = free_now.unwrap_or(0) as f64 / 1e9;
-        json!({"status": {
-            "uptime": "0",
-            "color_scheme": "",
-            "version": SAB_VERSION,
-            "paused": d.paused.load(Ordering::Relaxed),
-            "pause_int": pause_int(d),
-            "have_warnings": warns.len().to_string(),
-            "warnings": warns,
-            "diskspace1": format!("{free:.2}"),
-            "diskspace1_norm": format!("{free:.1} G"),
-            "speedlimit_abs": d.hub.rate.get().to_string(),
-            // Withheld from the add-only tier: config.rs already
-            // refuses to "volunteer its filesystem layout to every
-            // API caller", and a push extension needs the numbers,
-            // not the path.
-            "complete_dir": out_dir_for(d, ctx),
-            "completedir": out_dir_for(d, ctx),
-            "cache_art": "0",
-            "cache_size": "0 B",
-            "finishaction": Value::Null,
-            "servers": [],
-        }})
-    })
+    Some(sab_status_body(d, ctx, false))
 }
 
 fn m_shutdown(
@@ -963,39 +1251,29 @@ pub(in crate::serve) fn dispatch(
         // a Restart item, and the honest answer is better than a
         // button that half works.
         "restart_daemon" => return m_restart_daemon(d, req, params, ctx, api_body),
-        "fullstatus" => {
-            // §18: LunaSea's statistics page reads the two speed caps
-            // and both disks out of fullstatus, and its parser routes
-            // each through Dart's tryParse - which takes a String -
-            // so a missing key OR a JSON number throws and the page
-            // errors. Strings, as real SAB sends them.
-            let free = free_bytes(&d.out_dir()).unwrap_or(0) as f64 / 1e9;
-            let line = d.line_speed.load(Ordering::Relaxed);
-            let abs = d.hub.rate.get();
-            json!({"status": {
-                "uptime": "0",
-                "color_scheme": "",
-                "version": SAB_VERSION,
-                "paused": d.paused.load(Ordering::Relaxed),
-                // Sonarr/Radarr resolve a relative complete_dir via
-                // "completedir" (no underscore); keep both spellings.
-                "complete_dir": out_dir_for(d, ctx),
-                "completedir": out_dir_for(d, ctx),
-                // "" is SAB's "no cap set"; LunaSea shows it as
-                // unlimited, where "0" would read as a 0 B/s cap.
-                "speedlimit_abs": if abs == 0 { String::new() } else { abs.to_string() },
-                // Percentage of the line speed, "0" when either half
-                // is unknown - the queue body's convention.
-                "speedlimit": if line > 0 && abs > 0 {
-                    format!("{}", (abs as f64 * 100.0 / line as f64).round() as u64)
-                } else {
-                    "0".to_string()
-                },
-                // One filesystem serves both of SAB's disks here.
-                "diskspace1": format!("{free:.2}"),
-                "diskspace2": format!("{free:.2}"),
-            }})
-        }
+        // SAB answers `fullstatus` and `status` from the SAME function
+        // (`_api_fullstatus`, reached under both names in its
+        // `_api_table`), so both spellings answer the same body here -
+        // see `sab_status_body`, which also records what the two arms
+        // used to be missing from each other.
+        //
+        // §18: LunaSea's statistics page reads the two speed caps and
+        // both disks out of fullstatus, and its parser routes each
+        // through Dart's tryParse - which takes a String - so a missing
+        // key OR a JSON number throws and the page errors. Strings, as
+        // real SAB sends them.
+        //
+        // The `true` is the one field this arm still spells differently
+        // from `mode=status`: "" is SAB's "no cap set" as LunaSea reads
+        // it, and it shows that as unlimited where SAB's own literal
+        // "0" would read as a 0 B/s cap. A deliberate deviation with a
+        // named client behind it - and `mode=status` keeps "0" because
+        // the queue payload sends "0" and three integration suites pin
+        // that. Unifying the two on either spelling is a judgement about
+        // what live clients do with the value, not about the shape, so
+        // it is deliberately NOT taken here: it stays one named argument
+        // rather than two whole payloads until somebody measures it.
+        "fullstatus" => sab_status_body(d, ctx, true),
         "sysbench" => return m_sysbench(d, req, params, ctx, api_body),
         // Update checker: force a check now. Notify-only - there
         // is no apply/install path; the banner links to the

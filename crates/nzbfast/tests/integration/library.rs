@@ -284,7 +284,6 @@ async fn library_job_completes_without_downloading() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -374,7 +373,6 @@ async fn stream_of_library_job_triggers_download() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -506,7 +504,6 @@ async fn unauthenticated_stream_cannot_start_parked_job() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -539,7 +536,6 @@ async fn library_job_with_missing_articles_fails() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A download that has FINISHED is served from disk, not from the live
@@ -613,5 +609,4 @@ async fn stream_of_a_finished_download_serves_it_from_disk() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

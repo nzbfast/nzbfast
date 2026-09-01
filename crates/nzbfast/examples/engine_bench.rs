@@ -45,7 +45,10 @@ fn main() -> anyhow::Result<()> {
             for set in &sets {
                 files += set.files.len();
                 for f in &set.files {
-                    let path = dir.join(nzbkit::disk::sanitize_filename(&f.name));
+                    let path = nzbkit::disk::join_out_name(
+                        &dir,
+                        &nzbkit::disk::sanitize_out_name(&f.name),
+                    );
                     match std::fs::read(&path) {
                         Ok(data) => {
                             let v = nzbkit::par2::verify_file(f, set.block_size, &data);

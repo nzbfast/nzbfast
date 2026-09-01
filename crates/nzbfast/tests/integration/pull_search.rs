@@ -312,7 +312,6 @@ async fn a_title_page_search_uses_the_imdb_id() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The TV half of the same rule (TODO 187 follow-up): a series searched
@@ -414,7 +413,6 @@ async fn a_series_page_search_uses_the_tvdb_id() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M35 phase 2: the watchlist's external leg. A watched show with
@@ -578,7 +576,6 @@ async fn watchlist_external_defaults_on_but_an_explicit_off_wins() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -725,7 +722,6 @@ async fn pull_search_grabs_from_a_second_nzbfast() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Issue #44: the same release listed by several indexers comes back as
@@ -879,5 +875,4 @@ async fn copies_of_one_release_group_into_one_row_with_a_grab_each() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -13,6 +13,17 @@
 //! which is the one shape of this test that cannot flake. The
 //! before/after numbers live in `mover_lane_bench` at the bottom,
 //! ignored because they need two real volumes.
+//!
+//! The ASSERTIONS were the only half that sentence ever covered, and
+//! for a while this file read as though it covered the WAITS too. It
+//! did not: every wait below was an absolute `Duration::from_secs`
+//! deadline, and three of these tests failed together on a loaded box
+//! (`cargo test -p nzbfast --bin nzbfast`, 31 Aug 2026 - 3 failed at
+//! load ~40, 0 at ~27, all passing in isolation) reporting a job that
+//! had simply not finished yet as a wrong ANSWER. What replaced them
+//! is [`NO_PROGRESS`] and the [`settle_all`] family; the mechanism,
+//! and why a per-STEP budget is the only one that can be sized here,
+//! is written up there.
 
 use super::*;
 use crate::serve::job::{JobState, job_from_json};
@@ -41,11 +52,9 @@ impl Drop for DelayGuard {
     }
 }
 
-fn scratch(tag: &str) -> PathBuf {
+fn scratch(tag: &str) -> crate::testscratch::ScratchDir {
     let dir = std::env::temp_dir().join(format!("nzbfast-lane-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::testscratch::ScratchDir::attach(&dir)
 }
 
 /// A parked Completed job with a payload on disk and its move owed.
@@ -76,17 +85,143 @@ fn pending_job_of(d: &Arc<Daemon>, name: &str, cat: &str, bytes: usize) -> Arc<M
     job
 }
 
-/// Wait for a job's move to settle. Returns false on timeout so the
-/// caller can say what it was waiting for.
-async fn settled(job: &Arc<Mutex<Job>>, within: Duration) -> bool {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if !job.lock_ok().move_pending {
-            return true;
+/// How long a wait here tolerates the mover settling NOTHING at all.
+///
+/// A NO-PROGRESS GAP, deliberately, and never a total - which is the
+/// whole of what these waits get wrong when they are written as
+/// `Instant::now() + Duration::from_secs(20)`. The cost of one move is
+/// not the mover's own work (a 150 ms test delay and a rename); it is
+/// that work PLUS an unbounded queue behind `Daemon::hold_queue_writes`,
+/// a PROCESS-GLOBAL mutex every `save_queue` takes and every one of the
+/// ~2,650 tests in `cargo test -p nzbfast --bin nzbfast` shares. Two of
+/// its holders (`altcand`'s park transaction, `editqueue_delete`'s
+/// custody transaction) do filesystem work under it. So the wait a
+/// single move must absorb is set by what the REST of the binary is
+/// doing, and no total is sizeable from in here.
+///
+/// Measured 31 Aug 2026 on the 32-core dev Mac, one process, the lock
+/// instrumented: 143-208 waits over 200 ms per sweep, the longest 978
+/// ms - and that is under CPU load alone, with none of the disk
+/// contention the failing runs had. Which is also why the three that
+/// failed together were exactly the three whose moves run SERIALLY in
+/// one lane (FIFO, the busy job's lane-mate, the dispatcher's two jobs
+/// on one device): a serial chain pays that queue once per move, in
+/// series, where `two_lanes_...` and `the_cap_...` pay it in parallel
+/// and so need one much worse outlier rather than N ordinary ones.
+///
+/// EXPOSED LATER IS NOT EXEMPT, and it is worth knowing which way that
+/// cuts before trusting a green here.
+/// `two_lanes_run_side_by_side_and_both_jobs_land` was measured flaky
+/// 2/2 the day before, 30 Aug 2026, under heavier contention still -
+/// 383 daemon processes and eighteen build trees - and left unclaimed,
+/// by one lane; a second lane then claimed this file under a different
+/// spelling 51 seconds before the claim this work landed under. Two
+/// lanes, two days, each thinking it had seen the module fail once.
+/// Its two waits were one move each against 10 s, so it takes a single
+/// step over ~10 s to break where FIFO takes three averaging over
+/// ~6.7 s. Every wait in this file is on the budget below for that
+/// reason, not just the three that were caught.
+///
+/// What that leaves bounded is one STEP. The number of steps is a
+/// property of the test and not of the box, so a test that grows a
+/// fourth job does not need this re-derived - the same argument
+/// `crates/nzbfast/tests/e2e_wave5_cost/mod.rs` makes for its cost
+/// rows, in the form a WAIT can take it.
+///
+/// 60 s is ~21x the slowest single settle seen under 6x CPU
+/// oversubscription (2.84 s) and 30x the lane's own 2 s requeue period.
+/// It is deliberately not sized tighter, because it is PAID ONCE - at
+/// the stall, not per step - so a genuinely dead mover costs this much
+/// in total and never N times it, and the trade against a false red on
+/// main is not close.
+///
+/// AND IT STILL CANNOT COVER A STARVED BOX, which is worth knowing
+/// before reading a trip here as a defect. Measured 31 Aug 2026 by the
+/// lane that wrote up the `terminate-after = 600` ceiling
+/// (`37bdf653f`): at load 130-160 with seventeen `cargo-nextest`
+/// processes across worktrees, a test that runs in 3.3 s took SEVEN
+/// MINUTES - 127x, state `U` at 0.0% CPU, 5.9 s of CPU for 7 minutes
+/// elapsed. That is disk starvation, not a product hang, and no budget
+/// a test can name survives it. So the reading rule is that commit's:
+/// above ~load 100 a trip here is a statement about the MACHINE, run
+/// `uptime` before believing it, and trust the failure KIND - a wrong
+/// ORDER or a broken cap is real at any load, a no-progress trip under
+/// contention is not.
+///
+/// THE NUMBER ITSELF NOW LIVES IN `serve::testutil`, and this block
+/// stays the write-up. It moved there on 31 Aug 2026 when three more
+/// waits in this binary were put on it - `serve::tests_api`'s redrive
+/// settle and its drain-count settle, and
+/// `serve::daemon::daemon_tests`'s picker spin - because it has already
+/// been RE-MEASURED once, from 30 s to 60 s in `cea15ceed`, hours after
+/// it was written. Four sites each spelling their own 60 is a fifth
+/// measurement that moves one and leaves three, which is CLAUDE.md's
+/// fourteenth gate's argument about a threshold in four copy-paste
+/// sibling drivers. That entry also records which sites must NOT take
+/// it, which is the half a grep gets wrong.
+const NO_PROGRESS: Duration = crate::serve::testutil::NO_PROGRESS;
+
+/// How often the waits below sample. Every assertion in this file that
+/// reads `Daemon::moving` reads it on this tick, so it is also the
+/// resolution of the `peak` observations - 30 samples per 150 ms move.
+const TICK: Duration = Duration::from_millis(5);
+
+/// Wait for every job in `jobs` to settle, sampling `each_tick` as it
+/// goes. Answers the order they settled in, or `None` when the mover
+/// went [`NO_PROGRESS`] without settling one more of them.
+///
+/// The clock is reset by PROGRESS - another job settling - so a box
+/// that makes every step slow does not fail a test that is still
+/// moving; only a mover that has stopped does.
+async fn settle_all_watching(
+    jobs: &[Arc<Mutex<Job>>],
+    gap: Duration,
+    mut each_tick: impl FnMut(),
+) -> Option<Vec<usize>> {
+    let mut order: Vec<usize> = Vec::new();
+    let mut last_progress = Instant::now();
+    while order.len() < jobs.len() {
+        each_tick();
+        let before = order.len();
+        for (i, job) in jobs.iter().enumerate() {
+            if !job.lock_ok().move_pending && !order.contains(&i) {
+                order.push(i);
+            }
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        if order.len() > before {
+            last_progress = Instant::now();
+            continue;
+        }
+        if last_progress.elapsed() >= gap {
+            return None;
+        }
+        tokio::time::sleep(TICK).await;
     }
-    false
+    Some(order)
+}
+
+/// [`settle_all_watching`] with nothing to sample.
+async fn settle_all(jobs: &[Arc<Mutex<Job>>]) -> Option<Vec<usize>> {
+    settle_all_watching(jobs, NO_PROGRESS, || {}).await
+}
+
+/// One job's move. Returns false only when the mover made no progress
+/// for [`NO_PROGRESS`], so the caller can say what it was waiting for -
+/// and so a give-up is never reported as a wrong answer.
+async fn settled(job: &Arc<Mutex<Job>>) -> bool {
+    settle_all(std::slice::from_ref(job)).await.is_some()
+}
+
+/// [`settled`] against a budget the CALLER can size, which only
+/// `mover_lane_bench` can: its copies are real bytes against a fixed
+/// cap, so `bytes / cap` is a number, where a machinery test's move is
+/// a rename plus however long the rest of the binary holds the global
+/// queue-write lock. Same helper, and the difference between the two
+/// budgets is the whole of [`NO_PROGRESS`]'s argument.
+async fn settled_within(job: &Arc<Mutex<Job>>, gap: Duration) -> bool {
+    settle_all_watching(std::slice::from_ref(job), gap, || {})
+        .await
+        .is_some()
 }
 
 /// Two roots on ONE volume are one lane, whether they sit side by side
@@ -112,7 +247,6 @@ fn lane_key_pins_two_roots_on_one_volume_to_one_lane() {
         lane_key(&global),
         lane_key(&dir.join("not-yet").join("deep"))
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Unresolvable root = the single shared lane. Falling back to serial
@@ -153,7 +287,6 @@ fn lane_key_for_reads_the_root_the_move_will_use() {
     // one lane - which is the guarantee, not a limitation.
     assert_eq!(lane_key_for(&d, "tv"), lane_key(&tv));
     assert_eq!(lane_key_for(&d, "movies"), lane_key(&global));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Two keys, two lanes, both payloads land where their own destination
@@ -177,13 +310,12 @@ async fn two_lanes_run_side_by_side_and_both_jobs_land() {
     lanes.dispatch(&d, "dev:b".to_string(), b.clone());
     assert_eq!(lanes.len(), 2, "two destinations must get two lanes");
 
-    assert!(settled(&a, Duration::from_secs(10)).await, "lane a stalled");
-    assert!(settled(&b, Duration::from_secs(10)).await, "lane b stalled");
+    assert!(settled(&a).await, "lane a stalled");
+    assert!(settled(&b).await, "lane b stalled");
     assert_eq!(a.lock_ok().out_dir, global.join("Film.Release"));
     assert_eq!(b.lock_ok().out_dir, tv.join("Show.S01E01"));
     assert!(global.join("Film.Release").join("payload.bin").exists());
     assert!(tv.join("Show.S01E01").join("payload.bin").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// One lane is one destination, and one destination is still strictly
@@ -208,21 +340,24 @@ async fn one_lane_moves_in_enqueue_order() {
     }
     assert_eq!(lanes.len(), 1, "one destination is one lane");
 
-    let mut order: Vec<usize> = Vec::new();
     let mut peak = 0;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while order.len() < jobs.len() && Instant::now() < deadline {
-        // Serial is the other half of FIFO, and the half a settle order
-        // alone cannot see: two moves running at once would settle in
-        // one poll tick and still read as ordered.
-        peak = peak.max(d.moving.lock_ok().len());
-        for (i, job) in jobs.iter().enumerate() {
-            if !job.lock_ok().move_pending && !order.contains(&i) {
-                order.push(i);
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    // Serial is the other half of FIFO, and the half a settle order
+    // alone cannot see: two moves running at once would settle in one
+    // poll tick and still read as ordered.
+    let order = settle_all_watching(&jobs, NO_PROGRESS, || {
+        peak = peak.max(d.moving.lock_ok().len())
+    })
+    .await;
+    // Reported as the STALL it is. Falling through to the order
+    // assertion with a short vector was how a job that had not
+    // finished yet came out as `left: [0, 1] right: [0, 1, 2]` - a
+    // wrong-ORDER verdict on a lane that had ordered nothing wrongly.
+    let order = order.expect("a lane stopped moving: no job settled for the no-progress budget");
+    // `peak` is a floor - sampling can only ever under-count - so the
+    // equality is doing two jobs: no two moves at once, AND the
+    // sampler saw a move at all. It gets ~30 samples per 150 ms move
+    // and the wait above no longer gives up early, so an under-count
+    // needs the poller descheduled across all three.
     assert_eq!(peak, 1, "one lane must never run two moves at once");
     assert_eq!(
         order,
@@ -232,7 +367,6 @@ async fn one_lane_moves_in_enqueue_order() {
     for (i, job) in jobs.iter().enumerate() {
         assert_eq!(job.lock_ok().out_dir, nas.join(format!("Release.{i}")));
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A job whose files another actor holds (the `moving` fence: a
@@ -258,12 +392,8 @@ async fn a_busy_job_blocks_neither_its_lane_nor_the_other() {
     lanes.dispatch(&d, "dev:b".to_string(), other.clone());
 
     assert!(
-        settled(&behind, Duration::from_secs(10)).await,
-        "the job behind a busy one must not wait for it"
-    );
-    assert!(
-        settled(&other, Duration::from_secs(10)).await,
-        "the other lane must not wait for it either"
+        settle_all(&[behind.clone(), other.clone()]).await.is_some(),
+        "the job behind a busy one, and the other lane, must not wait for it"
     );
     assert!(
         held.lock_ok().move_pending,
@@ -272,11 +402,10 @@ async fn a_busy_job_blocks_neither_its_lane_nor_the_other() {
 
     d.moving.lock_ok().remove(&held_id);
     assert!(
-        settled(&held, Duration::from_secs(20)).await,
+        settled(&held).await,
         "a busy job must move once the fence comes down"
     );
     assert!(nas.join("Held.Release").join("payload.bin").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Lanes free the DESTINATIONS from each other, but they all read one
@@ -303,23 +432,20 @@ async fn the_cap_bounds_moves_in_flight_across_lanes() {
     assert_eq!(lanes.len(), 5);
 
     let mut peak = 0;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        peak = peak.max(d.moving.lock_ok().len());
-        if jobs.iter().all(|j| !j.lock_ok().move_pending) || Instant::now() > deadline {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    let landed = settle_all_watching(&jobs, NO_PROGRESS, || {
+        peak = peak.max(d.moving.lock_ok().len())
+    })
+    .await;
     assert!(
         peak <= MOVER_MAX_CONCURRENT,
         "{peak} moves in flight breaks the cap of {MOVER_MAX_CONCURRENT}"
     );
     assert!(peak >= 2, "five lanes must overlap at all: peak was {peak}");
-    for job in &jobs {
-        assert!(!job.lock_ok().move_pending, "every capped move must land");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        landed.is_some(),
+        "every capped move must land: the mover settled nothing for the \
+         no-progress budget"
+    );
 }
 
 /// The dispatcher end of it: the boot rescan's shape - jobs enqueued on
@@ -342,11 +468,10 @@ async fn the_dispatcher_drains_the_queue_into_lanes() {
 
     spawn_mover(&d);
 
-    assert!(settled(&a, Duration::from_secs(10)).await, "replay of a");
-    assert!(settled(&b, Duration::from_secs(10)).await, "replay of b");
+    assert!(settled(&a).await, "replay of a");
+    assert!(settled(&b).await, "replay of b");
     assert!(global.join("Film.Replay").join("payload.bin").exists());
     assert!(tv.join("Show.S02E02").join("payload.bin").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The pacer's bucket belongs to the DAEMON, not to the call. Two
@@ -410,7 +535,6 @@ fn concurrent_pacers_share_one_bucket() {
         elapsed >= Duration::from_millis(1000),
         "two concurrent movers must divide one budget, not take it each: {elapsed:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The measurement behind this change: a small move to one volume,
@@ -480,9 +604,9 @@ async fn mover_lane_bench() {
         );
         assert_eq!(lanes.len(), if one_lane { 1 } else { 2 });
 
-        assert!(settled(&small, Duration::from_secs(600)).await);
+        assert!(settled_within(&small, Duration::from_secs(600)).await);
         let small_at = started.elapsed();
-        assert!(settled(&big, Duration::from_secs(600)).await);
+        assert!(settled_within(&big, Duration::from_secs(600)).await);
         let both_at = started.elapsed();
         println!(
             "[bench] {label}: small ({SMALL_MB} MB) landed at {:.2?}, both ({BIG_MB} MB + \
@@ -490,7 +614,6 @@ async fn mover_lane_bench() {
             small_at, both_at
         );
         results.push((label, small_at, both_at));
-        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&big_root);
         let _ = std::fs::remove_dir_all(&small_root);
     }
@@ -532,8 +655,8 @@ async fn mover_lane_bench() {
     lanes.dispatch(&d, lane_key_for(&d, ""), one.clone());
     lanes.dispatch(&d, lane_key_for(&d, "two"), two.clone());
     assert_eq!(lanes.len(), 2);
-    assert!(settled(&one, Duration::from_secs(600)).await);
-    assert!(settled(&two, Duration::from_secs(600)).await);
+    assert!(settled_within(&one, Duration::from_secs(600)).await);
+    assert!(settled_within(&two, Duration::from_secs(600)).await);
     let paired = started.elapsed();
     let ideal = Duration::from_secs_f64((2 * EACH_MB) as f64 / CAP_MB_S.parse::<f64>().unwrap());
     println!(
@@ -547,7 +670,6 @@ async fn mover_lane_bench() {
         paired > ideal.mul_f64(0.8),
         "two lanes took {paired:?} for what one budget prices at {ideal:?} - each took the cap whole"
     );
-    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&root_one);
     let _ = std::fs::remove_dir_all(&root_two);
 }

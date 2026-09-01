@@ -558,12 +558,15 @@ impl Extractor {
             // the slots that need it.
             if matches!(s.mode, SlotMode::RarChase | SlotMode::SevenZ)
                 && !s.name.is_empty()
-                && sanitize_filename(&s.name) == name
+                && sanitize_out_name(&s.name) == name
             {
                 return vec![(si, start.min(s.size), end.min(s.size), s.size)];
             }
             if let Some(w) = &s.writer {
-                let fname = w.path.file_name().unwrap_or_default().to_string_lossy();
+                // The out_dir-RELATIVE name, not the bare file name: a
+                // tree-preserved member is addressed by its whole
+                // relative path ("VIDEO_TS/x.vob").
+                let fname = out_name_of(&self.out_dir, &w.path);
                 if fname == name {
                     return vec![(si, start.min(w.size), end.min(w.size), w.size)];
                 }
@@ -601,13 +604,13 @@ impl Extractor {
                     // path.
                     match inner.child.as_ref().and_then(|c| c.plain_slot_out_name(cs)) {
                         Some(n) => n,
-                        None => sanitize_filename(&e.name),
+                        None => sanitize_out_name(&e.name),
                     }
                 } else {
                     g.out_names
                         .get(&e.name)
                         .cloned()
-                        .unwrap_or_else(|| sanitize_filename(&e.name))
+                        .unwrap_or_else(|| sanitize_out_name(&e.name))
                 };
                 if out_name != name {
                     continue;
@@ -642,7 +645,7 @@ impl Extractor {
         let Some(g) = inner
             .groups
             .iter()
-            .find(|(k, g)| sanitize_filename(k) == name || g.out_names.values().any(|v| v == name))
+            .find(|(k, g)| sanitize_out_name(k) == name || g.out_names.values().any(|v| v == name))
             .map(|(_, g)| g)
         else {
             return out;
@@ -699,12 +702,7 @@ impl Extractor {
         };
         let mut n = 0;
         for w in &writers {
-            let name = w
-                .current_path()
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
+            let name = out_name_of(&self.out_dir, &w.current_path());
             if verified.iter().any(|(vn, vl)| *vn == name && *vl == w.size) {
                 w.note_repaired(0, w.size);
                 n += 1;
@@ -737,14 +735,7 @@ impl Extractor {
                 .collect();
             for s in &inner.slots {
                 if let Some(w) = &s.writer {
-                    out.push((
-                        w.current_path()
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                        w.clone(),
-                    ));
+                    out.push((out_name_of(&self.out_dir, &w.current_path()), w.clone()));
                 }
             }
             (out, inner.child.clone())
@@ -768,13 +759,9 @@ impl Extractor {
         if !matches!(s.mode, SlotMode::Plain) {
             return None;
         }
-        s.writer.as_ref().map(|w| {
-            w.path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
+        s.writer
+            .as_ref()
+            .map(|w| out_name_of(&self.out_dir, &w.path))
     }
 
     /// (name, size) of every slot-owned output file - what a PARENT folds
@@ -789,16 +776,9 @@ impl Extractor {
             .iter()
             .filter(|s| matches!(s.mode, SlotMode::Plain | SlotMode::RarFallback))
             .filter_map(|s| {
-                s.writer.as_ref().map(|w| {
-                    (
-                        w.path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
-                        w.size,
-                    )
-                })
+                s.writer
+                    .as_ref()
+                    .map(|w| (out_name_of(&self.out_dir, &w.path), w.size))
             })
             .collect()
     }
@@ -810,6 +790,40 @@ impl Extractor {
     pub fn slot_path(&self, slot: usize) -> Option<PathBuf> {
         let inner = self.inner.lock_ok();
         inner.slots[slot].writer.as_ref().map(|w| w.current_path())
+    }
+
+    /// True when this slot's writer saw a byte range written more than
+    /// once - see [`crate::disk::FileWriter::had_rewrite`]. Settle uses it
+    /// to force a read-back so a block left Ok in-stream by the first
+    /// (good) copy of a maliciously-duplicated range is re-hashed from the
+    /// bytes actually on disk.
+    pub fn slot_had_rewrite(&self, slot: usize) -> bool {
+        let inner = self.inner.lock_ok();
+        inner.slots[slot]
+            .writer
+            .as_ref()
+            .is_some_and(|w| w.had_rewrite())
+    }
+
+    /// True when two ARTICLE deliveries wrote one range of this slot with
+    /// DIFFERENT bytes - see
+    /// [`crate::disk::FileWriter::had_conflicting_rewrite`]. Strictly
+    /// narrower than [`Self::slot_had_rewrite`], which is true of any
+    /// overlap at all: a same-article hedge or tail duplicate re-writes
+    /// bytes already on disk and leaves this false.
+    ///
+    /// Settle uses it for the case a read-back cannot settle: a post with
+    /// no recovery set whose own articles contradict each other. There is
+    /// nothing to adjudicate the disagreement, and whichever copy wins is
+    /// decided by arrival order, so the job fails rather than delivering
+    /// one of two different files at rc=0. `Some((offset, len))` names the
+    /// first such range so the refusal can quote it.
+    pub fn slot_had_conflicting_rewrite(&self, slot: usize) -> Option<(u64, u64)> {
+        let inner = self.inner.lock_ok();
+        inner.slots[slot]
+            .writer
+            .as_ref()
+            .and_then(|w| w.conflicting_rewrite_span())
     }
 
     /// Bytes of the slot's declared file range that were never written.
@@ -901,16 +915,8 @@ impl Extractor {
         // `covered` and not a walk over `covered_intervals`: the map is
         // kept sorted and MERGED, so a gap-free span is contained in one
         // interval by construction.
-        w.covered(off, len).then(|| {
-            (
-                w.current_path()
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                w.size,
-            )
-        })
+        w.covered(off, len)
+            .then(|| (out_name_of(&self.out_dir, &w.current_path()), w.size))
     }
 
     /// (file name, size) of the slot's on-disk file - what the journal
@@ -920,16 +926,10 @@ impl Extractor {
     /// find (same rule as [`Self::slot_path`], and half of R3).
     pub fn slot_file_info(&self, slot: usize) -> Option<(String, u64)> {
         let inner = self.inner.lock_ok();
-        inner.slots[slot].writer.as_ref().map(|w| {
-            (
-                w.current_path()
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                w.size,
-            )
-        })
+        inner.slots[slot]
+            .writer
+            .as_ref()
+            .map(|w| (out_name_of(&self.out_dir, &w.current_path()), w.size))
     }
 
     /// Crash resume, REPLAY mode (§94 A): reserve `file_name` in the
@@ -982,8 +982,12 @@ impl Extractor {
         if inner.slots[slot].writer.is_some() {
             return Ok(());
         }
-        let path = self.out_dir.join(file_name);
-        let cur = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        // The size already on disk, off the joined NAME - a read, never
+        // the write's own binding, which `create_resume_under` below
+        // does from the output root.
+        let cur = std::fs::metadata(crate::disk::join_out_name(&self.out_dir, file_name))
+            .map(|m| m.len())
+            .unwrap_or(0);
         // Same reservation ceiling every other writer gets: the journal's
         // `size` came from a slot size the poster declared, so it may not
         // reserve the disk either. `size.max(cur)` stays the writer's
@@ -991,7 +995,12 @@ impl Extractor {
         // cap bounds only what is RESERVED, and never below `cur`, so a
         // resumed file keeps every byte it already holds.
         let cap = inner.limits.prealloc_cap();
-        let w = Arc::new(FileWriter::create_resume_capped(&path, size.max(cur), cap)?);
+        let w = Arc::new(FileWriter::create_resume_under(
+            &self.out_dir,
+            file_name,
+            size.max(cur),
+            cap,
+        )?);
         for &(off, len) in spans {
             w.note_written(off, len);
         }
@@ -1025,7 +1034,8 @@ impl Extractor {
     /// `get::settle` sent every split part down the no-writer path,
     /// read its still-Pending blocks back against a file that does not
     /// exist, and marked EVERY one of them bad. A clean download then
-    /// reported "N recovery block(s) needed but the NZB only carries
+    /// reported "N recovery block(s) needed but the recovery set
+    /// that covers this damage carries only
     /// M" and failed the job (§272, 23 Aug 2026 - the bytes on disk
     /// were byte-identical to the fixture in every captured failure).
     /// Load-dependent only in HOW MANY blocks were still Pending at
@@ -1241,6 +1251,27 @@ impl Extractor {
         }
     }
 
+    /// The name a WRITERLESS slot's file will be created under - what
+    /// [`rename`](Self::rename) has retargeted, or the name the write
+    /// path latched if nothing has.
+    ///
+    /// `None` once a writer exists, because then the question is
+    /// answered by [`slot_path`](Self::slot_path) instead and there is
+    /// exactly one right answer to it. The two are deliberately one
+    /// question asked of two states rather than two doors: a mapped or
+    /// chased slot has no file yet, so a caller deciding what a rename
+    /// would COST has nothing to read - which is how the settle tier's
+    /// GH #63 deferral (`nzbfast::get::settle::current_leaf`) could
+    /// never fire on the very slots the repair ladder materializes.
+    ///
+    /// Empty is `None` too: a slot the write path has not named yet has
+    /// no name to lose.
+    pub fn pending_slot_name(&self, slot: usize) -> Option<String> {
+        let inner = self.inner.lock_ok();
+        let s = &inner.slots[slot];
+        (s.writer.is_none() && !s.name.is_empty()).then(|| s.name.clone())
+    }
+
     /// The on-disk file behind `slot` was renamed (verified-name publish);
     /// keep its writer's by-path reopen in step - see
     /// [`FileWriter::note_renamed`](crate::disk::FileWriter::note_renamed).
@@ -1283,9 +1314,10 @@ impl Extractor {
             if self.depth == 0
                 && materialized
                 && let Some(h) = hook
-                && let Some(name) = new_path.file_name()
             {
-                h(slot, &name.to_string_lossy(), w.size);
+                // The out_dir-relative name: what replay joins back onto
+                // the out dir must round-trip a tree-preserved publish.
+                h(slot, &out_name_of(&self.out_dir, &new_path), w.size);
             }
         }
     }
@@ -1375,13 +1407,9 @@ impl Extractor {
         if !matches!(s.mode, SlotMode::Plain | SlotMode::RarFallback) {
             return None;
         }
-        s.writer.as_ref().map(|w| {
-            w.path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
+        s.writer
+            .as_ref()
+            .map(|w| out_name_of(&self.out_dir, &w.path))
     }
 
     /// Force materialization of a slot's group (e.g. PAR2 repair needs the
@@ -1598,6 +1626,7 @@ mod tests {
         let dir = tmpdir("poison");
         let data = payload(60_000, 94);
         let ex = Arc::new(Extractor::new(&dir, 1, true));
+        ex.anchor();
         // A plain output file, fully written.
         ex.write(0, "file.bin", data.len() as u64, 0, &data)
             .unwrap();

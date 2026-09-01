@@ -3,6 +3,7 @@
 //! Split out of main.rs verbatim; behaviour unchanged.
 
 use crate::*;
+use nzbkit::extract::release_stem;
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -1774,49 +1775,44 @@ pub(crate) async fn nzb_import(
     Ok(())
 }
 
-/// Strip release-file suffixes down to the shared stem:
-/// `x.part01.rar`/`x.r00`/`x.vol000+01.par2`/`x.par2`/`x.rar` → `x`.
-pub(crate) fn release_stem(name: &str) -> String {
-    let lower = name.to_ascii_lowercase();
-    let mut end = lower.len();
-    let cut = |s: &str, end: usize, suffix_ok: &dyn Fn(&str) -> Option<usize>| -> usize {
-        suffix_ok(&s[..end]).unwrap_or(end)
-    };
-    // .par2 first (may wrap .volNN+MM)
-    end = cut(&lower, end, &|s| s.strip_suffix(".par2").map(|r| r.len()));
-    // .volNNN+MM, range-style .volNNN-MMM, and the bare ordinal
-    // .vol-NN - the SHARED rule, the same one kind() and
-    // extract::release_stem ask. This was a third private spelling that
-    // demanded digits before the separator, so a `.vol-NN.par2` post
-    // stemmed its volumes to `Rel.vol-01` while its main and data
-    // stemmed to `Rel`: make_release_nzb below then never saw main,
-    // volume and data in one release map and reported "no complete
-    // release with par2 found" on a complete post (14 Aug sweep).
-    end = cut(&lower, end, &nzbkit::nzb::par2_vol_suffix);
-    end = cut(&lower, end, &|s| s.strip_suffix(".rar").map(|r| r.len()));
-    end = cut(&lower, end, &|s| {
-        // .partNNN
-        let p = s.rfind(".part")?;
-        let tail = &s[p + 5..];
-        (!tail.is_empty() && tail.bytes().all(|c| c.is_ascii_digit())).then_some(p)
-    });
-    end = cut(&lower, end, &|s| {
-        // .rNN / .sNN (split archives)
-        let p = s.rfind('.')?;
-        let tail = &s[p + 1..];
-        (tail.len() >= 2
-            && (tail.starts_with('r') || tail.starts_with('s'))
-            && tail[1..].bytes().all(|c| c.is_ascii_digit()))
-        .then_some(p)
-    });
-    name[..end].to_string()
-}
+// `release_stem` is `nzbkit::extract::release_stem`, imported at the head
+// of this file. It USED to be written out a second time here, and the two
+// spellings drifted twice: once into a third private `.vol-NN` rule, which
+// stemmed a complete post's volumes to `Rel.vol-01` while its main and data
+// stemmed to `Rel`, so `make_release_nzb` below never saw main, volume and
+// data in one release map and reported "no complete release with par2
+// found" (14 Aug 2026 sweep - that fix shared `nzb::par2_vol_suffix` and
+// left the rest of the function duplicated); and then into a missing
+// split-container cut, so a split 7z or zip post shattered into one
+// "release" per volume and could never reach the three-file floor the
+// qualifier applies (31 Aug 2026, `research/RELEASE-STEM-TWIN-2026-08-31.md`).
+// Do not write a second one: there is one public home for this rule.
 
 /// Does this release member put a RAR extractor in the job's path?
 /// Suffix-only, so a `.rar` in the middle of a name does not count:
 /// `x.rar` and `x.part01.rar` both end `.rar`, and the old split
-/// shapes are `x.r00` / `x.s00`. Same spellings `release_stem` above
-/// strips, asked as a question rather than as a cut.
+/// shapes are `x.r00` / `x.s00`.
+///
+/// DELIBERATELY NARROWER THAN THE CUT `release_stem` MAKES, and this
+/// used to claim they were the same spellings - which stopped being true
+/// on 31 Aug 2026 when the twin above was collapsed onto
+/// `extract::release_stem`, whose old-style continuation range is
+/// `r..=z` (a set past `.s99` rolls on into `.t00` … `.z99`, and
+/// `vol_sort_key` orders that whole range). Two reasons this question
+/// stays at `r`/`s` rather than following it:
+///
+/// * `.zNN` is ALSO how PKZIP spells a split zip volume - the shape
+///   `manifest::is_consumable_source` names as its ZIP arm - so a
+///   widened rule answers true for a set with no RAR anywhere in it,
+///   and the ONE caller is `--require-rar`, a screen whose whole job is
+///   to refuse a release that puts no extractor in path.
+/// * It loses nothing here even so. The caller asks this of every
+///   member of a release (`rel.keys().any(..)`), and an old-style
+///   sequence that reaches `.t00` began at `.rar` and passed through
+///   `.r00` … `.s99` to get there, so such a set always carries a
+///   member this answers true for. A false negative would only make the
+///   descent continue; a false positive hands back the fixture the flag
+///   exists to reject.
 pub(crate) fn is_rar_member(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".rar") {
@@ -2105,6 +2101,40 @@ mod scan_pass_tests {
         assert_eq!(
             release_stem("VA.Best.Hits.Vol-3.par2"),
             "VA.Best.Hits.Vol-3"
+        );
+    }
+
+    /// `make_release_nzb` groups by this stem, so a split-container
+    /// post - 7-Zip's `%s.%03d` volumes, or a PKZIP byte split - has to
+    /// reduce every part AND its par2 sidecar to one key or the release
+    /// shatters into one "release" per volume and can never reach the
+    /// three-file floor the qualifier applies. The canonical rule cuts
+    /// the numeric tail and KEEPS the container extension, which is what
+    /// puts `Big.Post.7z.001` and `Big.Post.7z.par2` in one map.
+    #[test]
+    fn a_split_container_post_groups_every_part_with_its_par2() {
+        for (n, want) in [
+            ("Big.Post.7z.001", "Big.Post.7z"),
+            ("Big.Post.7z.002", "Big.Post.7z"),
+            ("Big.Post.7z.100", "Big.Post.7z"),
+            // Four digits past 999 - 7-Zip widens the field.
+            ("Big.Post.7z.1000", "Big.Post.7z"),
+            ("Big.Post.7z.par2", "Big.Post.7z"),
+            ("Big.Post.7z.vol000+01.par2", "Big.Post.7z"),
+            ("Big.Post.zip.001", "Big.Post.zip"),
+            ("Big.Post.ZIP.001", "Big.Post.ZIP"),
+        ] {
+            assert_eq!(release_stem(n), want, "{n} must stem to the set");
+        }
+        // The negatives the digit bounds protect: one and two digits stay,
+        // because `Track.01` is somebody's music and not a volume, and a
+        // numeric tail after anything other than a container extension is
+        // part of the name.
+        assert_eq!(release_stem("Track.01"), "Track.01");
+        assert_eq!(release_stem("Big.Post.7z.01"), "Big.Post.7z.01");
+        assert_eq!(
+            release_stem("Show.S01E05.1080p.264"),
+            "Show.S01E05.1080p.264"
         );
     }
 

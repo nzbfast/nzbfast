@@ -225,6 +225,12 @@ pub(in crate::serve) fn job_json(j: &Job) -> Value {
         // daily is back to retrying an unreachable NAS forever.
         "move_attempts": j.move_attempts,
         "move_pending": j.move_pending,
+        // TODO 317. Persisted because it is a decision made at enqueue
+        // that the restart cannot re-derive: the setting may have been
+        // turned off in between, and a write-through job read back
+        // without it is handed to the mover with a payload the mover
+        // cannot compute a relative path for.
+        "write_through": j.write_through,
         // §296. Persisted for the reason the field's own comment gives:
         // it is the only record of which files are ALREADY at the
         // destination, and a move that forgets publishes them twice.
@@ -501,6 +507,12 @@ pub(in crate::serve) fn job_from_json(v: &Value) -> Option<Job> {
         move_attempts: nar_u32(v, "move_attempts"),
         move_pending: v
             .get("move_pending")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        // Absent on every record written before TODO 317, which reads
+        // as "downloaded into the download folder" - true of all of them.
+        write_through: v
+            .get("write_through")
             .and_then(Value::as_bool)
             .unwrap_or(false),
         // Absent on every record written before §296, which reads as

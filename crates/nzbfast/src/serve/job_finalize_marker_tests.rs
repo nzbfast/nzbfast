@@ -27,6 +27,12 @@ async fn an_unwritable_finalize_marker_skips_post_processing() {
     // A sidecar the default par2 sweep deletes: if post-processing
     // runs regardless, this file is gone and the assert names it.
     std::fs::write(out.join("some.job.par2"), b"par2").unwrap();
+    // X5-03: and the article journal the engine handed us to retire
+    // (`get::JournalOwner::Caller`). Its retirement is ORDERED after the
+    // marker's `save_queue`, and that order is the crash transaction -
+    // see the assert below.
+    let journal = out.join(nzbkit::journal::JOURNAL_LEAF);
+    std::fs::write(&journal, b"nzbfast-journal v1 x\n").unwrap();
     let job = Arc::new(Mutex::new(
         job_from_json(&json!({
             "nzo_id": "SABnzbd_nzo_finmark",
@@ -45,6 +51,27 @@ async fn an_unwritable_finalize_marker_skips_post_processing() {
     assert!(
         out.join("some.job.par2").exists(),
         "post-processing ran with no durable finalize marker"
+    );
+    // X5-03, THE ORDERING - and it is the ordering that IS the crash
+    // transaction rather than either statement on its own. The engine no
+    // longer retires a daemon job's journal; `retire_deferred_journal`
+    // does, and it must run strictly AFTER the `save_queue` that makes
+    // the row's own record durable. Put it one line earlier and the
+    // window X5-03 names reopens - narrower, and just as real - with
+    // nothing in the crash probe able to see it: that probe kills at the
+    // engine's barrier, minutes before either statement runs.
+    //
+    // This arm is where the ordering becomes DETERMINISTICALLY visible,
+    // with no race to catch. The save FAILED, so the row is still in the
+    // resume-from-journal regime and the message above tells the user to
+    // retry the job - advice this file is the only thing that keeps
+    // honest, because a retry with the journal already gone refetches
+    // every byte of a download that had completely finished.
+    assert!(
+        journal.exists(),
+        "the journal was retired before the finalize marker was durable - the row is \
+         still resume-from-journal and its own message promises a retry that would \
+         now refetch the whole job"
     );
     let j = job.lock_ok();
     assert!(!j.finalizing, "the in-memory marker must be cleared");

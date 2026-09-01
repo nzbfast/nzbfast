@@ -1202,3 +1202,43 @@ fn preview_takes_three_modes_and_falls_back_to_the_default() {
     *d.preview.lock_ok() = "yes please".to_string();
     assert_eq!(preview_mode(&d), PREVIEW_DEFAULT);
 }
+
+/// M5 (29 Aug 2026 sweep): the apply/save transaction is per SETTING
+/// NAME, and both halves of that are load-bearing.
+///
+/// Same name must be the same mutex, or `apply_and_save`'s live
+/// mutation and its `settings.json` write can interleave with another
+/// request's and leave the two stores naming different winners - the
+/// credential interleave, which was known, is that race on ONE name.
+/// Different names must NOT share one, or every settings edit queues
+/// behind whichever one is currently probing a NAS that is down.
+#[test]
+fn the_apply_transaction_is_per_setting_name() {
+    let a1 = setting_tx("speedlimit");
+    let a2 = setting_tx("speedlimit");
+    assert!(
+        Arc::ptr_eq(&a1, &a2),
+        "two requests for one setting must contend"
+    );
+    assert!(
+        !Arc::ptr_eq(&a1, &setting_tx("move_completed")),
+        "a slow destination probe must not hold the whole settings surface"
+    );
+    // The credential names keep the guarantee the old global lock gave
+    // them: their own name, contended with themselves.
+    for k in ["apikey", "nzbkey"] {
+        assert!(Arc::ptr_eq(&setting_tx(k), &setting_tx(k)));
+    }
+    assert!(!Arc::ptr_eq(&setting_tx("apikey"), &setting_tx("nzbkey")));
+}
+
+// NOT PINNED HERE, and stated rather than left as a gap: the
+// interleave itself. A same-name race test was written and MEASURED -
+// four writers, 1,600 apply/save rounds, 24 s - and it does not bite
+// with the transaction removed, because `bootstrap::save_settings`
+// takes its own I/O lock and the file write dominates, so the window
+// between one request's apply and its save almost never contains
+// another's whole save. A test that cannot fail is worse than none.
+// What is asserted above is the MECHANISM the property rests on; the
+// interleave needs a barrier inside `apply_and_save`, which is
+// instrumentation this file should not add for it.

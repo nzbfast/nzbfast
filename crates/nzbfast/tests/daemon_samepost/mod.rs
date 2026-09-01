@@ -145,7 +145,7 @@ async fn a_second_grab_of_the_same_post_costs_zero_extra_body_requests() {
         // name-keyed duplicate would be.
         let q = http(port, "/api?mode=queue&output=json", None);
         let held = queue_slot(&q, &second);
-        assert_eq!(held["priority"], "Duplicate", "not held: {q}");
+        assert!(held_behind_a_copy(&held), "not held: {q}");
         assert_eq!(held["status"], "Paused", "a hold is a pause: {q}");
 
         http(port, "/api?mode=resume&output=json", None);
@@ -197,5 +197,4 @@ async fn a_second_grab_of_the_same_post_costs_zero_extra_body_requests() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

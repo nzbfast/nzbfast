@@ -1,10 +1,14 @@
-//! Plain split files: HJSplit-style `.001/.002/…` and `.1/.2/…` runs that
-//! carry NO archive header at all, where the whole "extraction" is a
+//! Plain split files: HJSplit-style `.001/.002/…` and `.1/.2/…` runs, and
+//! the `.part01/.part02/…` spelling of the same thing (M4-55), that carry
+//! NO archive header at all, where the whole "extraction" is a
 //! concatenation in numeric order.
 //!
 //! A poster who byte-splits a raw `Movie.mkv` into `Movie.mkv.001`,
 //! `Movie.mkv.002`, … posts something no archive arm on the ladder can
-//! open, because there is no archive: every part is payload bytes. SABnzbd
+//! open, because there is no archive: every part is payload bytes. The
+//! `.partNN` spelling is the same post typed by a different splitter -
+//! see [`numeric_tail`], which reads both, and rule 3 in
+//! [`collect_split_sets`], which refuses one set that mixes them. SABnzbd
 //! joins these in its post-processing joiner; we used to land the parts
 //! loose and leave the user to `cat` them by hand. This module is the
 //! missing arm, and it is deliberately the LAST one - see
@@ -41,7 +45,9 @@ pub(crate) struct SplitSet {
     /// The joined file's name - the part names with the numeric tail
     /// stripped, in part 1's original case.
     pub(crate) base: String,
-    /// Parts 1..=n in numeric order.
+    /// Every part in numeric order, first part first. The run is
+    /// contiguous and starts at 1 or at 0 - see rule 1 in
+    /// [`collect_split_sets`].
     pub(crate) parts: Vec<PathBuf>,
     /// The parts' total size as MEASURED during detection. The join
     /// compares the bytes it copied against this, so a part that changed
@@ -69,20 +75,67 @@ pub(crate) enum SplitScan {
     Container,
 }
 
-/// The numeric tail of a split part: `Movie.mkv.001` -> (`Movie.mkv`, 1, 3).
-/// The third field is the tail's WIDTH, which the set-level check uses to
-/// refuse a directory mixing `.1` and `.01` for one base.
+/// How a split part spells its index, so the set-level check can refuse
+/// a directory that mixes two spellings for one base.
+///
+/// M4-55 (wave-4 matrix read, 30 Aug 2026). Both are RAW byte splits -
+/// no archive header anywhere, the whole "extraction" is a
+/// concatenation - and they differ only in how the tail is written.
+/// Kept as a value rather than folded into the width, because a mix of
+/// SPELLINGS is a different refusal from a mix of WIDTHS and the two
+/// have to be distinguishable when one is being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tail {
+    /// `true` for the `.partNN` spelling, `false` for the bare `.NNN`.
+    part_prefixed: bool,
+    /// Digits in the tail (1-4), which is what refuses `.1` beside `.01`.
+    width: usize,
+}
+
+/// The index tail of a split part: `Movie.mkv.001` -> (`Movie.mkv`, 1,
+/// bare/3), `Movie.mkv.part01` -> (`Movie.mkv`, 1, prefixed/2).
+///
+/// TWO SPELLINGS, and the set-level check requires one set to use ONE of
+/// them throughout - see [`Tail`] and rule 3 in [`collect_split_sets`].
 ///
 /// Width 1-4 covers every splitter in the wild (`.1`…`.9`, `.001`…`.9999`).
 /// Wider than that is not a split tail, it is a name that happens to end in
 /// digits (`Movie.2019.12345`).
-fn numeric_tail(name: &str) -> Option<(&str, u32, usize)> {
+///
+/// M4-55: `.partNN` is what Total Commander and several posters write for
+/// a RAW byte split of a plain file, and until 30 Aug 2026 this function
+/// saw it as "a tail that is not digits" and the whole set was left loose
+/// on disk - MEASURED on that day's baseline: `Movie.mkv.part01` +
+/// `Movie.mkv.part02` produced 0 sets where `.001` + `.002` produced 1.
+///
+/// Accepting the spelling costs nothing in safety, and the reason is that
+/// the name has never been the gate. `release.part01.rar` is untouched
+/// here (the last tail is `rar`), and an obfuscated RAR set whose `.rar`
+/// was stripped - `release.part01`, `release.part02` - is refused by rule
+/// 5, because EVERY RAR volume carries `Rar!` and the head check reads
+/// every part, not just the first. That is the same argument the module
+/// header already makes for the bare-numeric spelling, applied unchanged.
+///
+/// Case-insensitive on the prefix: a Windows splitter may write `.PART01`,
+/// and the grouping key beside it is lowercased for exactly that reason.
+fn numeric_tail(name: &str) -> Option<(&str, u32, Tail)> {
     let p = name.rfind('.')?;
     let tail = &name[p + 1..];
-    if !(1..=4).contains(&tail.len()) || !tail.bytes().all(|c| c.is_ascii_digit()) {
+    let (digits, part_prefixed) = match tail.get(..4) {
+        Some(pre) if pre.eq_ignore_ascii_case("part") => (&tail[4..], true),
+        _ => (tail, false),
+    };
+    if !(1..=4).contains(&digits.len()) || !digits.bytes().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    Some((&name[..p], tail.parse().ok()?, tail.len()))
+    Some((
+        &name[..p],
+        digits.parse().ok()?,
+        Tail {
+            part_prefixed,
+            width: digits.len(),
+        },
+    ))
 }
 
 /// Does this name's base belong to some OTHER arm of the ladder, or to no
@@ -101,8 +154,12 @@ fn numeric_tail(name: &str) -> Option<(&str, u32, usize)> {
 ///   `.volNNN+NNN` slice marker anywhere in the base. Recovery volumes are
 ///   an INPUT to repair, and this function's caller deletes what it joins.
 /// * `.rev` recovery volumes, for the same reason.
-/// * a base that is itself a numeric tail (`Movie.001.001`), a hidden name,
-///   a name with no alphanumeric character in it, or anything carrying a
+/// * a base that is itself an index tail - `Movie.001.001`, and since
+///   M4-55 `Movie.part01.001` too, because `numeric_tail` reads both
+///   spellings and this test asks it. A base that looks like somebody
+///   else's part means we cannot say what the run is, which is the
+///   conservative direction: the parts stay on disk. A hidden name, a
+///   name with no alphanumeric character in it, or anything carrying a
 ///   path separator. No splitter writes those, and the base becomes an
 ///   output filename.
 ///
@@ -198,12 +255,27 @@ fn carries_archive_magic(path: &std::path::Path, zip_is_the_payload: bool) -> bo
 /// reported, and an unreported set is simply left on disk exactly as it
 /// arrived. The checks, per candidate base:
 ///
-/// 1. **Gapless from 1.** The parts present must be exactly 1..=n. A
-///    missing MIDDLE part (`.001 .002 .004`) leaves a hole in that run and
-///    refuses the whole set - joining it would publish a silently truncated
-///    file over a set the user could still fix by hand. (A missing FINAL
-///    part is not detectable from names alone; nothing can be, and PAR2 has
-///    already spoken for completeness by the time this runs.)
+/// 1. **Gapless, from 1 or from 0.** The parts present must be exactly
+///    `s..s+n` for a first index `s` of 1 or 0. A missing MIDDLE part
+///    (`.001 .002 .004`) leaves a hole in that run and refuses the whole
+///    set - joining it would publish a silently truncated file over a set
+///    the user could still fix by hand. (A missing FINAL part is not
+///    detectable from names alone; nothing can be, and PAR2 has already
+///    spoken for completeness by the time this runs.)
+///
+///    0-ORIGIN is here because splitters emit it (matrix row M4-30,
+///    30 Aug 2026): scene joiners and several GUI splitters write
+///    `.000` as the FIRST part, and the 1-origin-only rule refused
+///    those sets outright - `.000 .001` is neither `1..=2` nor even a
+///    run containing 1 - so the payload landed as loose parts with the
+///    join left to the user. Nothing else about the set is relaxed: a
+///    0-origin run is still held to one file per index, one numbering
+///    width, uniform part sizes, no archive head, a plausible base, and
+///    an output that does not already exist. Those five are what make a
+///    join safe; the first index never was. In particular the `.1`/`.2`
+///    duplicate-download hazard rule 6 exists for cannot reach a
+///    0-origin set, because nothing that suffixes duplicates ever
+///    writes a `.0`.
 /// 2. **No duplicate index.** On a case-sensitive filesystem `Movie.001`
 ///    and `movie.001` are two files claiming to be part 1. We cannot know
 ///    which, and the caller deletes what it joins.
@@ -274,12 +346,16 @@ pub(crate) fn collect_container_split_sets(dir: &std::path::Path) -> Result<Vec<
 /// grouped by `split_7z_part`; a `.rar`/`.zip`/`.zipx` base carrying a 7z
 /// head is a set whose name and head disagree, and that one keeps
 /// today's behaviour - the arm that owns the NAME fails on it first and
-/// the rescue then joins it. A named payload base (`comic.cb7`) is
-/// refused for the standing reason: its 7z bytes ARE the deliverable.
+/// the rescue then joins it. A payload base is refused for the standing
+/// reason - its 7z bytes ARE the deliverable - and since 31 Aug 2026
+/// that covers `Movie.mkv` as well as `comic.cb7`
+/// ([`nzbkit::extract::archive_sniff_eligible_name`]): a byte-split
+/// whose parts join back into a file the poster named as content is a
+/// join, never an unpack.
 pub(crate) fn obfuscated_sevenz_split(set: &SplitSet) -> bool {
     use std::io::Read as _;
     if !plausible_base(&set.base, SplitScan::Plain)
-        || nzbkit::extract::is_final_name(&set.base.to_ascii_lowercase())
+        || !nzbkit::extract::archive_sniff_eligible_name(&set.base)
     {
         return false;
     }
@@ -401,8 +477,8 @@ pub(crate) fn split_part_set(dir: &std::path::Path) -> std::collections::HashSet
 
 fn collect_sets(dir: &std::path::Path, scan: SplitScan) -> Result<Vec<SplitSet>> {
     use std::collections::BTreeMap;
-    // base (lowercased, for grouping) -> index -> (path, base as written, size, tail width)
-    type Part = (PathBuf, String, u64, usize);
+    // base (lowercased, for grouping) -> index -> (path, base as written, size, tail)
+    type Part = (PathBuf, String, u64, Tail);
     let mut groups: BTreeMap<String, BTreeMap<u32, Vec<Part>>> = BTreeMap::new();
     for e in std::fs::read_dir(dir)?.flatten() {
         if !e.file_type().is_ok_and(|t| t.is_file()) {
@@ -414,7 +490,7 @@ fn collect_sets(dir: &std::path::Path, scan: SplitScan) -> Result<Vec<SplitSet>>
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        let Some((base, idx, width)) = numeric_tail(&name) else {
+        let Some((base, idx, tail)) = numeric_tail(&name) else {
             continue;
         };
         let Ok(md) = e.metadata() else {
@@ -425,7 +501,7 @@ fn collect_sets(dir: &std::path::Path, scan: SplitScan) -> Result<Vec<SplitSet>>
             .or_default()
             .entry(idx)
             .or_default()
-            .push((path, base.to_string(), md.len(), width));
+            .push((path, base.to_string(), md.len(), tail));
     }
     let mut out = Vec::new();
     for (_key, indexed) in groups {
@@ -434,17 +510,37 @@ fn collect_sets(dir: &std::path::Path, scan: SplitScan) -> Result<Vec<SplitSet>>
             continue;
         }
         let parts: Vec<&Part> = indexed.values().filter_map(|v| v.first()).collect();
-        // (1) exactly 1..=n, in order - a hole anywhere refuses the set.
+        // (1) a contiguous run from 1 or from 0, in order - a hole
+        //     anywhere refuses the set, and so does any other origin
+        //     (`.007 .008` is a fragment of a set, not a set).
         let n = parts.len();
-        if n < 2 || !indexed.keys().copied().eq(1..=(n as u32)) {
+        let start = indexed.keys().next().copied().unwrap_or(1);
+        if n < 2 || start > 1 || !indexed.keys().copied().eq(start..start + n as u32) {
             continue;
         }
-        // (3) all one width, or all minimal.
-        let uniform = parts.iter().all(|p| p.3 == parts[0].3);
+        // (3) ONE spelling throughout, and then all one width or all
+        //     minimal within it. M4-55/M4-74: a base with `.001` beside
+        //     `.part02` is two splitters' output sharing a stem, or one
+        //     set somebody half-renamed - either way we cannot say what
+        //     the run is, and the caller DELETES what it joins. The
+        //     spelling test is separate from the width test on purpose:
+        //     the two tails of a mixed set may agree on width and still
+        //     be two different runs.
+        //
+        //     "Minimal" is measured from the run's OWN first index, so a
+        //     0-origin `.0 … .9 .10` rollover reads exactly as the
+        //     1-origin one does.
+        if parts
+            .iter()
+            .any(|p| p.3.part_prefixed != parts[0].3.part_prefixed)
+        {
+            continue;
+        }
+        let uniform = parts.iter().all(|p| p.3.width == parts[0].3.width);
         let minimal = parts
             .iter()
             .enumerate()
-            .all(|(i, p)| p.3 == (i + 1).to_string().len());
+            .all(|(i, p)| p.3.width == (i as u32 + start).to_string().len());
         if !uniform && !minimal {
             continue;
         }
@@ -632,13 +728,16 @@ pub(crate) fn rescue_split_of_container(
         // success makes it `Produced` even for an input no arm ever
         // touched (Codex F-01, 23 Aug 2026). A final-payload name is
         // exactly that input by construction - `collect_sevenz_archives`
-        // and the stray-archive door both refuse `.cb7`/`.cbr`, so its
-        // bytes ARE the deliverable and nothing can ever have consumed
-        // them. Deleting one loses it outright: the parts went with the
+        // and the stray-archive door both refuse a payload NAME (`.cb7`,
+        // `.cbr`, and since 31 Aug 2026 `.mkv`/`.iso`/`.srt` and the
+        // rest), so its bytes ARE the deliverable and nothing can ever
+        // have consumed them. The guard is widened in step with those
+        // two on purpose: it is the keep side of the same rule, so a
+        // name they decline must be a name this one preserves. Deleting one loses it outright: the parts went with the
         // join. Any other joined container that no arm claimed makes the
         // aggregate `Failed`, so this branch does not run for it.
         for p in &joined {
-            if nzbkit::extract::is_final_file(p) || nzbkit::zip::is_final_file(p) {
+            if !nzbkit::extract::archive_sniff_eligible(p) || nzbkit::zip::is_final_file(p) {
                 continue;
             }
             if let Some(name) = p.file_name() {

@@ -86,6 +86,33 @@ impl HoldsLedger {
     /// ever an estimate: a predecessor's holds drain while the resumed
     /// job sets up, so this reads high, which is the safe direction for
     /// a gate that spends the remainder.
+    ///
+    /// **THAT LAST SENTENCE IS MEASURED NOW, and it holds** (31 Aug 2026,
+    /// `research/RESUME-SEATABLE-DRIFT-2026-08-31.md`). It reads the same
+    /// SET of seats a joiner's own `senior_bytes` would - a joiner is
+    /// junior to all of them, which is what
+    /// `live_bytes_is_what_the_next_seat_would_lose` pins - so the only
+    /// thing separating the gate's snapshot from the cap its run is judged
+    /// against is TIME. Seven two-job daemon runs put that difference
+    /// between +0.0 MB and +1.2 MB, at most 1.4% of the reading, and the
+    /// reason is the hand-over's own trigger: `pool::handoff::HandoffSignal`
+    /// latches once the predecessor's queue is DRY, so from the instant the
+    /// successor's gate reads, the predecessor will ask for no more
+    /// articles and its holds can only fall.
+    ///
+    /// Two things that does NOT cover, both stated in that note rather
+    /// than left to be found. The residual IN-FLIGHT window still lands
+    /// and still holds; this rig's is ~3 MB and exhausted before the
+    /// signal fires, while the handoff module's own doc describes a
+    /// 360-connection fleet whose queue is dry at 11% of the run with four
+    /// articles outstanding per connection. And the predecessor's TAIL
+    /// overlaps the successor's download by design, so anything feeding
+    /// its extractor there raises this number after the gate has read it -
+    /// `ReplayPending::drain_rest`, the Issue #14 deferred fetch, a
+    /// tail-time nested chase. None of the three was reachable there. If one
+    /// fires the harm is not partial: `HoldsBudget::cap()` floors at
+    /// `HOLDS_CAP_FLOOR`, so the successor sweeps down through
+    /// `cap/volume` = 1, which is the measured 2.89-3.00x pay-twice band.
     pub fn live_bytes(&self) -> usize {
         self.seats
             .lock_ok()

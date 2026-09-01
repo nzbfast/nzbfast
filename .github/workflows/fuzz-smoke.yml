@@ -215,6 +215,28 @@ jobs:
             mkdir -p "corpus/$t"
             find "$d" -type f ! -name README.md -exec cp {} "corpus/$t/" \;
           done
+          # nzb_parse rides that loop since 30 Aug 2026 (seeds/nzb_parse,
+          # 19 files / 33 KB) and there is deliberately NO `cp
+          # ../testdata/nzb/*.nzb` beside it, which is what the fuzz
+          # README used to recommend. libFuzzer takes `max_len` from the
+          # largest corpus UNIT, so seeding the 84,880-byte garbled
+          # fixture drops this 60 s burst from 120k execs to 54k and
+          # lands on FEWER edges (2,102 -> 2,072, measured that day); the
+          # 1.18 MiB undefined-entity fixture is far past that again.
+          # Both shapes are carried by seeds under 600 bytes instead. If
+          # you want the big fixtures, they belong in a long campaign
+          # with an explicit -max_len, not here.
+          # nzb_semantic rides the same loop since 31 Aug 2026
+          # (seeds/nzb_semantic, 18 files / 606 bytes). Those are CHOICE
+          # STREAMS rather than documents - that target builds a manifest
+          # model from its input - and they are what reaches the hostile
+          # arm at INITED: eight `Schema` breaks, six capped fields, and
+          # the two N6-09 count ceilings. The four `nzbc-*` build
+          # documents of up to nineteen MB, so the target holds them
+          # behind a magic prefix and a per-process budget; without the
+          # budget they take this burst from 1,557 exec/s to 287.
+          # Measured worst unit 1.5 s on the dev Mac against the
+          # -timeout=10 below.
           # url_authority_diff needs the scheme prefix in the corpus:
           # "http://" is a 7-byte magic that coverage feedback alone is
           # slow to discover, and everything interesting is behind it.
@@ -259,7 +281,7 @@ jobs:
         working-directory: crates/nzbkit/fuzz
         run: |
           set -e
-          # All eighteen targets (sevenz_name_probe runs separately below
+          # All nineteen targets (sevenz_name_probe runs separately below
           # with its own rss limit). Targets that land after this list was
           # last touched belong here too - absence is an accident, not an
           # exclusion: zip_stream is the chase's call order over an
@@ -275,10 +297,10 @@ jobs:
           # and tar_parse drives nzbkit::tar::Reader - the container with
           # no tail structure, so its bomb guard is the declared total
           # rather than a promote window (TODO 163 item 6's fuzz debt).
-          for t in yenc_decode nzb_parse nzblnk_parse par2_parse rar_extract \
-                   rar_map rar_recovery_scan mkv_parse zip_parse zip_stream \
-                   mediaprobe pesto_msgid par2_verify_diff url_authority_diff \
-                   rar_name_probe audio_tags tar_parse; do
+          for t in yenc_decode nzb_parse nzb_semantic nzblnk_parse par2_parse \
+                   rar_extract rar_map rar_recovery_scan mkv_parse zip_parse \
+                   zip_stream mediaprobe pesto_msgid par2_verify_diff \
+                   url_authority_diff rar_name_probe audio_tags tar_parse; do
             echo "::group::fuzz $t"
             cargo +nightly fuzz run "$t" -- \
               -max_total_time=60 -rss_limit_mb=4096 -timeout=10

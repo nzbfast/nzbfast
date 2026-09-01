@@ -61,7 +61,7 @@ COPY --from=build /src/target/release/nzbfast.debug /usr/lib/debug/usr/local/bin
 
 LABEL org.opencontainers.image.title="nzbfast" \
       org.opencontainers.image.source="https://github.com/nzbfast/nzbfast" \
-      org.opencontainers.image.url="https://nzbfast.com" \
+      org.opencontainers.image.url="https://nzbfast.github.io/nzbfast/" \
       org.opencontainers.image.vendor="nzbfast"
 
 # Config + data mount points (compose/NAS bind them). WORKDIR /config so

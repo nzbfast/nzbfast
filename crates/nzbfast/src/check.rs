@@ -228,12 +228,20 @@ fn damaged_span(damage: &FileDamage) -> u64 {
 /// then failed on every release, over a file their own cleanup settings
 /// would have deleted seconds later.
 ///
-/// This is the same predicate the post-drain census now uses to spare
-/// such a slot (`smart::is_junk_ext`, via `get::census`), which is the
-/// point: pre-flight should predict what the downloader will actually
-/// do. Its exclusions are what make it safe - archives and executables
-/// are deliberately NOT furniture, so a missing `.rar` or `.mkv` still
-/// decides the verdict.
+/// This is the EXTENSION HALF of the predicate the post-drain census
+/// uses to spare such a slot (`smart::is_junk_ext`, via
+/// `census::SpareRule`), which is the point: pre-flight should predict
+/// what the downloader will actually do. Its exclusions are what make it
+/// safe - archives and executables are deliberately NOT furniture, so a
+/// missing `.rar` or `.mkv` still decides the verdict.
+///
+/// The census's OTHER half is per-POST and so cannot live in a predicate
+/// over one name: furniture is only furniture where the post carries
+/// payload beside it (row M4-33). Its counterpart here is applied at the
+/// one call site, where the whole file list is in hand - see the arm
+/// beside `furniture` in `check` below. Keep the two in step: a text
+/// release that pre-flights as "one droppable `.txt`" and then fails the
+/// download is exactly the mispredict this function exists to prevent.
 ///
 /// Two narrowings on top of the shared list:
 ///
@@ -932,39 +940,45 @@ fn fold_raw_stem(stem: &str) -> String {
 /// must not be allowed to inflate this. Mis-splitting a single-set NZB
 /// would only drop the cap there - it refuses strictly less, never
 /// more - but it would quietly cost the benefit, so it is worth not
-/// doing by accident.
+/// doing by accident. Since the stem comes off the classification
+/// itself (T2, 31 Aug 2026) a PAR2 kind always yields one, so the
+/// unparseable case is now the `Data` files the kind gate already
+/// drops; an EMPTY stem is a different answer and still takes the
+/// anonymous-set arm below.
 fn multiple_par2_sets(nzb: &Nzb) -> bool {
     let mut stems: Vec<String> = Vec::new();
     // A PAR2 file whose name reduces to nothing at all.
     let mut anonymous = false;
     for f in &nzb.files {
-        if !matches!(f.kind(), FileKind::Par2Main | FileKind::Par2Volume) {
+        // ONE call, and the stem comes off the SAME answer. `.volNNN+MM
+        // .par2` -> the stem in front of `.vol`; a bare `.par2` Main ->
+        // the stem in front of that - both under the rule that produced
+        // the kind gated on two lines above, which is what
+        // `SubjectClass` exists to carry.
+        //
+        // BOTH ARMS, which the T3 gate could only fix one of. That gate
+        // caught the Main arm restating the terminal rule and folded it
+        // onto `nzb::par2_name_end`, correctly; the VOLUME arm was still
+        // `par2_vol_suffix`, the RAW-subject rule, whatever rule decided
+        // the kind - and that is the arm that fires on a quoted
+        // `"a.vol-10.par2 x.par2"`. `kind()` calls it a Main whose stem
+        // is `a.vol-10.par2 x`; the raw suffix rule read it as a volume
+        // of `a` and folded it into an unrelated `a.par2` set, so this
+        // detector saw one set where there are two and left the
+        // declared-count cap live over a set no probe had sized (T2, 31
+        // Aug 2026). A gate against RESTATING the rule cannot see a
+        // reader calling the right function with the wrong `isolated`.
+        let class = f.classify();
+        if !matches!(class.kind(), FileKind::Par2Main | FileKind::Par2Volume) {
             continue;
         }
-        let quoted = f.filename_hint().is_some();
-        let name = f.filename_hint().unwrap_or(&f.subject).to_ascii_lowercase();
-        // `.volNNN+MM.par2` -> the stem in front of `.vol`; a bare
-        // `.par2` Main -> the stem in front of that. Same two shapes
-        // `par2_vol_count` reads, so the two cannot disagree about what
-        // a volume of a set is called.
-        let stem = match nzbkit::nzb::par2_vol_suffix(&name) {
-            Some(vol) => &name[..vol],
-            // kind()'s OWN rule for a Main, not `strip_suffix(".par2")`:
-            // `.par2` ending the name or followed by whitespace. The two
-            // have to agree, and with strip_suffix they did not - a Main
-            // classified from an unquoted raw subject ("setb.par2 yEnc
-            // (1/1)") is a Par2Main to kind() and was skipped here, so a
-            // second set represented ONLY by such a Main left cross_set
-            // false and the declared-count cap alive. That cap can
-            // refuse a genuinely repairable post (18 Aug sweep).
-            None => match name.match_indices(".par2").find(|(i, _)| {
-                let rest = &name[i + ".par2".len()..];
-                rest.is_empty() || rest.starts_with(char::is_whitespace)
-            }) {
-                Some((i, _)) => &name[..i],
-                None => continue,
-            },
+        // Some for every PAR2 kind by construction, so this arm is the
+        // shape rather than a live case - see `SubjectClass::par2_stem`.
+        let Some(stem) = class.par2_stem() else {
+            continue;
         };
+        let lowered = stem.to_ascii_lowercase();
+        let stem = lowered.as_str();
         // A RAW subject carries more than the filename, and the extra is
         // per-file: "[01/02] - set.par2" and "[02/02] - set.vol000+51.par2"
         // are one set whose stems differ only by a counter, and comparing
@@ -974,7 +988,7 @@ fn multiple_par2_sets(nzb: &Nzb) -> bool {
         // contain spaces, and merging two genuinely different sets is
         // the unsafe direction.
         let folded;
-        let stem = match quoted {
+        let stem = match class.isolated() {
             true => stem,
             false => {
                 folded = fold_raw_stem(stem);
@@ -1030,7 +1044,7 @@ fn live_volumes(nzb: &Nzb, absent_volumes: &[usize]) -> Vec<(u64, Option<usize>)
             let declared = if cross_set {
                 None
             } else {
-                vol_count_from_name(f.filename_hint().unwrap_or(&f.subject))
+                vol_count_from_name(f.classify().name())
             };
             (f.bytes(), declared)
         })
@@ -1291,7 +1305,7 @@ pub(crate) async fn check(
     // qualify: a `Par2Volume` is budget rather than deficit, and
     // `Par2Main` is the packet repair is made of, not something to shrug
     // off.
-    let furniture: Vec<bool> = nzb
+    let mut furniture: Vec<bool> = nzb
         .files
         .iter()
         .map(|f| {
@@ -1299,6 +1313,24 @@ pub(crate) async fn check(
                 && is_droppable_metadata(f.filename_hint().unwrap_or(&f.subject))
         })
         .collect();
+    // Row M4-33's payload arm, and the reason this whole function
+    // exists: pre-flight must predict what the downloader will do.
+    // `census::SpareRule` spares furniture only where the post carries
+    // payload for it to sit BESIDE, so a text release - every name in it
+    // furniture, the `.txt` the deliverable - has nothing droppable in
+    // it at all. Without this arm a book post short an article
+    // pre-flights as "one droppable .txt, deficit 0, OK" and then fails
+    // the download, which is the mispredict the #23 work was undertaken
+    // to end rather than to move one file over.
+    if !nzb
+        .files
+        .iter()
+        .zip(&furniture)
+        .any(|(f, junk)| f.kind() == FileKind::Data && !junk)
+    {
+        furniture.iter_mut().for_each(|j| *j = false);
+    }
+    let furniture = furniture;
     // Recovery volumes are in the sweep now, so the deficit has to say
     // out loud what it always meant: payload only. Counting a volume
     // here would charge the budget's own absence to the damage it is
@@ -1319,7 +1351,7 @@ pub(crate) async fn check(
         .enumerate()
         .filter(|(_, f)| f.kind() == FileKind::Par2Volume)
     {
-        match vol_count_from_name(f.filename_hint().unwrap_or(&f.subject)) {
+        match vol_count_from_name(f.classify().name()) {
             // Saturating, not `+=`: the count comes from a filename in
             // a file we were handed, and a budget that wraps is worse
             // than one that pegs. `par2_vol_count` caps the per-volume

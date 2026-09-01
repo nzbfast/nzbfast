@@ -46,6 +46,19 @@ def main():
         i = argv.index("--skip-dirs")
         skip = {d for d in argv[i + 1].split(",") if d}
         del argv[i:i + 2]
+    # --names-strict: deobfuscation grading. The nested round asks "did
+    # the payload bytes come out"; a deobf round asks "did they come out
+    # UNDER THE RIGHT NAME" - bytes-right-name-wrong is precisely the
+    # defect those legs exist to measure, so content found elsewhere is
+    # counted separately as misnamed= and caps the class at
+    # manual-intervention (an operator must rename by hand). A payload
+    # with a "path" field must sit at that outdir-relative path (tree
+    # legs); otherwise its exact basename anywhere counts. Default
+    # behavior without the flag is unchanged for the old rounds.
+    strict = False
+    if "--names-strict" in argv:
+        strict = True
+        argv.remove("--names-strict")
     if len(argv) != 3:
         sys.exit(__doc__)
     manifest = json.load(open(argv[0]))
@@ -67,24 +80,49 @@ def main():
             except OSError:
                 pass
 
-    missing, matched = [], 0
+    def content_ok(cand, p):
+        try:
+            return os.path.getsize(cand) == p["bytes"] and sha256(cand) == p["sha256"]
+        except OSError:
+            return False
+
+    missing, matched, misnamed = [], 0, []
     for p in manifest["payloads"]:
         ok = False
-        # Fast path: a file with the same basename and matching content.
-        for cand in by_name.get(p["name"], []):
-            if os.path.getsize(cand) == p["bytes"] and sha256(cand) == p["sha256"]:
-                ok = True
-                break
+        if strict and p.get("path"):
+            # Tree leg: the payload must sit AT its expected relative
+            # path. The job root differs per client (outdir/<job>/...),
+            # so any file whose outdir-relative path ends with the
+            # expected path counts - a component-aligned suffix, never a
+            # substring, so "S_01.VOB" cannot satisfy "VTS_01.VOB".
+            want = p["path"].replace("\\", "/").strip("/").split("/")
+            for cands in by_name.get(want[-1], []):
+                rel = os.path.relpath(cands, outdir).replace(os.sep, "/").split("/")
+                if rel[-len(want):] == want and content_ok(cands, p):
+                    ok = True
+                    break
+        else:
+            # Fast path: a file with the same basename and matching content.
+            for cand in by_name.get(p["name"], []):
+                if content_ok(cand, p):
+                    ok = True
+                    break
         # Name-independent path: any file of the right size and sha256
-        # (credits clients that renamed the extracted payload).
+        # (credits clients that renamed the extracted payload). Under
+        # --names-strict this does NOT credit a match - it diagnoses one:
+        # the bytes exist under some other name/place, which is the
+        # deobfuscation defect itself.
         if not ok:
             for cand in by_size.get(p["bytes"], []):
                 if sha256(cand) == p["sha256"]:
-                    ok = True
+                    if strict:
+                        misnamed.append(p["name"])
+                    else:
+                        ok = True
                     break
         if ok:
             matched += 1
-        else:
+        elif p["name"] not in misnamed:
             missing.append(p["name"])
 
     # Leftover archives = a visible signal that denesting stopped early.
@@ -103,6 +141,8 @@ def main():
     line = f"class={cls} matched={matched}/{n}"
     if missing:
         line += " missing=" + ",".join(missing[:5])
+    if misnamed:
+        line += " misnamed=" + ",".join(misnamed[:5])
     if leftover:
         line += " leftover=" + ",".join(leftover[:5])
     print(line)

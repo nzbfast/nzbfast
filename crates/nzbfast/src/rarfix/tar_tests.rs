@@ -7,11 +7,9 @@
 use super::*;
 use nzbkit::tar::fixtures::{Spec, tar_of};
 
-fn tmp(tag: &str) -> PathBuf {
+fn tmp(tag: &str) -> crate::testscratch::ScratchDir {
     let d = std::env::temp_dir().join(format!("nzbfast-tarx-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    crate::testscratch::ScratchDir::attach(&d)
 }
 
 /// Write `bytes` into `dir` as `name` and answer the path.

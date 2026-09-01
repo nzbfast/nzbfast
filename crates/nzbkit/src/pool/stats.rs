@@ -75,7 +75,7 @@ pub struct PoolStats {
     ///
     /// `ever_connected` cannot see it: that stays TRUE for a server that
     /// worked for ten minutes and then walked out. So nothing said the
-    /// quorum had shrunk while `live_mask` (alive NOW) stopped counting
+    /// quorum had shrunk while `live_mask` (able to serve NOW) stopped counting
     /// the leaver, and the survivors' 430s on the segments it alone
     /// carried read as unanimous. What that cost - a healthy post
     /// reported gone, the one automatic retry suppressed, and with it the

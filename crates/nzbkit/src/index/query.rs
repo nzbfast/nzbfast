@@ -1088,9 +1088,9 @@ mod tests {
 
     #[test]
     fn a_movie_year_answers_only_when_unambiguous() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-my-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-index-my-{}", std::process::id())),
+        );
         let ix = Index::open(&dir.join("index.db")).unwrap();
         let put = |key: &str, kind: &str, year: u32| {
             ix.db

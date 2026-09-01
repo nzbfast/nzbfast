@@ -3,11 +3,14 @@ use super::ApiCtx;
 
 /// Is `k` one of the usage ledger's DATE buckets?
 ///
-/// The store is keyed `"YYYY-MM-DD" -> host -> bytes`, plus three
-/// buckets that are not days and are never pruned: `"lifetime"`
-/// (billed in parallel, answers the total), `"reliability"` (article
-/// try counts, not bytes) and `"block_base"` (the §96.5 per-host
-/// lifetime offset stamped when the user pressed "Block refilled").
+/// The store is keyed `"YYYY-MM-DD" -> host -> bytes`, plus four
+/// buckets that are not days and are never pruned as days:
+/// `"lifetime"` (billed in parallel, answers the total),
+/// `"reliability"` (lifetime article try counts, not bytes),
+/// `"article_days"` (the same tally with a day dimension, pruned per
+/// host rather than by this rule) and `"block_base"` (the §96.5
+/// per-host lifetime offset stamped when the user pressed "Block
+/// refilled").
 ///
 /// Naming the non-date buckets and skipping those is what this used to
 /// do, and it is the wrong way round: `"block_base"` was added after
@@ -31,10 +34,33 @@ fn is_date_bucket(k: &str) -> bool {
         && d.parse::<u32>().is_ok_and(|d| (1..=31).contains(&d))
 }
 
+/// A per-server object with every field SAB publishes, at zero. The
+/// three MAP fields are the shape half of GitHub #69 / TODO 320:
+/// `_api_server_stats` hands the client `daily`, `articles_tried` and
+/// `articles_success` as `{"YYYY-MM-DD": n}` objects
+/// (`BPSMeter.amounts` returns `timeline_total`, `article_stats_tried`
+/// and `article_stats_failed`, all declared `dict[str, dict[str, int]]`),
+/// and we published `{}` for the first and a bare integer for the other
+/// two. A statically-typed client deserializing `Map<String,Int>` from
+/// `0` throws where it stands, which is what crashed nzb360's download
+/// history view against us and not against SAB.
+///
+/// One function rather than a literal at each site because there were
+/// two copies of that literal and both were wrong in the same way.
+fn empty_server_stats() -> Value {
+    json!({"total": 0u64, "month": 0u64, "week": 0u64, "day": 0u64,
+           "daily": {}, "articles_tried": {}, "articles_success": {}})
+}
+
 /// The `mode=server_stats` payload, off the usage ledger. `days` is the
-/// current UTC day number. Split out from the handler so the bucket
+/// current UTC day number and `configured` is every server host in the
+/// config, traffic or not. Split out from the handler so the bucket
 /// classification above is testable without standing up a daemon.
-fn server_stats_json(u: &serde_json::Map<String, Value>, days: i64) -> Value {
+fn server_stats_json(
+    u: &serde_json::Map<String, Value>,
+    days: i64,
+    configured: &[String],
+) -> Value {
     // Shape SAB apps expect: total/month/week/day bytes,
     // plus the same per server - fed from the usage ledger.
     let (y, m, dd) = civil_from_days(days);
@@ -46,6 +72,19 @@ fn server_stats_json(u: &serde_json::Map<String, Value>, days: i64) -> Value {
     };
     let mut tot = (0u64, 0u64, 0u64, 0u64); // total, month, week, day
     let mut servers = serde_json::Map::new();
+    // SAB iterates `config.get_servers()`, so a configured server that
+    // has never been used still appears, with zeros. We built this map
+    // from the LEDGER alone, so a second account showed up only once it
+    // had spent something - and a client that walks its own server list
+    // and indexes `servers[name]` got a null. That is an independent
+    // crash path from the map-shaped fields above, and a compat bug on
+    // its own (GitHub #69 finding 3). Seeded first, so the ledger fills
+    // these in rather than the other way round.
+    for host in configured {
+        servers
+            .entry(host.clone())
+            .or_insert_with(empty_server_stats);
+    }
     for (day, hosts) in u {
         let lifetime = day == "lifetime";
         if !lifetime && !is_date_bucket(day) {
@@ -56,10 +95,9 @@ fn server_stats_json(u: &serde_json::Map<String, Value>, days: i64) -> Value {
         };
         for (host, b) in hosts {
             let b = b.as_u64().unwrap_or(0);
-            let e = servers.entry(host.clone()).or_insert_with(|| {
-                json!({"total":0u64,"month":0u64,"week":0u64,"day":0u64,
-                                "daily":{}, "articles_tried":0,"articles_success":0})
-            });
+            let e = servers
+                .entry(host.clone())
+                .or_insert_with(empty_server_stats);
             let eo = e.as_object_mut().unwrap();
             let bump = |eo: &mut serde_json::Map<String, Value>, k: &str, v: u64| {
                 let cur = eo.get(k).and_then(Value::as_u64).unwrap_or(0);
@@ -69,6 +107,21 @@ fn server_stats_json(u: &serde_json::Map<String, Value>, days: i64) -> Value {
                 bump(eo, "total", b);
                 tot.0 += b;
             } else {
+                // `daily`: the per-day byte history, SAB's
+                // `timeline_total`. This loop already had the value in
+                // hand for the three windows below and threw it away,
+                // so the map went out empty on every install - the
+                // chart the client draws from it was blank even before
+                // the shape above crashed the parse (GitHub #69
+                // finding 1).
+                if let Some(dm) = eo
+                    .entry("daily")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                {
+                    let cur = dm.get(day.as_str()).and_then(Value::as_u64).unwrap_or(0);
+                    dm.insert(day.clone(), json!(cur + b));
+                }
                 if day.starts_with(&month_prefix) {
                     bump(eo, "month", b);
                     tot.1 += b;
@@ -84,23 +137,55 @@ fn server_stats_json(u: &serde_json::Map<String, Value>, days: i64) -> Value {
             }
         }
     }
-    // Reliability ledger → the SAB per-server article
-    // counters apps already display.
+    // The LIFETIME reliability bucket only puts the host on the list.
+    // A provider that answered nothing but 430s has articles tried and
+    // zero bytes billed, so it is in no date bucket and would otherwise
+    // be missing from a payload that is partly about how badly it is
+    // doing.
     if let Some(rel) = u.get("reliability").and_then(Value::as_object) {
-        for (host, counts) in rel {
-            let g = |k| counts.get(k).and_then(Value::as_u64).unwrap_or(0);
-            let (tried, missing) = (g("tried"), g("missing"));
-            let e = servers.entry(host.clone()).or_insert_with(|| {
-                json!({"total":0u64,"month":0u64,"week":0u64,"day":0u64,
-                                "daily":{}, "articles_tried":0,"articles_success":0})
-            });
-            if let Some(eo) = e.as_object_mut() {
-                eo.insert("articles_tried".into(), json!(tried));
-                eo.insert(
-                    "articles_success".into(),
-                    json!(tried.saturating_sub(missing)),
-                );
+        for host in rel.keys() {
+            servers
+                .entry(host.clone())
+                .or_insert_with(empty_server_stats);
+        }
+    }
+    // The counters themselves come from the DAY-dimensioned bucket,
+    // which is what SAB publishes. A host with lifetime tries and no
+    // day rows - every install that upgrades into this, until its next
+    // download - gets `{}`, which is what SAB gives for a server it has
+    // no article stats for. Deliberately not a synthetic key for today:
+    // that would attribute the whole history to one day.
+    if let Some(byday) = u.get("article_days").and_then(Value::as_object) {
+        for (host, rows) in byday {
+            let Some(rows) = rows.as_object() else {
+                continue;
+            };
+            let e = servers
+                .entry(host.clone())
+                .or_insert_with(empty_server_stats);
+            let Some(eo) = e.as_object_mut() else {
+                continue;
+            };
+            let (mut tried_m, mut succ_m) = (serde_json::Map::new(), serde_json::Map::new());
+            for (day, counts) in rows {
+                if !is_date_bucket(day) {
+                    continue;
+                }
+                let g = |k| counts.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let (tried, missing) = (g("tried"), g("missing"));
+                tried_m.insert(day.clone(), json!(tried));
+                // TODO 320 finding 4, NOT yet decided: SAB's own
+                // `_api_server_stats` unpacks `article_stats_FAILED`
+                // into the key `articles_success`, so a client
+                // calibrated against SAB reads this number as failures.
+                // We publish true successes. Whether to be bug-for-bug
+                // compatible with an upstream misnomer is a maintainer's
+                // call, so the meaning is left exactly as it was and
+                // only the SHAPE moved here.
+                succ_m.insert(day.clone(), json!(tried.saturating_sub(missing)));
             }
+            eo.insert("articles_tried".into(), Value::Object(tried_m));
+            eo.insert("articles_success".into(), Value::Object(succ_m));
         }
     }
     json!({"total": tot.0, "month": tot.1, "week": tot.2, "day": tot.3,
@@ -111,15 +196,27 @@ fn m_server_stats(
     d: &Arc<Daemon>,
     _req: &mut tiny_http::Request,
     _params: &std::collections::HashMap<String, String>,
-    _ctx: &ApiCtx<'_>,
+    ctx: &ApiCtx<'_>,
     _api_body: &mut Option<Vec<u8>>,
 ) -> Option<Value> {
+    // Clone and drop the usage guard on this line: `current_servers`
+    // below reads the config off disk, and the ledger mutex is taken by
+    // every finishing download.
     let u = d.usage.lock_ok().clone();
     let days = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| (d.as_secs() / 86_400) as i64)
         .unwrap_or(0);
-    Some(server_stats_json(&u, days))
+    // Keyed by `host`, which is what the ledger bills to, so a
+    // configured server that HAS spent something lands on its own row
+    // rather than beside a duplicate.
+    let configured: Vec<String> = current_servers(ctx.cfg_path)
+        .iter()
+        .filter_map(|s| s.get("host").and_then(Value::as_str))
+        .filter(|h| !h.is_empty())
+        .map(str::to_string)
+        .collect();
+    Some(server_stats_json(&u, days, &configured))
 }
 
 fn m_server_save(
@@ -2601,12 +2698,12 @@ mod tests {
         let mut u = serde_json::Map::new();
         u.insert("2026-08-28".into(), json!({"blk.example": 100u64}));
         u.insert("lifetime".into(), json!({"blk.example": 900u64}));
-        let before = server_stats_json(&u, today);
+        let before = server_stats_json(&u, today, &[]);
 
         // The user presses "Block refilled": the store gains a
         // never-pruned bucket holding this host's lifetime spend.
         u.insert("block_base".into(), json!({"blk.example": 900u64}));
-        let after = server_stats_json(&u, today);
+        let after = server_stats_json(&u, today, &[]);
 
         assert_eq!(after, before, "a refill is not a week of downloading");
         assert_eq!(after["week"], json!(100u64));
@@ -2626,7 +2723,7 @@ mod tests {
         let today = day_num(2026, 8, 28);
         let mut u = serde_json::Map::new();
         u.insert("2026-08-28".into(), json!({"h": 5u64}));
-        let base = server_stats_json(&u, today);
+        let base = server_stats_json(&u, today, &[]);
         for k in [
             "reliability",
             "block_base",
@@ -2635,7 +2732,7 @@ mod tests {
         ] {
             let mut u = u.clone();
             u.insert(k.into(), json!({"h": 1_000_000u64}));
-            let got = server_stats_json(&u, today);
+            let got = server_stats_json(&u, today, &[]);
             assert_eq!(
                 (&got["total"], &got["month"], &got["week"], &got["day"]),
                 (&base["total"], &base["month"], &base["week"], &base["day"]),
@@ -2655,7 +2752,7 @@ mod tests {
         u.insert("2026-08-21".into(), json!({"h": 4u64})); // this month, not the week
         u.insert("2026-07-30".into(), json!({"h": 8u64})); // neither
         u.insert("lifetime".into(), json!({"h": 15u64}));
-        let s = server_stats_json(&u, today);
+        let s = server_stats_json(&u, today, &[]);
         assert_eq!(s["day"], json!(1u64));
         assert_eq!(s["week"], json!(3u64));
         assert_eq!(s["month"], json!(7u64));
@@ -2665,18 +2762,145 @@ mod tests {
 
     /// `reliability` holds try counts rather than bytes, and is read a
     /// second time on purpose - being skipped as a byte bucket must not
-    /// stop it answering the article counters.
+    /// stop the host appearing at all. It no longer fills the counters
+    /// (`article_days` does, below); a provider answering nothing but
+    /// 430s bills no bytes, so without this read it would be missing
+    /// from a payload that is partly about how badly it is doing.
     #[test]
-    fn reliability_still_fills_the_article_counters() {
+    fn reliability_still_puts_the_host_on_the_list() {
         let mut u = serde_json::Map::new();
         u.insert(
             "reliability".into(),
             json!({"h": {"tried": 100u64, "missing": 3u64}}),
         );
-        let s = server_stats_json(&u, day_num(2026, 8, 28));
-        assert_eq!(s["servers"]["h"]["articles_tried"], json!(100u64));
-        assert_eq!(s["servers"]["h"]["articles_success"], json!(97u64));
+        let s = server_stats_json(&u, day_num(2026, 8, 28), &[]);
+        assert!(s["servers"]["h"].is_object(), "the host is listed");
         assert_eq!(s["week"], json!(0u64), "tries are not bytes");
+        // ...and its lifetime pair is NOT smuggled in under a day key.
+        assert_eq!(s["servers"]["h"]["articles_tried"], json!({}));
+        assert_eq!(s["servers"]["h"]["articles_success"], json!({}));
+    }
+
+    // -- GH #69 / TODO 320: the SAB `server_stats` shape ---------------
+
+    /// Finding 1. `"daily":{}` was a literal at two sites and nothing
+    /// anywhere wrote into it, so the per-day chart the client draws was
+    /// blank on every install. The values were already in hand: this is
+    /// the same ledger the three windows are summed from.
+    #[test]
+    fn daily_carries_a_row_per_date_bucket() {
+        let mut u = serde_json::Map::new();
+        u.insert("2026-08-28".into(), json!({"h": 1u64}));
+        u.insert("2026-08-23".into(), json!({"h": 2u64}));
+        u.insert("2026-07-30".into(), json!({"h": 8u64}));
+        u.insert("lifetime".into(), json!({"h": 11u64}));
+        u.insert("block_base".into(), json!({"h": 5u64}));
+        let s = server_stats_json(&u, day_num(2026, 8, 28), &[]);
+        let daily = s["servers"]["h"]["daily"].as_object().unwrap().clone();
+        assert_eq!(
+            daily
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["2026-07-30", "2026-08-23", "2026-08-28"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>(),
+            "every date bucket and nothing else: {daily:?}"
+        );
+        assert_eq!(daily["2026-08-28"], json!(1u64));
+        assert_eq!(daily["2026-07-30"], json!(8u64), "older than the window");
+        // The windows are unmoved by carrying the same bytes twice.
+        assert_eq!(s["servers"]["h"]["week"], json!(3u64));
+        assert_eq!(s["servers"]["h"]["total"], json!(11u64));
+    }
+
+    /// Finding 2, the crash. SAB gives `articles_tried` and
+    /// `articles_success` as `{"YYYY-MM-DD": n}`; we gave a bare
+    /// integer, and a statically-typed client deserializing
+    /// `Map<String,Int>` from `0` throws at parse time.
+    #[test]
+    fn the_article_counters_are_date_keyed_maps_and_never_scalars() {
+        let mut u = serde_json::Map::new();
+        u.insert(
+            "article_days".into(),
+            json!({"h": {
+                "2026-08-28": {"tried": 100u64, "missing": 3u64},
+                "2026-08-27": {"tried": 10u64, "missing": 10u64},
+            }}),
+        );
+        let s = server_stats_json(&u, day_num(2026, 8, 28), &[]);
+        let (t, ok) = (
+            &s["servers"]["h"]["articles_tried"],
+            &s["servers"]["h"]["articles_success"],
+        );
+        assert!(
+            t.is_object() && ok.is_object(),
+            "maps, not scalars: {t} {ok}"
+        );
+        assert_eq!(t["2026-08-28"], json!(100u64));
+        assert_eq!(ok["2026-08-28"], json!(97u64));
+        assert_eq!(t["2026-08-27"], json!(10u64));
+        assert_eq!(ok["2026-08-27"], json!(0u64), "every article missing");
+        // A zero-traffic server's counters are maps too - the empty
+        // map is the shape, so a client parses it the same way.
+        let s = server_stats_json(
+            &serde_json::Map::new(),
+            day_num(2026, 8, 28),
+            &["idle.example".to_string()],
+        );
+        assert_eq!(s["servers"]["idle.example"]["articles_tried"], json!({}));
+    }
+
+    /// ...and a row the day dimension cannot read is skipped rather
+    /// than emitted under a key that is not a date, which is the one
+    /// thing that would put the client back where it started.
+    #[test]
+    fn a_non_date_row_never_reaches_the_article_maps() {
+        let mut u = serde_json::Map::new();
+        u.insert(
+            "article_days".into(),
+            json!({"h": {
+                "lifetime": {"tried": 9u64, "missing": 0u64},
+                "2026-08-28": {"tried": 1u64, "missing": 0u64},
+            }}),
+        );
+        let s = server_stats_json(&u, day_num(2026, 8, 28), &[]);
+        let t = s["servers"]["h"]["articles_tried"].as_object().unwrap();
+        assert_eq!(t.len(), 1, "{t:?}");
+        assert_eq!(t["2026-08-28"], json!(1u64));
+    }
+
+    /// Finding 3. SAB iterates the CONFIG, so every configured server
+    /// is listed whether or not it has spent anything; we built the map
+    /// from the ledger, so a client that walks its own server list and
+    /// indexes `servers[name]` got a null.
+    #[test]
+    fn a_configured_server_with_no_traffic_is_listed_with_zeros() {
+        let mut u = serde_json::Map::new();
+        u.insert("2026-08-28".into(), json!({"busy.example": 5u64}));
+        u.insert("lifetime".into(), json!({"busy.example": 5u64}));
+        let s = server_stats_json(
+            &u,
+            day_num(2026, 8, 28),
+            &["busy.example".to_string(), "idle.example".to_string()],
+        );
+        let idle = &s["servers"]["idle.example"];
+        assert!(!idle.is_null(), "the idle server is absent: {s}");
+        for k in ["total", "month", "week", "day"] {
+            assert_eq!(idle[k], json!(0u64), "{k}");
+        }
+        assert_eq!(idle["daily"], json!({}));
+        // Seeding must not zero a server that HAS traffic, which is the
+        // way round this would break silently.
+        assert_eq!(s["servers"]["busy.example"]["day"], json!(5u64));
+        assert_eq!(s["servers"]["busy.example"]["total"], json!(5u64));
+        // A server in the ledger but not in the config still appears -
+        // dropping it would lose the history of an account the user has
+        // just deleted, and this map is what the totals are read from.
+        let s = server_stats_json(&u, day_num(2026, 8, 28), &["only.example".to_string()]);
+        assert_eq!(s["servers"]["busy.example"]["day"], json!(5u64));
+        assert!(s["servers"]["only.example"].is_object());
     }
 
     #[test]

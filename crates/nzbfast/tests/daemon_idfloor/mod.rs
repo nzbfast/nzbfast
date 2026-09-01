@@ -161,5 +161,4 @@ async fn a_history_only_spool_still_raises_the_id_floor() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

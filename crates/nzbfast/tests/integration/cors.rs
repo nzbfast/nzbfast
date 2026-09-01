@@ -251,8 +251,6 @@ fn the_sab_api_answers_cors_the_way_sabnzbd_does() {
         Some(ext),
     );
     assert_eq!(r.header("Access-Control-Allow-Origin"), Some("*"));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `cors_origin` narrows the default for anyone who wants it tighter
@@ -371,8 +369,6 @@ fn cors_origin_restricts_who_may_read_the_api() {
         "cors_origin reverted across a restart: {}",
         r.body
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The header rides the SAB surface and nothing else.
@@ -402,6 +398,4 @@ fn the_header_stays_off_everything_outside_the_sab_surface() {
             r.headers
         );
     }
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

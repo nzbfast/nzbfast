@@ -97,9 +97,9 @@ struct Pending {
     at: Instant,
 }
 
-/// Everything this feature keeps on the daemon, as ONE field - the
-/// struct is at its size-gate ceiling and four loose fields would not
-/// fit. Grouping is also honest: these five only ever move together.
+/// Everything this feature keeps on the daemon, as ONE field: the
+/// `Daemon` struct is declared in `serve/daemon.rs`, which is at its
+/// size-gate ceiling, and four loose fields would not fit. Grouping is also honest: these five only ever move together.
 pub(in crate::serve) struct FinishState {
     action: Mutex<FinishAction>,
     script: Mutex<Option<PathBuf>>,

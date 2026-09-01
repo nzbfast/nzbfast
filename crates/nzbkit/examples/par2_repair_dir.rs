@@ -57,8 +57,12 @@ fn main() {
                 needed,
                 have,
                 adopted,
+                partial,
             } => {
-                format!("Unrepairable needed={needed} have={have} adopted={adopted}")
+                format!(
+                    "Unrepairable needed={needed} have={have} adopted={adopted} published={}",
+                    partial.files_patched.len()
+                )
             }
         })
     );

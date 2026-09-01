@@ -1412,6 +1412,45 @@ mod tests {
         assert!(!staged.contains(".."), "{staged}");
     }
 
+    /// The other half of `wall::art_names_leave_room_for_every_decoration`:
+    /// `art_name` holds back exactly `wall::ART_DECORATION` bytes, and
+    /// that reserve is only right while the widest decoration really is
+    /// the one it is spelled from. This is the file that grows an art
+    /// name, so this is where the two are compared - a new field in the
+    /// staging name shows up here rather than as `couldn't write the art
+    /// cache` on somebody's wall.
+    #[test]
+    fn an_art_name_leaves_room_for_its_staging_name() {
+        // No furniture token, so an obfuscated post's whole release stem
+        // becomes the title key - the shape that reaches the cap.
+        let long = format!("m:{}:2024", "a b.c-d_e".repeat(40));
+        for key in [long.as_str(), "m:the matrix:1999"] {
+            for backdrop in [false, true] {
+                let live = crate::wall::art_name(key, backdrop);
+                let staged = super::art_staging_name(&live);
+                assert!(staged.len() <= 255, "{staged} is {} bytes", staged.len());
+                assert!(
+                    staged.len() - live.len() <= crate::wall::ART_DECORATION.len(),
+                    "{staged} decorates by {}, the reserve is {}",
+                    staged.len() - live.len(),
+                    crate::wall::ART_DECORATION.len()
+                );
+                // Still recognisable, so the hourly sweep still collects
+                // an upload a crash abandoned under a CAPPED name.
+                assert!(super::is_art_staging_name(&staged), "{staged}");
+                assert!(!super::is_art_staging_name(&live), "{live}");
+                assert!(crate::serve::apiutil::art_name_ok(&live), "{live}");
+                assert!(
+                    crate::serve::apiutil::art_name_ok(&format!("thumb_{live}")),
+                    "the thumb of {live} is not servable"
+                );
+            }
+        }
+        // `thumb_` is not the maximum and must still fit beside the
+        // longest tail `art_name` composes itself.
+        assert!("thumb_".len() + ".bd.jpg".len() <= crate::wall::ART_DECORATION.len());
+    }
+
     /// An art directory of our own, emptied first so a previous run's
     /// leftovers cannot decide an assertion.
     fn art_dir(tag: &str) -> std::path::PathBuf {

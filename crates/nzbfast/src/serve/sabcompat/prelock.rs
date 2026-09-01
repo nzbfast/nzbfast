@@ -35,6 +35,12 @@ pub(super) struct PreLock {
     pub(super) hold: Option<Value>,
     pub(super) hold_quota_spent: Option<f64>,
     pub(super) sc: Option<(String, u64)>,
+    /// What the early start is pulling right now, bytes/sec - the second
+    /// series on the dashboard's throughput chart. 0 with no sidecar
+    /// running. Sampled in the SAME read as `sc` above, so the rate and
+    /// the byte count a row reports are one instant, like everything
+    /// else here.
+    pub(super) prefetch_bps: f64,
     pub(super) activity_map: std::collections::HashMap<String, &'static str>,
     pub(super) unpack_map:
         std::collections::HashMap<String, Arc<crate::unpackprog::UnpackProgress>>,
@@ -115,12 +121,22 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
                 .map(|(_, spent, _)| *spent),
         )
     };
-    // Prefetch sidecar state, matched by nzo_id per slot below.
-    let sc = d
+    // Prefetch sidecar state, matched by nzo_id per slot below, plus its
+    // own live rate off the same read - see `PreLock::prefetch_bps`.
+    // ONE lock of the sidecar mutex, taken here with everything else,
+    // because a second read under the queue lock is the issue #38
+    // ordering this whole function exists to keep.
+    let (sc, prefetch_bps) = d
         .sidecar
         .lock_ok()
         .as_ref()
-        .map(|s| (s.nzo_id.clone(), s.progress.load(Ordering::Relaxed)));
+        .map(|s| {
+            (
+                Some((s.nzo_id.clone(), s.progress.load(Ordering::Relaxed))),
+                s.rate_bps(),
+            )
+        })
+        .unwrap_or((None, 0.0));
     // Queue-row activity: the pipeline's own token per job, the hub
     // owner, an open stall episode, and a per-server pool view - all
     // read BEFORE the queue lock like live_shape above. The fetch
@@ -182,6 +198,7 @@ pub(super) fn prelock_reads(d: &Daemon) -> PreLock {
         hold,
         hold_quota_spent,
         sc,
+        prefetch_bps,
         activity_map,
         unpack_map,
         active_id,

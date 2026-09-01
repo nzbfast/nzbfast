@@ -517,7 +517,6 @@ async fn enospc_in_lane_keeps_journal_and_second_job_unharmed() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The queue-soak extension (rollout gate): a DAMAGED job's repair runs
@@ -752,7 +751,6 @@ async fn damaged_jobs_repair_overlaps_clean_download_byte_identical() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Restart mid-`Finishing` (design point 5.2): kill the daemon while a
@@ -875,7 +873,6 @@ async fn restart_mid_finishing_requeues_and_completes() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Backpressure (design point 3): lane width 1 (settings.json), four
@@ -1000,5 +997,4 @@ async fn saturated_lane_pauses_picks_with_stated_reason_then_drains() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

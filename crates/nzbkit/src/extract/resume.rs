@@ -187,29 +187,39 @@ impl Extractor {
         for (member, w) in pending {
             let (len, crc32) = w.prefix_hash().unwrap_or((0, 0));
             let path = w.current_path();
-            // Drop our reference before touching the file by path: on
-            // Windows an open handle can refuse the unlink below.
-            // `retain_slot_output` took the writer out of the slot, so
-            // this is normally the last reference - but the streaming
-            // server hands out clones (`writers_snapshot`), so a viewer
-            // watching this very member can still hold one. Both calls
-            // below tolerate that: the `set_len` goes through a fresh
-            // handle either way, and a `remove_file` that loses to an
-            // open handle leaves a partial the caller's own cleanup will
-            // find (`resumeout`'s arm proves ownership by length).
-            drop(w);
+            // The two REMOVAL branches go through `abandon_close`, not a
+            // bare drop: `retain_slot_output` took the writer out of the
+            // slot, so ours is normally the last reference - but the
+            // streaming server hands out clones (`writers_snapshot`),
+            // and a clone's open handle across the unlink pins the
+            // unlinked inode until process exit (the 30 Aug 2026 51 GB
+            // incident, see `FileWriter::abandon_close`). Closing
+            // through the shared state ends every clone's handle at
+            // once - and on Windows is also what lets the unlink
+            // succeed. The KEPT branch must NOT abandon: the ledger is
+            // keeping that file, and a live viewer streaming it would
+            // be cut off by the abandoned flag for no reason.
             if len == 0 {
-                let _ = std::fs::remove_file(&path);
+                let gone = w.abandon_close();
+                drop(w);
+                let _ = std::fs::remove_file(&gone);
                 continue;
             }
+            // `set_len` goes through a fresh handle; our own std handle
+            // being open does not conflict (std opens with full share
+            // flags on Windows - the share-mode-0 concern is external
+            // tools, which never run here).
             let cut = std::fs::OpenOptions::new()
                 .write(true)
                 .open(&path)
                 .and_then(|f| f.set_len(len));
             if cut.is_err() {
-                let _ = std::fs::remove_file(&path);
+                let gone = w.abandon_close();
+                drop(w);
+                let _ = std::fs::remove_file(&gone);
                 continue;
             }
+            drop(w);
             out.push(ResumeOutput {
                 member,
                 path,
@@ -243,9 +253,14 @@ impl Extractor {
             std::mem::take(&mut g.resume_pending)
         };
         for (_, w) in pending {
-            let path = w.current_path();
-            // Same reference caveat as `settle_resume_ledger`: usually
-            // the last one, not provably so.
+            // `abandon_close`, for `settle_resume_ledger`'s reason - a
+            // stream clone across the unlink pins the inode. Abandoning
+            // is also CORRECT here rather than merely safe: this ledger
+            // is being dropped because a repair rewrote bytes, so a
+            // viewer still streaming one of these members is being
+            // served stale data and the abandoned flag is what ends
+            // that response.
+            let path = w.abandon_close();
             drop(w);
             let _ = std::fs::remove_file(&path);
         }

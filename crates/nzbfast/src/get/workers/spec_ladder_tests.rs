@@ -213,6 +213,7 @@ async fn c5_spec_ladder_rss_at_field_scale() {
         Default::default();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let demand = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ladder_over = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let before = rss_kb();
     let t0 = std::time::Instant::now();
     let task = spawn_spec_prefetch(
@@ -226,6 +227,7 @@ async fn c5_spec_ladder_rss_at_field_scale() {
         &prefetched,
         &stop,
         &demand,
+        &ladder_over,
     )
     .expect("volumes present, so the watcher must spawn");
     let spawn_cost = t0.elapsed();

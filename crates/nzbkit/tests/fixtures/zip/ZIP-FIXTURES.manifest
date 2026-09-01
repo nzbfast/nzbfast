@@ -1,0 +1,71 @@
+# ZIP-FIXTURES.manifest - what the committed zip interop fixtures beside it
+# ARE. Held by tools/zip-fixture-gate.py on every branch push.
+#
+#     fixture <name> <writer> <sha256> entries=N comment=N zip64=S prefix=N
+#     entry   name=.. method=N enc=.. crc=XXXXXXXX usize=N dir=0|1
+#
+# TWO KINDS OF CLAIM, and keeping them apart is the whole design.
+#
+# The SHA256 is written by `tools/gen-zip-fixtures.py --record`, for the
+# files that run actually wrote. It is what catches a regeneration: the
+# output is non-deterministic by construction (timestamps, and a random
+# salt in the two encrypted fixtures), so a rerun rewrites these files with
+# different bytes at the SAME SIZE and `git status` shows only
+# `Bin 595 -> 595`. That is not hypothetical - a blanket `for g in
+# tools/*.py` sweep did exactly that on 31 Aug 2026 and came within two
+# commands of staging six rewritten fixtures into an unrelated push.
+#
+# Everything after the digest is a FROZEN JUDGEMENT about what the fixture
+# MEANS, written by hand by somebody who read the tests, and `--record`
+# never touches it. Without it the digest is trivially satisfied by
+# re-recording, which is the one edit every gate in this family states as
+# its own limit; here it can be closed, because unlike a PNG's pixels the
+# meaning of a zip container is recoverable from its bytes. So an Info-ZIP
+# that started emitting a SATURATED end record, or a 7-Zip that switched
+# from AE-2 to AE-1, is a red line rather than a fixture that has quietly
+# stopped being the thing its name and its test say it is.
+#
+# The COMPRESSED size is deliberately not recorded: it pins the
+# compressor's version rather than what the fixture is for, and the payload
+# is pinned by crc= and usize= instead.
+#
+# `writer` is `zipfile`, `7zz`, `infozip` or `handmade`, and is held to the
+# generator's own GENERATES table in BOTH directions - a fixture the script
+# writes must name its writer, and one it does not must say `handmade`, so
+# a rerun can never silently rewrite a file this manifest claims nobody
+# produces.
+#
+# Editing a digest here without rerunning the generator is the one edit the
+# digest arm cannot see; what stops it being free is that the file must
+# still satisfy the frozen shape below it.
+
+
+fixture aes256.zip 7zz fdc2e2a0a29ed9ca5dabfda2ce0da35bc42d8d4f8c64d0b49b69d21d55894065 entries=1 comment=0 zip64=none prefix=0
+entry   name=movie.bin method=99 enc=ae2-256 crc=00000000 usize=20000 dir=0
+
+fixture commented.zip zipfile e1e2b39fc58b572cf079650e0b5cfc1aa4b8292558aec58a932df4f32256e882 entries=1 comment=880 zip64=none prefix=0
+entry   name=a.bin method=8 enc=none crc=5404470d usize=1100 dir=0
+
+fixture empty_dirs.zip zipfile deb90ab95caeff8c23d958d66f4dd997eafe3e2513df1aec901f40308d5c9c57 entries=2 comment=0 zip64=none prefix=0
+entry   name=dir/ method=0 enc=none crc=00000000 usize=0 dir=1
+entry   name=dir/file.bin method=0 enc=none crc=422c6a15 usize=7 dir=0
+
+fixture store_deflate.zip zipfile aba2243d52678eb615c3b607ce300b4a3506157f8cb95f69e3e3c84925e9e015 entries=3 comment=0 zip64=none prefix=0
+entry   name=Pack/movie.mkv method=0 enc=none crc=6d44949f usize=20000 dir=0
+entry   name=Pack/info.nfo method=8 enc=none crc=f9d4c097 usize=15 dir=0
+entry   name=Pack/sub/notes.txt method=8 enc=none crc=00dbf026 usize=5000 dir=0
+
+fixture zip64.zip zipfile c302abbcd9db45ab871a5e6a933c3712d77d4c9b5215f9b384360077948df2d0 entries=1 comment=0 zip64=none prefix=0
+entry   name=big.bin method=8 enc=none crc=ffe19724 usize=100000 dir=0
+
+fixture zip64_sector_prefixed.zip handmade 414050154c26ea136f7368623ca9e2bff04e310de4dcc9a45921fe1f1a0141d9 entries=1 comment=0 zip64=unsaturated prefix=511
+entry   name=a.bin method=0 enc=none crc=e66b4aea usize=300 dir=0
+
+fixture zip64_sector_prefixed_saturated.zip handmade 31a3e253a37ea829f3bbd9c771a73dd1c65b38f60326d16700feb500ace546bc entries=1 comment=0 zip64=saturated prefix=511
+entry   name=a.bin method=0 enc=none crc=e66b4aea usize=300 dir=0
+
+fixture zip64_unsaturated.zip infozip f36d56c214802aa8bc1112a056a9f71269ff57d816555f84f1d749b996c3c9c7 entries=1 comment=0 zip64=unsaturated prefix=0
+entry   name=- method=0 enc=none crc=afc9d5ce usize=2000 dir=0
+
+fixture zipcrypto.zip 7zz a4770032d46db6a922e7816564cc26c001239cecc2d89f89cc798c0b3c827b1a entries=1 comment=0 zip64=none prefix=0
+entry   name=movie.bin method=8 enc=zipcrypto crc=897e9e86 usize=20000 dir=0

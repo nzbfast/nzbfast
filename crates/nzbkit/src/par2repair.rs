@@ -51,6 +51,7 @@
 //! targets are scanned too (mid-file insertions leave a half-verified
 //! file whose remaining content is byte-shifted inside itself).
 
+use crate::disk::case_fold_key as fold_key;
 use crate::gf16;
 use crate::par2::{self, BlockCheck, Par2File};
 use crate::sync::MutexExt;
@@ -137,10 +138,10 @@ pub fn input_base_logs(n: usize) -> Result<Vec<u32>, RepairError> {
 // The two recovery-slice finders live in par2repair/slices.rs (TODO
 // 106 size-gate split); the public paths are unchanged.
 // The GF(2^16) arithmetic - fold present slices into syndromes, invert
-// the repair matrix - is a child module (TODO 106 size-gate split). The
-// two benchmark doors keep their `par2repair::` paths through the
-// re-export, which is what the three examples drive.
-mod linalg;
+// the repair matrix - is a child module (TODO 106 size-gate split), and
+// `pub(crate)` because `par2gen` folds its RECOVERY slices with the very
+// same routine. The benchmark doors keep their `par2repair::` re-exports.
+pub(crate) mod linalg;
 use linalg::{FeedBatch, fold_parallel, invert};
 pub use linalg::{bench_fold, bench_invert};
 // Its only two call sites carry the same cfg - it is a Windows core
@@ -149,7 +150,7 @@ pub use linalg::{bench_fold, bench_invert};
 use linalg::physical_cores;
 
 mod slices;
-pub use slices::{recovery_slice_census, recovery_slice_locators};
+pub use slices::{recovery_slice_census, recovery_slice_locators, slice_fits_block};
 
 /// Streaming Reed-Solomon reconstruction. Build with the missing input
 /// slice indices and exactly as many recovery slices, [`feed`] every
@@ -622,10 +623,12 @@ fn resolve_syndrome_path(
 // `impl Reconstructor` lives in par2repair/reconstruct.rs (TODO 106
 // size-gate split).
 mod catalog;
+mod nested;
 mod reconstruct;
 
 pub use catalog::PacketCatalog;
 use catalog::{Crit, RecLoc, SetReplay, load_selected_recovery};
+pub use nested::{PacketScope, nested_subdirs, source_candidate_files};
 
 /// One producer's handle into a [`Reconstructor`]'s fold worker (M2c.2
 /// parallel feed reads). Same batching as the built-in feed path, but
@@ -959,12 +962,18 @@ fn repair_mapped_inner(
                 let mut buf = vec![0u8; 1 << 20];
                 for (&fi, r) in tchunk.iter().zip(rchunk) {
                     let (f, _) = &files[fi];
-                    // MD5 for the bytes this call just wrote, and for a set
-                    // with no IFSC to check against; CRC32 per block for the
-                    // rest. See the function docs.
+                    // MD5 for the bytes this call just wrote, for a set
+                    // with no IFSC to check against, and for a grid
+                    // holding any UNPROVEN slice - a short IFSC, fitted
+                    // rather than dropped (`par2::fit_ifsc`), leaves
+                    // blocks with no CRC to close against, and the
+                    // per-block path would refuse a file the whole-file
+                    // MD5 proves. CRC32 per block for the rest. See the
+                    // function docs.
                     let md5_this = full_verify
                         || rebuilt_files.contains(&fi)
-                        || f.blocks.len() as u64 != f.length.div_ceil(bs);
+                        || f.blocks.len() as u64 != f.length.div_ceil(bs)
+                        || f.blocks.iter().any(|b| !b.is_proven());
                     let one = (|| {
                         let mut hasher = Md5::new();
                         let mut crc = crc32fast::Hasher::new();
@@ -991,8 +1000,10 @@ fn repair_mapped_inner(
                                     if filled == block_size {
                                         let done =
                                             std::mem::replace(&mut crc, crc32fast::Hasher::new());
-                                        if f.blocks.get(bidx).map(|b| b.crc32)
-                                            != Some(done.finalize())
+                                        if !f
+                                            .blocks
+                                            .get(bidx)
+                                            .is_some_and(|b| b.crc_matches(done.finalize()))
                                         {
                                             return Err(RepairError::VerifyFailed(f.name.clone()));
                                         }
@@ -1015,7 +1026,7 @@ fn repair_mapped_inner(
                                 crc.finalize(),
                                 (block_size - filled) as u64,
                             );
-                            if f.blocks.get(bidx).map(|b| b.crc32) != Some(padded) {
+                            if !f.blocks.get(bidx).is_some_and(|b| b.crc_matches(padded)) {
                                 return Err(RepairError::VerifyFailed(f.name.clone()));
                             }
                         }
@@ -1141,10 +1152,12 @@ impl RollingCrc {
 /// which is how a "distinct" target ends up sharing (and destroying)
 /// another's bytes. `fold` comes from probing the output volume
 /// (`disk::case_insensitive_dir`), not from the build target: the answer
-/// belongs to the destination filesystem, not to the binary.
+/// belongs to the destination filesystem, not to the binary. `fold_key`
+/// is `disk::case_fold_key`, NOT `to_lowercase`, which is weaker than the
+/// volume: read that header, which prices both directions here (M4-44).
 fn path_identity_key(fold: bool, p: &Path) -> PathBuf {
     if fold {
-        PathBuf::from(p.to_string_lossy().to_lowercase())
+        PathBuf::from(fold_key(&p.to_string_lossy()))
     } else {
         p.to_path_buf()
     }
@@ -1153,8 +1166,8 @@ fn path_identity_key(fold: bool, p: &Path) -> PathBuf {
 /// [`path_identity_key`] for a declared file NAME, sanitized the way the
 /// repair lands it. Same folding rule and the same reason.
 fn name_identity_key(fold: bool, name: &str) -> String {
-    let s = crate::disk::sanitize_filename(name);
-    if fold { s.to_lowercase() } else { s }
+    let s = crate::disk::sanitize_out_name(name);
+    if fold { fold_key(&s) } else { s }
 }
 
 /// What the OTHER recovery sets sharing this directory declare.
@@ -1169,15 +1182,21 @@ fn name_identity_key(fold: bool, name: &str) -> String {
 /// exactly as it always has.
 #[derive(Default, Clone)]
 struct DirContext {
-    /// Destination names that more than one DISTINCT file descriptor
-    /// claims across the whole directory. Targets with these names are
+    /// Destination names that two DIFFERENT sets in this directory
+    /// claim for different content. Targets with these names are
     /// disambiguated in EVERY set, so no two sets can land on one path.
     /// Two sets describing the SAME file (identical descriptor) are not
-    /// contested - sharing that destination is correct.
+    /// contested - sharing that destination is correct, and neither is
+    /// a collision INSIDE one set, which the claim loop sees for itself
+    /// (see `PacketCatalog::declared_and_contested`).
     contested: HashSet<String>,
     /// Every name any set in the directory declares. Payload, whoever
     /// owns it, and so never a spent adoption donor to sweep.
     declared: HashSet<String>,
+    /// May a SHORTFALL publish patch a member that already EXISTS? Only
+    /// a caller can answer it, only the surveying entry point may grant
+    /// it, and [`status::publishable`] carries the argument.
+    patch_existing: bool,
     /// §293: directories OUTSIDE the repair dir whose files are offered
     /// to the adoption scan - a failed predecessor's output, handed to
     /// the successor so blocks the wire will not serve again can still
@@ -1194,7 +1213,7 @@ struct DirContext {
 // scan - lives in par2repair/adopt.rs, a child module (size gate,
 // TODO 106), and fans out across candidates (R2 / N11).
 mod adopt;
-use adopt::CandReader;
+pub use adopt::is_recovery_by_name_and_content;
 mod donate;
 pub use donate::{Donation, donate_whole_files, donor_candidates, placed_names};
 
@@ -1206,7 +1225,20 @@ pub use donate::{Donation, donate_whole_files, donor_candidates, placed_names};
 // par2repair/status.rs, a child module under the size gate (TODO 106),
 // the same shape `adopt` and `donate` already use.
 mod status;
-pub use status::{RepairReport, RepairStatus};
+pub use status::{FileRepair, RepairReport, RepairStatus, adopted_from_clause, published_clause};
+
+// Which files in a directory are packet files - the ceiling, the
+// by-name rule and the content sniff. Its own file under the size gate
+// (TODO 106); the sniff PREDICATE it shares with the catalog's relist
+// lives in `par2::head_is_packet_file`, not here.
+#[path = "par2repair/collect.rs"]
+mod collect;
+pub use collect::{MAX_PACKET_FILE_BYTES, sniffed_packet_files};
+// Reached by name from `par2repair/unit_tests.rs`, which drives the
+// ceiling and the sniff through the bounded form rather than writing a
+// gigabyte; nothing in production takes it.
+#[cfg(test)]
+use collect::collect_packet_files_bounded;
 
 /// One recovery-set file mapped onto the global slice index space.
 struct Target {
@@ -1223,92 +1255,6 @@ struct Target {
     /// Verify-pass MD5 state for the in-place self-prove to resume
     /// from (see [`Md5Resume`]); None keeps the full reread.
     resume: Option<Md5Resume>,
-}
-
-/// Ceiling on one packet file. Every consumer below reads a packet file
-/// WHOLE (`std::fs::read`, because `scan_packets` walks a slice and
-/// recovery slices are copied straight out of it), so this is the bound
-/// on how much attacker-chosen input one directory entry can turn into
-/// resident memory.
-///
-/// It applies by SIZE, never by name: the extension is chosen by the
-/// poster, so letting `*.par2` past a bound that extensionless volumes
-/// have to clear would make the bound optional - rename the file and it
-/// is gone (Codex sweep 10 Aug, M4). A real recovery volume is orders of
-/// magnitude under this; a file over it is either not a volume at all or
-/// one no repair could afford to load.
-pub const MAX_PACKET_FILE_BYTES: u64 = 1 << 30;
-
-/// Gather the PAR2 packet files in `dir`: `*.par2` by name, plus
-/// magic-sniffed files (obfuscated posts rename recovery volumes too, and
-/// par2cmdline - handed extra files - loads packets from them, so do we).
-/// Sniffing costs one 8-byte read per file. Oversized candidates are
-/// skipped rather than slurped, by name and by sniff alike - see
-/// [`MAX_PACKET_FILE_BYTES`]. Returns (sorted packet files, the subset
-/// found by sniff rather than name).
-fn collect_packet_files(dir: &Path) -> Result<(Vec<PathBuf>, HashSet<PathBuf>), RepairError> {
-    collect_packet_files_bounded(dir, MAX_PACKET_FILE_BYTES)
-}
-
-/// [`collect_packet_files`] with the ceiling spelled out, so a test can
-/// exercise the bound without writing a gigabyte.
-fn collect_packet_files_bounded(
-    dir: &Path,
-    max_bytes: u64,
-) -> Result<(Vec<PathBuf>, HashSet<PathBuf>), RepairError> {
-    let mut packet_files: Vec<PathBuf> = Vec::new();
-    let mut sniffed: HashSet<PathBuf> = HashSet::new();
-    for e in std::fs::read_dir(dir)? {
-        let Ok(e) = e else { continue };
-        if !e.file_type().is_ok_and(|t| t.is_file()) {
-            continue;
-        }
-        let p = e.path();
-        let len = e.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
-        if p.extension()
-            .is_some_and(|x| x.eq_ignore_ascii_case("par2"))
-        {
-            if len > max_bytes {
-                warn!(
-                    file = %p.display(),
-                    bytes = len,
-                    "skipping oversized .par2 - past the packet-file ceiling"
-                );
-                continue;
-            }
-            packet_files.push(p);
-        } else if (64..=max_bytes).contains(&len) {
-            let mut head = [0u8; 8];
-            let ok = File::open(&p)
-                .and_then(|mut f| f.read_exact(&mut head))
-                .is_ok();
-            if ok && &head == par2::MAGIC {
-                sniffed.insert(p.clone());
-                packet_files.push(p);
-            }
-        }
-    }
-    packet_files.sort();
-    Ok((packet_files, sniffed))
-}
-
-/// The PAR2 packet files in `dir` that only a content sniff could find:
-/// recovery volumes an obfuscated post shipped under an extensionless
-/// hash name.
-///
-/// Deliberately NOT the whole packet set. Files named `*.par2` are
-/// already swept by extension wherever that matters; these are the ones
-/// no extension rule can ever match, which is why a finished obfuscated
-/// download kept its spent recovery set forever (issue #9).
-///
-/// Directory-wide, so it says nothing about which recovery SET a volume
-/// served. A caller holding more than one set must not act on this until
-/// every set it cares about has verified.
-pub fn sniffed_packet_files(dir: &Path) -> Result<Vec<PathBuf>, RepairError> {
-    let (_, sniffed) = collect_packet_files(dir)?;
-    let mut out: Vec<PathBuf> = sniffed.into_iter().collect();
-    out.sort();
-    Ok(out)
 }
 
 /// Repair the PAR2 recovery set found in `dir`: parse every `*.par2`
@@ -1363,20 +1309,112 @@ pub fn repair_dir_with_donors(dir: &Path, donors: &[PathBuf]) -> Result<RepairSt
 /// A wanted set with no Main packet on disk is
 /// [`RepairError::NoMainPacket`] - the honest answer, which lets the
 /// caller reach its own backstop instead of accepting a green about
-/// somebody else's files. Everything else (lazy catalog, empty
-/// [`DirContext`] name sets, donors) is [`repair_dir_with_donors`]'s
-/// exactly, so the only difference is WHICH set is repaired.
+/// somebody else's files. The donors are [`repair_dir_with_donors`]'s
+/// exactly; the catalog and the two [`DirContext`] name sets are not,
+/// and deliberately - see [`repair_dir_set_with_donors_scoped`], which
+/// this forwards to, for why a set picked out of a shared directory has
+/// to be told what its neighbours declare.
 pub fn repair_dir_set_with_donors(
     dir: &Path,
     set_id: &[u8; 16],
     donors: &[PathBuf],
 ) -> Result<RepairStatus, RepairError> {
-    let mut cat = PacketCatalog::build_lazy(dir)?;
+    repair_dir_set_with_donors_scoped(dir, set_id, donors, PacketScope::Flat, false)
+}
+
+/// [`repair_dir_set_with_donors`] with packet DISCOVERY scope named.
+///
+/// Only the packet walk widens: the data files this set speaks for are
+/// still resolved against `dir` through
+/// [`crate::disk::join_out_name`], because a FileDesc name is relative
+/// to the JOB, never to wherever its packets happen to have landed.
+/// That is what makes `META/inner.par2` naming a root payload work, and
+/// it is the same rule the flat walk always applied.
+///
+/// This is "one set out of a directory that may hold SEVERAL" by
+/// construction - `get::latesets` applies every non-activated set in
+/// turn through it - so it owes its caller both of [`DirContext`]'s
+/// protections, and neither survives a lazy catalog: a name is declared
+/// by a critical packet, and which files carry which set's criticals is
+/// not known until they have been read. The bytes are read either way
+/// (the volume scan always finishes before the repair does), so the
+/// price of building COMPLETE is the overlap with the verify pass and
+/// not the I/O. What the default cost is measured, not reasoned, and
+/// pinned in `crates/nzbkit/tests/integration/par2repair_namepath.rs`.
+pub fn repair_dir_set_with_donors_scoped(
+    dir: &Path,
+    set_id: &[u8; 16],
+    donors: &[PathBuf],
+    scope: PacketScope,
+    patch_existing: bool,
+) -> Result<RepairStatus, RepairError> {
+    let mut cat = PacketCatalog::build_scoped(dir, scope)?;
+    let (declared, contested) = cat.declared_and_contested(crate::disk::case_insensitive_dir(dir));
     let ctx = DirContext {
+        contested,
+        declared,
         donors: donors.to_vec(),
-        ..DirContext::default()
+        patch_existing,
     };
     repair_dir_set(&mut cat, Some(*set_id), &ctx, true)
+}
+
+/// Every recovery-set id the PAR2 packets in `dir` carry, in
+/// first-seen (sorted packet-file) order. Finding F12's door: a set
+/// can LAND on disk through another set's naming (par2-of-par2 - the
+/// outer set names the obfuscated inner par2 files) without ever
+/// activating in-stream, and the caller needs the ids to ask
+/// [`repair_dir_set_with_donors`] about the ones it has not applied.
+pub fn disk_set_ids(dir: &Path) -> Result<Vec<[u8; 16]>, RepairError> {
+    disk_set_ids_scoped(dir, PacketScope::Flat)
+}
+
+/// [`disk_set_ids`] with the discovery scope named. W4-06's door: the
+/// outer set of a par2-of-par2 chain may legitimately publish the inner
+/// packet files under a safe subdirectory, so the walk that looks for
+/// the set nobody activated has to be able to see one.
+pub fn disk_set_ids_scoped(dir: &Path, scope: PacketScope) -> Result<Vec<[u8; 16]>, RepairError> {
+    Ok(disk_sets_scoped(dir, scope)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// [`disk_set_ids_scoped`], each id paired with the packet files that
+/// carry it, in the same first-seen order.
+///
+/// The paths are what a NESTED caller needs and a flat one never did:
+/// discovering a set below the job root widens WHERE a set may be, so
+/// the caller has to be able to ask whether anything actually published
+/// it there. An extracted archive can carry a recovery set of its own,
+/// and repairing that against the job ROOT - where its files are not -
+/// is at best noise and at worst files recreated from slices in a
+/// directory that never wanted them, which is the resurrection
+/// [`repair_present_sets`] keeps its own name gate to avoid.
+pub fn disk_sets_scoped(
+    dir: &Path,
+    scope: PacketScope,
+) -> Result<Vec<([u8; 16], Vec<PathBuf>)>, RepairError> {
+    let cat = PacketCatalog::build_scoped(dir, scope)?;
+    let mut out: Vec<([u8; 16], Vec<PathBuf>)> = Vec::new();
+    let mut at: HashMap<[u8; 16], usize> = HashMap::new();
+    for (file, occ) in cat.walk() {
+        let i = match at.get(&occ.set_id) {
+            Some(i) => *i,
+            None => {
+                out.push((occ.set_id, Vec::new()));
+                at.insert(occ.set_id, out.len() - 1);
+                out.len() - 1
+            }
+        };
+        let p = cat.path_of(file);
+        // A packet FILE can carry two sets interleaved, so dedupe by
+        // membership rather than against the previous push.
+        if !out[i].1.iter().any(|q| q == p) {
+            out[i].1.push(p.to_path_buf());
+        }
+    }
+    Ok(out)
 }
 
 /// Every file name the PAR2 packets in `dir` describe, across EVERY
@@ -1451,6 +1489,14 @@ pub fn repair_present_or_renamed_sets(dir: &Path) -> Result<Vec<SetOutcome>, Rep
 /// about any repair.
 #[derive(Debug)]
 pub struct SetOutcome {
+    /// The recovery set id these packets share - the same 16 bytes
+    /// `Par2Set::recovery_set_id` carries, so a caller can name the set
+    /// the way every `[par2]`/`[verify]` console line already does
+    /// (first 8 of `par2::hex16`). It travels WITH the verdict because
+    /// an arithmetic shortfall is a statement about ONE set, and a
+    /// caller reporting it over a post that carries several has nothing
+    /// else to say which one it measured (31 Aug 2026).
+    pub set_id: [u8; 16],
     /// Every file name this set's FileDesc packets declare.
     pub names: Vec<String>,
     /// What repairing it produced. `Ok` means every one of `names` is
@@ -1480,40 +1526,34 @@ fn repair_sets_catalog(
     let fold = crate::disk::case_insensitive_dir(dir);
     let mut order: Vec<[u8; 16]> = Vec::new();
     let mut names: HashMap<[u8; 16], Vec<String>> = HashMap::new();
-    // Which descriptors claim each destination name, directory-wide.
-    // A name claimed by two DIFFERENT descriptors is one destination
-    // holding two different files; a name claimed by one descriptor in
-    // two sets is the same file described twice, which is fine.
-    let mut claims: HashMap<String, HashSet<([u8; 16], u64, [u8; 16])>> = HashMap::new();
     for (_, occ) in cat.walk() {
         names.entry(occ.set_id).or_insert_with(|| {
             order.push(occ.set_id);
             Vec::new()
         });
-        if let Some(Crit::FileDesc(fid, d)) = cat.crit(&occ.md5) {
-            claims
-                .entry(name_identity_key(fold, &d.name))
-                .or_default()
-                .insert((*fid, d.length, d.md5));
+        if let Some(Crit::FileDesc(_, d)) = cat.crit(&occ.md5) {
             names.get_mut(&occ.set_id).unwrap().push(d.name.clone());
         }
     }
+    // Which descriptors claim each destination name, directory-wide -
+    // `PacketCatalog::declared_and_contested`, shared with the
+    // single-set-out-of-a-shared-directory entry point so the two
+    // cannot disagree about what this directory declares.
+    let (declared, contested) = cat.declared_and_contested(fold);
     let ctx = DirContext {
-        contested: claims
-            .iter()
-            .filter(|(_, who)| who.len() > 1)
-            .map(|(k, _)| k.clone())
-            .collect(),
-        declared: claims.into_keys().collect(),
+        contested,
+        declared,
         donors: Vec::new(),
+        patch_existing: false,
     };
     let mut out = Vec::new();
     for id in &order {
         let present = names[id]
             .iter()
-            .any(|n| dir.join(crate::disk::sanitize_filename(n)).is_file());
+            .any(|n| crate::disk::join_out_name(dir, &crate::disk::sanitize_out_name(n)).is_file());
         if present {
             out.push(SetOutcome {
+                set_id: *id,
                 names: names[id].clone(),
                 status: repair_dir_set(cat, Some(*id), &ctx, false),
             });
@@ -1538,12 +1578,10 @@ fn repair_sets_catalog(
     // Unrepairable here fails nothing that used to succeed.
     if renamed_fallback && out.is_empty() {
         let packet_set: HashSet<&Path> = cat.packet_paths().collect();
-        let has_candidates = std::fs::read_dir(dir)?.flatten().any(|e| {
-            e.file_type().is_ok_and(|t| t.is_file()) && !packet_set.contains(e.path().as_path())
-        });
-        if has_candidates {
+        if adopt::any_adoption_source(dir, &packet_set)? {
             for id in &order {
                 out.push(SetOutcome {
+                    set_id: *id,
                     names: names[id].clone(),
                     status: repair_dir_set(cat, Some(*id), &ctx, false),
                 });
@@ -1668,19 +1706,24 @@ fn repair_dir_set_inner(
             )));
         }
         let n_slices = n_slices_u64 as usize;
-        // A disagreeing IFSC packet is DROPPED, not fatal - `par2.rs` handles
-        // the identical case the same way, for the same reason: an empty
-        // `blocks` routes the file to the whole-file MD5, which covers every
-        // byte. Failing the call instead abandoned every other file in the
-        // set (19 repairable files lost to one malformed packet) when the
-        // recovery blocks to fix them were sitting right there.
+        // A disagreeing IFSC packet is FITTED to the declared grid, not
+        // fatal and not discarded - `par2.rs::fit_ifsc` is the same
+        // reconciliation for the same reason, and this is its second
+        // reader, so the two move together or a set parses one way here
+        // and another there. Failing the call instead abandoned every
+        // other file in the set (19 repairable files lost to one
+        // malformed packet) when the recovery blocks to fix them were
+        // sitting right there.
         let blocks = replay
             .ifscs
             .remove(fid)
-            .filter(|b| b.len() == n_slices)
+            .map(|b| par2::fit_ifsc(b, d.length, bs as u64))
             .unwrap_or_default();
         // Wire-supplied names never touch the filesystem raw.
-        let path = dir.join(crate::disk::sanitize_filename(&d.name));
+        // Tree-preserving: a provably safe FileDesc path keeps its
+        // directory structure (VIDEO_TS trees have to stay trees to
+        // play); anything else flattens exactly as before.
+        let path = crate::disk::join_out_name(dir, &crate::disk::sanitize_out_name(&d.name));
         targets.push(Target {
             file: Par2File {
                 file_id: *fid,
@@ -1737,6 +1780,20 @@ fn repair_dir_set_inner(
             if !contested && claimed.insert(path_identity_key(fold, &t.path)) {
                 continue;
             }
+            // Composed onto the out-RELATIVE name and re-capped, not
+            // pushed onto the joined path: `t.path`'s leaf is a
+            // `sanitize_out_name` result and is routinely AT the
+            // 255-byte component cap - capping is what produced it - so
+            // a raw 17-byte `.dup-<fid>` yields a 272-byte component no
+            // filesystem here will create, and the repaired file has
+            // nowhere to land. The cap goes on the COMPOSED name
+            // because this path is also the claim key (`claimed` is
+            // keyed on it and the verify pass reads it back); shortening
+            // it at the write would split the two. Distinctness across
+            // `suffix` rests on `cap_component`'s hash tag, which is
+            // exactly what that function's tag is for - the tail is what
+            // truncation removes here, where a prefix survives it.
+            let base = crate::disk::out_name_of(dir, &t.path);
             let mut suffix = 0u32;
             loop {
                 let fid: String = t
@@ -1751,9 +1808,10 @@ fn repair_dir_set_inner(
                 } else {
                     format!(".dup-{fid}-{suffix}")
                 };
-                let mut alt = t.path.clone().into_os_string();
-                alt.push(tag);
-                let alt = PathBuf::from(alt);
+                let alt = crate::disk::join_out_name(
+                    dir,
+                    &crate::disk::sanitize_out_name(&format!("{base}{tag}")),
+                );
                 if claimed.insert(path_identity_key(fold, &alt)) {
                     t.path = alt;
                     break;
@@ -1817,11 +1875,21 @@ fn repair_dir_set_inner(
 
     // --- pick recovery slices: smallest exponents, deduped ---
     let mut by_exp: HashMap<u32, RecLoc> = HashMap::new();
+    let (mut refused, mut shortest) = (0usize, u32::MAX);
     for loc in &rec_locs {
-        if loc.len as usize == bs {
+        // M4-56, and the same rule the mapped selection applies: a
+        // packet longer than one block is the block plus padding and is
+        // cut on load; a short one cannot be extended without inventing
+        // bytes, so it is refused - out loud, which is the half that was
+        // missing. See [`slices::slice_fits_block`].
+        if slices::slice_fits_block(loc.len as usize, bs) {
             by_exp.entry(loc.exp).or_insert(*loc);
+        } else {
+            refused += 1;
+            shortest = shortest.min(loc.len);
         }
     }
+    catalog::warn_short_slices(refused, shortest, bs);
 
     // --- extra-file adoption ---
     // Only when a file failed identification outright (missing, renamed,
@@ -1848,6 +1916,14 @@ fn repair_dir_set_inner(
     // a donor deleted after the decision failed the repair from the lazy
     // open. Pin them now; one already gone degrades to dropped adoptions.
     let pinned = adopt::pin_donor_sources(&cands, &donor_cands, &mut adopted, &mut missing);
+
+    // In-set harvest: a slice this set already proved present on disk is
+    // this set's own copy of any missing slice declaring the same block
+    // checksums, wherever the two files sit. Free to decide and
+    // unconditional - see [`adopt::harvest_in_set`] for why it may not
+    // wait for a shortfall the way the escalation below does.
+    adopt::harvest_in_set(&targets, &missing, bs, &mut cands, &mut adopted)?;
+    missing.retain(|g| !adopted.contains_key(g));
 
     // Last-resort escalation: still more damage than recovery on disk -
     // scan identified damaged targets too, which the normal pass skips.
@@ -1886,41 +1962,48 @@ fn repair_dir_set_inner(
     }
     mark("adoption");
     let cands = cands;
+    // `adopted` is final: THREE writers above fill this one map -
+    // `adopt::adopt_blocks` (outside the set), `adopt::harvest_in_set`
+    // and the escalation's `adopt::sliding_scan` (both inside it) - and
+    // `RepairStatus::Unrepairable` reports only its LENGTH. A fourth
+    // writer needs nothing here, which is the point: the shortfall
+    // surface deliberately says how many blocks adoption found and not
+    // where they came from, because a location claim has to be
+    // re-derived for every path and the old one ("in files outside the
+    // recovery set") was false on two of these three for five weeks.
+    // See `nzbfast::repair::adopted_clause`, which carries the whole
+    // argument and the reason the donor NAMES were not plumbed here.
     let adopted = adopted;
     let missing = missing;
-    let mut cand_reader = CandReader {
+    let mut cand_reader = adopt::CandReader {
         cands: &cands,
         open: pinned,
     };
 
     let needed = missing.len();
-    if by_exp.len() < needed {
-        return Ok(RepairStatus::Unrepairable {
-            needed,
-            have: by_exp.len(),
-            adopted: adopted.len(),
-        });
-    }
     // `missing` is final here - adoption has already subtracted every
     // block it found, and a set that adoption brings back UNDER the cap
     // is a legitimate repair, which is why this cannot move any earlier.
-    // The shortfall verdict above stays first: "you do not have enough
+    // The shortfall verdict stays first: "you do not have enough
     // recovery data" is the more useful answer when both are true, and
     // it is the order `Reconstructor::new_with_path` would have reached
     // on its own. What this buys over that backstop is the load below.
-    reconstruct::check_repair_dim(needed)?;
-    let recovery = if needed > 0 {
+    //
+    // A SHORTFALL NO LONGER RETURNS HERE: the write path below still
+    // runs, over `status::publishable` targets only, so a member already
+    // proven byte-exact is not thrown away with the set. Verdict and
+    // arithmetic are unchanged. See `status::finish`.
+    let mut shortfall = (by_exp.len() < needed).then_some(by_exp.len());
+    let recovery = if shortfall.is_none() && needed > 0 {
+        reconstruct::check_repair_dim(needed)?;
         match load_selected_recovery(cat, &mut by_exp, needed, bs, !fresh)? {
             Some(loaded) => loaded,
             // Re-proof at pread dropped enough mutated packets to fall
             // short - the same verdict a fresh scan of the changed file
             // would have reached.
             None => {
-                return Ok(RepairStatus::Unrepairable {
-                    needed,
-                    have: by_exp.len(),
-                    adopted: adopted.len(),
-                });
+                shortfall = Some(by_exp.len());
+                Vec::new()
             }
         }
     } else {
@@ -1930,7 +2013,7 @@ fn repair_dir_set_inner(
 
     // --- syndrome pass: stream every present slice once ---
     let blocks_rebuilt = missing.len();
-    let rebuilt: Vec<Vec<u8>> = if blocks_rebuilt > 0 {
+    let rebuilt: Vec<Vec<u8>> = if blocks_rebuilt > 0 && shortfall.is_none() {
         let mut rec = Reconstructor::new_with_path(bs, n_inputs, &missing, &recovery, path)?;
         probe.selected = rec.ntt_selected();
         probe.m = missing.len();
@@ -2033,34 +2116,35 @@ fn repair_dir_set_inner(
     };
 
     // --- patch ---
-    let mut adopted_from: Vec<String> = adopted
-        .values()
-        .map(|s| {
-            cands[s.cand]
-                .0
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        })
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    adopted_from.sort();
+    // X6-02c: [`adopt::adopted_from_names`] owns the rule and its argument.
+    let adopted_from = adopt::adopted_from_names(dir, &cands, &donor_cands, &adopted);
     // Which candidates donated anything. Turning these into whole paths
     // the CALLER may delete needs a proof about every byte of the file,
     // not just the window that matched, so it waits until after the
     // final verify (see `spent_donors` below).
     let donors: HashSet<usize> = adopted.values().map(|s| s.cand).collect();
     let mut report = RepairReport {
-        blocks_rebuilt,
+        blocks_rebuilt: rebuilt.len(),
         blocks_adopted: adopted.len(),
         adopted_from,
         files_patched: Vec::new(),
         files_created: Vec::new(),
         consumed_sources: Vec::new(),
+        // Built HERE and not in the patch loop below: that loop walks
+        // `damaged` only, and the census is over every target.
+        per_file: status::per_file_census(&targets, &adopted, &missing),
     };
-    let rebuilt_of: HashMap<usize, usize> =
-        missing.iter().enumerate().map(|(mi, &g)| (g, mi)).collect();
+    // Bounded by `rebuilt` so it cannot outrun it: a shortfall
+    // reconstructs nothing, and an empty map cannot be indexed.
+    let rebuilt_of: HashMap<usize, usize> = missing[..rebuilt.len()]
+        .iter()
+        .enumerate()
+        .map(|(m, &g)| (g, m))
+        .collect();
+    // Global slice ids the repair rebuilt from recovery data - ALL of
+    // `missing`, correct only while the spend loop is gated on
+    // `shortfall.is_none()`. Read `adopt::proven_spent` before lifting it.
+    let rebuilt_set: HashSet<usize> = missing.iter().copied().collect();
     let mut damaged: Vec<usize> = needs_resize;
     for (ti, t) in targets.iter().enumerate() {
         if !t.present.iter().all(|&p| p) && !damaged.contains(&ti) {
@@ -2068,6 +2152,9 @@ fn repair_dir_set_inner(
         }
     }
     damaged.sort_unstable();
+    if shortfall.is_some() {
+        damaged.retain(|&ti| status::publishable(&report.per_file[ti], &targets[ti], ctx));
+    }
 
     // Identified targets (≥1 verified block or an intact MD5) are patched
     // in place - unless their bytes serve as an adoption source. Those,
@@ -2083,6 +2170,8 @@ fn repair_dir_set_inner(
         .map(|s| path_identity_key(fold, &cands[s.cand].0))
         .collect();
     let mut renames: Vec<(PathBuf, usize)> = Vec::new();
+    // Publishable members that did NOT land - `status::publish_failed`.
+    let mut unpublished: Vec<usize> = Vec::new();
     let cleanup = |renames: &[(PathBuf, usize)], extra: Option<&PathBuf>| {
         for (tmp, _) in renames {
             let _ = std::fs::remove_file(tmp);
@@ -2097,12 +2186,20 @@ fn repair_dir_set_inner(
     let mut checks: Vec<(PathBuf, usize, bool)> = Vec::new();
     for &ti in &damaged {
         let t = &targets[ti];
+        // A tree-preserved target writes into a subdirectory that may
+        // not exist yet (missing-file recreate); the temp file lands in
+        // the same parent, so both arms need it. Symlink-refusing, same
+        // containment rule as every other tree write.
+        crate::disk::create_out_dirs(dir, &crate::disk::out_name_of(dir, &t.path))?;
         let identified = t.exists && (t.intact || t.present.iter().any(|&p| p));
-        let via_temp = !identified || used_sources.contains(&path_identity_key(fold, &t.path));
+        // Shortfall publishes stage - `status::publishable`'s argument.
+        let via_temp = !identified
+            || shortfall.is_some()
+            || used_sources.contains(&path_identity_key(fold, &t.path));
         // In temp mode verified blocks are copied over from the old
         // file; in place they're already where they belong.
         let write_blocks = |f: &File,
-                            cand_reader: &mut CandReader,
+                            cand_reader: &mut adopt::CandReader,
                             copy_present: bool|
          -> Result<(), RepairError> {
             f.set_len(t.file.length)?;
@@ -2157,11 +2254,29 @@ fn repair_dir_set_inner(
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".into());
+            // That leaf is a `sanitize_out_name` result and is routinely
+            // AT the 255-byte component cap - capping is what produced
+            // it - so decorating it raw gives a temp name no filesystem
+            // will create, and the rebuild has nowhere to be staged.
+            //
+            // Held back at the STEM rather than capped on the composed
+            // name, unlike the `.dup-` destination above: this name is
+            // nobody's identity key (it is created with `create_new`,
+            // renamed away, and swept by its infix), so what matters is
+            // that it stays RECOGNISABLE as a repair temp - and capping
+            // the composed name truncates the `.nzbfast-repair.` marker
+            // off exactly the names that needed shortening.
+            //
+            // ONE closure spells the decoration and the reserve is that
+            // same closure over an empty stem, so the two cannot drift:
+            // `cap_shared_stem` reserves its LONGEST tail rather than a
+            // sum, and the leading `.` costs a byte on the same
+            // component as the tail does.
+            let decorate = |stem: &str, n: usize| format!(".{stem}.nzbfast-repair.{n}.tmp");
+            let base = crate::disk::cap_shared_stem(&base, [decorate("", 1023).as_str()]);
             let mut made = None;
             for n in 0..1024 {
-                let candidate = t
-                    .path
-                    .with_file_name(format!(".{base}.nzbfast-repair.{n}.tmp"));
+                let candidate = t.path.with_file_name(decorate(&base, n));
                 match std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -2186,10 +2301,12 @@ fn repair_dir_set_inner(
                 )
                 .into());
             };
-            let res = write_blocks(&tmp_file, &mut cand_reader, true);
-            if let Err(e) = res {
-                cleanup(&renames, Some(&tmp));
-                return Err(e);
+            if let Err(e) = write_blocks(&tmp_file, &mut cand_reader, true) {
+                let _ = std::fs::remove_file(&tmp);
+                status::publish_failed(shortfall, &t.file.name, e)
+                    .inspect_err(|_| cleanup(&renames, None))?;
+                unpublished.push(ti);
+                continue;
             }
             checks.push((tmp.clone(), ti, false));
             renames.push((tmp, ti));
@@ -2218,19 +2335,10 @@ fn repair_dir_set_inner(
                 });
             }
         });
-        for ((_, ti, _), r) in checks.iter().zip(results) {
-            match r.expect("verify worker filled every slot") {
-                Ok(true) => {}
-                Ok(false) => {
-                    cleanup(&renames, None);
-                    return Err(RepairError::VerifyFailed(targets[*ti].file.name.clone()));
-                }
-                Err(e) => {
-                    cleanup(&renames, None);
-                    return Err(e);
-                }
-            }
-        }
+        unpublished.extend(
+            status::verify_results(&checks, results, &targets, shortfall)
+                .inspect_err(|_| cleanup(&renames, None))?,
+        );
     }
     mark("final verify");
     // --- which donors are provably spent ---
@@ -2269,7 +2377,9 @@ fn repair_dir_set_inner(
         .map(|t| path_identity_key(fold, &t.path))
         .collect();
     let mut spent_donors: Vec<PathBuf> = Vec::new();
-    for ci in donors {
+    // A shortfall publishes files and spends NOTHING: see the
+    // `consumed_sources` note on `status::RepairStatus::Unrepairable`.
+    for ci in donors.into_iter().filter(|_| shortfall.is_none()) {
         let (p, len) = &cands[ci];
         // §293: a candidate from a DONOR directory is a predecessor
         // job's payload, not this directory's junk - byte-identical to
@@ -2279,11 +2389,7 @@ fn repair_dir_set_inner(
         if !p.starts_with(dir) {
             continue;
         }
-        if target_keys.contains(&path_identity_key(fold, p))
-            || p.file_name()
-                .map(|n| name_identity_key(fold, &n.to_string_lossy()))
-                .is_some_and(|n| declared_names.contains(&n))
-        {
+        if adopt::is_somebodys_payload(dir, fold, p, &target_keys, &declared_names) {
             continue;
         }
         let want: Vec<[u8; 16]> = targets
@@ -2294,11 +2400,19 @@ fn repair_dir_set_inner(
         // A hash that cannot be read decides nothing: keep the file.
         if !want.is_empty() && adopt::md5_of_file(p, None).is_ok_and(|h| want.contains(&h)) {
             spent_donors.push(p.clone());
+            continue;
+        }
+        // The damaged-twin and fully-donated arms - the per-byte proofs
+        // for a source the exact-MD5 test can never clear. See
+        // [`adopt::proven_spent`].
+        if adopt::proven_spent(p, *len, ci, &targets, &adopted, &rebuilt_set, &cands, bs) {
+            spent_donors.push(p.clone());
         }
     }
     spent_donors.sort();
     report.consumed_sources = spent_donors;
     // Every adopted read and every verify is done - land the rebuilds.
+    status::drop_unpublished(&unpublished, &mut damaged, &mut renames);
     let temp_set: HashSet<usize> = renames.iter().map(|&(_, ti)| ti).collect();
     for &ti in &damaged {
         if !temp_set.contains(&ti) {
@@ -2314,13 +2428,17 @@ fn repair_dir_set_inner(
         // it first opened a window where a crash, or any rename failure, left
         // NO canonical file at all: the original had been deleted and the
         // rebuilt copy was still sitting under its temp name.
-        std::fs::rename(&tmp, &t.path)?;
+        if let Err(e) = std::fs::rename(&tmp, &t.path) {
+            let _ = std::fs::remove_file(&tmp);
+            status::publish_failed(shortfall, &t.file.name, e.into())?;
+            continue;
+        }
         report.files_patched.push(t.file.name.clone());
         if !t.exists {
             report.files_created.push(t.file.name.clone());
         }
     }
-    Ok(RepairStatus::Repaired(report))
+    Ok(status::finish(shortfall, needed, adopted.len(), report))
 }
 
 /// Per-worker read-chunk size for the parallel block-hash pass. Blocks
@@ -2430,7 +2548,7 @@ fn hash_blocks_par(
                         } else {
                             crate::yenc_simd::crc32_zeros(crc.finalize(), bs as u64 - avail)
                         };
-                        *ok = blocks.get(bidx).is_some_and(|c| c.crc32 == crc_val);
+                        *ok = blocks.get(bidx).is_some_and(|c| c.crc_matches(crc_val));
                     }
                     Ok(())
                 })();
@@ -2653,7 +2771,7 @@ pub fn verify_pass1(
                     let matched = file
                         .blocks
                         .get(bidx)
-                        .is_some_and(|check| done.finalize() == check.crc32);
+                        .is_some_and(|check| check.crc_matches(done.finalize()));
                     if let Some(slot) = ok.get_mut(bidx) {
                         *slot = matched;
                     }
@@ -2685,7 +2803,7 @@ pub fn verify_pass1(
             // already clamped for exactly this reason.
             let padded = crate::yenc_simd::crc32_zeros(crc.clone().finalize(), (bs - bfill) as u64);
             if let Some(check) = file.blocks.get(bidx) {
-                ok[bidx] = padded == check.crc32;
+                ok[bidx] = check.crc_matches(padded);
             }
         }
         if !ok.get(bidx).copied().unwrap_or(true) && snap.is_none() {
@@ -2854,6 +2972,11 @@ pub fn md5_matches_resumed(
     let md5: [u8; 16] = hasher.finalize().into();
     Ok(md5 == file.md5)
 }
+
+// Wave-4 row M4-53: the recovery-volume SHAPE test the sniffed-leftover
+// sweeps gate their deletes on. Its own file for the size gate.
+mod volshape;
+pub use volshape::is_recovery_volume_shape;
 
 // The repair math and the mapped driver - moved out bodily (TODO 106),
 // same child-module shape as `unit_tests` below.

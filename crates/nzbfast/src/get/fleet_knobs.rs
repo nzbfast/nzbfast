@@ -292,22 +292,49 @@ pub(super) fn read_knobs(cfg_all: &Config, config: &Path) -> FleetKnobs {
     // is the forced per-article CRC where M32 delegation would have
     // skipped it (+4.5% user on a PAR2 full-MD5 job, wall parity).
     //
-    // Default ON where an elsewhere exists. "2+ enabled servers" is
-    // necessary but not sufficient: the steer marks tried_fail, and a
-    // fill server's pickup gate demands the primary's 430 bit - so a
-    // primary + fill pair can never steer, and a same-host (or same
-    // explicit group) sibling serves the same wrong copy. Pay the
-    // forced CRC only where a same-LEVEL peer on a different
-    // host/backbone exists; the delivery-time other_can_take check
-    // enforces the same rule live. Single-server configs pay nothing
-    // at all. NZBFAST_CRC_STEER overrides both ways (the chaos rig's
-    // same-host twins depend on =1); NZBFAST_CRC_RETRY is honored as
-    // an alias - it named the same feature while the detection lived
-    // in the pool, and the rig drivers still set it.
-    let multi_server = has_steer_peer(&cfg_all.servers);
+    // Default ON wherever an article can be asked for AGAIN, which
+    // since 31 Aug 2026 is any enabled server at all.
+    //
+    // It was `has_steer_peer` - a same-LEVEL peer on a different
+    // host/backbone, because a primary + fill pair can never steer (the
+    // fill gate demands the primary's 430 bit) and a same-host sibling
+    // serves the same wrong copy. That predicate was the right answer to
+    // the question it asked, and the question changed: the seam now
+    // re-asks the DELIVERER when it has no peer
+    // (`QueueControl::note_decoded`, `REASK_WASTE_CAP`), so a
+    // single-server install has an elsewhere too. Leaving the old
+    // predicate here would have left the finding's headline case unfixed
+    // - a peerless fleet never calls the seam at all, so EVERY corrupt
+    // article stays terminal on its first bad copy.
+    // `research/CORRUPT-BODY-NO-SECOND-ASK-2026-08-31.md` has the whole
+    // of it. The live delivery-time `other_can_take` check still
+    // enforces the peer rule where a peer is what is wanted; nothing
+    // about WHERE a steer may go moved.
+    //
+    // WHAT IT COSTS, per verify mode, since the only marginal cost is
+    // the forced per-article CRC where M32 delegation would have skipped
+    // it. `fast_verify` has been the shipped default since 21 Jul 2026
+    // and `LiveVerifier::delegates_integrity` is false under it, so on a
+    // default install the CRC is already running on every article and
+    // this costs ZERO (pinned at
+    // `live_verify::delegates_integrity_only_when_full_md5_covers_the_slot`).
+    // Under `--verify full` it is the +4.5% user above, which every
+    // multi-server install has already been paying. Under `--verify
+    // lean` - the explicit "skip the article CRC once PAR2 covers the
+    // file" mode for slow CPUs - the forced CRC undoes the setting; that
+    // conflict is NOT new here and is not this change's to settle, since
+    // a lean install with two same-level peers has had the steer on by
+    // default all along.
+    //
+    // NZBFAST_CRC_STEER overrides both ways (the chaos rig's same-host
+    // twins depend on =1, and =0 is how a lean install can decline);
+    // NZBFAST_CRC_RETRY is honored as an alias - it named the same
+    // feature while the detection lived in the pool, and the rig drivers
+    // still set it.
+    let can_reask = cfg_all.servers.iter().any(|s| s.enabled);
     let crc_steer = std::env::var("NZBFAST_CRC_STEER")
         .or_else(|_| std::env::var("NZBFAST_CRC_RETRY"))
-        .map_or(multi_server, |v| v == "1");
+        .map_or(can_reask, |v| v == "1");
     FleetKnobs {
         read_timeout,
         adaptive_timeout,

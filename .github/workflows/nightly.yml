@@ -32,7 +32,7 @@ jobs:
       # 30 s timeouts, none of which said "disk". The suites now pass
       # `--min-free 0` so they cannot be held that way again, but the
       # headroom is worth having on its own: a debug build of this
-      # workspace with the seven heavy targets linked is tens of GB, and
+      # workspace with the eight heavy targets linked is tens of GB, and
       # the next thing a full disk breaks is the build, not a guard.
       #
       # Nothing removed here is used by a Rust job. The toolchain lives
@@ -137,8 +137,19 @@ jobs:
       # (rationale in pr-check.yml). --test-threads=1 is a hard
       # requirement for the daemon suite (CLAUDE.md invariant 4); the
       # e2e suite tolerates parallelism but carries timing-sensitive
-      # stall/watchdog tests (8-10s abort windows), so it runs
+      # stall/watchdog tests (8-10s abort windows), so it ran
       # single-threaded here too - nightly has the time budget.
+      #
+      # THAT LAST CLAUSE STOPPED BEING THE TRADE ON 31 Aug 2026. The
+      # judgement above is right and is why the threshold tests are
+      # isolated in `.config/nextest.toml` rather than merely run; what
+      # changed is that "nightly has the time budget" was paying 1434 s
+      # for 733 s of tests that are 92% IDLE. e2e now runs in the two
+      # steps below, 210 s + ~304 s, with the timing-sensitive tests
+      # still getting a box to themselves. Six tests in the suite are
+      # measurably contention-sensitive and named in
+      # research/E2E-SERIALIZATION-COST-2026-08-31.md; `retries = 1`
+      # reports them as FLAKY rather than hiding them.
       - name: daemon suite
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -164,15 +175,41 @@ jobs:
       - name: wedge check - daemon
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: python3 tools/wedge-gate.py --junit target/nextest
-      - name: e2e suite
+      # SPLIT IN TWO on 31 Aug 2026, and the split IS the speed. Run as
+      # one command this suite is 1434 s serial; the same tests in two
+      # invocations are 210 s + ~304 s. The reason is not parallelism as
+      # such - `.config/nextest.toml` gives the three
+      # `_at_shipped_thresholds` tests `threads-required =
+      # 'num-test-threads'`, which is correct (they measure a 69 s
+      # demotion window and lose it under load) and which makes nextest
+      # DRAIN the run before each one. This suite holds other 145 s,
+      # 126 s and 71 s tests, so each barrier stalls the box for as long
+      # as whatever is still in flight: measured, the isolation costs
+      # 556 s of wall to execute 304 s of test. Splitting spends that
+      # once, at a step boundary, instead of three times mid-run.
+      # Keep the two steps ADJACENT and keep the filters COMPLEMENTARY -
+      # together they are the whole binary, which is what makes this a
+      # scheduling change and not a coverage cut. The full measurement,
+      # including the two hypotheses it refuted, is in
+      # research/E2E-SERIALIZATION-COST-2026-08-31.md.
+      - name: e2e suite (parallel)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
-        run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test e2e
+        run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test e2e -E 'not test(/_at_shipped_thresholds$/)'
       # Same as the first one above: this job's suites share one junit
       # path, so each needs its own check before the next overwrites it.
-      - name: wedge check - e2e
+      - name: wedge check - e2e (parallel)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
+      - name: e2e suite (shipped thresholds, one at a time)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo nextest run --profile ci -p nzbfast --locked --features heavy-tests --test e2e -E 'test(/_at_shipped_thresholds$/)'
+      - name: wedge check - e2e (shipped thresholds)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: python3 tools/wedge-gate.py --junit target/nextest
       # The other half of ci-private's exclusion list. That job runs
@@ -195,7 +232,7 @@ jobs:
       # exception, and an exception should be a decision.
       #
       # Every heavy-suite invocation in this file passes `--features
-      # heavy-tests`: since TODO 116b the seven targets carry
+      # heavy-tests`: since TODO 116b the eight targets carry
       # required-features in their Cargo.toml so the push path stops
       # LINKING what it never runs. Forgetting the flag cannot silently
       # skip a suite - cargo refuses the --test name loudly, naming the
@@ -212,6 +249,29 @@ jobs:
       # Same as the first one above: this job's suites share one junit
       # path, so each needs its own check before the next overwrites it.
       - name: wedge check - conn_tuner
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
+      # par2gen at scale: tens of megabytes of GENERATED fixture and a
+      # real repair round-trip over thousands of slices, plus the only
+      # interop assertion in the tree that runs at that size (par2cmdline
+      # verifying a six-member set we wrote, which is why the par2 install
+      # above is load-bearing for this step too). Heavy for the same
+      # reason its neighbours are - it is seconds rather than
+      # milliseconds - and NOT because it measures elapsed time: nothing
+      # in it is timing-sensitive, so it carries no wall-clock budget to
+      # be starved out of. Measured 31 Aug 2026 on the dev Mac, DEBUG,
+      # which is the profile this job builds and the profile every
+      # fixture in it was sized against: 4.7 s at load 77 under nextest,
+      # and 23 s at load 130 run serially, which is the shape the
+      # one-process job below uses. Both are noise against the
+      # multi-hour suites either side of it.
+      - name: large-set suite - par2gen
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo nextest run --profile ci -p nzbkit --locked --features heavy-tests --test par2gen_large_set
+      - name: wedge check - par2gen_large_set
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: python3 tools/wedge-gate.py --junit target/nextest
       - name: elapsed-time suite - index_size_cap
@@ -245,6 +305,57 @@ jobs:
       # Same as the first one above: this job's suites share one junit
       # path, so each needs its own check before the next overwrites it.
       - name: wedge check - queue_soak
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: python3 tools/wedge-gate.py --junit target/nextest
+      # The pool rigs (claim `pool-rigs-run-in-no-job`, 31 Aug 2026). 26
+      # `#[ignore]`d wall-clock rigs under crates/nzbkit/src/pool/ ran in
+      # NO CI job at all, nightly included, until this - the only
+      # `--ignored` anywhere in .github/workflows/ was leak_soak above.
+      # Two causes found the same day left 5 of the 26 red BY DESIGN
+      # against thresholds that predate a deliberate product change and
+      # were never re-priced against it (full numbers:
+      # research/IGNORED-POOL-RIGS-RED-2026-08-31.md). Both are product
+      # judgements to make on purpose, not edits to make quietly, so
+      # those 5 are named OUT of this filter rather than fixed or
+      # loosened:
+      #   - payout_adaptive_timeout_cuts_dead_air_stalls and
+      #     payout_adaptive_timeout_survives_cgnat_evictions assert a
+      #     ratio the §275 sole-server pre-byte floor doubling
+      #     (23 Aug 2026) made unsatisfiable at ANY load - the floor
+      #     alone bounds the ratio at >= 0.667 where the two assert
+      #     < 0.6 and < 0.5.
+      #   - fight_flap_clamp_still_reaches_missing_verdicts,
+      #     fight_recycle_slow_must_not_churn_the_flap_keeper and
+      #     gauntlet_four_faults_three_config_tiers count a "sessions
+      #     flapping" announcement that cap-aware keepers (ON by
+      #     default) make unreachable when the fixture's accept cap
+      #     equals the keeper target - the clamp still ENGAGES, only its
+      #     note is never emitted, so the rig-sanity line reads "the
+      #     clamp never engaged" when it did.
+      # The other 21 are real regression coverage that has simply never
+      # run; they pass clean today (verified individually and as a
+      # group, 31 Aug 2026). `--run-ignored ignored-only` so this step
+      # runs ONLY the named ignored tests, never the ordinary pool::
+      # unit tests the main sweep already covers on every push.
+      # `.config/nextest.toml`'s `pool-rigs-serial` test-group forces
+      # `max-threads = 1` on this exact name list (not on the four
+      # modules, which also hold fast parallel tests the push sweep
+      # must not slow down) - more than half of these carry "...flaky
+      # under suite load..." in their own #[ignore] reason, and it was
+      # not idle: two of the 26 failed once each in a census run
+      # alongside unrelated compiles and passed clean 3-for-3 each in
+      # isolation immediately after.
+      - name: elapsed-time suite - pool rigs
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+        run: >
+          cargo nextest run --profile ci -p nzbkit --locked --lib
+          --features heavy-tests --run-ignored ignored-only
+          -E 'package(nzbkit) and binary(nzbkit) and test(/^pool::(fault_rigs::fight_slope_plus_adaptive_must_not_double_punish|queue_tests::queue_control_cancel_cost_at_field_scale|rig_tests::(payout_brownout_recovery_across_config_tiers|payout_channel_depth_smooths_a_stalling_write_side|payout_flap_breaker_collapses_ip_cap_churn|payout_flap_cap_keepers_hold_the_caps_worth|payout_hedge_rescues_stalls_in_under_a_second_not_eight|payout_hot_spare_hides_reconnect_latency|payout_hot_spare_skips_the_slow_start_trickle|payout_multiwan_fanout_rescues_the_frozen_wan|payout_rain_fade_drains_to_the_healthy_wan|payout_recycle_slope_probes_an_asymmetric_multiwan|payout_slope_recycle_frees_a_degraded_session|payout_ttfb_hedge_beats_the_budget_on_dead_air|payout_ttfb_hedge_still_pays_when_dials_cost|safety_adaptive_timeout_kills_nothing_on_a_jittery_link|safety_shipped_defaults_survive_starlink_handovers|safety_ttfb_hedge_kills_nothing_on_a_jittery_link)|tail_rigs::(the_queue_dry_tail_is_the_dial_not_the_job|the_taper_costs_nothing_when_the_client_is_the_bottleneck|the_taper_shortens_the_drain_without_paying_wall_for_it))$/)'
+      # Same as the first one above: this job's suites share one junit
+      # path, so each needs its own check before the next overwrites it.
+      - name: wedge check - pool rigs
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: python3 tools/wedge-gate.py --junit target/nextest
       # The FFI contract on the host, moved here from the push path on
@@ -491,7 +602,8 @@ jobs:
           cargo test --locked -p nzbfast --features heavy-tests --no-run \
             --test daemon --test e2e --test index_size_cap \
             --test http_wedge --test queue_soak
-          cargo test --locked -p nzbkit --features heavy-tests --no-run --test conn_tuner
+          cargo test --locked -p nzbkit --features heavy-tests --no-run \
+            --test conn_tuner --test par2gen_large_set
       # Named one at a time rather than swept, for the reason long-suites
       # gives about its own list: a target added to crates/*/tests/
       # tomorrow must inherit "runs on push" from ci-private's
@@ -500,12 +612,17 @@ jobs:
       # one step per target, which is what stops a red one hiding the
       # rest.
       #
-      # SIX of the seven heavy targets, and the missing one is
+      # SEVEN of the eight heavy targets, and the missing one is
       # arithmetic rather than an oversight: `leak_soak` contains
       # exactly ONE test. A binary with one test cannot have a test
       # pollute another test, so a one-process run of it is bit-for-bit
       # the run nextest already does nightly, at the same multi-hour
       # price. If it ever grows a second test, it belongs here.
+      # `par2gen_large_set` IS here, on that same arithmetic read the
+      # other way - five tests in one binary is a binary where one test
+      # can pollute another - and it is the cheapest step in this job by
+      # two orders of magnitude (seconds, against the multi-hour suites
+      # above), so there is nothing to trade against enrolling it.
       - name: daemon - one process, serial
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -542,6 +659,12 @@ jobs:
           NZBFAST_NO_ENRICH: "1"
           NZBFAST_REQUIRE_PAR2: "1"
         run: cargo test --locked -p nzbkit --features heavy-tests --test conn_tuner -- --test-threads=1
+      - name: par2gen_large_set - one process, serial
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NZBFAST_NO_ENRICH: "1"
+          NZBFAST_REQUIRE_PAR2: "1"
+        run: cargo test --locked -p nzbkit --features heavy-tests --test par2gen_large_set -- --test-threads=1
       # POLLUTION-ONLY on purpose, and it differs from the annotations on
       # `unit-one-process` and `one-process-loaded` for a reason rather
       # than by drift: every command in this job ends `--test-threads=1`,
@@ -1188,7 +1311,7 @@ jobs:
   # pays the emulator for work an optimizer would have deleted, and on
   # 16 Aug that was measured at 8-23x on the tests that dominate the run.
   # Even so this is a nightly, not a per-push job.
-  # The seven heavy targets are excluded exactly as ci-private excludes
+  # The eight heavy targets are excluded exactly as ci-private excludes
   # them; `heavy-tests` is not passed, so they are not even built.
   armv7-cross:
     if: github.repository != 'nzbfast/nzbfast'
@@ -1477,6 +1600,7 @@ jobs:
             -E 'not binary(conn_tuner) and not binary(index_size_cap) and
                 not binary(http_wedge) and not binary(queue_soak) and
                 not binary(daemon) and not binary(e2e) and not binary(leak_soak) and
+                not binary(par2gen_large_set) and
                 not test(=sysbench::tests::compute_report_is_sane)'
 
   # Full cargo-deny pass (advisories, licenses, bans, sources) against

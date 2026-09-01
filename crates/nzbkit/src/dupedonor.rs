@@ -154,6 +154,26 @@ pub struct FileMatch {
     pub length: u64,
 }
 
+/// A target file and the donor file that is byte-identical to it, in a
+/// donor that ships more than one recovery set.
+///
+/// [`FileMatch`] with the set it was found in. Kept as its own type
+/// rather than as an `Option` field on that one, because the two answer
+/// different questions: a `FileMatch` names a member of the set it was
+/// asked about, and a caller holding one has no set to look `donor` up
+/// in but the one it passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetMatch {
+    /// Index into the donor SETS slice this was matched against.
+    pub set: usize,
+    /// Index into `target.files`.
+    pub target: usize,
+    /// Index into `donors[set].files`.
+    pub donor: usize,
+    /// The length both sets agree on.
+    pub length: u64,
+}
+
 /// Pair every target file with a donor file the two recovery sets agree
 /// is byte-identical.
 ///
@@ -174,19 +194,97 @@ pub struct FileMatch {
 /// set cannot both borrow from the same donor file - they get one each,
 /// which is what a caller fetching per (file, span) wants. Ambiguity is
 /// harmless either way: identical content is identical content.
+///
+/// The rule itself lives in [`match_by_content_multi`] and this is the
+/// one-set door onto it, so the pairing is written once: a donor that
+/// ships several independent sets needs a claim that spans them, and
+/// two copies of a pairing rule are two rules the moment one is edited.
 pub fn match_by_content(target: &Par2Set, donor: &Par2Set) -> Vec<FileMatch> {
-    let mut taken = vec![false; donor.files.len()];
+    match_by_content_multi(target, std::slice::from_ref(donor))
+        .into_iter()
+        .map(|m| FileMatch {
+            target: m.target,
+            donor: m.donor,
+            length: m.length,
+        })
+        .collect()
+}
+
+/// The same pairing over a donor that ships SEVERAL independent
+/// recovery sets - one per file, which is GH #63's own shape - taken
+/// as one decision rather than as one per set.
+///
+/// # Why this is not `match_by_content` in a loop
+///
+/// [`match_by_content`] keeps its claim bookkeeping inside one call, so
+/// running it per donor set would let TWO of the donor's sets each pair
+/// with the same target file: the caller then builds two asks for one
+/// file's holes and fetches the same bytes twice. The claim that has to
+/// span the sets is the TARGET's, and it is the reason this function
+/// exists at all - it is what lets a caller widen past the "largest set
+/// only" rule without paying for a hole twice.
+///
+/// Both claims are held, and they are different questions:
+///
+/// * A TARGET file is paired at most once across the whole donor. It is
+///   claimed by the FIRST set that can serve it, and the search then
+///   moves to the next target file.
+/// * A DONOR file is claimed at most once WITHIN its own set, exactly
+///   as [`match_by_content`] claims it - two identical target files get
+///   one donor member each.
+///
+/// Set ORDER is the caller's and is honoured: `crate::live::pick_sets`
+/// hands them back largest first with ties broken by set id, so which
+/// set serves a file that appears in two of them does not depend on
+/// which article came back first. Ambiguity is harmless either way -
+/// identical content is identical content, and every borrowed block is
+/// re-proved against the TARGET's own checksums regardless.
+///
+/// # What the target claim COSTS, measured rather than assumed
+///
+/// A second donor set that could also have served a file is never
+/// tried, even where the first one only PARTLY served it - a donor
+/// article that is itself dead leaves that hole to repair rather than
+/// falling through to the twin. That fallback exists ACROSS donor
+/// postings (`BlockHealer::reopen_rejected` plus the caller's donor
+/// loop) and is deliberately not rebuilt inside one donor here, because
+/// the claim is what stops a partly-served file re-asking for the holes
+/// it has already filled: an ask is cut ONCE, against the holes as they
+/// stood when it was built, so a second ask over the same file pulls
+/// bodies for blocks that are no longer wanted and charges them to the
+/// caller's byte ceiling.
+///
+/// The population that would benefit is a donor posting ONE file's
+/// bytes twice, under two of its OWN recovery sets, with the first
+/// copy's articles dead - which is not a shape any census here has
+/// seen. Measured on `nzbfast`'s side while this landed: a duplicate
+/// pairing is additionally absorbed by `fetch_and_offer`'s
+/// already-satisfied guard whenever the first ask DOES satisfy the
+/// file, so the wire cost the claim avoids is exactly the partial case
+/// and nothing else.
+pub fn match_by_content_multi(target: &Par2Set, donors: &[Par2Set]) -> Vec<SetMatch> {
+    let mut taken: Vec<Vec<bool>> = donors.iter().map(|d| vec![false; d.files.len()]).collect();
     let mut out = Vec::new();
     for (ti, tf) in target.files.iter().enumerate() {
         if tf.length == 0 {
             continue;
         }
-        let hit = donor.files.iter().enumerate().position(|(di, df)| {
-            !taken[di] && df.length == tf.length && df.md5 == tf.md5 && df.md5_16k == tf.md5_16k
+        let hit = donors.iter().enumerate().find_map(|(si, d)| {
+            d.files
+                .iter()
+                .enumerate()
+                .position(|(di, df)| {
+                    !taken[si][di]
+                        && df.length == tf.length
+                        && df.md5 == tf.md5
+                        && df.md5_16k == tf.md5_16k
+                })
+                .map(|di| (si, di))
         });
-        if let Some(di) = hit {
-            taken[di] = true;
-            out.push(FileMatch {
+        if let Some((si, di)) = hit {
+            taken[si][di] = true;
+            out.push(SetMatch {
+                set: si,
                 target: ti,
                 donor: di,
                 length: tf.length,

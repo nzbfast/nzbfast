@@ -6,11 +6,9 @@ use super::*;
 use std::sync::atomic::AtomicBool;
 
 /// A fresh temp directory for one test's `test_daemon`.
-fn tmp(tag: &str) -> std::path::PathBuf {
+fn tmp(tag: &str) -> crate::testscratch::ScratchDir {
     let dir = std::env::temp_dir().join(format!("nzbfast-wire-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+    crate::testscratch::ScratchDir::attach(&dir)
 }
 
 /// A drain slot for `nzo_id` with a fresh abort flag, as `tasks/worker.rs`
@@ -98,4 +96,71 @@ fn an_empty_drain_slot_answers_no_owner() {
     let d = crate::serve::testutil::test_daemon(&dir);
     assert!(!d.fire_drain(true, |_| true));
     assert!(!d.owns_wire(|_| true));
+}
+
+/// F5: a job whose NZB declared no `bytes=` must not report itself
+/// FINISHED for the whole of its download.
+///
+/// `arith`'s old `total.max(1)` clamped `done` to 1 and answered
+/// `(1, 1, 0)` - 100%, nothing left - from the first article onward,
+/// which is the exact shape `get::plan`'s UX §15 comment records the
+/// percentage pair being rebuilt to end ("pinned at 100% / 0 left with
+/// articles still in flight"). An unknown total is now reported as
+/// unknown, and `done` passes through truthfully because
+/// `requeue_cost`'s refetch arm reads it.
+///
+/// Both wire slots, because they are two copies of the same
+/// arithmetic: the owner's, and the draining predecessor's.
+#[test]
+fn an_undeclared_total_is_reported_unknown_and_never_as_complete() {
+    let dir = tmp("unknown-total");
+    let d = crate::serve::testutil::test_daemon(&dir);
+
+    // Control first, so the fallback is known to be doing its job: a
+    // declared total with no published plan reports ordinary progress.
+    *d.active_dl.lock_ok() = Some("U".to_string());
+    d.progress.reset().store(5_000_000, Ordering::Relaxed);
+    d.active_total.store(20_000_000, Ordering::Relaxed);
+    assert_eq!(
+        d.wire_counters("U"),
+        Some((5_000_000, 20_000_000, 15_000_000)),
+        "control: the declared-total fallback is unchanged"
+    );
+
+    // The subject. Nothing here is 1, and nothing here is complete.
+    d.active_total.store(0, Ordering::Relaxed);
+    assert_eq!(
+        d.wire_counters("U"),
+        Some((5_000_000, 0, 0)),
+        "an undeclared total is unknown - the bytes fetched are real, \
+         the total and the remainder are the unknowns"
+    );
+
+    // ...and the queue row that reads it says 0%, never 100%.
+    let (pct, left) = crate::serve::sabcompat::slot_progress(
+        JobState::Downloading,
+        d.wire_counters("U").map(|(done, total, _)| (done, total)),
+        false,
+        0,
+        0,
+        0,
+    );
+    assert_eq!(
+        (pct, left),
+        (0, 0),
+        "0% is this surface's spelling of an unknown; 100% is a claim \
+         that the download has finished"
+    );
+
+    // The draining predecessor takes the identical arithmetic.
+    *d.active_dl.lock_ok() = Some("SUCC".to_string());
+    let (mut slot, _abort) = drain_slot("PRED");
+    slot.progress.store(3_000_000, Ordering::Relaxed);
+    slot.total = 0;
+    *d.drain_dl.lock_ok() = Some(slot);
+    assert_eq!(
+        d.wire_counters("PRED"),
+        Some((3_000_000, 0, 0)),
+        "the drain slot must not answer 100% either"
+    );
 }

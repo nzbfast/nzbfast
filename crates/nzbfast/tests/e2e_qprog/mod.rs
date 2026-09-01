@@ -103,6 +103,7 @@ use super::e2e_faults::{
 };
 use super::harness::serve;
 use super::{Fixture, have_par2, unix_now};
+use crate::payloads;
 
 /// Healthy jobs queued BEHIND the broken head.
 ///
@@ -342,17 +343,7 @@ fn qprog_upload(port: u16, xml: &str, name: &str) {
 /// Distinct bytes per peer, so two peers can never be confused for one
 /// another on disk or in a chaos set.
 fn peer_payload(k: usize) -> Vec<u8> {
-    let mut x = 0x0026_0826_0000_0000u64 ^ (k as u64);
-    let mut out = Vec::with_capacity(PEER_BYTES + 8);
-    while out.len() < PEER_BYTES {
-        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = x;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        out.extend_from_slice(&(z ^ (z >> 31)).to_le_bytes());
-    }
-    out.truncate(PEER_BYTES);
-    out
+    payloads::unique_payload(PEER_BYTES, 0x0026_0826_0000_0000 ^ k as u64)
 }
 
 /// A healthy post nothing in any chaos set can name.

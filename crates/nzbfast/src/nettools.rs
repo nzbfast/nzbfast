@@ -633,27 +633,6 @@ pub(crate) fn load_server(config: &Path) -> Result<ServerConfig> {
         })
 }
 
-/// A8 multi-server indexing: the servers worth scanning HEADERS from.
-///
-/// - enabled only;
-/// - never a metered account ([`ServerConfig::may_spend_on_measurement`]:
-///   the explicit block-account flag, or a configured prepaid block):
-///   OVER traffic is bytes the user's download never asked for, and on a
-///   block it burns the credit that exists to rescue missing bodies;
-/// - one per backbone: mirrors share a spool, so a second reseller of
-///   the same backbone contributes no headers the first didn't. Mirrors
-///   are detected by the explicit `group` field first, else by
-///   [`nzbkit::oracle::backbone_of`];
-/// - ranked level-then-config-order, which is the tiebreak order the
-///   per-group primary choice uses.
-///
-/// An all-metered (but enabled) config falls back to the enabled list
-/// unfiltered - a user who configured indexing gets an index; the
-/// caller logs that headers are spending billed bytes. Indexing is
-/// opt-in and asks before it starts, so someone who turned it on with
-/// nothing but metered servers has already chosen to spend on it; the
-/// flag reorders who scans, and only silences it where there is a
-/// free alternative.
 /// Resolve a marks server key (see [`nzbkit::index::Index::server_key`])
 /// back to its config entry - the scan loop persists only the key.
 /// None = the config no longer carries that server, or no longer carries
@@ -676,6 +655,27 @@ pub(crate) fn find_scan_server(config: &Path, key: &str) -> Option<ServerConfig>
         .cloned()
 }
 
+/// A8 multi-server indexing: the servers worth scanning HEADERS from.
+///
+/// - enabled only;
+/// - never a metered account ([`ServerConfig::may_spend_on_measurement`]:
+///   the explicit block-account flag, or a configured prepaid block):
+///   OVER traffic is bytes the user's download never asked for, and on a
+///   block it burns the credit that exists to rescue missing bodies;
+/// - one per backbone: mirrors share a spool, so a second reseller of
+///   the same backbone contributes no headers the first didn't. Mirrors
+///   are detected by the explicit `group` field first, else by
+///   [`nzbkit::oracle::backbone_of`];
+/// - ranked level-then-config-order, which is the tiebreak order the
+///   per-group primary choice uses.
+///
+/// An all-metered (but enabled) config falls back to the enabled list
+/// unfiltered - a user who configured indexing gets an index; the
+/// caller logs that headers are spending billed bytes. Indexing is
+/// opt-in and asks before it starts, so someone who turned it on with
+/// nothing but metered servers has already chosen to spend on it; the
+/// flag reorders who scans, and only silences it where there is a
+/// free alternative.
 #[cfg(feature = "indexer")]
 pub(crate) fn scan_servers(cfg: &Config) -> Vec<ServerConfig> {
     let eligible: Vec<&ServerConfig> = {
@@ -711,13 +711,13 @@ pub(crate) fn scan_servers(cfg: &Config) -> Vec<ServerConfig> {
 // probe
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn probe(config: &Path) -> Result<()> {
+pub(crate) async fn probe(config: &Path, post_check: bool) -> Result<()> {
     let cfg = Config::load(config)?;
     for server in &cfg.servers {
         print!("{:<28}", server.host);
         let t0 = Instant::now();
         match Connection::connect(server).await {
-            Ok((mut conn, _)) => {
+            Ok((mut conn, greeting)) => {
                 let connected = t0.elapsed();
                 let mut rtts = Vec::new();
                 for _ in 0..3 {
@@ -726,20 +726,56 @@ pub(crate) async fn probe(config: &Path) -> Result<()> {
                     rtts.push(t.elapsed());
                 }
                 let avg = rtts.iter().sum::<std::time::Duration>() / rtts.len() as u32;
-                let pipelining = conn
-                    .capabilities()
-                    .await
-                    .map(|caps| caps.iter().any(|c| c.contains("PIPELINING")))
-                    .unwrap_or(false);
+                let caps = conn.capabilities().await.unwrap_or_default();
+                let pipelining = caps.iter().any(|c| c.contains("PIPELINING"));
                 let g = conn.group("alt.binaries.boneless").await;
-                conn.quit().await;
-                println!(
+                print!(
                     " ok: auth {:>4}ms · RTT {:>5.1}ms · PIPELINING {} · boneless {}",
                     connected.as_millis(),
                     avg.as_secs_f64() * 1000.0,
                     if pipelining { "yes" } else { "n/a" },
                     if g.is_ok() { "ok" } else { "MISSING" },
                 );
+                if !post_check {
+                    println!();
+                    conn.quit().await;
+                    continue;
+                }
+                // Posting capability WITHOUT posting anything. Three
+                // tiers of evidence, weakest first: the greeting code
+                // (RFC 3977: 200 = posting allowed, 201 = reading
+                // only), the CAPABILITIES advertisement, and the
+                // definitive one - issue POST and read the answer,
+                // which arrives BEFORE any article data (340 = go
+                // ahead, 440 = posting not permitted). On a 340 the
+                // connection is dropped without sending a byte; a
+                // close before the terminating dot discards the
+                // article, so nothing ever reaches the group. QUIT
+                // must NOT be sent after a 340 - the server would
+                // read it as article content.
+                let advertised = caps.iter().any(|c| c.trim() == "POST");
+                print!(
+                    " · greeting {} · caps POST {}",
+                    greeting.code(),
+                    if advertised { "yes" } else { "no" },
+                );
+                match conn.exec("POST").await {
+                    Ok(st) if st.code() == 340 => {
+                        println!(" · POST → 340: CAN POST (aborted, nothing sent)");
+                        drop(conn);
+                    }
+                    Ok(st) if st.code() == 440 => {
+                        println!(" · POST → 440: posting not permitted");
+                        conn.quit().await;
+                    }
+                    Ok(st) => {
+                        println!(" · POST → {} {}", st.code(), st.line());
+                        conn.quit().await;
+                    }
+                    Err(e) => {
+                        println!(" · POST probe failed: {e}");
+                    }
+                }
             }
             Err(e) => println!(" FAILED: {e}"),
         }
@@ -1730,7 +1766,7 @@ mod stream_submit {
         let (url, body) = stream_request(base, "https://idx.example/get/abc.nzb").unwrap();
         assert!(body.is_empty(), "an http(s) nzb is the GET shape");
         assert_eq!(credential_param(&url), None, "{url}");
-        let f = tmp_nzb("nocred", b"<nzb/>");
+        let (_scratch, f) = tmp_nzb("nocred", b"<nzb/>");
         let (url, body) = stream_request(base, f.to_str().unwrap()).unwrap();
         assert!(!body.is_empty(), "a file nzb is the POST shape");
         assert_eq!(credential_param(&url), None, "{url}");
@@ -1767,7 +1803,7 @@ mod stream_submit {
         // value and not a parameter of ours - the daemon needs the link
         // whole to fetch it.
         assert_eq!(credential_param(&url), None);
-        let f = tmp_nzb("shape", b"<nzb/>");
+        let (_scratch, f) = tmp_nzb("shape", b"<nzb/>");
         let (url, _) = stream_request("http://127.0.0.1:6789", f.to_str().unwrap()).unwrap();
         assert_eq!(
             url,
@@ -1803,7 +1839,7 @@ mod stream_submit {
         );
         // And the header the real body builds from such a name is one
         // line carrying exactly its two quoted values.
-        let f = tmp_nzb("shape-guard.nzb", b"PAYLOAD");
+        let (_scratch, f) = tmp_nzb("shape-guard.nzb", b"PAYLOAD");
         let (_, body) = stream_request("http://h:6789", f.to_str().unwrap()).unwrap();
         let whole = String::from_utf8_lossy(&body).to_string();
         let head = whole.split("\r\n\r\n").next().unwrap().to_string();
@@ -2035,16 +2071,19 @@ mod stream_submit {
         );
     }
 
-    fn tmp_nzb(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
+    /// The guard comes back with the path because the file lives inside
+    /// it: this used to `create_dir_all` and hand back a bare path with
+    /// nothing removing it, one `$TMPDIR` entry per name per run
+    /// forever. See `crates/nzbfast/tests/scratch/mod.rs`.
+    fn tmp_nzb(name: &str, bytes: &[u8]) -> (crate::testscratch::ScratchDir, std::path::PathBuf) {
+        let d = crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join(format!(
             "nzbfast-stream-{}-{}",
             std::process::id(),
             name.bytes().map(|b| format!("{b:02x}")).collect::<String>()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
+        )));
         let p = d.join(name);
         std::fs::write(&p, bytes).unwrap();
-        p
+        (d, p)
     }
 }
 
@@ -2109,14 +2148,18 @@ mod multi_server_selection {
     /// Write a config to disk - `load_server` and `find_scan_server` both
     /// take a path, because both are called from lanes that re-read the
     /// file rather than hold a parsed copy.
-    fn cfg_file(name: &str, servers: serde_json::Value) -> std::path::PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("nzbfast-nettools-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+    /// The guard comes back with the path for the reason `tmp_nzb` above
+    /// gives.
+    fn cfg_file(
+        name: &str,
+        servers: serde_json::Value,
+    ) -> (crate::testscratch::ScratchDir, std::path::PathBuf) {
+        let d = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-nettools-{name}-{}", std::process::id())),
+        );
         let p = d.join("config.local.json");
         std::fs::write(&p, serde_json::json!({ "servers": servers }).to_string()).unwrap();
-        p
+        (d, p)
     }
 
     /// The 23 Aug 2026 defect, at the helper every one-connection
@@ -2124,7 +2167,7 @@ mod multi_server_selection {
     /// used to hand it straight back.
     #[test]
     fn load_server_skips_a_switched_off_server_however_early_it_sorts() {
-        let p = cfg_file(
+        let (_scratch, p) = cfg_file(
             "off-first",
             serde_json::json!([
                 { "host": "news.newshosting.com", "enabled": false },
@@ -2139,7 +2182,7 @@ mod multi_server_selection {
     /// for the single-server install that switched its one server off.
     #[test]
     fn load_server_refuses_when_every_server_is_switched_off() {
-        let p = cfg_file(
+        let (_scratch, p) = cfg_file(
             "all-off",
             serde_json::json!([
                 { "host": "news.newshosting.com", "enabled": false },
@@ -2159,7 +2202,7 @@ mod multi_server_selection {
     /// that chose it.
     #[test]
     fn find_scan_server_does_not_resurrect_a_disabled_primary() {
-        let p = cfg_file(
+        let (_scratch, p) = cfg_file(
             "stale-primary",
             serde_json::json!([
                 { "host": "news.newshosting.com", "enabled": false },

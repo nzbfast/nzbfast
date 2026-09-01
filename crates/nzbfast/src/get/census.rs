@@ -8,32 +8,97 @@ use super::workers::CauseSplit;
 use crate::*;
 use tracing::{info, warn};
 
-/// Is this slot's name Usenet furniture - metadata a short article must
-/// not fail the job over?
+/// Does this slot's NAME look like Usenet furniture?
 ///
-/// The extension test half of issue #23's spare rule. The caller owns
-/// the other half (the recovery set must NOT cover the file: if it does,
-/// repair can heal it and sparing would skip a heal we can actually do).
+/// The extension test half of issue #23's spare rule, and by itself it
+/// is never the answer: go through [`SpareRule`], which owns the other
+/// half. Private for exactly that reason - a caller that reaches the
+/// extension test directly is a caller asking a question about a string
+/// where the question is about a post.
 ///
-/// Shared rather than restated because the two consumers HAD drifted:
-/// the census spared the file and reported `incomplete == 0`, while
-/// `settle`'s uncovered-hole scan re-derived the same question straight
-/// off the slot counters with no junk test. The two agreed only while a
-/// job took no damage - the moment repair ran, the spared file failed
-/// the job anyway, so a payload PAR2 had rebuilt and MD5-proved was
-/// reported Failed and an *arr blocklisted a good release. One
-/// predicate, one answer, both arms.
-///
-/// An obfuscated slot with no usable extension is never spared: we
+/// An obfuscated slot with no usable extension is never furniture: we
 /// cannot tell furniture from payload, and guessing wrong hands an *arr
 /// a directory missing its video.
-pub(super) fn is_spared_metadata(hint: &str) -> bool {
-    let name = nzbkit::disk::sanitize_filename(hint).to_ascii_lowercase();
+fn is_furniture_ext(hint: &str) -> bool {
+    let name = nzbkit::disk::sanitize_out_name(hint).to_ascii_lowercase();
     let ext = std::path::Path::new(&name)
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     !ext.is_empty() && crate::smart::is_junk_ext(&ext)
+}
+
+/// Issue #23's spare rule: which short files must not fail the job.
+///
+/// One value, built once per post, because the two halves below cannot
+/// be allowed to drift - and they HAD, which is why this is shared at
+/// all. The census spared a file and reported `incomplete == 0`, while
+/// `settle`'s uncovered-hole scan re-derived the same question straight
+/// off the slot counters with no junk test. The two agreed only while a
+/// job took no damage; the moment repair ran, the spared file failed the
+/// job anyway, so a payload PAR2 had rebuilt and MD5-proved was reported
+/// Failed and an *arr blocklisted a good release. One predicate, one
+/// answer, every arm.
+///
+/// Callers still own the third half, which is per-file rather than
+/// per-post: the recovery set must NOT cover the file. If it does,
+/// repair can heal it, and sparing here would skip a heal we can
+/// actually do.
+pub(super) struct SpareRule {
+    /// Does this post carry any payload at all for the furniture to sit
+    /// BESIDE? Row M4-33: `is_furniture_ext` keys on the POSTED HINT, so
+    /// a text release whose deliverable is `Novel.Chapter.txt` - or an
+    /// `.md5` of a disc image, or a `.diz`, or a hash list that IS the
+    /// product - reads as furniture on its name alone. Measured 30 Aug
+    /// 2026 on a 64 KiB `book.txt` short one article with no PAR2: the
+    /// job logged `all 2 files complete` and `complete, without 1
+    /// metadata file(s) no server had`, DELETED the partial, and exited
+    /// 0. The user asked for a book and got an empty directory, reported
+    /// as a success.
+    ///
+    /// So furniture is only furniture when there is payload for it to be
+    /// furniture TO. `smart::sweep_junk` already refuses to empty a
+    /// release for the same reason and says so at its own site ("when
+    /// every file it can see is furniture, the premise does not hold:
+    /// there is nothing here it can tell payload FROM"); this is that
+    /// argument moved to where the job's verdict is decided, rather than
+    /// left to the one consumer that happened to have it.
+    ///
+    /// NOT A SIZE FLOOR, and the reason is measured rather than a
+    /// preference. On a real post a 64 KiB text file is ONE article and
+    /// a scene `.nfo` is ONE article, so there is no size at which the
+    /// two separate: every floor low enough to spare a 30 KB ASCII-art
+    /// `.nfo` still eats a novella, and every floor high enough to save
+    /// the novella fails issue #23's own reporter. The structural
+    /// question has no constant to tune and no ebook to eat.
+    ///
+    /// Recovery data is excluded: a set is what rebuilds payload, never
+    /// the payload itself, so a post that is one recovery set and one
+    /// hash list still has no payload in it.
+    ///
+    /// A slot the user asked to SKIP is NOT excluded, and deliberately
+    /// so rather than by omission - the post carried that payload, and
+    /// declining to fetch it is not the same as the post having none.
+    /// It needs no arm of its own (`sample_skipped` is set on sample and
+    /// proof CLIPS, whose names are never furniture), which is exactly
+    /// why the pin for it is worth having: it is the arm somebody adds.
+    any_payload: bool,
+}
+
+impl SpareRule {
+    pub(super) fn of(slots: &[Arc<FileSlot>]) -> SpareRule {
+        SpareRule {
+            any_payload: slots
+                .iter()
+                .any(|s| !s.is_par2() && !is_furniture_ext(&s.hint)),
+        }
+    }
+
+    /// Is this slot's short file optional furniture rather than the
+    /// thing the user asked for?
+    pub(super) fn spares(&self, hint: &str) -> bool {
+        self.any_payload && is_furniture_ext(hint)
+    }
 }
 
 /// What the settle/repair phase and the failure summary need to know
@@ -78,6 +143,38 @@ pub(super) struct Census {
     /// counters have never had. See `diag::LossCauses::recovery_segments`
     /// for what reads it and why a bare loss count could not serve.
     pub(super) recovery_segments: u64,
+}
+
+impl Census {
+    /// A census with every figure at zero, for the `finish_job` cases
+    /// that set two or three of them and care about nothing else.
+    ///
+    /// Test-only, and `#[cfg(test)]` rather than a `Default` derive on
+    /// purpose: [`take_census`] is the only thing that may produce one
+    /// of these in production, and a blank census that compiled there
+    /// would report a clean run over a job nobody counted.
+    #[cfg(test)]
+    pub(super) fn blank() -> Census {
+        Census {
+            total: 0,
+            dead_servers: Vec::new(),
+            left_servers: Vec::new(),
+            backbones: Vec::new(),
+            post_age_days: 0,
+            sniff_bootstrap: None,
+            incomplete: 0,
+            incomplete_spared: Vec::new(),
+            missing_segments: 0,
+            total_segments: 0,
+            sparse_slots: Vec::new(),
+            recovery_errs: 0,
+            derrs: 0,
+            retention_skipped: 0,
+            retention_skipped_payload: 0,
+            recovery_missing: 0,
+            recovery_segments: 0,
+        }
+    }
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -273,6 +370,7 @@ pub(super) fn take_census(
     // at all has always succeeded on this same path.
     let sniff_bootstrap = sniff.bootstrap_slot();
     let slot_recovery = |i: usize| slots[i].is_par2();
+    let spare_rule = SpareRule::of(slots);
     let deferred_arts = sniff.deferred_articles.load(Ordering::Relaxed);
     if deferred_arts > 0 {
         info!(
@@ -304,7 +402,7 @@ pub(super) fn take_census(
         (!sets.is_empty()).then(|| {
             sets.iter()
                 .flat_map(|set| set.files.iter())
-                .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
+                .map(|f| nzbkit::disk::sanitize_out_name(&f.name).to_lowercase())
                 .collect()
         })
     };
@@ -347,13 +445,16 @@ pub(super) fn take_census(
             //   does, repair can rebuild it and the repair branch is where
             //   that belongs; sparing it here would skip a heal we can
             //   actually do.
+            // - Only when this post carries payload for the furniture to
+            //   sit beside (row M4-33). A text release IS its `.txt`.
+            //   See [`SpareRule`].
             //
             // An obfuscated slot with no usable extension is not spared -
             // we cannot tell furniture from payload, and guessing wrong
             // would hand an *arr a directory missing its video.
-            let name = nzbkit::disk::sanitize_filename(&slot.hint).to_ascii_lowercase();
+            let name = nzbkit::disk::sanitize_out_name(&slot.hint).to_ascii_lowercase();
             let covered = set_names.as_ref().is_some_and(|n| n.contains(&name));
-            if !covered && is_spared_metadata(&slot.hint) {
+            if !covered && spare_rule.spares(&slot.hint) {
                 warn!(
                     target: "get",
                     "{}: {} missing of {} segment(s) - metadata the recovery set \
@@ -426,7 +527,7 @@ pub(super) fn take_census(
         let covered_by_set = verifier.slot_in_set(i)
             || match (&set_names, &written_as) {
                 (Some(n), Some(name)) => {
-                    n.contains(&nzbkit::disk::sanitize_filename(name).to_lowercase())
+                    n.contains(&nzbkit::disk::sanitize_out_name(name).to_lowercase())
                 }
                 _ => false,
             };
@@ -552,6 +653,10 @@ mod tests {
     /// rebuilt and MD5-proved reported Failed. Sharing the predicate is
     /// the fix; this pins its answers so a future edit cannot quietly
     /// widen it into archives or narrow it out of furniture.
+    ///
+    /// The extension arm ALONE, which is what a caller must never be
+    /// able to ask on its own - see [`SpareRule`] and the payload arm
+    /// pinned below it.
     #[test]
     fn spared_metadata_is_furniture_only() {
         for f in [
@@ -562,7 +667,7 @@ mod tests {
             "hashes.md5",
             "info.diz",
         ] {
-            assert!(is_spared_metadata(f), "{f} is furniture and must spare");
+            assert!(is_furniture_ext(f), "{f} is furniture and must spare");
         }
         for f in [
             // Payload. A short .rar or .mkv still fails the job - that
@@ -577,8 +682,89 @@ mod tests {
             "abcdef0123456789",
             "",
         ] {
-            assert!(!is_spared_metadata(f), "{f} must still fail the job");
+            assert!(!is_furniture_ext(f), "{f} must still fail the job");
         }
+    }
+
+    fn spare_slot(hint: &str, par2: bool) -> Arc<FileSlot> {
+        Arc::new(FileSlot {
+            hint: hint.to_string(),
+            hint_is_posted_name: true,
+            yenc_votes: Default::default(),
+            name_choice: Default::default(),
+            is_par2_main: par2,
+            par2_name_demoted: Default::default(),
+            par2_sniffed: Default::default(),
+            total_segments: 1,
+            remaining: Default::default(),
+            missing: Default::default(),
+            errors: Default::default(),
+            deferred: Default::default(),
+            abandoned: Default::default(),
+            sample_skipped: false,
+            capture: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Row M4-33: furniture is only furniture when the post carries
+    /// payload for it to be furniture TO.
+    ///
+    /// The measured defect was a 64 KiB `Novel.Chapter.txt` short one
+    /// article with no PAR2: spared on its extension, DELETED as an
+    /// unrebuildable partial, and the job exited 0 with an empty
+    /// directory. The e2e pin
+    /// `m4_33_a_text_release_is_not_furniture_because_of_its_extension`
+    /// drives the whole job; this pins the predicate underneath it,
+    /// including the arm no e2e can reach cheaply - that a post which is
+    /// nothing but a recovery set and one `.txt` still has no payload.
+    #[test]
+    fn a_post_that_is_all_furniture_spares_nothing() {
+        // The shape issue #23 reported: metadata beside a video.
+        let with_payload = [
+            spare_slot("Feature.mkv", false),
+            spare_slot("release.nfo", false),
+        ];
+        let rule = SpareRule::of(&with_payload);
+        assert!(
+            rule.spares("release.nfo"),
+            "a .nfo beside a video is furniture - issue #23 must still hold"
+        );
+        assert!(!rule.spares("Feature.mkv"), "a video is never furniture");
+
+        // A text release. Every name in it reads as furniture, so there
+        // is nothing here to tell payload FROM.
+        let text_release = [
+            spare_slot("Novel.Chapter.txt", false),
+            spare_slot("release.nfo", false),
+            spare_slot("release.sfv", false),
+        ];
+        let rule = SpareRule::of(&text_release);
+        for f in ["Novel.Chapter.txt", "release.nfo", "release.sfv"] {
+            assert!(
+                !rule.spares(f),
+                "{f}: a post with no payload has nothing for furniture to sit beside,                  so sparing it empties the release and calls that a success"
+            );
+        }
+
+        // Recovery data is what rebuilds payload, never the payload
+        // itself - so a set plus one hash list is still all furniture.
+        let set_and_hashes = [
+            spare_slot("release.par2", true),
+            spare_slot("image.md5", false),
+        ];
+        assert!(
+            !SpareRule::of(&set_and_hashes).spares("image.md5"),
+            "a recovery set is not the payload its furniture sits beside"
+        );
+
+        // A slot the user declined is still payload the POST carried.
+        let mut skipped = spare_slot("Feature.mkv", false);
+        Arc::get_mut(&mut skipped).unwrap().sample_skipped = true;
+        let declined = [skipped, spare_slot("release.nfo", false)];
+        assert!(
+            SpareRule::of(&declined).spares("release.nfo"),
+            "declining to fetch payload is not the same as the post having none"
+        );
     }
 
     fn srv(host: &str) -> (ServerConfig, nzbkit::pool::PoolConfig) {
@@ -645,9 +831,11 @@ mod tests {
         Arc::new(FileSlot {
             hint: hint.into(),
             hint_is_posted_name: nzbkit::release::stem_is_a_name(hint),
+            yenc_votes: Default::default(),
             name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main,
             sample_skipped: false,
+            par2_name_demoted: Default::default(),
             par2_sniffed: std::sync::atomic::AtomicBool::new(false),
             total_segments: total,
             remaining: AtomicUsize::new(remaining),

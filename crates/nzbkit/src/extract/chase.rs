@@ -40,6 +40,57 @@ pub(super) fn chase_relief_env_off_value(v: Option<&str>) -> bool {
     v == Some("1")
 }
 
+/// A doubt the CALLER raises about an article whose terminal verdict it
+/// has DEFERRED, and the reason `Inner::lost_articles` is not enough on
+/// its own.
+///
+/// That flag is set from a TERMINAL fetch verdict, and
+/// [`Extractor::note_article_lost`] says in its own doc why that lands
+/// late: "verdicts typically land AFTER the pile has built (retries
+/// exhaust last)". The drop-behind trim reads the flag as its veto -
+/// "no lost article anywhere in the job: a demote waiting to happen,
+/// and a demote after a drop is a re-download" - so between the pool
+/// deciding an article is one refusal from gone and the verdict
+/// actually landing, the trim can DROP a prefix a repair will need.
+/// Measured 30 Aug 2026 and written up in
+/// `research/CHASE-TRIM-DROPS-BEFORE-VERDICT-2026-08-30.md`: under the
+/// holds backpressure park (whose arm bypasses the pace and can-finish
+/// gates by design) the pass dropped five megabytes of a PAR2-vouched
+/// prefix, `try_mapped_repair` then declined for want of backing data,
+/// and the set took the disk ladder with a re-fetch on top - the exact
+/// three-write route the row-26 chase repair exists to remove.
+///
+/// So this is the SAME veto, raised EARLIER: the pool raises it at the
+/// moment it decides a refusal is the last evidence an article needs
+/// and holds the verdict back anyway (TODO 315's late re-ask, and
+/// §129's confirming repeat for a bare refusal that would be
+/// live-unanimous with this group's bit folded in). It is deliberately
+/// NOT raised on every 430 - an article a later server answers is not
+/// doubt about the JOB - and it does not arm the stalled-chase paging
+/// pass, which does real disk I/O and wants the terminal mark.
+///
+/// STICKY and never cleared, exactly like the flag it stands in front
+/// of. A re-ask that succeeds does not give back a prefix already
+/// dropped, so a flag that could fall again would reopen the same
+/// window it closes. A clean job cannot raise it at all: nothing here
+/// happens without a 430 that has walked the whole live fleet.
+#[derive(Debug, Default)]
+pub struct LossDoubt(AtomicBool);
+
+impl LossDoubt {
+    /// Raise the doubt. Cheap enough for the pool's refusal path: one
+    /// relaxed store, no lock - which is the whole reason the flag is
+    /// handed out as an `Arc` rather than reported through a method on
+    /// the extractor, whose every entry point takes the global mutex.
+    pub fn raise(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+    /// Has any article's terminal verdict been held back?
+    pub fn raised(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
 /// One drop-behind trim spill, planned under the routing lock and
 /// WRITTEN after it drops (TODO 37 item 1, 23 Aug 2026). The prefix
 /// `[at, at+len)` of `buf` is still in RAM while this is queued - only
@@ -118,6 +169,18 @@ impl Extractor {
                 }
             }
             self.shape.note(self.depth, bits);
+            // The depth cap counts COMPRESSING layers only - see
+            // `Inner::saw_compressed`. This is the only place
+            // in the tree that learns an archive's per-entry method, so it
+            // is the only place these can be latched. Sticky in the
+            // compressed direction: one compressed entry makes the whole
+            // layer count, whatever the rest of it stores.
+            if bits & SH_COMPRESSED != 0 {
+                inner.saw_compressed = true;
+            }
+            if bits & SH_STORE != 0 {
+                inner.saw_store = true;
+            }
         }
         let stashed = self.retain_header_bytes(inner, slot, offset, data);
         // Header bytes parked in RAM hold this article's record exactly
@@ -510,18 +573,24 @@ impl Extractor {
         data: &[u8],
     ) -> io::Result<()> {
         // Anything below the trim point is not the buffer's to reconcile
-        // - it is already in the archive file. A late span there is
-        // either a routing re-feed (which cannot happen after a trim:
-        // re-feeds all land at classification) or a PAR2 repair rewrite,
-        // and we cannot tell cheaply. So take the safe reading: write it
-        // to the file, where it OVERWRITES whatever the trim spilled, and
-        // force the forfeit below - the engine may already have decoded
-        // from the stale copy. Same shape and same direction as the
-        // conflict guard, which is what actually fires here.
-        //
-        // Unreachable in practice: `patch_volume_span` refuses a SevenZ
-        // slot outright, and at depth 0 the caller materializes a chased
-        // slot before repair runs at all.
+        // - it is already in the archive file, at identity offsets (the
+        // spill writes through `ensure_plain_writer`). A late span there
+        // is either a duplicate redelivery or a PAR2 repair rewrite, and
+        // the disk copy is what tells them apart. This arm read as
+        // "unreachable in practice" until 30 Aug 2026, and the reachable
+        // case is the BENIGN one: the multipart 7z feed predelivers the
+        // last part's tail (the promote ladder front-loads the end
+        // header), the body pass later refeeds that same range, and on
+        // a starved box the engine sprints to EOF and trims past it in
+        // between - windows-unit went red on exactly that twice (runs
+        // 33191713092, 33320045978), demoting a healthy streaming set.
+        // So compare before condemning: bytes that AGREE with the
+        // spilled copy are a no-op (they are already on disk); bytes
+        // that differ - or a copy that cannot be read back, including a
+        // drop-not-spill trim's hole - overwrite the file and force the
+        // forfeit, because the engine may already have decoded from the
+        // stale copy. Same direction as the conflict guard, which is
+        // what actually fires here.
         let trimmed = inner.slots[slot]
             .chase
             .as_ref()
@@ -530,8 +599,17 @@ impl Extractor {
             && offset < base
         {
             let n = crate::disk::chunk_len(base - offset, data.len());
-            buf.mark_conflict();
-            self.plain_span(inner, slot, offset, &data[..n])?;
+            let agrees = n == 0 || {
+                let mut have = vec![0u8; n];
+                self.ensure_plain_writer(inner, slot)
+                    .and_then(|w| w.read_at(&mut have, offset))
+                    .is_ok()
+                    && have[..] == data[..n]
+            };
+            if !agrees {
+                buf.mark_conflict();
+                self.plain_span(inner, slot, offset, &data[..n])?;
+            }
         }
         let Some(ch) = inner.slots[slot].chase.as_mut() else {
             return match inner.slots[slot].mode {
@@ -793,6 +871,13 @@ impl Extractor {
     /// further spans to re-arm from. A later repair (or a rescheduled
     /// fetch) that fills the gap resumes the decode straight off the
     /// paged bytes.
+    /// The chain-wide [`LossDoubt`] this job's fetch pool raises when it
+    /// holds a terminal verdict back. Handed out once at wiring time and
+    /// stored into, never read, by the caller - see the type's own doc
+    /// for what it is for and why it is not `lost_articles`.
+    pub fn loss_doubt(&self) -> Arc<LossDoubt> {
+        self.inner.lock_ok().loss_doubt.clone()
+    }
     pub fn note_article_lost(&self, slot: usize) {
         {
             let mut g = self.inner.lock_ok();
@@ -1013,6 +1098,17 @@ impl Extractor {
         // - no lost article anywhere in the job: a demote waiting to
         //   happen, and a demote after a drop is a re-download. (A
         //   conflicted buffer declines `trim_to` itself.)
+        // - and no DOUBT about one either ([`LossDoubt`]). The flag above
+        //   is set from a terminal verdict, which lands late by
+        //   construction (`note_article_lost`: "retries exhaust last"),
+        //   so on its own it is a race the trim can win - measured 30 Aug
+        //   2026 dropping a vouched prefix under the park arm below,
+        //   after which the mapped repair declined for want of backing
+        //   data and the set took the disk ladder plus a re-fetch
+        //   (`research/CHASE-TRIM-DROPS-BEFORE-VERDICT-2026-08-30.md`).
+        //   The pool raises the doubt at the moment it decides a refusal
+        //   is an article's last evidence and holds the verdict back
+        //   anyway, which is the same veto one round trip earlier.
         // - the engine is keeping pace with the line. The same round
         //   measured the regime as line rate vs decode rate: at 110 MB/s
         //   every breach finds a finished volume, at 250 MB/s the trim
@@ -1045,6 +1141,7 @@ impl Extractor {
             && inner.rar_drop_on
             && self.depth == 0
             && !inner.lost_articles.load(Ordering::Relaxed)
+            && !(inner.loss_doubt_on && inner.loss_doubt.raised())
             && (parked
                 || (Self::rar_engine_keeping_pace(&volumes)
                     && Self::rar_drop_can_finish(
@@ -1654,13 +1751,14 @@ impl Extractor {
                 inner.late_placements.push(LatePlacement {
                     slot: j.slot,
                     frag: Frag {
-                        file: j
-                            .writer
-                            .path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned(),
+                        // The out_dir-RELATIVE name, never the bare one (30 Aug 2026
+                        // sweep): the resume journal resolves a fragment's file by
+                        // joining this onto out_dir, and matches it against the `S`/`M`
+                        // records, which carry `sanitize_out_name`'s tree form. A bare
+                        // basename sent restore to `out_dir/x.vob` for a payload living
+                        // at `out_dir/VIDEO_TS/x.vob` - every article whose bytes were
+                        // in it refetched, and its crypto facts unfindable.
+                        file: out_name_of(&inner.out_dir, &j.writer.path),
                         file_off: j.at,
                         vol_off: j.at,
                         len: n as u64,

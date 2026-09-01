@@ -8,7 +8,7 @@
 //! multiple consumer tasks write concurrently.
 
 use crate::sync::{MutexExt, RwLockExt};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -475,23 +475,65 @@ fn mark_sparse(file: &File) {
     }
 }
 
-/// Open `lanes - 1` extra read+write handles on `path` for the Windows
-/// write-lane spread. Best-effort: stop at the first failure and run
-/// with what opened (possibly none) - fewer lanes is always correct.
+/// Open `lanes - 1` extra read+write handles on the SAME FILE OBJECT as
+/// `primary` for the Windows write-lane spread. Best-effort: stop at the
+/// first failure and run with what opened (possibly none) - fewer lanes
+/// is always correct.
+///
+/// FROM THE HANDLE, NEVER FROM THE NAME (X5-06/08/19 OWED item 5,
+/// 31 Aug 2026). This is called from inside both constructors' struct
+/// literals and from [`FileWriter::unpark`], which is to say AFTER the
+/// primary's own no-follow bound open has already settled which inode
+/// this writer owns. Reopening `path` here asked the filesystem the
+/// question a second time, so anything that changed what the name
+/// referred to in between handed the lanes a DIFFERENT INODE from the
+/// primary - and every lane writes payload bytes at absolute offsets,
+/// so the two would have interleaved one file's contents across two.
+/// `ReOpenFile` takes the existing handle and hands back a new one to
+/// the same file object with its own file pointer, which is what the
+/// lane spread wanted in the first place: there is no name in it to
+/// race.
+///
+/// Windows-only and COMPILE-VERIFIED ONLY - no box on this fleet can
+/// execute it, and the lane spread is dark by default
+/// ([`WIN_WRITER_LANES_DEFAULT`] is 1, so the loop below does not run
+/// unless `NZBFAST_WIN_WRITE_LANES` turns it on). A `ReOpenFile` that
+/// refuses is not an error: the writer runs on the primary alone,
+/// which is the shipped configuration.
 #[cfg(windows)]
-fn open_aux_handles(path: &Path) -> Vec<File> {
+fn open_aux_handles(primary: &File) -> Vec<File> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+    use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
+    };
     let lanes = win_writer_lanes();
     let mut v = Vec::new();
     for _ in 1..lanes {
-        match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(path)
-        {
-            Ok(f) => v.push(f),
-            Err(_) => break,
+        // Same sharing std itself opens with, so the lanes can coexist
+        // with each other and with whatever else holds the file; 0
+        // flags, because `ReOpenFile` takes FILE_FLAG_* values there
+        // and this wants none of them.
+        // SAFETY: `primary` is borrowed across the call so its handle
+        // stays live; ReOpenFile reads it and returns a fresh handle or
+        // INVALID_HANDLE_VALUE, and writes nothing back through a
+        // pointer.
+        let h = unsafe {
+            ReOpenFile(
+                primary.as_raw_handle() as _,
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                0,
+            )
+        };
+        if h == INVALID_HANDLE_VALUE || h.is_null() {
+            break;
         }
+        // SAFETY: `h` is a fresh, valid, owned handle from the call
+        // above (checked against both failure spellings), and nothing
+        // else holds or closes it - so `File` takes sole ownership of
+        // it exactly once.
+        v.push(unsafe { File::from_raw_handle(h as _) });
     }
     v
 }
@@ -912,6 +954,18 @@ const REPAIR_ADMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(30
 #[cfg(windows)]
 const REPAIR_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Article-write gates per [`FileWriter`] - see `article_gates`. Sixteen
+/// is a few hundred bytes per open output and leaves ordinary concurrent
+/// arrival essentially uncontended; the number only trades memory against
+/// how often two unrelated offsets alias onto one mutex, never against
+/// correctness.
+const ARTICLE_GATES: usize = 16;
+
+/// File-offset grain an [`ARTICLE_GATES`] shard covers. One MiB is
+/// comfortably wider than an article (~700 KB here), so a delivery takes
+/// one gate or two rather than a handful.
+const ARTICLE_GATE_GRAIN: u64 = 1 << 20;
+
 pub struct FileWriter {
     /// `None` while PARKED - the handle is closed but the writer (and every
     /// `Arc` clone of it) stays alive and reopens on [`FileWriter::unpark`].
@@ -948,6 +1002,33 @@ pub struct FileWriter {
     /// file is unlinked. Distinct from `covered`, which counts spans
     /// published without a charge too (`note_repaired`).
     charged: AtomicU64,
+    /// A range was written TWICE with DIFFERENT bytes by two article
+    /// deliveries (see [`FileWriter::write_article_at`]). Distinct from
+    /// [`FileWriter::had_rewrite`], which counts any overlap at all: a
+    /// same-article hedge or tail duplicate rewrites a range with the
+    /// bytes already there and is harmless, so it leaves this false.
+    /// Only a post that CONTRADICTS ITSELF sets it. Holds the FIRST such
+    /// range as `(offset, len)`, so the refusal can name the bytes rather
+    /// than just assert that some disagreed.
+    conflict: std::sync::Mutex<Option<(u64, u64)>>,
+    /// Makes an article write's coverage peek atomic with its own pwrite -
+    /// see [`FileWriter::write_article_at`]. Without it two decode threads
+    /// delivering the two halves of an overlapping pair both peek an empty
+    /// map (coverage is published by `note_written` AFTER the pwrite) and
+    /// neither sees the other: measured 30 Aug 2026 as a 5-in-12 flake on
+    /// the M4-14a fixture before this existed.
+    ///
+    /// SHARDED by file offset rather than one gate per file, so ordinary
+    /// out-of-order arrival keeps its parallelism - the Windows write-lane
+    /// pool exists precisely to write one file from several threads, and a
+    /// whole-file mutex would undo it. Two spans that OVERLAP share at
+    /// least one byte and therefore at least one grain, which is all the
+    /// exclusion this needs; aliasing distinct grains onto one mutex only
+    /// ever over-serializes, never under. The `intervals` mutex cannot
+    /// play this role: `covered`/`contiguous_from_start` take it to answer
+    /// the streaming server, and holding it across a pwrite would stall
+    /// /stream on every write.
+    article_gates: [std::sync::Mutex<()>; ARTICLE_GATES],
     /// Written spans, sorted + merged - lets the streaming server ask
     /// "are bytes [off, off+len) really on disk yet?". Out-of-order
     /// arrival keeps this list tiny (≈ number of gaps, not writes).
@@ -1150,36 +1231,14 @@ impl FileWriter {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
-        apply_cache_policy(&file);
-        preallocate_capped(&file, size, prealloc_cap)?;
-        Ok(FileWriter {
-            file: std::sync::RwLock::new(Some(file)),
-            path: path.to_path_buf(),
-            renamed_to: std::sync::Mutex::new(None),
-            size,
-            written: AtomicU64::new(0),
-            covered: AtomicU64::new(0),
-            budget: None,
-            charged: AtomicU64::new(0),
-            intervals: std::sync::Mutex::new(Vec::new()),
-            drop_next: AtomicU64::new(16 << 20),
-            #[cfg(windows)]
-            aux: std::sync::RwLock::new(open_aux_handles(path)),
-            #[cfg(windows)]
-            next_lane: AtomicU64::new(0),
-            custody: Arc::new(ReadCustody {
-                st: std::sync::Mutex::new(CustodyState::default()),
-                cv: std::sync::Condvar::new(),
-            }),
-            abandoned: AtomicBool::new(false),
-            prefix: None,
-        })
+        // The no-follow, descriptor-bound open (see
+        // `relpath::open_out_leaf`): the parent this write lands in is
+        // the one that was checked, and neither it nor the leaf may be
+        // an alias. A plain `OpenOptions::open` here followed a symlink
+        // planted at the payload's own name and truncated an outside
+        // inode (X5-06, 30 Aug 2026).
+        let file = relpath::open_out_leaf(path, relpath::LeafOpen::Truncate)?;
+        Self::around(file, path.to_path_buf(), size, prealloc_cap)
     }
 
     /// Open WITHOUT truncating (crash-resume: earlier runs' bytes are
@@ -1199,30 +1258,88 @@ impl FileWriter {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            // Never truncate: this is the RESUME open. The bytes already on
-            // disk are the point - a truncate here silently restarts the
-            // download it was called to continue.
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
+        // `LeafOpen::Keep` never truncates: this is the RESUME open,
+        // and the bytes already on disk are the point - a truncate here
+        // silently restarts the download it was called to continue.
+        // Same no-follow, descriptor-bound rule as the fresh open above;
+        // the resume arm followed a planted leaf alias too, and resized
+        // an outside inode through `preallocate_capped` (X5-06).
+        let file = relpath::open_out_leaf(path, relpath::LeafOpen::Keep)?;
+        Self::around(file, path.to_path_buf(), size, prealloc_cap)
+    }
+
+    /// [`FileWriter::create_capped`] ANCHORED ON THE JOB'S OUTPUT ROOT:
+    /// the directories `out_name` needs are made and the payload is
+    /// opened inside the last of them, with no component below `root`
+    /// ever re-resolved between the check and the write.
+    ///
+    /// This is the shape every write site under a known root should
+    /// take. The path-taking constructors above can bind no more than
+    /// the leaf and its immediate parent, so `out/a/b/leaf.bin` with
+    /// `a` swapped for a symlink after the directories were made is
+    /// still followed by them - the residue X5-06/08/19 left open, and
+    /// exactly the shape of a BDMV tree (`BDMV/STREAM/00001.m2ts`). See
+    /// `relpath::open_out_leaf_under`.
+    pub fn create_under(
+        root: &Path,
+        out_name: &str,
+        size: u64,
+        prealloc_cap: u64,
+    ) -> io::Result<FileWriter> {
+        let file = relpath::open_out_leaf_under(root, out_name, relpath::LeafOpen::Truncate)?;
+        Self::around(
+            file,
+            relpath::join_out_name(root, out_name),
+            size,
+            prealloc_cap,
+        )
+    }
+
+    /// [`FileWriter::create_resume_capped`] anchored on the output root,
+    /// the same way [`FileWriter::create_under`] is - and never
+    /// truncating, for the reason that constructor gives.
+    pub fn create_resume_under(
+        root: &Path,
+        out_name: &str,
+        size: u64,
+        prealloc_cap: u64,
+    ) -> io::Result<FileWriter> {
+        let file = relpath::open_out_leaf_under(root, out_name, relpath::LeafOpen::Keep)?;
+        Self::around(
+            file,
+            relpath::join_out_name(root, out_name),
+            size,
+            prealloc_cap,
+        )
+    }
+
+    /// Everything the four constructors above do once the payload is
+    /// OPEN: the cache policy, the reservation, and the writer around
+    /// them. Spelled once so a field added to `FileWriter` cannot be
+    /// added to three of four openings - the state this replaced, where
+    /// two copies of a 24-line literal sat one screen apart.
+    fn around(file: File, path: PathBuf, size: u64, prealloc_cap: u64) -> io::Result<FileWriter> {
         apply_cache_policy(&file);
         preallocate_capped(&file, size, prealloc_cap)?;
+        // From the handle the open above bound, and BEFORE the struct
+        // literal takes ownership of it - see `open_aux_handles`.
+        #[cfg(windows)]
+        let aux = std::sync::RwLock::new(open_aux_handles(&file));
         Ok(FileWriter {
             file: std::sync::RwLock::new(Some(file)),
-            path: path.to_path_buf(),
+            path,
             renamed_to: std::sync::Mutex::new(None),
             size,
             written: AtomicU64::new(0),
             covered: AtomicU64::new(0),
             budget: None,
             charged: AtomicU64::new(0),
+            conflict: std::sync::Mutex::new(None),
+            article_gates: std::array::from_fn(|_| std::sync::Mutex::new(())),
             intervals: std::sync::Mutex::new(Vec::new()),
             drop_next: AtomicU64::new(16 << 20),
             #[cfg(windows)]
-            aux: std::sync::RwLock::new(open_aux_handles(path)),
+            aux,
             #[cfg(windows)]
             next_lane: AtomicU64::new(0),
             custody: Arc::new(ReadCustody {
@@ -1292,6 +1409,131 @@ impl FileWriter {
             b.charge(fresh)?;
         }
         Ok(())
+    }
+
+    /// [`FileWriter::write_at`] for bytes delivered by ONE ARTICLE of the
+    /// post, which is the only caller that can tell a duplicate from a
+    /// contradiction.
+    ///
+    /// In a well-formed post every article owns a disjoint byte range, so
+    /// this peeks the coverage map and, in the overwhelming majority of
+    /// writes, finds nothing and falls straight through to `write_at`
+    /// unchanged - one uncontended shard lock, which the grain being
+    /// wider than an article keeps cheap.
+    ///
+    /// The peek MUST be atomic with this span's own pwrite, which is what
+    /// `article_gates` buys: coverage is published by `note_written`
+    /// AFTER the pwrite, so two threads delivering the two halves of an
+    /// overlapping pair would otherwise both peek an empty map and
+    /// neither would see the other.
+    ///
+    /// When the range HAS been written before, the sub-ranges that
+    /// overlap are read back and compared against the matching slices of
+    /// `data`:
+    ///
+    /// * equal - a same-article hedge or tail duplicate re-delivering
+    ///   bytes already on disk. Silent, and the write still happens, so
+    ///   nothing about the existing behaviour moves.
+    /// * different - two articles of one file claim the same range and
+    ///   DISAGREE (overlapping `=ypart` ranges, or a rogue duplicate
+    ///   segment). [`FileWriter::had_conflicting_rewrite`] latches, and
+    ///   the write still happens: settle is what decides the job's fate,
+    ///   and refusing the pwrite here would only make WHICH bytes land
+    ///   depend on arrival order all over again.
+    ///
+    /// NOT a check that belongs inside `write_at` itself. Two of that
+    /// method's callers legitimately rewrite a range with different
+    /// bytes - `extract::crypto` writes plaintext over the ciphertext it
+    /// just decrypted (an in-place transform), and the repair path
+    /// patches rebuilt blocks over the damaged ones - so a check there
+    /// would fire on every encrypted or repaired download. The
+    /// distinction is the CALLER's to make, which is why this is a
+    /// second door rather than a flag.
+    ///
+    /// A read-back failure is not the caller's error to report: it means
+    /// the compare could not be made, so the conflict is latched (the
+    /// honest answer - "this range may disagree") and the write proceeds.
+    pub fn write_article_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        let len = data.len() as u64;
+        let last = offset + len.max(1) - 1;
+        let (g0, g1) = (offset / ARTICLE_GATE_GRAIN, last / ARTICLE_GATE_GRAIN);
+        // The span sits inside one grain - the case every ordinary article
+        // takes - so one uncontended lock, no allocation.
+        if g0 == g1 {
+            let _g = self.article_gates[(g0 % ARTICLE_GATES as u64) as usize].lock_ok();
+            return self.write_article_locked(offset, data);
+        }
+        let _gs = self.lock_article_gates(g0, g1);
+        self.write_article_locked(offset, data)
+    }
+
+    /// Every [`ARTICLE_GATES`] shard the grain range `g0..=g1` touches, in
+    /// ASCENDING SHARD ORDER so two spans wanting the same pair can never
+    /// deadlock against each other. A span wider than the whole ring takes
+    /// all of them, which is still correct and still ordered.
+    fn lock_article_gates(&self, g0: u64, g1: u64) -> Vec<std::sync::MutexGuard<'_, ()>> {
+        let n = ARTICLE_GATES as u64;
+        let mut want: Vec<usize> = if g1 - g0 + 1 >= n {
+            (0..ARTICLE_GATES).collect()
+        } else {
+            (g0..=g1).map(|g| (g % n) as usize).collect()
+        };
+        want.sort_unstable();
+        want.dedup();
+        want.into_iter()
+            .map(|i| self.article_gates[i].lock_ok())
+            .collect()
+    }
+
+    /// [`FileWriter::write_article_at`] with this span's gates already
+    /// held: peek, compare what the peek found, then write.
+    fn write_article_locked(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        let prior = self.covered_intervals(offset, data.len() as u64);
+        if !prior.is_empty() {
+            self.compare_prior(offset, data, &prior);
+        }
+        self.write_at(offset, data)
+    }
+
+    /// Read back the already-written sub-ranges of an article write and
+    /// latch [`FileWriter::conflict`] if any of them disagrees with the
+    /// bytes about to be written over them. Split out of
+    /// [`FileWriter::write_article_at`] so the common no-overlap path is
+    /// one `covered_intervals` call and a branch.
+    fn compare_prior(&self, offset: u64, data: &[u8], prior: &[(u64, u64)]) {
+        let mut buf = Vec::new();
+        for &(s, e) in prior {
+            let n = (e - s) as usize;
+            buf.clear();
+            buf.resize(n, 0);
+            let at = (s - offset) as usize;
+            match self.read_at(&mut buf, s) {
+                Ok(()) if buf[..] == data[at..at + n] => {}
+                _ => {
+                    // First writer wins the record; a second thread
+                    // finding its own conflict does not overwrite the
+                    // range already named.
+                    self.conflict.lock_ok().get_or_insert((s, e - s));
+                    return;
+                }
+            }
+        }
+    }
+
+    /// True when two ARTICLE deliveries wrote the same range with
+    /// DIFFERENT bytes - see [`FileWriter::write_article_at`]. A post
+    /// that contradicts itself and has no recovery set to adjudicate it
+    /// cannot be delivered honestly: whichever copy survives is decided
+    /// by arrival order, so settle fails the job rather than shipping one
+    /// of two different files at rc=0.
+    pub fn had_conflicting_rewrite(&self) -> bool {
+        self.conflict.lock_ok().is_some()
+    }
+
+    /// The first range two disagreeing article deliveries both claimed,
+    /// as `(offset, len)` - see [`FileWriter::had_conflicting_rewrite`].
+    pub fn conflicting_rewrite_span(&self) -> Option<(u64, u64)> {
+        *self.conflict.lock_ok()
     }
 
     /// The positioned write behind [`FileWriter::write_at`], routed
@@ -1743,7 +1985,22 @@ impl FileWriter {
             return Ok(());
         }
         let path = self.current_path();
-        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        // The same no-follow, descriptor-bound open the constructors
+        // take, in the one mode that must NEVER create: this is a
+        // REOPEN of bytes the external par2 just rewrote, and a
+        // `LeafOpen::Keep` here would answer a file that has gone by
+        // making an empty one and handing it back as the repaired
+        // payload (X5-06/08/19 OWED item 6, 31 Aug 2026).
+        //
+        // Why a by-name reopen at all, rather than keeping the handle:
+        // `park_for_repair` CLOSES it on purpose, because par2 opens
+        // the file with share-mode 0 on Windows and is the sole writer
+        // on every platform. So the name is all there is at this point,
+        // and what this fixes is what the name is allowed to resolve
+        // to - a regular file inside a directory that is not itself an
+        // alias, never a symlink that appeared while par2 was renaming
+        // inodes around.
+        let file = relpath::open_out_leaf(&path, relpath::LeafOpen::Existing)?;
         apply_cache_policy(&file);
         // The readers that kept their handles through the repair are
         // holding an inode par2 renamed aside; this is where they are
@@ -1751,11 +2008,11 @@ impl FileWriter {
         if after_repair {
             self.publish_repaired_handle(&file);
         }
-        *g = Some(file);
         #[cfg(windows)]
         {
-            *self.aux.write_ok() = open_aux_handles(&path);
+            *self.aux.write_ok() = open_aux_handles(&file);
         }
+        *g = Some(file);
         Ok(())
     }
 
@@ -1816,6 +2073,21 @@ impl FileWriter {
     pub fn covered(&self, off: u64, len: u64) -> bool {
         let iv = self.intervals.lock_ok();
         iv.iter().any(|&(s, e)| s <= off && off + len <= e)
+    }
+
+    /// True when some byte range was written MORE THAN ONCE - the total
+    /// bytes written exceed the distinct bytes covered. In a well-formed
+    /// download every article owns a disjoint byte range, so this stays
+    /// false; it turns true only when two writes land on the same range:
+    /// a same-article hedge/tail duplicate (identical bytes, harmless) or
+    /// - the reason this exists - a MALFORMED post carrying two different
+    /// articles for one file range. The second is silent corruption: the
+    /// later write overwrites the first on disk, but a block the in-stream
+    /// verifier already marked Ok from the first copy is never re-hashed,
+    /// so garbage ships as a "clean download". Settle consults this to
+    /// force a read-back of such a slot (see `LiveVerifier::force_readback`).
+    pub fn had_rewrite(&self) -> bool {
+        self.written.load(Ordering::Relaxed) > self.covered.load(Ordering::Relaxed)
     }
 
     /// The written sub-ranges of [off, off+len), clipped, in file offsets.
@@ -1922,6 +2194,49 @@ impl FileWriter {
     /// [`abandon`]: FileWriter::abandon
     pub fn is_abandoned(&self) -> bool {
         self.abandoned.load(Ordering::Acquire)
+    }
+
+    /// [`abandon`] plus closing the shared OS handle, returning the
+    /// path an unlink must target. The delete sites' primitive: every
+    /// site that unlinks an abandoned writer's file must go through
+    /// this, never through `abandon()` alone.
+    ///
+    /// Why the close is not optional there: the handle lives in shared
+    /// state behind the `Arc`, and clones of that `Arc` legitimately
+    /// outlive the slot - the stream picker's snapshot, a group's
+    /// `routed_plain` cache, a pending spill, the resume ledger. On
+    /// unix an unlinked file with ANY live descriptor keeps its blocks,
+    /// so `abandon()` + `remove_file` with a surviving clone pinned the
+    /// whole file until process exit. Measured 30 Aug 2026 on the live
+    /// daemon: a 51.2 GB preallocated .mkv, demoted mid-chase
+    /// ("materialized for repair"), sat unlinked-but-open for over four
+    /// hours because the writer's handle was still in the shared slot.
+    /// Closing through the shared state ends it for every clone at
+    /// once - the same argument [`park`] makes for its own close. On
+    /// Windows the close is also what lets the unlink itself succeed.
+    ///
+    /// No sync, deliberately, where [`park`] syncs first: park hands
+    /// the bytes to an external tool, so they must be durable; this
+    /// hands them to `remove_file`, so flushing dirty pages into blocks
+    /// the kernel is about to free would be pure wasted I/O on a file
+    /// this size.
+    ///
+    /// Returns [`current_path`], not `path`: a verified-name publish
+    /// renames the file under the live writer, and unlinking the
+    /// creation name is then ENOENT while the real file survives as
+    /// exactly the false artifact the delete existed to prevent.
+    ///
+    /// [`abandon`]: FileWriter::abandon
+    /// [`park`]: FileWriter::park
+    /// [`current_path`]: FileWriter::current_path
+    pub fn abandon_close(&self) -> PathBuf {
+        self.abandon();
+        let mut g = self.file.write_ok();
+        #[cfg(windows)]
+        self.aux.write_ok().clear();
+        *g = None;
+        drop(g);
+        self.current_path()
     }
 
     /// Opens [`current_path`], never `path`: a verified-name publish
@@ -2187,180 +2502,41 @@ pub fn sync_dir(dir: &Path) {
     }
 }
 
-/// Does this directory live on a case-insensitive filesystem?
-///
-/// Decided by PROBING, not by the build target. Case sensitivity is a
-/// property of the destination VOLUME, and `cfg!(target_os)` gets both
-/// interesting cases wrong: the Linux container/NAS build writing to a
-/// CIFS/SMB share or an exFAT disk is case-INsensitive, and a macOS build
-/// writing to a case-sensitive APFS volume is not. Guessing from the build
-/// target means `README` and `readme` are treated as two output files on a
-/// volume where they name one - and the second write truncates the first.
-///
-/// Probes the nearest EXISTING ancestor, so it still answers correctly when
-/// the output directory has not been created yet (sensitivity is a mount
-/// property, and an ancestor is on the same mount). Falls back to the
-/// platform default if no probe can be written.
-pub fn case_insensitive_dir(dir: &Path) -> bool {
-    let default = cfg!(any(target_os = "macos", target_os = "windows"));
-    let mut at = Some(dir);
-    while let Some(d) = at {
-        if d.is_dir() {
-            return probe_case_insensitive(d).unwrap_or(default);
-        }
-        at = d.parent();
-    }
-    default
-}
-
-/// One probe: write a mixed-case name, then ask for it in lower case. The
-/// pid + a counter keep concurrent jobs (and concurrent probes of one dir)
-/// from deleting each other's probe file.
-fn probe_case_insensitive(dir: &Path) -> Option<bool> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let tag = format!(
-        ".nzbfast-CaseProbe-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let mixed = dir.join(&tag);
-    std::fs::File::create(&mixed).ok()?;
-    // `tag` is deliberately mixed-case, so this differs ONLY in case.
-    let lowered = dir.join(tag.to_lowercase());
-    let insensitive = std::fs::metadata(&lowered).is_ok();
-    let _ = std::fs::remove_file(&mixed);
-    Some(insensitive)
-}
-
-/// Make a filename safe as a single path component. Neutralises path
-/// separators and NUL, ASCII control characters (which have no place in a
-/// filename and can confuse terminals/loggers), and - so a crafted archive
-/// entry or NZB name is portable and can't open a device on Windows - the
-/// reserved DOS device names (CON, NUL, COM1..9, LPT1..9, AUX, PRN) and
-/// trailing dots/spaces that Windows silently strips.
-pub fn sanitize_filename(name: &str) -> String {
-    sanitize_filename_for(name, cfg!(windows))
-}
-
-/// `sanitize_filename` with the platform as a parameter, so the Windows-only
-/// guarantee is asserted by the suite on every host. A `cfg!`-only guard would
-/// leave that test vacuous on the Mac and Linux boxes we actually develop and
-/// run CI on - the trap an earlier filesystem-behaviour test fell into.
-pub fn sanitize_filename_for(name: &str, windows: bool) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | '\0' => '_',
-            // Windows only: ':' carries path meaning even with no separator.
-            // "C:evil.dll" is a DRIVE-RELATIVE path, and `Path::join` DISCARDS
-            // the base when the joined name has a prefix - so an archive entry
-            // named that way escapes the download directory entirely (it lands
-            // in the process's cwd on C:, which for the installed app is the
-            // directory holding nzbfast.exe = first in the DLL search order).
-            // "payload.mkv:hidden" is the other half: an NTFS alternate data
-            // stream, where the payload writes into the stream and the visible
-            // file is left 0 bytes. Neither is a legal Windows filename, so
-            // mapping it costs nothing there; on Unix ':' is legal and common
-            // in release names ("Movie: The Sequel.mkv"), so leave it alone.
-            ':' if windows => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect();
-    // Windows strips trailing dots and spaces, so "evil. " -> "evil"; strip
-    // them ourselves for a stable, portable name (leading dots too: hidden).
-    let trimmed = cleaned.trim().trim_matches('.').trim().to_string();
-    // The trim chain above is NOT a fixed point: `trim_matches('.')` peels the
-    // outer dots, the following `.trim()` then exposes INTERIOR dots as the
-    // new ends, and ". .. ." comes out as ".." (". . ." as "."). Both are
-    // non-empty, so they used to be returned verbatim - a single path
-    // component that escapes its parent. Every caller joins this straight
-    // onto a root (`out_dir/<category>/<stem>`) and nothing re-checks
-    // containment, so a category or NZB name of ". .. ." put the payload
-    // outside the download root, and "Remove + delete files" then ran
-    // `remove_dir_all` on that parent. A name that is nothing but dots has no
-    // meaning worth preserving.
-    if trimmed.is_empty() || trimmed.chars().all(|c| c == '.') {
-        return "unnamed".to_string();
-    }
-    // Reserved DOS device names match case-insensitively on the stem before
-    // the first dot (CON, con.txt, and "CON " all open the console device).
-    // Normalise for the match: uppercase, map the Unicode superscript digits
-    // Windows folds to 1/2/3 (COM\u{B9} opens COM1), and drop a trailing '$'
-    // (CLOCK$/CONIN$/CONOUT$ handles).
-    let raw_stem = trimmed.split('.').next().unwrap_or(&trimmed).trim();
-    let stem: String = raw_stem
-        .trim_end_matches('$')
-        .chars()
-        .map(|c| match c {
-            '\u{B9}' => '1', // superscript one
-            '\u{B2}' => '2', // superscript two
-            '\u{B3}' => '3', // superscript three
-            c => c.to_ascii_uppercase(),
-        })
-        .collect();
-    let reserved = matches!(
-        stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "CLOCK" | "CONIN" | "CONOUT"
-    ) || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-        && stem.len() == 4
-        && stem.as_bytes()[3].is_ascii_digit()
-        && stem.as_bytes()[3] != b'0');
-    if reserved {
-        format!("_{trimmed}")
-    } else {
-        trimmed
-    }
-}
-
-#[cfg(test)]
-mod case_probe_tests {
-    use super::*;
-
-    /// The probe must agree with what the filesystem ACTUALLY does, on
-    /// whatever volume the suite happens to run on. That is the whole point
-    /// of probing instead of reading `cfg!(target_os)`: this assertion is
-    /// meaningful on case-sensitive Linux CI, on a case-insensitive macOS
-    /// dev box, and on a Linux runner whose tmp is a case-insensitive mount -
-    /// where the old build-target guess was simply wrong.
-    #[test]
-    fn case_probe_agrees_with_the_real_filesystem() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-case-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        // Ground truth: write one spelling, ask for the other.
-        std::fs::write(dir.join("Ground.txt"), b"x").unwrap();
-        let truth = std::fs::metadata(dir.join("ground.txt")).is_ok();
-
-        assert_eq!(
-            case_insensitive_dir(&dir),
-            truth,
-            "probe disagrees with the filesystem at {}",
-            dir.display()
-        );
-
-        // A not-yet-created output dir must still answer correctly: the
-        // probe walks up to the nearest existing ancestor, since case
-        // sensitivity is a property of the mount.
-        let unborn = dir.join("does").join("not").join("exist");
-        assert_eq!(case_insensitive_dir(&unborn), truth);
-
-        // The probe must not leave its scratch file behind.
-        let leftovers: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains("CaseProbe") || n.contains("caseprobe"))
-            .collect();
-        assert!(leftovers.is_empty(), "probe left {leftovers:?} behind");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}
-
 #[cfg(test)]
 mod tests;
+
+mod sanitize;
+pub(crate) use sanitize::trimmed_extension;
+pub use sanitize::{sanitize_filename, sanitize_filename_for};
+
+// The one fold every identity-key site in the tree shares (M4-44). Gate
+// it on `case_insensitive_dir`, never on the build target.
+mod casefold;
+pub use casefold::case_fold_key;
+
+// Whether two paths reach ONE file object: the volume's own case
+// behaviour (`case_insensitive_dir`) and the inode identity behind a
+// pair of names (`file_object_id` and the two doors over it). Split out
+// under the size gate on 31 Aug 2026; the module's own header says what
+// the subject is and why the halves belong together.
+mod identity;
+pub use identity::{case_insensitive_dir, file_object_id, is_redundant_link, same_file_object};
+
+mod cowcopy;
+pub use cowcopy::copy_file_cow;
+
+mod relpath;
+/// Not in the `pub use` below because it is `pub(crate)`: it is a policy
+/// budget two sites inside this crate must agree on, not a name nzbkit
+/// publishes. `journal::restore::unquarantine_partials` bounds its
+/// directory walk by it - see the constant's own doc.
+pub(crate) use relpath::MAX_DEPTH;
+pub use relpath::{
+    LeafOpen, cap_shared_stem, create_out_dirs, disambiguated_out_name, join_out_name,
+    name_within_limits, open_out_leaf, open_out_leaf_under, out_name_of, prepare_out_path,
+    relpath_within_total, rename_out_under, resolve_out_root, sanitize_filename_capped,
+    sanitize_filename_capped_for, sanitize_out_name, sanitize_out_name_for, sanitize_relpath_for,
+};
 
 /// Mark one of our own bookkeeping files or dirs as hidden.
 ///

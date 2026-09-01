@@ -19,19 +19,6 @@ pub(in crate::serve) static DELETE_PREWRITE_BARRIER: Mutex<
 /// version string, so claim parity with the release whose API we match.
 pub(super) const SAB_VERSION: &str = "4.5.0";
 
-/// Minutes until a timed pause auto-resumes (SAB's `pause_int`).
-pub(super) fn pause_int(d: &Daemon) -> String {
-    d.pause_until
-        .lock_ok()
-        .map(|t| {
-            t.saturating_duration_since(Instant::now())
-                .as_secs()
-                .div_ceil(60)
-        })
-        .unwrap_or(0)
-        .to_string()
-}
-
 /// The conditions worth interrupting someone about, in SAB's warning
 /// shape (a client renders these verbatim).
 ///
@@ -175,8 +162,18 @@ pub(super) fn sab_warnings(
         ));
     }
 
+    // `origin` is the fourth key SAB's GUIHandler writes on EVERY entry
+    // (`SABnzbd.py`, unchanged in 4.5.0, 5.1.2 and develop, read
+    // 30 Aug 2026: type/text/time/origin), and we sent three - which is
+    // GH #69's absent-key half applied to this payload. SAB's value is
+    // the emitting `file.py` plus a line number; ours names the daemon
+    // subsystem that decided the condition, because these entries are
+    // COMPUTED states rather than captured log records and there is no
+    // one source line to point at.
     out.into_iter()
-        .map(|text| json!({"type": "WARNING", "text": text, "time": epoch_secs()}))
+        .map(|text| {
+            json!({"type": "WARNING", "text": text, "time": epoch_secs(), "origin": "nzbfast"})
+        })
         .collect()
 }
 
@@ -390,48 +387,6 @@ pub(super) fn param_priority(params: &std::collections::HashMap<String, String>)
         .unwrap_or(-100)
 }
 
-/// SABnzbd's `timeleft`, in the shape its own API emits.
-///
-/// Sonarr deserialises this field straight into a .NET `TimeSpan`, whose
-/// `hh:mm:ss` form rejects an hours component above 23. We used to emit
-/// `s / 3600` unbounded, so a slow enough job produced "27:46:12" and
-/// Sonarr failed to parse the WHOLE `mode=queue` response - reporting
-/// "Unable to retrieve queue and history items from SABnzbd" and losing
-/// track of every download, not just the slow one, for as long as the
-/// ETA stayed over a day. Past 24h SAB switches to a leading days field,
-/// which `TimeSpan` reads as `d:hh:mm:ss`.
-pub(super) fn sab_timeleft(secs: f64) -> String {
-    let s = if secs.is_finite() && secs > 0.0 {
-        secs as u64
-    } else {
-        0
-    };
-    let (d, h, m, sec) = (s / 86_400, s / 3600 % 24, s / 60 % 60, s % 60);
-    if d > 0 {
-        format!("{d}:{h:02}:{m:02}:{sec:02}")
-    } else {
-        format!("{h}:{m:02}:{sec:02}")
-    }
-}
-
-/// SAB's `to_units`: binary steps with a one-letter unit ("998 ",
-/// "417 K", "1.2 M"). NZB Unity parses `queue.speed` with
-/// `/([\d.]+)\s+(\w+)/` and multiplies by the unit letter, so the
-/// bare-KB-with-a-trailing-space format this used to send always read
-/// as 0 B/s there.
-pub(super) fn sab_units(n: f64) -> String {
-    const K: f64 = 1024.0;
-    if n < K {
-        format!("{n:.0} ")
-    } else if n < K * K {
-        format!("{:.0} K", n / K)
-    } else if n < K * K * K {
-        format!("{:.1} M", n / (K * K))
-    } else {
-        format!("{:.1} G", n / (K * K * K))
-    }
-}
-
 /// SAB's `script` field: the script that will ACTUALLY run for this job,
 /// by basename, or `"None"`.
 ///
@@ -539,12 +494,13 @@ pub(super) fn active_counters(d: &Daemon) -> (u64, u64, u64) {
 /// - anything else reports from the record: for a paused or re-queued
 ///   job that is what the journal is holding, and 0-with-everything-left
 ///   is what has users deleting a job that would resume in seconds.
-fn slot_progress(
+pub(super) fn slot_progress(
     state: JobState,
     live: Option<(u64, u64)>,
     tail: bool,
     total_bytes: u64,
     downloaded_bytes: u64,
+    prefetched: u64,
 ) -> (u64, u64) {
     // Widened, because neither operand is trustworthy: `total_bytes` is
     // summed from an NZB attribute (the parser saturates it rather than
@@ -569,10 +525,31 @@ fn slot_progress(
         // Decoded bytes against an encoded total, so this reads a few
         // percent shy of the truth (audit #15). A floor, never an
         // overstatement.
-        None => (
-            pct_of(downloaded_bytes, total_bytes),
-            total_bytes.saturating_sub(downloaded_bytes.min(total_bytes)),
-        ),
+        // `prefetched` is what the idle-server early start has banked
+        // into this job's out_dir and journal RIGHT NOW, and it counts
+        // exactly as a previous run's bytes do: the next run resumes
+        // from both, so both are bytes this queue no longer has to
+        // fetch. Zero on every row but the one the sidecar holds.
+        //
+        // The max, not the sum - they are the same bytes counted twice.
+        // The sidecar resumes from the journal, so its counter already
+        // includes whatever an earlier run left, and adding them put a
+        // resumed early start past 100% of its own job.
+        //
+        // Until this arm read it, the feature's best night looked like a
+        // stuck queue: 29.5 GB banked in 9.4 minutes and the row said
+        // `Queued, 0%, mbleft unchanged` for the whole of it (live
+        // daemon, 29 Aug 2026). Nothing here mutates the record - the
+        // bytes are reported where they are read, and `downloaded_bytes`
+        // stays what an actual RUN recorded, because spend accounting
+        // (insurance, altspend) reads it.
+        None => {
+            let banked = downloaded_bytes.max(prefetched);
+            (
+                pct_of(banked, total_bytes),
+                total_bytes.saturating_sub(banked.min(total_bytes)),
+            )
+        }
     }
 }
 
@@ -935,6 +912,21 @@ fn slot_json(
             needed.checked_sub(free).filter(|s| *s > 0)
         })
         .unwrap_or(0);
+    // SAB's `labels` for this row - see the key below for what each word
+    // means and why the hold lives here rather than in `priority`. Built
+    // out here rather than inline: `json!` reads a braced expression as a
+    // nested OBJECT, so the block form does not compile inside it.
+    let labels = {
+        let mut l: Vec<Value> = Vec::new();
+        if j.paused && j.priority == crate::serve::job::DUPE_PRIORITY {
+            l.push(json!(if j.held_for.is_empty() {
+                "DUPLICATE"
+            } else {
+                "ALTERNATIVE"
+            }));
+        }
+        Value::Array(l)
+    };
     json!({
         "nzo_id": j.nzo_id,
         "filename": j.name,
@@ -992,8 +984,8 @@ fn slot_json(
         // anything - which is the shape #34 reported, with
         // mode=addfile (no slot parsing) working throughout.
         // Names and formats mirror sabnzbd/api.py build_queue.
-        "size": format!("{}B", sab_units(j.total_bytes as f64)),
-        "sizeleft": format!("{}B", sab_units(left as f64)),
+        "size": sab_units_b(j.total_bytes as f64),
+        "sizeleft": sab_units_b(left as f64),
         // SAB's post-processing level for the job as a
         // string; `sab_pp` is what the add asked for, and 3
         // (repair + unpack + delete) is what one-pass does
@@ -1015,10 +1007,25 @@ fn slot_json(
         // none, and a client reads "no password" rather than
         // failing to find the key at all.
         "password": "",
-        // SAB's per-job label list (DUPLICATE, ALTERNATIVE,
-        // ...). Nothing here produces them yet, and an empty
-        // list is what SAB sends for a job with none.
-        "labels": Value::Array(Vec::new()),
+        // SAB's per-job label list, and since 31 Aug 2026 the place
+        // this facade says a job is HELD - see `priority` below, which
+        // is where that state used to ride.
+        //
+        // `DUPLICATE` is an ordinary duplicate hold; `ALTERNATIVE` is
+        // SAB's word for a spare parked behind a named job and promoted
+        // if that job fails, which is what a non-empty `held_for`
+        // means here (SAB spells the pair DUPLICATE /
+        // DUPLICATE_ALTERNATIVE and puts them in exactly these two
+        // labels). SAB TRANSLATES its labels; ours are English, which
+        // is what a SAB client matching on the word sees from an
+        // English SAB, and the dashboard renders its own sentence off
+        // the same fact rather than off this string.
+        //
+        // The other five SAB emits are not produced here yet:
+        // ENCRYPTED, TOO LARGE, INCOMPLETE, UNWANTED and the two timed
+        // ones (`WAIT n sec`, `PROPAGATING n min`). An empty list stays
+        // what a job with none gets.
+        "labels": labels,
         // Average article age. We do not carry the post dates
         // on the queue record, and "-" is SAB's own value for
         // a job whose age it does not know.
@@ -1063,7 +1070,27 @@ fn slot_json(
             "done": p.done(),
             "total": p.total(),
         })).unwrap_or(Value::Null),
-        "priority": priority_name(j.priority),
+        // SAB's INTERFACE_PRIORITIES vocabulary and NOTHING ELSE:
+        // Force, Repair, High, Normal, Low. `sab_priority_name` maps our
+        // held-duplicate sentinel out of it; the hold itself is in
+        // `labels` above.
+        //
+        // WHY THAT MATTERS, and it is SAB's own design rather than a
+        // guess about clients. `NzbObject.set_priority` answers a
+        // state-setting priority by applying the STATE and then calling
+        // `set_stateless_priority`, whose docstring says it is "for jobs
+        // to fall back to after their priority was set to PAUSED or
+        // DUP" - so a real SAB never publishes a priority that is
+        // secretly a state, and its five interface words are the whole
+        // set a client can be written against. We published `Duplicate`
+        // there, live on an ordinary duplicate-held row, which is a
+        // sixth word for anything deserializing this field into a
+        // declared type. That is the failure mode GH #69 reported on
+        // `mode=server_stats` and the one the queue and history bodies
+        // were audited for on 31 Aug 2026 - and `tests/daemon_facade`'s
+        // key-and-type census cannot see it, because a wrong string is
+        // still a string.
+        "priority": sab_priority_name(j),
         // Truth-audit I: the canonical name an oracle gave this
         // release, on the QUEUE row and not just in history. A
         // retried obfuscated job already knew its own name - it
@@ -1202,6 +1229,11 @@ fn slot_json(
     })
 }
 
+// The SAB value formats, a child module: see sabcompat/units.rs.
+mod units;
+use units::sab_priority_name;
+pub(super) use units::{pause_int, sab_age, sab_elapsed, sab_timeleft, sab_units, sab_units_b};
+
 // The pre-queue-lock reads, a child module: see sabcompat/prelock.rs.
 mod prelock;
 use prelock::{PreLock, prelock_reads};
@@ -1232,6 +1264,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         hold,
         hold_quota_spent,
         sc,
+        prefetch_bps,
         activity_map,
         unpack_map,
         active_id,
@@ -1248,8 +1281,13 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
     let (peak_bps, peak_src, line_hint) = d.link_peak.chart(d.line_speed.load(Ordering::Relaxed));
     // SAB's queue call takes the same category filter as history (the
     // *arrs pass category=<their cat> when one is configured).
+    // `cat` FIRST, then `category` - SAB reads
+    // `kwargs.get("cat") or kwargs.get("category")` and the *arrs send
+    // whichever their client library spells. See the twin in
+    // `HistQuery::from_params` for what reading only one of them cost.
     let cat_filter = params
-        .get("category")
+        .get("cat")
+        .or_else(|| params.get("category"))
         .filter(|c| !c.is_empty() && *c != "*");
     let ids = nzo_ids_param(params);
     // Whole-queue bytes still to fetch, for the top-level sizeleft /
@@ -1363,18 +1401,15 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         let cap = d.quota.load(Ordering::Relaxed) as f64;
         let spent = (d.quota_spent.load(Ordering::Relaxed) as f64)
             .max(hold_quota_spent.unwrap_or(0.0) * 1e9);
-        format!("{}B", sab_units((cap - spent).max(0.0)))
+        sab_units_b((cap - spent).max(0.0))
     };
     // Minutes until a timed pause auto-resumes (SAB's pause_int).
-    let pause_int = d
-        .pause_until
-        .lock_ok()
-        .map(|t| {
-            t.saturating_duration_since(Instant::now())
-                .as_secs()
-                .div_ceil(60)
-        })
-        .unwrap_or(0);
+    // SAB's `pause_int`, through the ONE helper. This used to be a
+    // second copy of that arithmetic right here, published as bare
+    // whole minutes, and the copy is what let the two answers differ
+    // in FORMAT for as long as they did - `mode=status` and the
+    // playback body already went through the helper.
+    let pause_int = pause_int(d);
     // Who paused, and when the queue comes back.
     //
     // The offline mechanism's own pause is named here rather than
@@ -1418,7 +1453,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         // does neither - so a single flag would leave the user unable to
         // tell why nothing is downloading.
         "offline": d.offline.load(Ordering::Relaxed),
-        "pause_int": format!("{pause_int}"),
+        "pause_int": pause_int,
         // Ours: who paused ("user"|"schedule"|"offline"), when it comes
         // back on its own (unix seconds, null when nothing promised a
         // time), and who set the speed cap ("user"|"schedule"|"api"|
@@ -1530,9 +1565,22 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         // semantics; see nzo_ids_param), which the walk honours too.
         "slots": slots,
         "speed": sab_units(speed_bps),
-        "kbpersec": format!("{:.0}", speed_bps / 1e3),
+        // SAB's own `"%.2f" % (bps / KIBI)`: two decimals, and KIBI
+        // rather than 1000 - this divided by 1e3 and printed no
+        // decimals, so it read 2.4% high and lost every rate under
+        // 1 KB/s to "0".
+        "kbpersec": format!("{:.2}", speed_bps / 1024.0),
+        // Ours, not SAB's, and deliberately BESIDE `kbpersec` rather
+        // than folded into it: the idle-server early start is a second
+        // pipeline on the same line, and the dashboard draws it as its
+        // own series on the throughput chart. Folding it in would move
+        // the number every *arr and phone remote reads as "the download
+        // rate" of the job they asked about. 0 with no early start
+        // running. The row it belongs to is the one carrying
+        // `prefetching`.
+        "prefetch_bps": prefetch_bps,
         // SAB's own suffix convention: to_units(bytes) + "B".
-        "sizeleft": format!("{}B", sab_units(remaining_bytes as f64)),
+        "sizeleft": sab_units_b(remaining_bytes as f64),
         // ETA from the RUNNABLE remainder, not the total: `sizeleft`
         // keeps promising the whole backlog, but a paused or
         // duplicate-held job contributes size and no time (walk.rs
@@ -1596,7 +1644,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         // carries (spent, cap) in GB while a spent quota is holding
         // the queue, and nothing is spent from this facade's point of
         // view until it does.
-        "quota": format!("{}B", sab_units(d.quota.load(Ordering::Relaxed) as f64)),
+        "quota": sab_units_b(d.quota.load(Ordering::Relaxed) as f64),
         "have_quota": d.quota.load(Ordering::Relaxed) > 0,
         "left_quota": left_quota,
         // One-pass decodes straight into the output file and holds no
@@ -1616,7 +1664,7 @@ pub(super) fn queue_json(d: &Daemon, params: &std::collections::HashMap<String, 
         // done, summed from each row's own unpack forecast.
         "mbleft_runnable": format!("{:.2}", runnable_bytes as f64 / API_MB),
         "space_need_bytes": need_bytes,
-        "size": format!("{}B", sab_units(total_bytes_all as f64)),
+        "size": sab_units_b(total_bytes_all as f64),
         "noofslots_total": total_slots,
         // The window this body answered for, echoed back as SAB does.
         "start": win_start,
@@ -1770,6 +1818,18 @@ fn jr_status(d: &Arc<Daemon>) -> Value {
 
 fn jr_listgroups(d: &Arc<Daemon>) -> Value {
     {
+        // The early start's banked bytes, read BEFORE the queue lock -
+        // the sidecar mutex under the queue lock is the issue #38
+        // ordering, and `prelock_reads` takes it in the same place for
+        // the same reason. The SAB queue counts these bytes against the
+        // row (see `slot_progress`), and the comment two screens down
+        // already says the two compat surfaces must not disagree about
+        // the same job's percentage.
+        let sc = d
+            .sidecar
+            .lock_ok()
+            .as_ref()
+            .map(|s| (s.nzo_id.clone(), s.progress.load(Ordering::Relaxed)));
         let groups: Vec<Value> = d
             .queue
             .lock_ok()
@@ -1808,8 +1868,16 @@ fn jr_listgroups(d: &Arc<Daemon>) -> Value {
                 // this job's connections while another download
                 // actually holds them is the same untruth.
                 let downloading = live.is_some() && !tail;
-                let (_, rem) =
-                    slot_progress(g.state, live, tail, g.total_bytes, g.downloaded_bytes);
+                let (_, rem) = slot_progress(
+                    g.state,
+                    live,
+                    tail,
+                    g.total_bytes,
+                    g.downloaded_bytes,
+                    sc.as_ref()
+                        .filter(|(id, _)| *id == g.nzo_id)
+                        .map_or(0, |(_, b)| *b),
+                );
                 let dl = g.total_bytes.saturating_sub(rem);
                 let mut o = serde_json::Map::new();
                 for (k, v) in size_fields("File", g.total_bytes) {

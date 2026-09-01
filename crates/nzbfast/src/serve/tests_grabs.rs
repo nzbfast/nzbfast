@@ -272,7 +272,7 @@ fn a_post_too_old_for_propagation_does_not_retry_itself() {
     // re-fetches gaps and can pull more recovery volumes.
     let unrepairable = with_msg(
         "verification failed and PAR2 repair could not complete: 1669 recovery \
-         block(s) needed but the NZB only carries 40"
+         block(s) needed but the recovery set that covers this damage carries only 40"
             .into(),
     );
     assert!(auto_retry_eligible(&unrepairable, cooldown));

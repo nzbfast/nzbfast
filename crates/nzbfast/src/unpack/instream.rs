@@ -38,6 +38,22 @@ pub(crate) struct FileSlot {
     /// under" - see [`slot_name`].
     pub(crate) name_choice: std::sync::atomic::AtomicU8,
     pub(crate) is_par2_main: bool,
+    /// M4-28: [`Self::is_par2_main`] was decided from the NZB NAME
+    /// alone, and an active set has since named these bytes as one of
+    /// its own PAYLOAD files - md5-16k over the first 16 KiB plus an
+    /// exact length, the same evidence
+    /// [`SniffCtl::matched_deferred`] rescues a wrongly-deferred slot
+    /// on. Set once, at settle, by
+    /// `crate::get::settle::reclaim_par2_named_payload`.
+    ///
+    /// A separate flag rather than a mutable `is_par2_main`: that field
+    /// is read at PLAN time to decide what to queue, what to capture in
+    /// memory and which set index a repair may read its packets from
+    /// (`settle::repair`'s `main_par2_for`, which proves ownership from
+    /// the bytes' own set id and must keep seeing a real index as one).
+    /// This says only that the settle-side census must count the slot as
+    /// payload, which is the half that was wrong.
+    pub(crate) par2_name_demoted: std::sync::atomic::AtomicBool,
     /// Issue #14: this slot was posted as payload (hash subject, hash yEnc
     /// name) but its offset-0 article decoded to the `PAR2\0PKT` magic -
     /// it IS recovery data, identified in-stream after the slot was built.
@@ -76,6 +92,13 @@ pub(crate) struct FileSlot {
     /// missing list as well, or repair would fetch recovery volumes to
     /// rebuild the very bytes the setting declined.
     pub(crate) sample_skipped: bool,
+    /// M4-70: what this slot's ARTICLES declared it was called. The
+    /// write path latches the first one and must - the file has to be
+    /// called something while it is being written - so the question is
+    /// re-decided at settle off this record, by `get::yencname`. See
+    /// [`slot_name::NameVotes`] for the per-article cost, which in the
+    /// agreeing case is one compare and one relaxed add.
+    pub(crate) yenc_votes: crate::unpack::slot_name::NameVotes,
     /// Par2-main slots capture decoded bytes in memory so the recovery set
     /// activates mid-download without re-reading from disk. `Some` from
     /// build time for slots the NZB names as par2; installed at sniff time
@@ -88,7 +111,9 @@ impl FileSlot {
     /// magic sniff. The settle/repair accounting that excludes par2 slots
     /// keys off this, not `is_par2_main` alone.
     pub(crate) fn is_par2(&self) -> bool {
-        self.is_par2_main || self.par2_sniffed.load(std::sync::atomic::Ordering::Relaxed)
+        use std::sync::atomic::Ordering::Relaxed;
+        let by_name = self.is_par2_main && !self.par2_name_demoted.load(Relaxed);
+        by_name || self.par2_sniffed.load(Relaxed)
     }
 }
 
@@ -150,6 +175,20 @@ pub(crate) struct SniffState {
     /// really SET-COVERED PAYLOAD (a posted par2 file the set includes)
     /// and must be un-deferred, not recreated from recovery blocks.
     pub(crate) head16: std::collections::HashMap<usize, ([u8; 16], u64)>,
+    /// Per sniffed slot whose offset-0 ARTICLE was shorter than 16 KiB:
+    /// the yEnc declared length alone, because the fingerprint above
+    /// could not be computed from one article's worth of head.
+    ///
+    /// Without this the reconcile is blind on any post whose articles
+    /// are under 16 KiB, and blind in the worst way: the chain shape
+    /// (an outer set naming the inner par2 FILES) then leaves every
+    /// inner file deferred and un-reconciled, so the outer set sees ten
+    /// wholly-missing targets, fetches its whole parity to rebuild
+    /// files that are already on disk, and the job dies. Measured
+    /// 30 Aug 2026 at 10,000-byte articles; identical fixture at 40,000
+    /// passes. [`SniffCtl::promote_pending_head16`] closes it off the
+    /// bytes the deferral already let land.
+    pub(crate) pending16: std::collections::HashMap<usize, u64>,
     /// Per deferred slot: the exact ids `cancel` removed (the only ids
     /// `requeue` may resurrect) and their encoded byte sum.
     pub(crate) cancelled_ids: std::collections::HashMap<usize, (Vec<std::sync::Arc<str>>, u64)>,
@@ -187,6 +226,54 @@ impl SniffCtl {
             .collect()
     }
 
+    /// Compute the head fingerprint of every slot that could not have one
+    /// at sniff time, from the bytes already on disk.
+    ///
+    /// The deferral cancels a slot's STILL-QUEUED articles, so an
+    /// article already in flight when the magic was decoded lands
+    /// anyway - which on a short post is routinely every article of the
+    /// file. This asks the disk for the first 16 KiB and fingerprints
+    /// it exactly as the sniff would have; a slot whose bytes really
+    /// were cancelled reads a hole and hashes to something no FileDesc
+    /// names, so it simply stays deferred as it does today. Exact, and
+    /// never a guess: nothing here matches by length.
+    ///
+    /// RECOMPUTED on every call, and the entry is never consumed. The
+    /// live caller runs while articles are still landing, and the output
+    /// file is sized up front - so a read that succeeds there can still
+    /// have hashed a hole, and caching that answer would strand the slot
+    /// for good. Measured: under parallel load the small-article chain
+    /// reconciled 6 of 9 volumes with the answer cached and all 9
+    /// without. The settle-time caller runs with the pool drained, so
+    /// its read is the final one. The entry is dropped only by
+    /// [`SniffCtl::mark_reconciled`], when the bytes are secured.
+    pub(crate) fn promote_pending_head16(&self, extractor: &nzbkit::extract::Extractor) {
+        let pending: Vec<(usize, u64)> = {
+            let st = self.state.lock_ok();
+            st.pending16.iter().map(|(&s, &n)| (s, n)).collect()
+        };
+        for (sidx, file_size) in pending {
+            // 16384 spelled out, as the reconcile's own head read
+            // below does: `HASH16K_LEN` is `pub(crate)` to nzbkit.
+            let want = file_size.min(16384) as usize;
+            let Some(path) = extractor.slot_path(sidx) else {
+                continue;
+            };
+            let mut buf = vec![0u8; want];
+            if want == 0
+                || std::fs::File::open(&path)
+                    .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+                    .is_err()
+            {
+                continue;
+            }
+            let Some(h) = nzbkit::par2::md5_16k_of_head(&buf, file_size) else {
+                continue;
+            };
+            self.state.lock_ok().head16.insert(sidx, (h, file_size));
+        }
+    }
+
     /// Deferred slots whose head fingerprint (md5-16k + length) matches a
     /// file the active set COVERS: payload the sniff wrongly deferred.
     /// Read-only - the caller marks each slot reconciled only once it has
@@ -214,6 +301,7 @@ impl SniffCtl {
         st.reconciled.insert(sidx);
         st.cancelled_ids.remove(&sidx);
         st.head16.remove(&sidx);
+        st.pending16.remove(&sidx);
     }
 
     /// Completion hook for a sniffed slot: locks the election if this is
@@ -304,8 +392,16 @@ pub(crate) fn reclassify_sniffed_par2(
         // includes this file by md5-16k + length, the sniff was wrong
         // about its ROLE (payload, not recovery) and reconcile un-defers
         // it. None when the head span doesn't cover the 16k prefix.
-        if let Some(h) = nzbkit::par2::md5_16k_of_head(head, file_size) {
-            st.head16.insert(sidx, (h, file_size));
+        match nzbkit::par2::md5_16k_of_head(head, file_size) {
+            Some(h) => {
+                st.head16.insert(sidx, (h, file_size));
+            }
+            // The head span is one ARTICLE, and an article under 16 KiB
+            // cannot carry the fingerprint. Remember the length so
+            // `promote_pending_head16` can finish the job off disk.
+            None => {
+                st.pending16.insert(sidx, file_size);
+            }
         }
         let mut demoted = None;
         if ctl.allow_bootstrap {
@@ -384,8 +480,15 @@ pub(crate) fn reclassify_sniffed_par2(
             .collect();
         queue.promote_opts(&promote, false);
     }
+    // A slot whose offset-0 ARTICLE was under 16 KiB has no head
+    // fingerprint yet, so the reconcile can only tell payload from
+    // parity if the head survives the cancel - see `pending16` and
+    // `promote_pending_head16`. Read out of the state rather than off
+    // `head`, because a DEMOTED slot's head belongs to an earlier call.
+    let short_head: std::collections::HashSet<usize> =
+        ctl.state.lock_ok().pending16.keys().copied().collect();
     for d in demoted.into_iter().chain((!is_bootstrap).then_some(sidx)) {
-        let mb = defer_sniffed_slot(ctl, slots, d, queue, id_to_slot);
+        let mb = defer_sniffed_slot(ctl, slots, d, queue, id_to_slot, short_head.contains(&d));
         info!(
             target: "par2",
             "recovery volume identified in-stream ({}) - deferring {:.1} MB",
@@ -398,19 +501,40 @@ pub(crate) fn reclassify_sniffed_par2(
 /// deferred. Articles already in flight resolve normally (their bytes are
 /// written and harmless); ids owned by ANOTHER slot (duplicate-id NZBs)
 /// are never touched. Returns the MB actually removed from the queue.
+///
+/// `keep_head` holds back the leading articles that carry the file's
+/// first 16 KiB. It is false for every ordinary post - an article of
+/// 16 KiB or more fingerprints the head on its own, so nothing is
+/// downloaded that was not downloaded before - and true only where the
+/// sniff could not fingerprint it, which is where cancelling the whole
+/// file blinds the reconcile permanently. What that blindness costs is
+/// measured: at 10,000-byte articles a par2-of-par2 chain leaves every
+/// inner file deferred, the outer set prices ten present files wholly
+/// missing, and the job dies having fetched its entire parity. The
+/// bound is per volume and generous both ways: `seg.bytes` is the
+/// ENCODED size, and halving it is a worst-case floor on the decoded
+/// span an article can carry, so the hold-back is at most ~32 KiB of
+/// wire per deferred volume and never less than the 16 KiB the
+/// fingerprint needs.
 fn defer_sniffed_slot(
     ctl: &SniffCtl,
     slots: &[Arc<FileSlot>],
     sidx: usize,
     queue: &nzbkit::pool::QueueControl,
     id_to_slot: &IdSlots,
+    keep_head: bool,
 ) -> f64 {
     use std::sync::atomic::Ordering;
     let f = &ctl.nzb.files[ctl.slot_file[sidx]];
     let mut want: std::collections::HashSet<std::sync::Arc<str>> = Default::default();
     let mut bytes_of: std::collections::HashMap<std::sync::Arc<str>, u64> = Default::default();
     let mut buf = String::new();
+    let mut held = 0u64;
     for seg in &f.segments {
+        if keep_head && held < 2 * 16384 {
+            held += seg.bytes;
+            continue;
+        }
         let b = interned_bracketed(&mut buf, id_to_slot, &seg.message_id);
         if id_to_slot.get(&*b).map(|&(s, _)| s as usize) == Some(sidx) {
             bytes_of.insert(b.clone(), seg.bytes);
@@ -488,6 +612,7 @@ pub(crate) fn reconcile_deferred_payload(
     verifier: &nzbkit::live::LiveVerifier,
 ) {
     use std::sync::atomic::Ordering;
+    ctl.promote_pending_head16(extractor);
     for (sidx, file_size) in ctl.matched_deferred(set) {
         let (ids, bytes) = ctl
             .state
@@ -502,7 +627,7 @@ pub(crate) fn reconcile_deferred_payload(
         // (never cancelled - e.g. the slot deferred nothing) count as
         // zero and the slot simply stays deferred. A refusal (short
         // post: the pool already wound down) is fine too - the drain
-        // fallback in get/settle.rs side-fetches whatever stayed
+        // fallback in get/settle/noset.rs side-fetches whatever stayed
         // deferred.
         let n = queue.requeue(&ids);
         if n == 0 || n != ids.len() {
@@ -516,7 +641,7 @@ pub(crate) fn reconcile_deferred_payload(
         // Give the deferral's progress credit back: these articles are
         // in the pool again and will credit themselves when they land.
         // Keeping it would take the bar past 100%. The drain fallback
-        // in get/settle.rs is the opposite case - it side-fetches
+        // in get/settle/noset.rs is the opposite case - it side-fetches
         // OUTSIDE the pool, so no outcome follows and the credit must
         // stand.
         ctl.fetch_done.fetch_sub(bytes, Ordering::Relaxed);
@@ -576,8 +701,6 @@ const BACKFILL_BUF: usize = 4 << 20;
 /// one buffer per core.
 const BACKFILL_MAX_WORKERS: usize = 4;
 
-/// When the last outstanding par2-main slot completes, parse the captured
-/// packets and switch the verifier to in-stream mode.
 /// M15b: hash spans that were decoded before PAR2 activation by reading
 /// them back from disk WHILE the download continues - the work that used
 /// to be the settle pass's re-read (42 GB on the 87 GB run) overlaps the
@@ -695,6 +818,8 @@ pub(crate) fn backfill_slot(
     fed
 }
 
+/// When the last outstanding par2-main slot completes, parse the captured
+/// packets and switch the verifier to in-stream mode.
 pub(crate) fn maybe_activate_par2(
     slots: &[Arc<FileSlot>],
     verifier: &nzbkit::live::LiveVerifier,

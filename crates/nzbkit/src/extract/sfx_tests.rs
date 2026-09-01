@@ -123,7 +123,12 @@ pub(super) fn sfx(stub_len: usize, archive: &[u8]) -> Vec<u8> {
     f
 }
 
-fn run(tag: &str, name: &str, file: &[u8], seed: u64) -> (PathBuf, ExtractReport) {
+fn run(
+    tag: &str,
+    name: &str,
+    file: &[u8],
+    seed: u64,
+) -> (crate::testscratch::ScratchDir, ExtractReport) {
     let dir = tmpdir(tag);
     let ex = Arc::new(Extractor::new(&dir, 1, true));
     ex.anchor();
@@ -149,7 +154,6 @@ fn a_store_rar_sfx_maps_in_stream_for_both_dialects() {
         assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
         assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), data);
         assert_eq!(dir_files(&dir), vec!["a.bin".to_string()]);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -163,7 +167,6 @@ fn a_seven_zip_sfx_chases_in_stream() {
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert_eq!(std::fs::read(dir.join("F.bin")).unwrap(), f);
     assert_eq!(dir_files(&dir), vec!["F.bin".to_string()]);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The strict failure mode: a file that looks like a program and has no
@@ -176,7 +179,6 @@ fn a_pe_lookalike_with_no_archive_is_written_whole() {
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert_eq!(std::fs::read(dir.join("setup.exe")).unwrap(), file);
     assert_eq!(dir_files(&dir), vec!["setup.exe".to_string()]);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Out of the sniff's reach - a stub longer than the offset-0 article,
@@ -194,7 +196,6 @@ fn a_deep_stub_or_a_non_sfx_name_lands_on_disk_intact() {
         assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
         assert_eq!(std::fs::read(dir.join(name)).unwrap(), file, "{tag}");
         assert_eq!(dir_files(&dir), vec![name.to_string()]);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -214,7 +215,6 @@ fn a_compressed_rar_sfx_chases_in_stream() {
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert_eq!(std::fs::read(dir.join("a.bin")).unwrap(), data);
     assert_eq!(dir_files(&dir), vec!["a.bin".to_string()]);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The same shape with the chase switched OFF still lands the posted
@@ -273,7 +273,6 @@ fn the_same_bytes_under_a_non_sfx_name_demote_unmarked() {
             "{why}"
         );
     }
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// The engine's watermark comes back in archive coordinates; the trim
@@ -300,5 +299,55 @@ fn an_sfx_one_level_down_is_delivered_not_exploded() {
     assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
     assert_eq!(std::fs::read(dir.join("setup.exe")).unwrap(), installer);
     assert_eq!(dir_files(&dir), vec!["setup.exe".to_string()]);
-    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A DUMP is not a self-extractor, whatever it is called: M4-101.
+///
+/// Reproduced on origin/main 31 Aug 2026 with this exact fixture - the
+/// `.bin` was gone from the output tree, `inner.mkv` published in its
+/// place, and the job reported success. A `mode=raw` or Blu-ray STREAM
+/// dump that happens to carry an archive is that shape, and the
+/// extension gate cannot tell it from a real installer.
+///
+/// The row's own remedy - deny `.bin` - is refuted (it is this
+/// product's obfuscated-volume extension), so the rule is structural:
+/// `nzbkit::sfx::is_launcher_stub`. Both names below carry the same
+/// bytes at the same offset; only the PREFIX differs, so this test
+/// fails if the rule ever goes back to reading the name.
+#[test]
+fn a_dump_that_merely_carries_an_archive_lands_on_disk_whole() {
+    let data = payload(80_000, 17);
+    let vol = fixtures::rar5_volume(&[("inner.mkv", 0, &data, false, false)]);
+    // Transport-stream sync bytes: a program header nowhere in sight.
+    let mut dump: Vec<u8> = (0..1024)
+        .map(|i| {
+            if i % 188 == 0 {
+                0x47
+            } else {
+                (i as u8).wrapping_mul(7)
+            }
+        })
+        .collect();
+    dump.extend_from_slice(&vol);
+    for (tag, name) in [("m4101-bin", "feature.bin"), ("m4101-exe", "feature.exe")] {
+        let (dir, rep) = run(tag, name, &dump, 91);
+        assert!(rep.fallbacks.is_empty(), "{tag}: {:?}", rep.fallbacks);
+        assert_eq!(std::fs::read(dir.join(name)).unwrap(), dump, "{tag}");
+        assert_eq!(dir_files(&dir), vec![name.to_string()], "{tag}");
+    }
+}
+
+/// ...and the SAME archive at the SAME offset behind a real program is
+/// still chased, so the rule narrows rather than switching the feature
+/// off. The negative control for the test above.
+#[test]
+fn the_same_archive_behind_a_real_program_still_maps_in_stream() {
+    let data = payload(80_000, 17);
+    let vol = fixtures::rar5_volume(&[("inner.mkv", 0, &data, false, false)]);
+    let mut file = stub(1_024);
+    file.extend_from_slice(&vol);
+    let (dir, rep) = run("m4101-control", "feature.bin", &file, 92);
+    assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
+    assert_eq!(std::fs::read(dir.join("inner.mkv")).unwrap(), data);
+    assert_eq!(dir_files(&dir), vec!["inner.mkv".to_string()]);
 }

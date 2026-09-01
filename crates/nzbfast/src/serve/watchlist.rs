@@ -213,14 +213,18 @@ fn settle_may_remove_files(d: &Arc<Daemon>, nzo_id: &str) -> bool {
             let g = j.lock_ok();
             DeleteRecord {
                 nzo_id: g.nzo_id.clone(),
+                name: g.name.clone(),
                 state: g.state,
                 out_dir: g.out_dir.clone(),
                 filed: g.filed,
                 locked: g.password_required,
+                published_failed: crate::serve::history::publishes_as_failed(&g),
             }
         })
         .collect();
-    plan_history_delete(&records, nzo_id, &queue_dirs)
+    // No `search`: this is a single-id delete on the watchlist's own
+    // behalf, and SAB's per-id branch never reads the parameter either.
+    plan_history_delete(&records, nzo_id, None, &queue_dirs)
         .iter()
         .zip(&records)
         .find(|(_, r)| r.nzo_id == nzo_id)
@@ -2260,6 +2264,7 @@ mod settle_tests {
             nzo_id: "old2".into(),
             hub: Arc::new(crate::StreamHub::default()),
             progress: Arc::new(AtomicU64::new(0)),
+            rate_win: Mutex::new(VecDeque::new()),
             cancelled: cancelled.clone(),
             task: tokio::spawn(async {}),
             borrowed: false,

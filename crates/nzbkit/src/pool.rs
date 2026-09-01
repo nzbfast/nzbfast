@@ -174,6 +174,21 @@ impl<'a> SessionTally<'a> {
 
 impl Drop for SessionTally<'_> {
     fn drop(&mut self) {
+        // `ConnDark`'s clock is stamped HERE and at no other site, which
+        // is a decision rather than an omission: a matching stamp as the
+        // session STARTS is dead weight, because `Shared::serving_at`
+        // reads the live count first and a held session already answers
+        // it - so the start stamp is a second guard that makes both
+        // unfalsifiable, and it survived a mutation that deleted it.
+        //
+        // BEFORE the count drops, though, and that order is load-
+        // bearing: `serving_at` reads the count and then the deadline,
+        // so a reader landing between the two would otherwise see a
+        // server with no session and a deadline older than the session
+        // it just finished holding.
+        self.shared
+            .conn_dark
+            .note_session(self.idx, self.shared.run_ms());
         self.shared.sessions[self.idx].fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -202,10 +217,10 @@ pub struct ArticleReq {
     pub part: u32,
     /// The NZB file (slot index) this segment belongs to; `u32::MAX` =
     /// unscoped (a side fetch, a probe). Only the part-mismatch gate
-    /// reads it: when two backbones agree a file's segment numbering is
-    /// synthesized, the gate stands down for THAT file alone (F-09) -
-    /// a run-wide stand-down let a later file's genuinely wrong part
-    /// sail through unsteered.
+    /// reads it: two backbones agreeing a file's numbering is
+    /// synthesized stand THAT file's gate down alone (F-09), and the
+    /// sentinel is not a file, so it can neither earn a stand-down nor
+    /// inherit one. `pool::queue`'s `PartLatch` carries both whys.
     pub file: u32,
 }
 
@@ -389,6 +404,52 @@ const SOFT_REARM_MAX: usize = 8192;
 /// healthy-but-absent post is the two dispatches it always was.
 const SOFT_REARM_CAP: u8 = 24;
 
+/// Ceiling on the SAME-server re-asks of a corrupt body that a run may
+/// waste, sized in articles.
+///
+/// [`QueueControl::note_decoded`]'s steer sends a corrupt body back to a
+/// DIFFERENT server. Where the fleet has no eligible peer - which is
+/// every single-server install, and any fleet whose only other server is
+/// a fill tier or the same backbone - it re-asks the deliverer itself,
+/// and this is what bounds that. A same-server re-ask is worth making
+/// because the two commonest corruptions are not the same fault: a
+/// damaged article in the spool answers the same bad bytes forever, and
+/// a broken cache node behind a load balancer answers a FRACTION of
+/// requests badly, so the second ask usually lands somewhere healthy.
+///
+/// It counts WASTE and not re-asks, which is the whole design. A unit is
+/// spent when a same-server re-ask goes out and REFUNDED the moment that
+/// article comes back with its CRC intact ([`Shared::settle_reask`]), so
+/// the broken cache node above never runs out however long the job is,
+/// and the damaged-spool article stops being asked after this many. A
+/// flat per-run quota cannot be both large enough to rescue a real job
+/// and small enough to refuse a corrupt storm; a waste quota is bounded
+/// on the useless side ONLY.
+///
+/// A unit is charged while its re-ask is IN FLIGHT, so this also bounds
+/// how many re-asks may be outstanding at one moment, and a burst of
+/// concurrent corrupt bodies wider than the budget has some of them
+/// refused. That is deliberate rather than a corner: a fleet holding
+/// more than this many bad bodies at once IS the corrupt storm, and
+/// refusing to keep paying is the direction to fail in. It does mean the
+/// rescue rate under a burst depends on arrival order, which is why the
+/// rig legs that assert EXACT counts run a serial pipeline (`lone_cfg`
+/// in `integration::steer_rig`).
+///
+/// 32 articles is ~25 MB at this repo's ~800 KB working article, inside
+/// the noise of any job large enough to carry a recovery set. Scaled
+/// DOWN on small jobs (see [`Shared::new`]): a nine-article post must
+/// not be able to pay 32 wasted fetches for nine articles of payload.
+/// Both numbers are first cuts with that reasoning behind them and no
+/// wire measurement under them; what IS measured is the mechanism, at
+/// `pool::steer_seam_tests`.
+const REASK_WASTE_CAP: usize = 32;
+
+/// Divisor for the small-job scaling of [`REASK_WASTE_CAP`]: waste is
+/// capped at an eighth of the run's articles, so the ceiling binds only
+/// from 256 articles up and a short post pays proportionally.
+const REASK_WASTE_DIV: usize = 8;
+
 struct Work {
     /// The interned id from [`ArticleReq`] (R9), MOVED in at queue
     /// construction: a requeue, a hedge dup, a `handed` stash and the
@@ -411,6 +472,14 @@ struct Work {
     /// (still bounded by `attempts`). Without this, a server that
     /// deterministically kills the article's connection can burn the
     /// whole retry budget before a healthy server ever sees the requeue.
+    ///
+    /// Since 31 Aug 2026 the CORRUPT-body seam reaches that same rule:
+    /// `note_decoded` folds the deliverer's group in here and requeues
+    /// even with no eligible peer, so `next_work` hands the article back
+    /// to the server that damaged it. Two readers of one sentence now,
+    /// which is why it is spelled out rather than left to the code -
+    /// narrowing it would silently retire the peerless re-ask as well as
+    /// the transport one. See [`REASK_WASTE_CAP`].
     tried_fail: u32,
     /// Tail duplicate: a second dispatch of an article already in flight
     /// on a slower server. First completion wins; a dup's own failures
@@ -438,6 +507,15 @@ struct Work {
     /// own and NOT a second meaning for `soft_430`, which doubts a
     /// different thing; see [`Shared::take_recheck`] for both.
     recheck_430: u32,
+    /// TODO 315: ms since [`Shared::start`] at which this article's late
+    /// re-ask hold was taken; 0 when it has never held one. The only
+    /// thing that can date a hold, and therefore the only thing that can
+    /// end one - what that bought, and what it cost when nothing did, is
+    /// at [`recheck::RECHECK_430_HOLD`]. A `u32` of milliseconds and not
+    /// an `Instant`: it rides every queued `Work` (a big job queues
+    /// ~100k), it fits the padding beside the four `u32` masks above,
+    /// and 49 days of run time is not a bound anything here reaches.
+    recheck_at: u32,
     /// §129 3g: this dispatch carried an alignment fence, so its
     /// response is followed by the fence's own and the reader must
     /// consume that too. Set at dispatch from the server's
@@ -676,6 +754,12 @@ struct AuthState {
     /// only ever bites the flapping case: against a server that is
     /// simply DOWN the consecutive horizon still expires first.
     down_ms_total: AtomicU64,
+    /// Dial pacing for a server that has STATED a connection cap: the
+    /// single-canary permit, and the ticket counter the connect
+    /// ladders' de-synchronising spread draws from. See
+    /// [`dialgate::DialGate`], whose header carries the 29 Aug 2026
+    /// measurement it was written against.
+    dial: dialgate::DialGate,
 }
 
 impl Default for AuthState {
@@ -689,6 +773,7 @@ impl Default for AuthState {
             reason: Default::default(),
             down_since: Default::default(),
             down_ms_total: Default::default(),
+            dial: Default::default(),
         }
     }
 }
@@ -851,11 +936,26 @@ struct Shared {
     /// Per-server time-to-status EWMA in ms (adaptive timeout path,
     /// TODO 96.1). 0 = unmeasured, which budgets at the clamp ceiling.
     ttfb_ms: Vec<AtomicU64>,
-    /// Ids the CRC-retry gate has already steered once. Bounds the
-    /// experiment to a single cross-server retry per article - the
+    /// Ids the CRC-retry gate has already requeued once. Bounds the
+    /// experiment to a single decode-seam retry per article - the
     /// second bad copy is delivered as-is and PAR2 owns it, exactly as
-    /// with the knob off.
+    /// with the knob off. One budget for both destinations: a peer when
+    /// one is eligible, otherwise the deliverer itself under
+    /// [`REASK_WASTE_CAP`]. Sharing it is what keeps the same-server
+    /// re-ask strictly ADDITIVE - an article the steer could place is
+    /// placed exactly as it was before, and only one the steer had to
+    /// own gets the new ask.
     crc_retried: std::sync::Mutex<HashSet<Arc<str>>>,
+    /// Units of same-server re-ask WASTE left this run. See
+    /// [`REASK_WASTE_CAP`] for what a unit is and why it comes back.
+    reask_waste: AtomicUsize,
+    /// Ids out on a budget-spending same-server re-ask right now, so the
+    /// refund can find the unit again. Empty on every run that never met
+    /// a corrupt body, and the counter beside it keeps the CLEAN decode
+    /// path off this lock - the same arrangement `soft_rearm` above uses,
+    /// and for the same reason: this is asked once per delivered article.
+    reask_out: std::sync::Mutex<HashSet<Arc<str>>>,
+    reask_out_n: AtomicUsize,
     /// Synthesized-numbering latch for the part gate (see its doc).
     part_latch: queue::PartLatch,
     /// §129 3g: bare-refusal passes to RE-ARM, keyed by message-id, the
@@ -871,6 +971,20 @@ struct Shared {
     /// COUNT, not a set, and a CONCURRENCY limit, not a quota - see
     /// [`Shared::take_recheck`].
     recheck_held: AtomicUsize,
+    /// TODO 315: [`PoolConfig::recheck_430_hold`] in ms, MAX-folded
+    /// across the fleet; 0 = unbounded (the pre-30-Aug shape). Here
+    /// rather than read at the site because the site that enforces it
+    /// is `next_work`'s queue scan, which is handed no `PoolConfig` at
+    /// all. MAX-folded like the gauge's `pct`: the most generous window
+    /// any member asked for is the only reading that cannot shorten a
+    /// hold somebody deliberately lengthened.
+    recheck_hold_ms: u64,
+    /// TODO 315: holds this run whose window ran out before their group
+    /// answered - the bounded outcome, and its only trace, so one warns.
+    recheck_expired: AtomicU64,
+    /// Per-server darkness clock: when each server stops counting as
+    /// able to serve for want of a session. See [`gates::ConnDark`].
+    conn_dark: ConnDark,
     /// Takedown-flavoured refusal evidence by message-id: server-group
     /// bits whose CHARGED refusal said "removed" rather than "not
     /// found" (see [`crate::nntp::takedown_flavoured`]). A HINT and
@@ -943,9 +1057,9 @@ struct Shared {
     /// with work still pending (start of the tail phase).
     dups_issued: AtomicU64,
     tail_started: std::sync::Mutex<Option<Instant>>,
-    /// Cross-job hand-over (`handoff`): per-server leases a successor's
-    /// workers wait on, and this run's idle latch.
-    leases: Vec<Option<Arc<handoff::HostLease>>>,
+    /// Cross-job hand-over (`handoff`): per-server seats at the leases a
+    /// successor's workers wait on, and this run's idle latch.
+    leases: Vec<Option<handoff::LeaseSeat>>,
     handoff: Option<Arc<handoff::HandoffSignal>>,
     /// Flips to true the moment every article is terminal. Workers blocked
     /// mid-read on slow connections select on this - without it, a tail
@@ -1365,13 +1479,25 @@ pub use ratelimit::RateLimit;
 mod gates;
 mod recheck;
 use gates::*;
-use recheck::RECHECK_430_MAX;
+use recheck::{RECHECK_430_HOLD, RECHECK_430_MAX};
 
 mod session;
 use session::*;
 
+// TODO 106: the park-and-probe tail - what a worker does while a server
+// is not granting sessions - came out of session.rs whole. A glob, as
+// `session`'s own is, so its callers there are unchanged.
+mod parkprobe;
+use parkprobe::*;
+
 mod pacing;
 use pacing::*;
+
+// The stated-cap dial gate and the connect-ladder spread (29 Aug 2026).
+// No glob: the dial path reaches it through `AuthState::dial`, and the
+// two free functions are named where they are used, so a reader of a
+// backoff line can see which module decides its delay.
+mod dialgate;
 
 // TODO 106: the tail dup race and the B3 in-flight wire budget came out
 // whole to pool/hedge.rs. Inherent `impl Shared` methods, so no glob is
@@ -1379,6 +1505,23 @@ use pacing::*;
 // every one of its descendants exactly as the private ones were.
 pub mod handoff;
 mod hedge;
+
+// TODO 106: the per-server observation ledger - the §96.5 block latch,
+// the TTFB EWMA, the session-end and 430-attribution tallies, the flap
+// breaker and the cap-bounce clamp - came out whole to
+// pool/serverledger.rs. Inherent `impl Shared` methods, so no glob is
+// needed: the child's `pub(super)` puts them back in scope for pool and
+// every one of its descendants exactly as the private ones were.
+mod serverledger;
+
+// TODO 106: work selection - the per-worker routing identity and the
+// pick itself - came out whole to pool/nextwork.rs. A glob, as
+// `session`'s own is, so its callers there and in the test modules are
+// unchanged; `MAX_SERVERS` is re-exported because `crate::config` names
+// it as `crate::pool::MAX_SERVERS`.
+mod nextwork;
+pub use nextwork::MAX_SERVERS;
+use nextwork::*;
 
 // TODO 94 item E: held-bytes backpressure - the per-file park the
 // extractor raises near its holds cap, consulted by `next_work`.
@@ -1510,98 +1653,6 @@ pub fn default_outage_mins() -> u64 {
 const ENDGAME_MAX: usize = 64;
 
 impl Shared {
-    /// §96.5: has this server spent its remaining prepaid block on this
-    /// run? One relaxed load and a compare - the fast path the top-up
-    /// loop and the pre-dial gate check per pass. `bytes` only grows,
-    /// so a true answer is permanent for the run.
-    pub(super) fn over_budget(&self, idx: usize) -> bool {
-        let b = self.budget_bytes[idx];
-        b > 0 && self.bytes[idx].load(Ordering::Relaxed) >= b
-    }
-
-    /// §96.5: first worker past the budget emits the one "block spent"
-    /// event; the latch also keeps `note_server_dark` from relabelling
-    /// the exit as a connection failure.
-    pub(super) fn note_budget_spent(&self, idx: usize) {
-        if self.budget_noted[idx].swap(true, Ordering::Relaxed) {
-            return;
-        }
-        if let Some(live) = &self.live {
-            live.note(
-                idx,
-                "block",
-                "prepaid block spent - stopped fetching mid-download; \
-                 any remaining articles go to the other servers",
-            );
-        }
-    }
-
-    /// Adaptive pre-byte budget for a server (TODO 96.1): 4x its
-    /// time-to-status EWMA, clamped to [2 s, 10 s]. Unmeasured servers
-    /// budget at the ceiling - generosity until the first sample, never
-    /// a guess. With pipelining the status line is often already
-    /// buffered (a ~0 ms sample); the floor keeps the budget honest
-    /// against that collapse.
-    fn ttfb_budget(&self, idx: usize) -> Duration {
-        let mut ms = ttfb_budget_ms(self.ttfb_ms[idx].load(Ordering::Relaxed));
-        // A sole-server fleet has nowhere to re-place a killed article,
-        // so it budgets against a doubled floor - see
-        // [`pacing::sole_server_floor_ms`] for the measurement.
-        if self.ttfb_ms.len() == 1 {
-            ms = ms.max(pacing::sole_server_floor_ms());
-        }
-        Duration::from_millis(ms)
-    }
-
-    /// TTFB-suspicion bound for a server (TODO 115): see
-    /// [`ttfb_suspect_ms`].
-    fn ttfb_suspect_after(&self, idx: usize) -> Duration {
-        Duration::from_millis(ttfb_suspect_ms(self.ttfb_ms[idx].load(Ordering::Relaxed)))
-    }
-
-    /// Feed one measured time-to-status into the server's EWMA
-    /// (alpha 0.2, integer ms, floor 1 so a fast loopback sample can't
-    /// re-zero the cell back to "unmeasured"). Plain load/store: a lost
-    /// update under a race is one dropped sample, not a wrong number.
-    fn note_ttfb(&self, idx: usize, sample: Duration) {
-        let ms = (sample.as_millis() as u64).max(1);
-        let cell = &self.ttfb_ms[idx];
-        let old = cell.load(Ordering::Relaxed);
-        let new = if old == 0 { ms } else { (old * 4 + ms) / 5 };
-        cell.store(new.max(1), Ordering::Relaxed);
-    }
-
-    /// A pre-byte timeout on this server: widen the budget instead of
-    /// leaving it where it was.
-    ///
-    /// Only SUCCESSFUL status reads feed the EWMA, so a budget trained
-    /// down to the floor by pipelined ~0 ms samples had no way back
-    /// up if the provider then settled at a stable latency above it:
-    /// every read timed out, every timeout produced no sample, and
-    /// healthy articles failed forever on a link the flat 30 s path
-    /// would have served (Codex sweep 3 Aug M4). A timeout is evidence
-    /// too - censored evidence ("at least this long"), so it is folded
-    /// in as a doubling rather than a measurement, and the next
-    /// successful sample decays it back down through the ordinary EWMA.
-    ///
-    /// The doubling is applied to the budget that just EXPIRED, not to
-    /// the raw EWMA, because the floor routinely hides the EWMA far
-    /// below the budget it produced. Doubling the raw value took a
-    /// 1 ms EWMA through 2, 4, 8, 16 ms - four charged attempts that
-    /// every one of them still spent at the flat floor (2 s when this
-    /// was found), so a provider that settled just above it failed
-    /// every article before the budget could widen a millisecond
-    /// (Codex sweep 2, 3 Aug M6). Escalating from the expired budget
-    /// makes the next attempt's budget strictly larger than the one
-    /// that just failed - 4 s, 8 s, ceiling at today's floor - so the
-    /// retry allowance is spent probing upwards instead of re-testing
-    /// the same floor four times.
-    fn note_ttfb_timeout(&self, idx: usize) {
-        let cell = &self.ttfb_ms[idx];
-        let old = cell.load(Ordering::Relaxed);
-        cell.store(escalated_ttfb_ms(old), Ordering::Relaxed);
-    }
-
     /// Refresh the stream-mode deadline: a reader touched the hub now.
     fn note_stream(&self) {
         let now = self.start.elapsed().as_millis() as u64;
@@ -1673,6 +1724,7 @@ impl Shared {
                     prebyte_expiries: 0,
                     soft_430: 0,
                     recheck_430: 0,
+                    recheck_at: 0,
                     fenced: false,
                     rearms: 0,
                     ladder: false,
@@ -1689,6 +1741,12 @@ impl Shared {
                 "dropped {dups} duplicate article request(s) - each id is fetched once"
             );
         }
+        // Same-server re-ask waste budget, sized off this run's article
+        // count while it is still in hand (see [`REASK_WASTE_CAP`]).
+        // Never zero: one wasted re-ask is what it costs to learn that
+        // this server's copy is the damaged one, and a job too small to
+        // afford that is too small to have a recovery set either.
+        let reask_budget = (queue.len() / REASK_WASTE_DIV).clamp(1, REASK_WASTE_CAP);
         let pending = AtomicUsize::new(queue.len());
         let done = std::sync::Mutex::new(DoneBits::new(queue.len()));
         let shared = Arc::new(Shared {
@@ -1709,10 +1767,16 @@ impl Shared {
                 .collect(),
             blocked_ms: (0..n_servers).map(|_| AtomicU64::new(0)).collect(),
             crc_retried: std::sync::Mutex::new(HashSet::new()),
+            reask_waste: AtomicUsize::new(reask_budget),
+            reask_out: std::sync::Mutex::new(HashSet::new()),
+            reask_out_n: AtomicUsize::new(0),
             part_latch: queue::PartLatch::default(),
             soft_rearm: std::sync::Mutex::new(HashMap::new()),
             soft_rearm_n: AtomicUsize::new(0),
             recheck_held: AtomicUsize::new(0),
+            recheck_hold_ms: recheck::hold_ms(servers),
+            recheck_expired: AtomicU64::new(0),
+            conn_dark: ConnDark::new(servers),
             takedown: std::sync::Mutex::new(HashMap::new()),
             takedown_n: AtomicUsize::new(0),
             spent: std::sync::Mutex::new(HashMap::new()),
@@ -1724,7 +1788,7 @@ impl Shared {
             deferred: AtomicU64::new(0),
             dups_issued: AtomicU64::new(0),
             tail_started: std::sync::Mutex::new(None),
-            leases: servers.iter().map(|(_, c)| c.lease.clone()).collect(),
+            leases: handoff::LeaseSeat::seats(servers),
             handoff: servers.iter().find_map(|(_, c)| c.handoff.clone()),
             finished: tokio::sync::watch::Sender::new(false),
             aborted: AtomicBool::new(false),
@@ -1832,10 +1896,20 @@ impl Shared {
             .iter()
             .map(|a| a.load(Ordering::Relaxed))
             .collect();
+        // `sessions` and `live` beside `alive` since 30 Aug 2026: the
+        // incident behind `gates::CONN_DARK` read `alive=[9, 17, 17]`
+        // with 399 articles pinned, and nothing said thirty-four of
+        // those workers held no socket.
+        let sessions: Vec<usize> = self
+            .sessions
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .collect();
         info!(
             target: "pool-debug",
-            "t={now}s pending={} alive={alive:?}",
-            self.pending.load(Ordering::Relaxed)
+            "t={now}s pending={} alive={alive:?} sessions={sessions:?} live={:06b}",
+            self.pending.load(Ordering::Relaxed),
+            self.live_mask(),
         );
         if let Ok(q) = self.queue.try_lock() {
             info!(target: "pool-debug", "queue={} item(s)", q.len());
@@ -1911,169 +1985,6 @@ impl Shared {
         }
     }
 
-    /// Record WHY a session ended. `slot` indexes [`SessionEnds`] in
-    /// field order (0 peer, 1 protocol, 2 prebyte, 3 stall, 4 ours).
-    /// Snapshot this server's session-end tally for [`PoolStats`].
-    fn session_ends(&self, server: usize) -> SessionEnds {
-        let Some(row) = self.ends.get(server) else {
-            return SessionEnds::default();
-        };
-        let g = |i: usize| row[i].load(Ordering::Relaxed);
-        SessionEnds {
-            peer: g(0),
-            protocol: g(1),
-            prebyte: g(2),
-            stall: g(3),
-            ours: g(4),
-        }
-    }
-
-    /// Count one authoritative 430/423 wire answer from a server -
-    /// proven attribution (echoed id, or fenced) in slot 0, bare
-    /// positional attribution in slot 1. See the `miss_answers` field
-    /// for why the split matters.
-    fn note_miss_answer(&self, server: usize, proven: bool) {
-        if let Some(row) = self.miss_answers.get(server) {
-            row[usize::from(!proven)].fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Count a session end by cause - slots 0 peer, 1 protocol, 2
-    /// prebyte, 3 stall, 4 ours - in BOTH the CLI tally (`ends`) and
-    /// the dashboard's live per-server counters, from the one call so
-    /// the two can never diverge (ends_ours used to be initialized and
-    /// never incremented because the live bump was pasted per site).
-    fn note_session_end(&self, server: usize, slot: usize) {
-        if let Some(row) = self.ends.get(server)
-            && let Some(c) = row.get(slot)
-        {
-            c.fetch_add(1, Ordering::Relaxed);
-        }
-        if let Some(l) = &self.live
-            && let Some(sl) = l.servers.get(server)
-        {
-            let c = match slot {
-                0 => &sl.ends_peer,
-                1 => &sl.ends_protocol,
-                2 => &sl.ends_prebyte,
-                3 => &sl.ends_stall,
-                _ => &sl.ends_ours,
-            };
-            c.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// M11 stream mode: should this server LEAVE a promoted (seek) item
-    /// for a faster one? Seek latency is per-article latency - a slow
-    /// backbone's connection sitting on a playhead article costs the
-    /// player seconds. Mirror of the tried_fail steering: skip only when
-    /// some LIVE, eligible server is measurably faster per worker (>2×),
-    /// so promoted work is never stranded - with no clear winner (cold
-    /// start, single server) everyone takes it. Judged on the WINDOWED
-    /// per-conn rate (steer module) since M7b.2: the whole-run average
-    /// answered "was this server slow at some point", and shaping that
-    /// starts or lifts mid-run flipped that answer wrongly for the rest
-    /// of the run.
-    fn faster_can_take(&self, w: &Work, me: usize) -> bool {
-        let mine = self.steer_rate_per_worker(me);
-        let evidence = w.tried_430 | self.spent_mask(&w.id);
-        for (si, &level) in self.levels.iter().enumerate() {
-            if si == me || self.alive[si].load(Ordering::Relaxed) == 0 {
-                continue;
-            }
-            let bit = server_bit(si);
-            if w.tried_430 & bit != 0 || w.tried_fail & bit != 0 {
-                continue;
-            }
-            let required = if level > 0 {
-                self.required_mask(level)
-            } else {
-                0
-            };
-            if evidence & required != required {
-                continue;
-            }
-            if self.steer_rate_per_worker(si) > 2.0 * mine {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Flap breaker: record an established-session death, trimming the
-    /// window in the same visit.
-    fn note_flap(&self, idx: usize) {
-        let mut d = self.flap_deaths[idx].lock_ok();
-        let now = Instant::now();
-        d.push_back(now);
-        while d
-            .front()
-            .is_some_and(|t| now.duration_since(*t) > FLAP_WINDOW)
-        {
-            d.pop_front();
-        }
-    }
-
-    /// Flap breaker: has this server accumulated [`FLAP_DEATHS`]
-    /// established-session deaths inside [`FLAP_WINDOW`]?
-    fn is_flapping(&self, idx: usize) -> bool {
-        let mut d = self.flap_deaths[idx].lock_ok();
-        let now = Instant::now();
-        while d
-            .front()
-            .is_some_and(|t| now.duration_since(*t) > FLAP_WINDOW)
-        {
-            d.pop_front();
-        }
-        d.len() >= FLAP_DEATHS
-    }
-
-    /// Cap estimation (TODO 115): a dial just bounced off this server's
-    /// capacity refusal, so the sessions we hold at this instant are
-    /// what the provider is willing to serve concurrently. Keep the
-    /// high-water across bounces.
-    ///
-    /// Returns the sampled count, so the caller can price the SAME
-    /// sample into the dashboard's gauge ([`ServerLive::note_cap`])
-    /// rather than re-reading a counter that has moved since.
-    /// `held` is passed IN, never re-read here. The refusal handler
-    /// samples the session count once, before either clock, precisely so
-    /// the outage gauge and this clamp describe the same observation -
-    /// and this function used to reload it, so sessions finishing in
-    /// between could stamp a ceiling of zero for an event that was
-    /// classified while two were held (Codex sweep 5, L7).
-    fn note_cap_bounce(&self, idx: usize, held: usize) {
-        self.flap_cap_seen[idx].fetch_max(held, Ordering::AcqRel);
-    }
-
-    /// How many keeper connections a flap-clamped server is worth.
-    /// The shipped answer is one. With `flap_cap_keepers` on and an
-    /// OBSERVED accept cap (a capacity bounce sampled while we held at
-    /// least one session), it is the observed cap - never above the
-    /// per-server connection budget, which is where the account's own
-    /// limits already landed; an unobserved cap stays at one, so a
-    /// server that flaps without ever refusing a dial (a throttling
-    /// account, a middlebox) keeps the conservative clamp.
-    fn flap_keeper_target(&self, idx: usize, cfg: &PoolConfig) -> usize {
-        if !cfg.flap_cap_keepers {
-            return 1;
-        }
-        match self.flap_cap_seen[idx].load(Ordering::Acquire) {
-            0 => 1,
-            cap => cap.min(cfg.connections.max(1)),
-        }
-    }
-
-    /// Some OTHER server has live workers - the precondition for
-    /// clamping this one (a lone server keeps its whole fleet: churn
-    /// beats zero throughput when there is no alternative).
-    fn other_live(&self, me: usize) -> bool {
-        self.alive
-            .iter()
-            .enumerate()
-            .any(|(i, a)| i != me && a.load(Ordering::Relaxed) > 0)
-    }
-
     /// First-emitter check: true exactly once per article. `ord` is
     /// the article's [`Work::ord`] (C4 - the bit arbitrated on); the
     /// id is still taken for the spent-map cleanup, which stays
@@ -2145,6 +2056,47 @@ impl Shared {
                 "fence-off",
                 "this provider does not answer DATE, so its responses cannot be checked for alignment - continuing without the check",
             );
+        }
+    }
+
+    /// Spend one unit of the same-server re-ask budget for `id`, or
+    /// answer false when the run has wasted its allowance already.
+    ///
+    /// The id is remembered so [`Self::settle_reask`] can hand the unit
+    /// back if the second copy is good. Asked only on the path that has
+    /// already decided to re-ask, so the lock here is off the hot path
+    /// by construction.
+    fn take_reask(&self, id: &Arc<str>) -> bool {
+        if self
+            .reask_waste
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1))
+            .is_err()
+        {
+            return false;
+        }
+        let mut out = self.reask_out.lock_ok();
+        out.insert(id.clone());
+        self.reask_out_n.store(out.len(), Ordering::Release);
+        true
+    }
+
+    /// Settle a same-server re-ask: `crc_ok` says whether the body that
+    /// just came back for `id` passed its own CRC.
+    ///
+    /// A pass refunds the unit - the re-ask did its job, so it was not
+    /// waste and the budget must not shrink for it. A second bad copy
+    /// keeps the unit spent, which is the only thing that ever exhausts
+    /// the budget. Ids this run never re-asked cost one relaxed load.
+    fn settle_reask(&self, id: &str, crc_ok: bool) {
+        if self.reask_out_n.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let mut out = self.reask_out.lock_ok();
+        let was_reasked = out.remove(id);
+        self.reask_out_n.store(out.len(), Ordering::Release);
+        drop(out);
+        if was_reasked && crc_ok {
+            self.reask_waste.fetch_add(1, Ordering::AcqRel);
         }
     }
 
@@ -2451,248 +2403,6 @@ async fn join_fleet(
              for - the caller will see slots with no outcome"
         );
     }
-}
-
-/// Per-worker identity for cross-server routing.
-#[derive(Clone, Copy)]
-struct ServerCtx {
-    idx: usize,
-    bit: u32,
-    #[expect(dead_code)] // mask of every server bit; kept beside bit/group_bits
-    all: u32,
-    /// Bits of this server's whole mirror group (incl. itself): a 430
-    /// here is authoritative for all of them (M14e Group).
-    group_bits: u32,
-    /// Tier (M14e Level): >0 = fill server, gated in next_work.
-    level: u32,
-}
-
-/// How many servers the routing bitmasks can represent.
-///
-/// Every routing decision - `tried_430`, retention, live/fail/required/group -
-/// is a `u32` keyed by server index, so there is no bit for index 32 and
-/// beyond. Enforced at config load (`Config::load`), which is what makes
-/// [`server_bit`] total in practice.
-pub const MAX_SERVERS: usize = 32;
-
-fn ctx_for(servers: &[(ServerConfig, PoolConfig)], si: usize) -> ServerCtx {
-    let me = &servers[si].0;
-    let mut group_bits = server_bit(si);
-    if let Some(g) = &me.group {
-        for (sj, (s, _)) in servers.iter().enumerate() {
-            if s.group.as_deref() == Some(g.as_str()) {
-                group_bits |= server_bit(sj);
-            }
-        }
-    }
-    ServerCtx {
-        idx: si,
-        bit: server_bit(si),
-        all: servers_mask(servers.len()),
-        group_bits,
-        level: me.level,
-    }
-}
-
-/// Next unit of work for this server: queued articles it hasn't 430'd
-/// first (rotating skipped items), then - tail phase - a duplicate of an
-/// article in flight on a slower/stalled server.
-async fn next_work(
-    shared: &Shared,
-    ctx: ServerCtx,
-    out: &mpsc::Sender<FetchOutcome>,
-    // Caller's current pipeline, split by kind (M2c.4): in the ENDGAME a
-    // 430-laddering article must not ride BEHIND queued payload bodies
-    // - head-of-line blocking on the slowest provider's last windows
-    // was the measured 4-6 s straggler tail. It may ride behind OTHER
-    // PROBES, which is the whole difference: a refusal is one line, so
-    // a window of probes answers in one round trip where the old
-    // empty-pipeline rule spent one round trip per probe. That cap -
-    // one verdict per connection per RTT - is what made a damaged post
-    // sit at 0.0 MB/s for ~10 s before repair while every payload byte
-    // was already on disk.
-    pipe: Pipeline,
-) -> Option<Work> {
-    // TTFB-suspicion hedge (TODO 115): an idle worker checks for suspect
-    // articles first - their owners are sitting in pre-byte silence
-    // RIGHT NOW, and the whole point is to answer inside the budget they
-    // have left. One atomic load when dark, quiet, or busy.
-    if let Some(w) = shared.pick_suspect_dup(ctx.bit, ctx.group_bits, ctx.level, pipe.used) {
-        return Some(w);
-    }
-    let endgame = shared.pending.load(Ordering::Acquire) <= ENDGAME_MAX;
-    // Fill-server gate (M14e): a level-N server only takes queued work
-    // that every LIVE lower-level server has already 430'd.
-    let required = if ctx.level > 0 {
-        shared.required_mask(ctx.level)
-    } else {
-        0
-    };
-    // Scan throttle: this server's last full scan found nothing takeable
-    // and re-shuffled the whole queue for the privilege. Sit out a tick
-    // instead of burning the shared queue lock - at scale that burn
-    // starves the servers that DO have work (see `scan_futile`).
-    let now_ms = shared.start.elapsed().as_millis() as u64;
-    let futile_at = shared.scan_futile[ctx.idx].load(Ordering::Relaxed);
-    if futile_at != u64::MAX && now_ms.saturating_sub(futile_at) < SCAN_RETRY_MS {
-        return shared.pick_dup(ctx.idx, ctx.bit, ctx.group_bits, required, pipe, ctx.level);
-    }
-    // An article every LIVE server has 430'd is terminal even if servers
-    // whose workers bowed out never saw it - a dead server can't answer,
-    // and waiting for it deadlocks the whole run (the queue rotates the
-    // item forever). Collected under the lock, reported after.
-    //
-    // Terminal, though, is not the same claim as GONE, and this site used to
-    // make both at once (27 Aug sweep finding 8). The refusal mask rides out
-    // of the scan with the id so `missing_cause` can tell "every server that
-    // could answer refused it" from "the fleet shrank out from under it" -
-    // see `Shared::participation_mask`. The test below is deliberately
-    // unchanged: a frozen mask there is what the warning above refuses.
-    let live = shared.live_mask();
-    let mut unservable: Vec<(Arc<str>, u32, u32)> = Vec::new();
-    let mut picked: Option<Work> = None;
-    // Promoted items this (slow) server steps PAST: they must go back to
-    // the queue FRONT in order - a fast server picks from the front, and
-    // rotating seek-critical work to the back would strand it.
-    let mut left_for_faster: Vec<Work> = Vec::new();
-    // Held-bytes backpressure: candidates stepped past because their
-    // group is at its allowance. Kept in QUEUE ORDER and put back at the
-    // front, never rotated: the queue runs file-then-offset, so the
-    // first one admitted is the article the engine is blocked on. A
-    // rotation scrambled that and the 4G leg of 23 Aug 2026 starved
-    // its engine 35 s at 6 MB/s while far-ahead bytes broke the cap.
-    // Not a dry queue either - no tail latch, no dup fan-out.
-    let mut parked_kept: Vec<Work> = Vec::new();
-    let parked_past = {
-        let mut q = shared.queue.lock().await;
-        // TODO 114 consumer steer: adopt any steered requeues parked
-        // in the inbox (the verdict thread never takes this lock -
-        // see the `steer_inbox` field doc). Front, behind the promoted
-        // run: the consumer is waiting on exactly this article, and
-        // the `PartLatch` needs a refetch to REPORT early, not last.
-        {
-            let mut inbox = shared.steer_inbox.lock_ok();
-            for w in inbox.drain(..) {
-                let at = q.iter().take_while(|x| x.promoted).count().min(q.len());
-                if w.promoted {
-                    shared.promoted_pending.fetch_add(1, Ordering::AcqRel);
-                }
-                q.insert(at, w);
-            }
-        }
-        for _ in 0..q.len() {
-            let Some(mut w) = q.pop_front() else { break };
-            if w.tried_430 & live == live {
-                unservable.push((w.id, w.ord, w.tried_430));
-                continue;
-            }
-            // M5: the fill gate asks for refusals, and a lower-level
-            // server that killed this article's connection on every
-            // attempt never files one - the deeper tier holding a good
-            // copy stayed locked out until the retries ran out and the
-            // article was reported lost. A server that spent its whole
-            // budget has answered as finally as a 430 does, so it
-            // satisfies the gate here (and NOWHERE else: `spent` is not
-            // evidence, so unanimous-Missing above still counts 430s
-            // alone). The lookup is skipped entirely while the gate is
-            // already satisfied, which includes every level-0 pick.
-            let gated = w.tried_430 & required != required
-                && (w.tried_430 | shared.spent_mask(&w.id)) & required != required;
-            if w.tried_430 & ctx.bit != 0
-                || gated
-                || (w.tried_fail & ctx.bit != 0 && shared.other_can_take(&w, ctx.idx))
-                || (endgame && pipe.payload > 0 && w.tried_430 != 0)
-            {
-                q.push_back(w);
-            } else if shared.park.defers(&w) {
-                parked_kept.push(w);
-            } else if w.promoted
-                && w.tried_430 == 0
-                && shared.stream_active()
-                && shared.faster_can_take(&w, ctx.idx)
-            {
-                // Untried promoted work waits briefly for a faster server;
-                // once ANY backbone has 430'd it, latency beats speed-
-                // matching - whoever can serve it, serves it.
-                left_for_faster.push(w);
-            } else {
-                if w.promoted {
-                    let _ = shared.promoted_pending.fetch_update(
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                        |v| v.checked_sub(1),
-                    );
-                }
-                // Per-dispatch classification (see `Work::ladder`): an
-                // article carrying refusal evidence is walking toward a
-                // verdict, and this hop is a probe. One that has never
-                // been refused is payload, however long it has been
-                // queued.
-                w.ladder = w.tried_430 != 0 || w.soft_430 != 0;
-                // Held-bytes backpressure: counted HERE, under the
-                // queue lock, not at registration a socket write later
-                // - every idle worker passed the one-in-flight floor
-                // in that window at once (60 x 700 KB, the whole
-                // margin, on the 22 Aug rig).
-                shared.park.note_pick(&w);
-                picked = Some(w);
-                break;
-            }
-        }
-        let parked_past = !parked_kept.is_empty();
-        for w in parked_kept.into_iter().rev() {
-            q.push_front(w);
-        }
-        for w in left_for_faster.into_iter().rev() {
-            q.push_front(w);
-        }
-        parked_past
-    };
-    if picked.is_none() {
-        shared.scan_futile[ctx.idx].store(now_ms, Ordering::Relaxed);
-    }
-    for (id, ord, tried_430) in unservable {
-        if shared.claim_done(&id, ord) {
-            let takedown = shared.take_takedown(&id) != 0;
-            let cause = shared.missing_cause(tried_430, takedown);
-            let _ = out.send(FetchOutcome::Missing { id, cause }).await;
-            shared.complete_one();
-        }
-    }
-    if picked.is_some() || parked_past {
-        return picked;
-    }
-    if ctx.level == 0 && shared.pending.load(Ordering::Acquire) > 0 {
-        // Only primaries mark the tail - an idle fill server waiting on
-        // its gate isn't evidence the queue ran dry.
-        let latched_now = {
-            let mut ts = shared.tail_started.lock_ok();
-            ts.is_none() && {
-                *ts = Some(Instant::now());
-                true
-            }
-        };
-        if latched_now {
-            // The latch opens the early fan-out rules for every server:
-            // wake pick_dup scanners gated on an unchanged map (N6).
-            shared.bump_inflight_gen();
-        }
-        // Phase marker, once per run at the latch: from here the line
-        // tapers naturally as the last in-flight articles land, and
-        // without a marker that taper reads as a fault.
-        if latched_now && let Some(l) = &shared.live {
-            l.note_run(
-                "tail",
-                "every article has been handed out - waiting for the last ones in flight",
-            );
-        }
-    }
-    // Cross-job hand-over outranks a speculative duplicate (None lets
-    // the pipeline drain to empty, where `idle_turn` hands over).
-    if shared.want_handoff(ctx.idx) {
-        return None;
-    }
-    shared.pick_dup(ctx.idx, ctx.bit, ctx.group_bits, required, pipe, ctx.level)
 }
 
 /// Deal every configured connection round-robin across `shards.max(1)`

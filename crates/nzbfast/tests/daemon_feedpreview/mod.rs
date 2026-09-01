@@ -214,5 +214,4 @@ async fn feed_preview_shows_matches_overrides_and_dupes() {
     );
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }

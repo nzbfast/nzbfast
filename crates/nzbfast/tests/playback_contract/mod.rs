@@ -223,5 +223,4 @@ async fn playback_contract_answers_readiness_and_scoped_tokens() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -69,6 +69,7 @@ fn work(id: &str) -> Work {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -1295,6 +1296,73 @@ async fn a_duplicates_refusal_counts_only_when_the_socket_can_be_checked() {
     );
 }
 
+/// TODO 315, 29 Aug 2026: a duplicate's authoritative 430 must not
+/// stamp its bit back onto a queued article whose LATE RE-ASK is
+/// holding that same bit down.
+///
+/// `handle_missing` clears the re-asked group's bit precisely so the
+/// requeued item is not live-unanimous while it waits. The dup fold
+/// found the queued copy and OR'd the bit straight back in, which
+/// terminalized the article on evidence the hold was bought to doubt -
+/// and left the budget slot held by a `Work` nothing would release,
+/// because the queued item is then removed by `next_work`'s unservable
+/// scan rather than by either verdict arm. The dup is not the delayed
+/// ask: it was already in flight when the hold was taken, so its
+/// refusal is the very evidence the hold exists to re-test.
+#[tokio::test]
+async fn a_duplicate_does_not_spend_a_queued_articles_held_re_ask() {
+    let servers = vec![(server("s"), PoolConfig::default())];
+    let cfg = PoolConfig {
+        recheck_430: true,
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<h@x>"]), &servers);
+    let ctx = ctx_for(&servers, 0);
+    sh.alive[0].store(1, Ordering::SeqCst);
+    // The shape `handle_missing` leaves behind when it takes the hold:
+    // the group's bit remembered in `recheck_430` and cleared out of
+    // `tried_430`, the item back in the queue waiting to be re-asked.
+    {
+        let mut q = sh.queue.lock().await;
+        let w = q.front_mut().unwrap();
+        assert!(sh.take_recheck(w, &cfg, ctx.group_bits));
+        w.tried_430 &= !ctx.group_bits;
+    }
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut dup = work("<h@x>");
+    dup.dup = true;
+    let mut inflight: VecDeque<Work> = [dup].into_iter().collect();
+    sh.charge_wire();
+    let mut bare: VecDeque<Arc<str>> = VecDeque::new();
+    handle_missing(
+        &cfg,
+        ctx,
+        &sh,
+        &tx,
+        &mut inflight,
+        PooledBuf::unpooled(Vec::new()),
+        true,
+        false,
+        &mut bare,
+    )
+    .await;
+    assert!(
+        rx.try_recv().is_err(),
+        "the held re-ask has not happened yet - nothing here may end the article"
+    );
+    assert_eq!(sh.pending.load(Ordering::Acquire), 1);
+    assert_eq!(
+        sh.queue.lock().await.front().unwrap().tried_430 & ctx.group_bits,
+        0,
+        "the bit the hold cleared must stay clear until the re-ask is answered"
+    );
+    assert_eq!(
+        sh.recheck_held.load(Ordering::Acquire),
+        1,
+        "and the slot is still legitimately held by an article still in the queue"
+    );
+}
+
 /// 27 Aug sweep finding 23: an un-echoed, unfenced dup 430 is dropped
 /// as evidence AND gives the article its hedge budget back. It is a dup
 /// dying without a verdict, exactly like a shed or a connection death
@@ -2094,5 +2162,233 @@ async fn a_refusal_that_only_looks_unanimous_because_a_server_left_says_so() {
     assert!(
         sh.queue.lock().await.is_empty(),
         "the article is still terminal - the fleet has nobody who could take it"
+    );
+}
+
+/// The stated-cap dial gate, wired end to end (measured 29 Aug 2026 on
+/// a live daemon; `pool/dialgate.rs`'s header carries the numbers).
+/// A provider that names a CONNECTION cap has answered the question the
+/// fleet keeps re-asking with eleven sockets at once, so the next dial
+/// arms `dialgate::DialGate` and the rest of the fleet queues behind one
+/// canary. The arithmetic and the permit itself are pinned in
+/// `pool/dialgate/tests.rs`; what is pinned HERE is that the dial path
+/// really consults them.
+#[tokio::test]
+async fn a_stated_connection_cap_arms_the_dial_gate() {
+    let srv = MockServer::start(
+        std::collections::HashMap::new(),
+        Chaos {
+            auth_rejected: true,
+            // The live line, verbatim.
+            auth_refusal_text: Some("502 connection limit (40) reached".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut sc = srv.server_config();
+    sc.username = Some("u".into());
+    sc.password = Some("p".into());
+    let servers = vec![(sc.clone(), PoolConfig::default())];
+    let cfg = PoolConfig {
+        flap_cap_keepers: true,
+        connect_backoff: Duration::from_millis(1),
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    sh.alive[0].store(1, Ordering::SeqCst);
+    let ctx = ctx_for(&servers, 0);
+    let mut finished = sh.finished.subscribe();
+    let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
+        (0u32, 0u32, 0u32, false, None);
+    assert!(
+        !sh.auth[0].dial.is_armed(),
+        "nothing is serialised before the provider has said anything"
+    );
+    let step = dial_session(
+        &sc,
+        &cfg,
+        ctx,
+        &sh,
+        &connects,
+        &reconnects,
+        &mut finished,
+        &mut fails,
+        &mut flap,
+        &mut bounces,
+        &mut ever,
+        true,
+        &mut last_end,
+    )
+    .await;
+    assert!(matches!(step, DialStep::Retry));
+    assert!(
+        sh.auth[0].dial.is_armed(),
+        "a stated connection cap arms the gate"
+    );
+    let asked = srv.accepted.load(Ordering::Relaxed);
+
+    // ...and now the fleet queues. Hold the permit the way a worker
+    // mid-dial holds it, and send another worker at the same server: it
+    // must not reach the wire at all.
+    let held = sh.auth[0]
+        .dial
+        .canary(true)
+        .expect("the gate hands out one permit");
+    let step = dial_session(
+        &sc,
+        &cfg,
+        ctx,
+        &sh,
+        &connects,
+        &reconnects,
+        &mut finished,
+        &mut fails,
+        &mut flap,
+        &mut bounces,
+        &mut ever,
+        true,
+        &mut last_end,
+    )
+    .await;
+    assert!(matches!(step, DialStep::Retry), "it waits and asks again");
+    assert_eq!(
+        srv.accepted.load(Ordering::Relaxed),
+        asked,
+        "a second socket while the canary is in flight IS the burst - \
+         eleven of these landed inside one second on the live daemon"
+    );
+    assert_eq!(
+        (fails, flap),
+        (0, 1),
+        "standing in the queue is neither a connect failure nor a bounce: \
+         counting it would walk a polite worker into the prober election"
+    );
+
+    // The canary's dial ends, and the next worker probes for real.
+    drop(held);
+    let step = dial_session(
+        &sc,
+        &cfg,
+        ctx,
+        &sh,
+        &connects,
+        &reconnects,
+        &mut finished,
+        &mut fails,
+        &mut flap,
+        &mut bounces,
+        &mut ever,
+        true,
+        &mut last_end,
+    )
+    .await;
+    assert!(matches!(step, DialStep::Retry));
+    assert_eq!(
+        srv.accepted.load(Ordering::Relaxed),
+        asked + 1,
+        "one canary at a time, but always one - a gate that let nobody \
+         through would abandon a cap that later clears"
+    );
+}
+
+/// A simultaneous-IP refusal must NOT arm it. That limit is about where
+/// the account is used from, not how many sockets it grants, so
+/// serialising dials would answer a question it never asked - the same
+/// distinction `note_cap` already draws (Codex sweep 5, M9).
+#[tokio::test]
+async fn a_source_ip_cap_does_not_arm_the_dial_gate() {
+    let srv = MockServer::start(
+        std::collections::HashMap::new(),
+        Chaos {
+            auth_rejected: true,
+            auth_refusal_text: Some("481 max number of simultaneous IP addresses reached".into()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut sc = srv.server_config();
+    sc.username = Some("u".into());
+    sc.password = Some("p".into());
+    let servers = vec![(sc.clone(), PoolConfig::default())];
+    let cfg = PoolConfig {
+        flap_cap_keepers: true,
+        connect_backoff: Duration::from_millis(1),
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    sh.alive[0].store(1, Ordering::SeqCst);
+    let ctx = ctx_for(&servers, 0);
+    let mut finished = sh.finished.subscribe();
+    let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
+        (0u32, 0u32, 0u32, false, None);
+    let step = dial_session(
+        &sc,
+        &cfg,
+        ctx,
+        &sh,
+        &connects,
+        &reconnects,
+        &mut finished,
+        &mut fails,
+        &mut flap,
+        &mut bounces,
+        &mut ever,
+        true,
+        &mut last_end,
+    )
+    .await;
+    assert!(matches!(step, DialStep::Retry));
+    assert!(
+        !sh.auth[0].dial.is_armed(),
+        "an address cap counts machines, not sockets - one canary would \
+         not make this host look like fewer of them"
+    );
+}
+
+/// The other end of the latch: a GRANTED session is what stands the gate
+/// down, and it has to be wired to the success arm or a cap that later
+/// clears leaves the fleet serialised for the rest of the run.
+#[tokio::test]
+async fn a_granted_session_stands_the_dial_gate_down() {
+    let srv = MockServer::start(std::collections::HashMap::new(), Chaos::default()).await;
+    let sc = srv.server_config();
+    let servers = vec![(sc.clone(), PoolConfig::default())];
+    let cfg = PoolConfig {
+        connect_backoff: Duration::from_millis(1),
+        ..Default::default()
+    };
+    let (sh, _) = Shared::new(fresh(&["<a@x>"]), &servers);
+    let ctx = ctx_for(&servers, 0);
+    let mut finished = sh.finished.subscribe();
+    let (connects, reconnects) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    let (mut fails, mut flap, mut bounces, mut ever, mut last_end) =
+        (0u32, 0u32, 0u32, false, None);
+    // An earlier episode left the fleet serialised.
+    sh.auth[0].dial.arm();
+    let step = dial_session(
+        &sc,
+        &cfg,
+        ctx,
+        &sh,
+        &connects,
+        &reconnects,
+        &mut finished,
+        &mut fails,
+        &mut flap,
+        &mut bounces,
+        &mut ever,
+        false,
+        &mut last_end,
+    )
+    .await;
+    assert!(
+        matches!(step, DialStep::Conn(_)),
+        "the mock grants a session"
+    );
+    assert!(
+        !sh.auth[0].dial.is_armed(),
+        "the cap has room again, so the fleet ramps back in"
     );
 }

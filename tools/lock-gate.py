@@ -660,19 +660,58 @@ def selftest():
                 file=sys.stderr,
             )
             bad += 1
+    # An unknown flag must be a REFUSAL naming it, never a silent skip that
+    # falls through to the ordinary clean gate verdict about a request
+    # nobody honoured - the shape reproduced live on size-gate.py 31 Aug 2026.
+    for args, want_bad in (
+        (["--this-flag-does-not-exist"], True),
+        ([], False),
+        (["--list"], False),
+        (["--selftest"], False),
+    ):
+        got_bad = unrecognised_argv(args) is not None
+        if got_bad != want_bad:
+            print(
+                f"  selftest FAIL: unrecognised_argv({args!r}) flagged={got_bad},"
+                f" wanted {want_bad}",
+                file=sys.stderr,
+            )
+            bad += 1
     if bad:
         print(f"\nlock-gate: {bad} selftest case(s) failed - the gate is not doing its job.", file=sys.stderr)
         return 1
     print(
         f"lock-gate: selftest ok ({len(SELFTEST) + 19} cases, flat and rustfmt-wrapped,"
-        " unwrap and expect, bare and combined cfg)"
+        " unwrap and expect, bare and combined cfg, 4 argv cases)"
     )
     return 0
+
+
+KNOWN_FLAGS = {"--selftest", "--list"}
+
+
+def unrecognised_argv(argv):
+    """First arg outside the known set, or None."""
+    for a in argv:
+        if a not in KNOWN_FLAGS:
+            return a
+    return None
 
 
 def main():
     if "--selftest" in sys.argv:
         return selftest()
+
+    bad_arg = unrecognised_argv(sys.argv[1:])
+    if bad_arg is not None:
+        print(
+            f"lock-gate: unrecognised argument {bad_arg!r} - known flags are "
+            "--list, --selftest, or no args for the gate. A stale checkout "
+            "may be missing a flag this script now supports - merge "
+            "origin/main.",
+            file=sys.stderr,
+        )
+        return 1
 
     prod, test = collect()
     if "--list" in sys.argv:

@@ -146,6 +146,28 @@ if [ "$SELF_TEST" -eq 1 ]; then
         ok "a build with no keystore is refused"
     fi
 
+    # `--skip-engine` promises to reuse the engine already in target/,
+    # and until 29 Aug 2026 it resolved the NDK anyway - so a packaging
+    # or signing host with everything BUT an NDK exited before it reached
+    # the Gradle and signing steps it had all the parts for. Driven with
+    # a bare SDK directory (no ndk/ under it, ANDROID_NDK unset): the run
+    # must get PAST the NDK ladder. It still fails afterwards - there is
+    # no build-tools and no engine in this fixture - so what is asserted
+    # is which refusal comes back, not that the build succeeds.
+    probe=$(mktemp -d)
+    mkdir -p "$probe/sdk" "$probe/ks"
+    : > "$probe/ks/fake.jks"
+    out=$( unset ANDROID_NDK ANDROID_SDK_ROOT
+           NZBFAST_ANDROID_KEYSTORE="$probe/ks/fake.jks" \
+           NZBFAST_ANDROID_KEYSTORE_PASS=x \
+           ANDROID_HOME="$probe/sdk" \
+           sh "$0" --skip-engine 2>&1 || true )
+    rm -rf "$probe"
+    case "$out" in
+        *"no NDK found"*) fail "--skip-engine still demands an NDK it does not use" ;;
+        *) ok "--skip-engine reaches past the NDK ladder without one" ;;
+    esac
+
     echo ""
     if [ "$bad" -ne 0 ]; then
         echo "SELF-TEST FAILED ($cases cases)"; exit 1
@@ -178,19 +200,33 @@ SDK=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 [ -d "$SDK" ] || die "ANDROID_HOME points at nothing: $SDK"
 export ANDROID_HOME="$SDK"
 
-NDK=${ANDROID_NDK:-}
-if [ -z "$NDK" ]; then
-    NDK=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
-fi
-[ -n "$NDK" ] && [ -d "$NDK" ] \
-    || die "no NDK found. Install one:
+# THE NDK IS THE ENGINE'S, so it is resolved only when the engine is
+# being built. `--skip-engine` documents itself as reusing an existing
+# target/ binary, and the whole NDK ladder below ran anyway - so a
+# packaging or signing host with the SDK, build-tools, a JDK, the
+# keystore and the prepared arm64 binary, but no NDK, exited here rather
+# than reaching the Gradle and signing steps it had everything for. The
+# SDK and build-tools checks stay unconditional: gradle and apksigner
+# need them either way.
+NDK=""
+TC=""
+CLANG=""
+if [ "$SKIP_ENGINE" -eq 0 ]; then
+    NDK=${ANDROID_NDK:-}
+    if [ -z "$NDK" ]; then
+        NDK=$(ls -d "$SDK"/ndk/* 2>/dev/null | sort -V | tail -1 || true)
+    fi
+    [ -n "$NDK" ] && [ -d "$NDK" ] \
+        || die "no NDK found. Install one:
       sdkmanager 'ndk;28.2.13676358'
-    or point ANDROID_NDK at an existing one."
+    or point ANDROID_NDK at an existing one, or pass --skip-engine to
+    reuse the engine already in target/."
 
-TC=$(ndk_bin "$NDK")
-[ -n "$TC" ] || die "unsupported build host $(uname -s) - this needs the NDK's darwin-x86_64 or linux-x86_64 prebuilt toolchain."
-CLANG="$TC/aarch64-linux-android26-clang"
-[ -x "$CLANG" ] || die "no $CLANG - is $NDK a complete NDK?"
+    TC=$(ndk_bin "$NDK")
+    [ -n "$TC" ] || die "unsupported build host $(uname -s) - this needs the NDK's darwin-x86_64 or linux-x86_64 prebuilt toolchain."
+    CLANG="$TC/aarch64-linux-android26-clang"
+    [ -x "$CLANG" ] || die "no $CLANG - is $NDK a complete NDK?"
+fi
 
 VERSION=$(crate_version)
 case "$VERSION" in
@@ -204,7 +240,7 @@ APKSIGNER="$BT/apksigner"
 
 echo "== nzbfast $VERSION -> android arm64 =="
 echo "   sdk        $SDK"
-echo "   ndk        $NDK"
+echo "   ndk        ${NDK:-(not needed - reusing the built engine)}"
 echo "   keystore   $KS"
 
 # ---- 1. the engine ---------------------------------------------------

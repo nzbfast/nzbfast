@@ -156,8 +156,6 @@ async fn downloads_a_body_over_tls() {
         128 << 10,
         "one article's worth of payload"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A TLS listener that records the SNI of every ClientHello it sees and
@@ -319,6 +317,4 @@ async fn the_tls_name_override_is_what_the_handshake_verifies_and_announces() {
         Some(CERT_NAME),
         "the override must also be the name announced as SNI, saw {announced:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

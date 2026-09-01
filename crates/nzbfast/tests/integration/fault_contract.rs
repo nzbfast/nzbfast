@@ -668,8 +668,7 @@ fn get(config: &Path, nzb: &Path, out: &Path, extra_env: &[(String, String)]) ->
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let o = cmd
-        .arg("--config")
+    cmd.arg("--config")
         .arg(config)
         .arg("get")
         .arg(nzb)
@@ -680,12 +679,18 @@ fn get(config: &Path, nzb: &Path, out: &Path, extra_env: &[(String, String)]) ->
         .arg("--window")
         .arg(WINDOW.to_string())
         .arg("--decoders")
-        .arg("4")
-        .output()
-        .expect("run nzbfast get");
+        .arg("4");
+    // Not `.output()`: cargo unlinks and re-links the uplifted
+    // `target/debug/nzbfast` on every invocation, so a concurrent cargo
+    // command makes this spawn answer NotFound for a binary that is
+    // there before and after. See `harness::spawn_under_test`.
+    let o = crate::harness::output_under_test(&mut cmd);
     (
+        // stdout/stderr are separate pipes with no shared clock - label
+        // the seam so a bare join can't be misread as one chronology.
+        // Copy the comment along with the string.
         format!(
-            "{}{}",
+            "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
             String::from_utf8_lossy(&o.stdout),
             String::from_utf8_lossy(&o.stderr)
         ),
@@ -1006,8 +1011,8 @@ async fn contract_crash_in_fault_window() {
         let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
         let served = srv.served.clone();
         tokio::task::spawn_blocking(move || {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
-                .env("NZBFAST_OPEN", "1")
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+            cmd.env("NZBFAST_OPEN", "1")
                 .env("NZBFAST_NO_ENRICH", "1")
                 // Same INFO pin as `get` above: this run's census is
                 // parsed too, and ambient RUST_LOG=warn empties it.
@@ -1022,9 +1027,9 @@ async fn contract_crash_in_fault_window() {
                 .arg("--connections")
                 .arg(CONNS.to_string())
                 .arg("--window")
-                .arg(WINDOW.to_string())
-                .spawn()
-                .unwrap();
+                .arg(WINDOW.to_string());
+            // Same uplift window as the `get` runner above.
+            let mut child = crate::harness::spawn_under_test(&mut cmd);
             let deadline = Instant::now() + Duration::from_secs(30);
             let journal = out.join(".nzbfast.journal");
             while served.load(Ordering::Relaxed) < total * 2 / 5
@@ -1041,6 +1046,9 @@ async fn contract_crash_in_fault_window() {
         .await
         .unwrap();
     }
+    let recorded_at_kill = nzbkit::journal::Journal::peek(&out)
+        .map(|r| r.recorded_ids())
+        .unwrap_or_default();
     let served_run1 = srv.served.load(Ordering::Relaxed);
     assert!(
         served_run1 >= total * 2 / 5,
@@ -1084,21 +1092,82 @@ async fn contract_crash_in_fault_window() {
         .filter(|(id, _)| asked_run1.contains_key(*id))
         .map(|(id, _)| id)
         .collect();
-    let budget = (CONNS * WINDOW) as usize * 2 + stalls;
+    // THE BUDGET IS MEASURED, NOT DERIVED, and that change is the whole
+    // of this clause's history. It used to be `CONNS * WINDOW * 2 +
+    // stalls` = 36, i.e. one in-flight window per connection twice over
+    // plus the dead-air stalls - a WIRE quantity, describing how many
+    // articles can be outstanding on the sockets. The quantity that
+    // actually governs a refetch is DURABILITY: run 2 owes a refetch for
+    // everything run 1 asked for and had not got into the journal, and
+    // the distance between those two is set by the journal's flush
+    // cadence against the decode lane, not by the pipelining window. On
+    // a loaded box the network lane runs away from the write lane and
+    // that distance grows without bound, while `CONNS * WINDOW` does not
+    // move at all. Measured under 8x load on 30 Aug 2026 this test blew
+    // the 36 with 54 refetched of 61 asked - and 54 is exactly 61 minus
+    // the 7 the journal had recorded, which is the identity below rather
+    // than an overrun.
+    //
+    // So the gap is READ at the kill, from the journal itself, through
+    // the same parser the resume runs (`Journal::peek` - never a second
+    // reader of the record grammar, which that function's own header
+    // refuses). Measured six ways on 31 Aug 2026, idle and under 8x
+    // load: `refetched` equalled `gap` EXACTLY every time (7/7, 6/6,
+    // 9/9, 8/8, 9/9, 7/7), and the count of refetched articles that
+    // were already recorded was ZERO every time.
+    //
+    // Note what leaves the formula with the derivation: `stalls`. A
+    // stalled article's first request was asked and never served, so it
+    // is already in the gap by construction - the old budget added it by
+    // hand because it was modelling the gap instead of measuring it.
+    //
+    // DO NOT REPLACE THIS WITH A BIGGER CONSTANT. A constant cannot
+    // track the flush cadence, and a constant large enough to survive a
+    // loaded box is large enough to admit a resume that restarted from
+    // scratch - which is the failure this clause exists to catch.
+    let gap = asked_run1
+        .keys()
+        .filter(|id| !recorded_at_kill.contains(*id))
+        .count();
+    // A record is not a promise: `restore` re-reads the bytes and checks
+    // them against the article's crc, so a record with no crc, or one
+    // whose bytes the SIGKILL tore, is recorded here and refetches
+    // anyway (see `ResumeState::recorded_ids`). That is what the slack
+    // is for, and it is small on purpose - a resume that started over
+    // refetches the whole recorded set, not four of it.
+    let slack = CONNS as usize;
+    let budget = gap + slack;
     assert!(
         refetched.len() <= budget,
         "resume refetched {} of the {} articles run 1 had already asked for \
-         (budget {budget}: one in-flight window per connection, twice over, plus \
-         the {stalls} dead-air stalls)\n{}\n{log}",
+         (budget {budget}: the {gap} the crash left un-journalled, plus {slack} \
+         slack for records the kill may have torn; the journal held {} at the \
+         kill)\n{}\n{log}",
         refetched.len(),
         asked_run1.len(),
+        recorded_at_kill.len(),
         srv.serve_count_line("crash"),
     );
+    // The sharper half, and the one that keeps the bound above from
+    // going vacuous when the gap is wide: whatever run 1 DID get into
+    // the journal, run 2 did not ask for again.
+    let redone: Vec<&&String> = refetched
+        .iter()
+        .filter(|id| recorded_at_kill.contains(**id))
+        .collect();
+    assert!(
+        redone.len() <= slack,
+        "resume re-asked for {} articles run 1 had already journalled - a resume \
+         owes the gap and nothing more, so this is work being redone, not \
+         recovered: {redone:?}\n{log}",
+        redone.len(),
+    );
     eprintln!(
-        "[contract] crash-in-window: {} refetched of {} asked in run 1 (budget {budget}), \
-         wall {:.2}s",
+        "[contract] crash-in-window: {} refetched of {} asked in run 1 ({} journalled \
+         at the kill, gap {gap}, budget {budget}), wall {:.2}s",
         refetched.len(),
         asked_run1.len(),
+        recorded_at_kill.len(),
         wall.as_secs_f64()
     );
 }

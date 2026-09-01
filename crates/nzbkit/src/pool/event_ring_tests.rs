@@ -327,12 +327,12 @@ fn a_budget_of_none_never_expires() {
         outage_budget: None,
         ..Default::default()
     };
-    assert!(!session::outage_budget_blown(&off, &shared, 0));
+    assert!(!parkprobe::outage_budget_blown(&off, &shared, 0));
     let on = PoolConfig {
         outage_budget: Some(Duration::from_secs(60)),
         ..Default::default()
     };
-    assert!(session::outage_budget_blown(&on, &shared, 0));
+    assert!(parkprobe::outage_budget_blown(&on, &shared, 0));
 }
 
 /// The shipped budget sits ABOVE the consecutive horizon on purpose, so
@@ -362,7 +362,7 @@ fn the_budget_does_not_undercut_the_consecutive_horizon() {
 fn turning_the_budget_off_also_stands_down_the_bounce_ladder() {
     // The prober's own gate, called - not restated. A test that
     // re-implements the condition passes while the code diverges.
-    let waits = |cfg: &PoolConfig, bounces: u32| !session::ladder_exhausted(cfg, bounces);
+    let waits = |cfg: &PoolConfig, bounces: u32| !parkprobe::ladder_exhausted(cfg, bounces);
     let ship = PoolConfig::shipped();
     assert!(
         !waits(&ship, ship.cap_probe_bounces),

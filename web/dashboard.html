@@ -181,12 +181,18 @@ a.pill:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
 .pill.live::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;
   background:var(--ok);margin-inline-end:6px;vertical-align:middle;animation:pulse 2s infinite}
 .pill.stale::before{background:var(--dim);animation:none}
-.pill.down::before{background:var(--bad);animation:none}
+/* off (queue paused) and down (daemon unreachable) both read red: a
+   subsystem that is OFF is red, the universal on/off standard (ruled
+   30 Aug 2026). Idle stays dim above - nothing is wrong, just nothing
+   running - so red never fires on a healthy quiet queue. */
+.pill.off::before,.pill.down::before{background:var(--bad);animation:none}
 /* Status chip strip: one chip per active BACKGROUND subsystem
    (stats.busy). The statusPill stays the queue's authority; these are
-   the work that used to be invisible. Dot color says the kind: accent
-   = metadata (indexing/enriching/feed/watchlist), green = payload on
-   the move, dim = upkeep and measurement. */
+   the work that used to be invisible. A chip is only on screen while its
+   subsystem is running, so the dot reads ON = green; the dim default is
+   kept for ephemeral upkeep (measuring, maintenance, moving, list sync)
+   that has no on/off switch. The older accent=metadata vs green=payload
+   split is dropped on purpose (ruled 30 Aug 2026). */
 .bchip{display:inline-flex;align-items:center;white-space:nowrap}
 /* Every chip in this strip is a BUTTON: a status you can see and not act
    on sends people to Settings to find the switch, which is the whole
@@ -210,7 +216,7 @@ button.pill:not(.upd):hover{color:var(--fg);border-color:color-mix(in srgb,var(-
 button.pill:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
 .bchip::before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;
   background:var(--dim);margin-inline-end:6px;vertical-align:middle}
-.bchip.b-meta::before{background:var(--acc)}
+.bchip.b-meta::before{background:var(--ok)}
 .bchip.b-net::before{background:var(--ok)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 /* An update chip styled like every other dim outline pill reads as page
@@ -221,6 +227,36 @@ button.pill:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
 .pill.upd.attn{animation:updattn .85s ease-in-out 5}
 @keyframes updattn{0%,100%{box-shadow:0 0 0 0 rgba(245,180,69,0)}
   50%{box-shadow:0 0 0 6px rgba(245,180,69,.45)}}
+/* The header row takes the accent. Everything up here was a transparent
+   outline - .pill in --dim, button.ghost and the two selects in --fg,
+   all bordered --line - so a chosen accent reached nothing but their
+   focus ring and the top of the page stayed grey whatever palette was
+   picked ("the main buttons on top lack personality ... colorize them
+   like the cards, background and text", r/usenet 31 Aug 2026). The
+   tokens are composed in web/ui-tokens.html out of --acc, --surface,
+   --fg and --line, so this one block holds in all five theme states and
+   under a user's own Cards/Text colours, and it cannot invert a pair:
+   the fill is anchored to --surface and the text to --fg, with the
+   accent mixed in.
+   SCOPED TO THE HEADER on purpose. A .pill inside a card (the two
+   Usenet-guide links, the manual link in the help sheet) already sits
+   ON --surface, so it has a ground of its own and a tint there would be
+   a chip on a chip; the complaint is about the row above the cards.
+   .pill.upd is untouched by specificity - two classes beat one class
+   plus one element - and that is deliberate: the update chip is solid
+   amber because it is a warning, not a navigation control.
+   The current destination stays the loudest thing in the row: rest,
+   hover and .on are one ramp (8/16/28% fill, 34/60/100% border), so it
+   is marked by DEPTH rather than by being the only coloured pill. */
+header .pill,header button.ghost,header select.ctl{
+  background:var(--ctl-bg);border-color:var(--ctl-line);color:var(--ctl-fg)}
+header a.pill:hover,header button.pill:not(.upd):hover,
+header button.ghost:hover,header select.ctl:hover{
+  background:var(--ctl-bg-hi);border-color:var(--ctl-line-hi);color:var(--fg)}
+header a.pill.on{background:var(--ctl-bg-on);border-color:var(--acc);color:var(--fg)}
+/* The icon inside a header select is chrome, not text, and at --dim on a
+   tinted fill it read as a smudge. Same tint as the label it labels. */
+header .selwrap .selic,header .selwrap .selcaret{color:var(--ctl-fg)}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 body.paused .hero .num,body.paused #speedChart{opacity:.5}
 #tip{position:fixed;pointer-events:none;background:var(--surface-2);border:1px solid var(--line);
@@ -360,7 +396,12 @@ button.warn:hover{background:color-mix(in srgb,var(--warn) 12%,transparent)}
    width keeps the text out of the column's intrinsic size; the
    percentage min-width paints it across whatever the column settles
    at. Same rule the fixed 168px above exists for. */
-.hero #speedEquiv{font-size:11px;line-height:14px;height:14px;margin-top:3px;
+/* #pfNow is the early start's live figure and the key to its trace on
+   the chart, and it comes and goes far more often than the equivalence
+   line above - so it takes the SAME reserved row, for the same measured
+   reason, rather than being allowed to resize the hero card every time
+   a prefetch starts or winds down. */
+.hero #speedEquiv,.hero #pfNow{font-size:11px;line-height:14px;height:14px;margin-top:3px;
   width:0;min-width:100%;overflow:hidden;white-space:nowrap}
 /* min-width:0, NOT width:100% - full-width made the canvas overflow the
    card to the right of its fixed-width sibling. */
@@ -479,12 +520,20 @@ body.layoutedit #layoutPanel{display:flex;flex-wrap:wrap;align-items:center;gap:
   font-size:12.5px;color:var(--dim)}
 #layoutPanel b{color:var(--fg);font-weight:600}
 #layoutPanel .lehint{flex:1 1 280px;min-width:0}
-/* Every movable card outlined, so "which blocks can I move?" is answered
-   before anything is touched. `:not(#welcomeCard)` is exactly
-   movableCards(): the hero lives inside #heroTiles, so it is not a direct
-   child here. outline, not border - a border relays every card out and
-   the page would jump on entering the mode. */
-body.layoutedit #dashview>.card:not(#welcomeCard){outline:1px dashed var(--acc);outline-offset:2px}
+/* Every editable card outlined, so "which blocks can I touch?" is
+   answered before anything is moved. The first selector is exactly
+   movableCards() (`:not(#welcomeCard)`, and the hero is not a direct
+   child); the second adds the hero by name, which is hideable and
+   compactable but never movable. outline, not border - a border relays
+   every card out and the page would jump on entering the mode. */
+body.layoutedit #dashview>.card:not(#welcomeCard),
+body.layoutedit #heroTiles>#heroCard{outline:1px dashed var(--acc);outline-offset:2px}
+/* The hero has no h3 to float its tools in: they pin to the card's top
+   corner instead (it only carries ▤ and Hide - no Move, it is the
+   headline). Absolute so the fixed-width number column and the chart
+   never move when the mode widens the buttons. */
+#heroCard{position:relative}
+#heroCard>.cardtools{position:absolute;top:10px;inset-inline-end:14px;float:none;z-index:2}
 /* The tools stop being quiet furniture: full opacity, a real bordered hit
    target, and the word beside the icon rather than hidden in a tooltip. */
 body.layoutedit .cardtools{opacity:1}
@@ -841,7 +890,7 @@ body.dense #evLegend{display:none!important}
    that is translated into 27 languages. The headline number carries the
    rate anyway; dense drops the event key and the histogram on the same
    grounds. */
-body.dense #speedEquiv{display:none}
+body.dense #speedEquiv,body.dense #pfNow{display:none}
 /* The speed histogram is a direct child wrap of the hero card (the
    speed chart's wrap sits inside .hero, so this cannot catch it). */
 body.dense #heroCard>.chartwrap{display:none!important}
@@ -858,9 +907,14 @@ body.dense #dashview .chgrip{display:none}
    card rises above the fold. Applied by tick(), never persisted, and
    never while the user has chosen a density themselves (uiCompact or a
    per-card ▤) - an explicit choice always outranks an automatic one. */
-#dashview .card.idlecompact .chartwrap{height:38px!important}
+/* The hero's per-card ▤ (its density key in layoutPrefs) is the same
+   squash as idle auto-compaction, chosen on purpose: sparkline-height
+   charts with the grip parked, every figure kept. Selectors shared so
+   the two states cannot drift apart - and persistChartH skips both, or
+   un-compacting would hand back the squashed height as a saved size. */
+#dashview .card.idlecompact .chartwrap,#dashview #heroCard.compact .chartwrap{height:38px!important}
 #dashview .card.idlecompact .legend{margin-bottom:4px}
-#dashview .card.idlecompact .chgrip{display:none}
+#dashview .card.idlecompact .chgrip,#dashview #heroCard.compact .chgrip{display:none}
 /* The density tool sits beside ⠿ and ×; lit when this card is compact. */
 .carddense{cursor:pointer;color:var(--dim);font-size:13px;line-height:1;background:none;border:0;padding:0 2px}
 .carddense:hover{color:var(--fg)}
@@ -1001,6 +1055,19 @@ body.qdragsel{user-select:none;-webkit-user-select:none}
    break opportunities in min-content sizing, so the name column wraps
    instead of overflowing - at every width, not just on phones. */
 #queue td:nth-child(2),#hist td:nth-child(2),#idx td:first-child{overflow-wrap:anywhere}
+/* Poster thumbnail on a Browse result (Reddit, u/Zimmster2020: the
+   wall grid had posters and the search results did not). Inside the
+   name cell rather than in a sixth column, for the wall table's
+   reason: most rows in most searches have no art, and an empty column
+   is worse than no column. Floated so the wrapping name flows around
+   it instead of being pushed bodily to the right. Sized in `em` so
+   Dense and the user zoom carry it. */
+#idx .rowart{float:inline-start;width:2.1em;height:3.15em;margin-inline-end:9px;
+  border-radius:3px;object-fit:cover;background:var(--surface-2);
+  box-shadow:0 1px 4px rgba(0,0,0,.35)}
+/* A broken or evicted image must not leave a grey block where the
+   poster was - alt="" on a failed <img> still occupies its box. */
+#idx .rowart.gone{display:none}
 tr.drawer td{background:var(--surface-2);border-top:1px dashed var(--line);padding:10px 14px}
 tr.drawer:hover{background:transparent}
 .drow{display:flex;gap:10px;align-items:center;padding:2px 0;font-size:12.5px}
@@ -1878,12 +1945,16 @@ input.txt.patbad{border-color:var(--warn);background:color-mix(in srgb,var(--war
    name beside it. Declare every track - see the .catfilerow note. */
 .catrow{display:grid;grid-template-columns:130px 1fr 1fr 130px 104px 36px;gap:8px;margin:6px 0;align-items:center}
 .catrow .catslug{font-size:11.5px;overflow:hidden;text-overflow:ellipsis}
-/* #19: category | folder (+ browse) | priority | script | nzb name |
-   remove, with the validation line spanning the row like .fhealth does.
+/* #19: category | folder (+ browse) | write-through | priority | script |
+   nzb name | remove, with the validation line spanning the row like
+   .fhealth does.
    The track list has to name every child: it still said 3 columns after
    §129 2b added priority and script, so those two wrapped onto a second
-   line with the select crushed into the 36px remove column. */
-.catfilerow{display:grid;grid-template-columns:180px 1fr 130px 1fr 1fr 130px 36px;gap:8px;margin:6px 0;align-items:center}
+   line with the select crushed into the 36px remove column. TODO 317
+   added the write-through tick as the EIGHTH track, next to the folder
+   it is about. */
+.catfilerow{display:grid;grid-template-columns:180px 1fr auto 130px 1fr 1fr 130px 36px;gap:8px;margin:6px 0;align-items:center}
+.catfilerow .wtick{display:flex;gap:4px;align-items:center;font-size:11.5px;white-space:nowrap;cursor:pointer}
 /* Opt-in indexing rows: a tick, the plain-language interest, and the
    newsgroups it actually scans underneath it. */
 .wantrow{display:flex;gap:9px;align-items:flex-start;margin:7px 0;cursor:pointer}
@@ -2266,6 +2337,11 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
            reserved in CSS, so appearing and going does not move the
            card. -->
       <div class="dim" id="speedEquiv"></div>
+      <!-- The idle-server early start's own rate, and the key to the
+           second trace on the chart beside it. Empty (but holding its
+           row) whenever nothing is prefetching, which is most of the
+           time. -->
+      <div class="dim" id="pfNow"></div>
     </div>
     <div class="chartwrap"><canvas id="speedChart"></canvas></div>
   </div>
@@ -2410,6 +2486,9 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     </select>
     <button onclick="doSearch(this)" data-i18n="browse.search">Search</button>
   </div>
+  <label class="mtog" style="margin:-4px 0 10px" data-i18n-title="browse.art.title"
+    title="Show a poster thumbnail on each result, where the index has one">
+    <input type="checkbox" id="browseArt" onchange="setBrowseArt(this.checked)"> <span data-i18n="browse.art">Posters</span></label>
   <div class="cardscroll"><table id="idx"><thead><tr><th data-i18n="col.name">Name</th><th data-i18n="col.size">Size</th><th data-i18n="col.files">Files</th><th data-i18n="col.state">State</th><th></th></tr></thead><tbody></tbody></table></div>
   <div class="cardgrip" data-card="browseCard" tabindex="0" role="separator" aria-orientation="horizontal"></div>
 </div>
@@ -2476,8 +2555,12 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
 
 <div class="card" id="histCard">
   <h3 data-i18n="hist.title">History <span class="dim" id="vhsum" style="text-transform:none;letter-spacing:0;font-weight:400"></span>
-    <button class="ghost" id="histClear" style="float:inline-end;margin-top:-4px;display:none"
-      data-snd="remove" onclick="clearHistDone(this)" data-i18n="hist.clear">Clear completed</button></h3>
+    <span class="h3tools">
+    <button class="ghost" id="histClear" style="display:none"
+      data-snd="remove" onclick="clearHistDone(this)" data-i18n="hist.clear">Clear completed</button>
+    <button class="ghost" id="histClearFailed" style="display:none"
+      data-snd="remove" onclick="clearHistFailed(this)" data-i18n="hist.clearfailed">Clear failed</button>
+    </span></h3>
   <div class="chartwrap" style="height:46px;margin-bottom:8px;display:none"><canvas id="vhChart" data-i18n-title="hist.vh.title" title="Bad PAR2 blocks per download, oldest → newest - a rising tail means articles are arriving damaged"></canvas></div>
   <!-- Downloads whose record was deleted but whose files are still on
        disk, one line each. It lives HERE, under History, because the row
@@ -2894,6 +2977,8 @@ html.macapp .setrail{top:calc(14px + var(--tbh,32px))}
     <div class="pathrow"><input class="txt" id="s_out_dir" onchange="setCfg('out_dir',this.value)"><button class="mini" onclick="browseDir('out_dir','dir')" data-i18n-title="btn.browse.title" title="Browse for a folder - including other drives" data-i18n="btn.browse">Browse…</button><button class="mini" onclick="openDir('out_dir')" data-i18n-title="btn.openfolder.title" title="Open this folder" aria-label="Open this folder">📂</button></div></div>
   <div class="row"><label data-i18n="set.disk.move">Move completed to<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.disk.move.hint">after unpack and renaming, finished downloads move here - a NAS share, media drive etc. Category subfolders are kept. Empty = leave them in the download folder. If the destination is unreachable the files stay put</span></label>
     <div class="pathrow"><input class="txt" id="s_move_completed" data-i18n-placeholder="set.disk.move.ph" placeholder="e.g. /Volumes/Media - empty = off" onchange="setCfg('move_completed',this.value)"><button class="mini" onclick="browseDir('move_completed','dir')" data-i18n-title="btn.browse.title" title="Browse for a folder - including other drives" data-i18n="btn.browse">Browse…</button><button class="mini" onclick="openDir('move_completed')" data-i18n-title="btn.openfolder.title" title="Open this folder" aria-label="Open this folder">📂</button></div></div>
+  <div class="row"><label data-i18n="set.disk.wt">Download straight into the destination<span class="badge next" data-i18n="badge.next">applies from the next download</span><span class="hint" data-i18n="set.disk.wt.hint">write files into the destination above from the start, instead of downloading here and moving them at the end. On a setup where the destination is a different drive, that turns every finished job from a full copy-and-delete into nothing at all, and no job ever needs room on two drives at once. Leave it off for a destination on a network share: every write then goes over the network for the whole download, rather than one bulk copy at the end. The unfinished download, its resume record and the repair scratch all live on the destination while it runs. Per-category ticks in Categories &amp; folders below turn it on for one kind of download without turning it on for the rest</span></label>
+    <input type="checkbox" id="s_write_through" onchange="setCfg('write_through',this.checked?1:0)"></div>
   <div class="row"><label data-i18n="set.disk.pace">File moves<span class="badge live" data-i18n="badge.live">live</span><span class="hint" data-i18n="set.disk.pace.hint">how moves to the completed folder share the machine with downloads. "Yield to downloads" slows the move while anything is downloading and goes full speed when the queue is idle. Pick a speed to give moves a fixed share of the line, alongside the download speed limit. "Full speed" never slows the move - for setups where the two paths don't share a bottleneck</span></label>
     <div class="pathrow"><select id="s_move_pace_mode" onchange="movePaceChanged()">
       <option value="yield" data-i18n="set.disk.pace.yield">Yield to downloads</option>
@@ -4632,6 +4717,17 @@ const N = 180;                        // minimum VISIBLE samples (~3 min)
 const NMAX = 3600, PXS = 1200/(N-1);
 function visN(w){ return Math.max(N, Math.min(NMAX, Math.floor(w/PXS)+1)); }
 const speedHist = [];                 // MB/s aggregate
+// The idle-server early start's OWN rate (MB/s), pushed in lockstep with
+// speedHist so one index means one moment in both. A second pipeline is
+// running whenever this is non-zero, and until it was drawn its work was
+// invisible: on the live daemon on 29 Aug 2026 the early start pulled
+// 29.5 GB in 9.4 minutes at up to 68.8 MB/s while the chart showed only
+// the active job crawling, so the fastest thing on the line read as a
+// stalled queue. Kept SEPARATE from speedHist rather than added into it:
+// `kbpersec` is the rate every SAB client reads for the job it asked
+// about, and folding a second job's bytes into it would move that number
+// for everyone.
+const pfHist = [];
 // §125: the link's learned peak (MB/s) - the throughput chart's 100%
 // anchor, served on the queue poll. 0 until the daemon knows one; the
 // chart then falls back to scale-to-window. src is "measured" (best
@@ -5167,20 +5263,26 @@ async function busy(btn, label, fn){
   }
   finally { if(btn){ btn.disabled = false; btn.textContent = btn.dataset.lbl; } }
 }
+// Single place that paints the header Pause control and the page's paused
+// class from the `paused` global, so the optimistic flips below and the
+// queue poll cannot disagree about it - paintNet()'s shape, same reason.
+// The three pause entry points (header buttons, queue-pill menu, space
+// key) all flip `paused` and call this; nothing rewrites the button text
+// or toggles body.paused on its own any more.
+function paintPauseBtn(){
+  const b=document.getElementById('pauseBtn');
+  if(b) b.textContent = paused?t('hdr.resume','Resume'):t('hdr.pause','Pause');
+  document.body.classList.toggle('paused', paused);
+}
 async function togglePause(){
   // Optimistic: flip the UI immediately, then confirm on the next tick.
   // Plain pause is graceful (finish in-flight, keep the queue for resume).
-  // TODO 309(b): BEFORE the optimistic flip, so a refusal leaves the
-  // button where it was rather than springing it back. Resuming costs
-  // nothing, so only the pause direction asks.
-  if(!paused && !okToPause(null)) return;
   paused=!paused;
-  document.getElementById('pauseBtn').textContent = paused?t('hdr.resume','Resume'):t('hdr.pause','Pause');
-  document.body.classList.toggle('paused', paused);
+  if(paused) notePauseCost(null);   // heads-up only, never a modal - see notePauseCost
+  paintPauseBtn();
   // The optimistic flip is its own rollback: tick() re-derives `paused`
   // from the daemon's own answer (see the poll), so a refused pause puts
-  // the button back within the second. What it cannot do is say WHY, and
-  // a control that springs back with no word for it reads as a glitch.
+  // the button back within the second, and reportRefusal says why.
   reportRefusal(await api(paused ? 'pause' : 'resume')); tick();
 }
 let offline=false;
@@ -5225,20 +5327,16 @@ function paintNet(){
 }
 async function pauseNow(){
   // Immediate abort - free the line at once; in-flight articles re-download.
-  // TODO 309(b): strictly worse than the graceful pause above, so it
-  // asks the same question and asks it first.
-  if(!okToPause(null)) return;
   paused=true;
-  document.getElementById('pauseBtn').textContent=t('hdr.resume','Resume');
-  document.body.classList.toggle('paused', true);
+  notePauseCost(null);
+  paintPauseBtn();
   reportRefusal(await api('pause','&value2=now')); tick();
 }
 async function pauseFor(mins){
-  // TODO 309(b): a timed pause is a pause. The select is reset either
-  // way, so a refused one does not leave the menu stuck on a duration
-  // that never took.
-  if(mins && !okToPause(null)) mins=0;
-  if(mins) reportRefusal(await api('pause','&value='+mins));
+  // A timed pause is a pause: same non-blocking heads-up. The select is
+  // reset either way, so a refused one does not leave the menu stuck on a
+  // duration that never took.
+  if(mins){ notePauseCost(null); reportRefusal(await api('pause','&value='+mins)); }
   document.getElementById('pauseSel').value='';
   tick();
 }
@@ -5249,22 +5347,33 @@ async function setLimit(v){
     // Accepts what the API accepts - 25M, 500K, a bare byte count.
     const typed=prompt(t('hdr.limit.ask','Speed limit - e.g. 25M, 500K, or 0 for no limit'), '');
     if(typed==null||typed.trim()===''){ tick(); return; }  // tick() re-syncs the select
-    if(!reportRefusal(await api('config','&name=auto_speed&value=0'))){ tick(); return; }
+    // THE LIMIT FIRST, and auto off only once it is accepted. The other
+    // order shipped: `notanumber` disabled automatic control (which
+    // persists, and hands the wheel straight back to the manual ceiling)
+    // and THEN was refused, so the toast said the edit was rejected while
+    // the governor had already changed under it. Setting the ceiling
+    // while auto is still on is safe - `set_speedlimit` only moves the
+    // ceiling, and `auto_speed=0` below is what makes the rate follow it.
     const r=await api('config','&name=speedlimit&value='+encodeURIComponent(typed.trim()));
     // tErr, not the raw phrase: this was the one site already testing the
     // status, and it printed the daemon's English straight at the reader.
-    if(!r||!r.status) toast(tErr(r&&r.error)||t('hdr.limit.bad','Could not set that limit.'), true);
+    if(!r||!r.status){ toast(tErr(r&&r.error)||t('hdr.limit.bad','Could not set that limit.'), true); tick(); return; }
+    reportRefusal(await api('config','&name=auto_speed&value=0'));
     tick(); return;
   }
   if(v==='auto') reportRefusal(await api('config','&name=auto_speed&value=1'));
   else{
-    if(!reportRefusal(await api('config','&name=auto_speed&value=0'))){ tick(); return; }
     // "pct:25" is this page's marker for the daemon's OWN percentage
     // convention: a bare number of 100 or less means percent of the
     // configured line speed (settings.rs). The marker exists only so
     // relabelLimitOptions and the custom-option check can tell a
     // percentage apart from a byte count of 25.
-    reportRefusal(await api('config','&name=speedlimit&value='+(String(v).startsWith('pct:')?String(v).slice(4):v)));
+    //
+    // Same order as the custom branch above and for the same reason: a
+    // bare percentage is REFUSED when no line speed is configured, and
+    // being refused must not leave automatic control switched off.
+    if(!reportRefusal(await api('config','&name=speedlimit&value='+(String(v).startsWith('pct:')?String(v).slice(4):v)))){ tick(); return; }
+    reportRefusal(await api('config','&name=auto_speed&value=0'));
   }
   tick();
 }
@@ -5444,7 +5553,12 @@ function renderIdxPill(s){
     // which is a warning, not activity.
     el.style.display=IDX_PAUSED?'':'none';
     el.textContent = t('hdr.idx.paused','indexing off');
-    el.classList.toggle('warn', IDX_PAUSED);
+    // OFF = red, the on/off standard (ruled 30 Aug 2026). `danger` is the
+    // existing red button style; the pill only ever shows while OFF, so it
+    // is red whenever it is on screen. (Not `warn`/amber - that read as a
+    // caution rather than an off switch.)
+    el.classList.remove('warn');
+    el.classList.toggle('danger', IDX_PAUSED);
     el.title = t('hdr.idx.paused.title','Indexing is OFF. Anything posted while it is off is not picked up later - click to resume.');
   }catch(e){ el.style.display='none'; }
 }
@@ -5608,9 +5722,33 @@ function drawSpeed(frac=0){
   // a blip past it pokes above and the scale settles back. Without an
   // anchor the old scale-to-window behaviour stands.
   const peak=linkPeak>0?linkPeak:0;
-  const m=drawArea(cv, speedHist, css('--acc'), frac, peak*1.04);
+  // The early start rides the SAME axis as the active job's trace, so
+  // its own visible max has to enter the scale - otherwise a prefetch
+  // running faster than the active job (68.8 MB/s against a crawling
+  // job, live daemon 29 Aug 2026) draws clipped flat along the top,
+  // which is exactly the case that makes the second trace worth having.
+  // Visible slice, not the whole ring: a spike that has scrolled off
+  // must not go on holding the scale down.
+  const pfVis=pfHist.slice(Math.max(0,pfHist.length-visN(cv.getBoundingClientRect().width)));
+  const pfMax=pfVis.length?Math.max(...pfVis):0;
+  const m=drawArea(cv, speedHist, css('--acc'), frac, Math.max(peak,pfMax)*1.04);
   if(!m||speedHist.length<3) return;
   const {ctx,x,y,w,s0}=m;
+  // The early start as its own trace: same x mapping (pfHist is pushed
+  // in lockstep with speedHist, so one index is one moment in both), a
+  // LINE and not a filled area, and drawn before the overlays so the
+  // active job's area stays the loudest thing on the canvas. Not
+  // stacked, deliberately - these are two pipelines on one line, and a
+  // stack would read as one total that neither number is.
+  //
+  // Drawn at every detail level, the summary form included: the trace
+  // IS the summary, and a card dragged small is not a reason to hide
+  // that a second download is running.
+  if(pfMax>0){
+    ctx.beginPath();
+    for(let i=s0;i<pfHist.length;i++) i>s0?ctx.lineTo(x(i),y(pfHist[i])):ctx.moveTo(x(i),y(pfHist[i]));
+    ctx.strokeStyle=css('--ok'); ctx.lineWidth=1.6; ctx.lineJoin='round'; ctx.stroke();
+  }
   ctx.font='9px -apple-system,system-ui,sans-serif';
   if(det==='summary'){
     // Summary form: the trace, plus the two figures the watermarks would
@@ -6553,6 +6691,11 @@ async function tick(){
     offline=!!q.offline;
     paintNet();
     const pill=document.getElementById('statusPill');
+    // `pause_int` is SAB's "minutes:seconds" since 31 Aug 2026 (it was
+    // bare whole minutes before, which is not SAB's shape - see
+    // serve/sabcompat/units.rs). `parseInt` stops at the colon and so
+    // still yields the MINUTES this name is about; it is spelled out
+    // here because the field looks like a plain number and is not.
     const pmin=parseInt(q.pause_int)||0;
     // §129 4c: the first job ends the second empty state, and it ends it
     // HERE - the poll is what sees it arrive. checkWelcome re-reads the
@@ -6613,11 +6756,15 @@ async function tick(){
       : tailNow ? tStatus(tailNow.status)
       : postWord ? tStatus(postWord)
       : tStatus(downloading?'Downloading':'Idle'));
-    // Work in progress gets the pulsing dot - a still one beside
-    // "Extracting" reads as an unpack that has stopped. Idle is still.
-    pill.className = 'pill' + (paused||!busy?' stale':' live');
-    document.body.classList.toggle('paused', paused);
-    document.getElementById('pauseBtn').textContent = paused?t('hdr.resume','Resume'):t('hdr.pause','Pause');
+    // Dot colour is the on/off/neutral story (ruled 30 Aug 2026): green
+    // while work is on the wire, red when the queue is paused (off - a
+    // schedule or storage pause is off too, and red doubly fits a drive
+    // that cannot keep up), dim when merely idle or held (nothing wrong,
+    // just nothing running). An unreachable daemon is painted `down` (red)
+    // in the catch below. Work in progress gets the pulsing dot; a still
+    // green one beside "Extracting" would read as an unpack that stopped.
+    pill.className = 'pill' + (paused?' off':busy?' live':' stale');
+    paintPauseBtn();
     // "Pause now" only helps mid-transfer - hide it when paused or idle.
     document.getElementById('pauseNowBtn').style.display =
       (downloading && !paused) ? '' : 'none';
@@ -6715,12 +6862,29 @@ async function tick(){
     // The units verdict rides the same poll as the anchor it explains.
     const lh=!!q.link_line_hint;
     if(lh!==lineHint){ lineHint=lh; renderTuneHint(); }
-    let mbps=(parseFloat(q.kbpersec)||0)/1000;
+    // `kbpersec` is SAB's field and SAB's units: KiB/s, two decimals
+    // (`"%.2f" % (bps / KIBI)`). It divided by 1e3 and printed none
+    // until 31 Aug 2026, so this line took it as decimal kB/s; both
+    // halves moved together, and the chart's own axis stays decimal
+    // MB/s like `prefetch_bps` and `link_peak` beside it.
+    let mbps=(parseFloat(q.kbpersec)||0)*1024/1e6;
     // Guard against the daemon's end-of-job rate spike (kbpersec computed
     // over ~zero elapsed): anything past ~40 Gbps isn't a real line, so
     // fall back to the last good sample instead of polluting the chart.
     if(mbps>5000) mbps = speedHist.length? speedHist[speedHist.length-1] : 0;
     push(speedHist,mbps);
+    // Lockstep with speedHist - same guard, same push, every tick. Drift
+    // between the two would slide the second trace away from the moment
+    // it belongs to, which is exactly what sampleT exists to prevent for
+    // the event marks.
+    let pfmbps=(+q.prefetch_bps||0)/1e6;
+    if(pfmbps>5000) pfmbps = pfHist.length? pfHist[pfHist.length-1] : 0;
+    push(pfHist,pfmbps);
+    // Driven from the POLL and not from renderSpeedNumber, which only
+    // fires when the shown speed moves: the whole case this exists for
+    // is an early start running while the active job sits flat, and
+    // there the hero number never changes at all.
+    renderPrefetchNow();
     push(sampleT, Date.now());
     push(emaHist, emaHist.length? emaHist[emaHist.length-1]*0.85+mbps*0.15 : mbps);
     lastSample=performance.now();
@@ -6927,7 +7091,12 @@ async function tick(){
     // An unreachable daemon's last-known chips would be a claim about
     // work nobody can verify - clear them with the pill.
     renderBusyChips([]);
-    document.getElementById('statusPill').textContent=t('status.unreachable','unreachable');
+    // `down` gives the pill its red dot (off = red, and unreachable is the
+    // hardest off there is) AND is what queueMenu checks before offering a
+    // menu of requests that cannot be made - the class was referenced there
+    // but never actually set, so both had been dead until now.
+    { const dp=document.getElementById('statusPill');
+      dp.textContent=t('status.unreachable','unreachable'); dp.className='pill down'; }
     // "daemon unreachable" and then nothing: the page IS still polling
     // (every PERIOD seconds, and it recovers by itself the moment the
     // daemon answers), but it never said so, and a stopped-looking page
@@ -7284,6 +7453,23 @@ function altSwitchBlock(s){
 // the log - and a post the fetch cannot get is precisely the post whose
 // articles are going, which is the news the whole feature exists to
 // deliver EARLY, while starting it by hand can still save it.
+// Is this queue row held behind another copy? The daemon says so in
+// SAB's own `labels` list - "DUPLICATE" for an ordinary duplicate hold,
+// "ALTERNATIVE" for a spare parked behind a named job and promoted if
+// that job fails.
+//
+// This read the SAB-named `priority` field for `"Duplicate"` until
+// 31 Aug 2026, and the daemon published a sixth word there to make that
+// possible. It cannot: `INTERFACE_PRIORITIES` in real SAB is Force,
+// Repair, High, Normal and Low, and SAB deliberately clears a
+// state-setting priority back to a stateless one so a client can be
+// written against those five. Both halves moved in one commit - see
+// `sab_priority_name` in serve/sabcompat.rs. The page's own sentences
+// are unchanged; only the field they are decided from is.
+function dupHeld(s){
+  const l=s&&s.labels;
+  return Array.isArray(l)&&(l.indexOf('DUPLICATE')>=0||l.indexOf('ALTERNATIVE')>=0);
+}
 function insChip(s){
   const q=s&&s.insurance; if(!q) return '';
   // Two of the four states are claims about a row that is WAITING, and a
@@ -7616,13 +7802,17 @@ function renderHistory(slots){
     +` placeholder="${escA(t('hist.search','search history…'))}"`
     +` aria-label="${escA(t('hist.search','search history…'))}"`
     +` oninput="setHistSearch(this.value)" style="margin-inline-start:auto;max-width:180px">`);
-  // The header's one-click clear appears only when it has work to do -
-  // and counts exactly what the daemon's value=completed sweep will take,
-  // which is NOT the Completed chip's count: that chip includes the
-  // password-locked rows, and those stay (see clearHistDone).
+  // The header's one-click clears appear only when they have work to do -
+  // and each counts exactly what its own sweep will take, which is NOT
+  // its chip's count: the Completed and Failed chips both include the
+  // password-locked rows, and those stay either way (see clearHistDone
+  // and clearHistFailed).
   const clearable=count('clearable');
   const cb=document.getElementById('histClear');
   if(cb) cb.style.display=clearable?'':'none';
+  const clearableFailed=count('clearable_failed');
+  const cbf=document.getElementById('histClearFailed');
+  if(cbf) cbf.style.display=clearableFailed?'':'none';
   // Already filtered and windowed by the daemon.
   const rows=lastHistSlots;
   // §129 2f: same shape of guard as the queue's - never yank a checkbox
@@ -8866,7 +9056,7 @@ async function toggleHistRow(tr){
   // carries no verdict at all and renders no row - absence is absence,
   // never "unknown" and never "line".
   const wv=s.whyslow;
-  if(wv&&['provider','cpu','client','disk','limit','missing','fleet','knee'].includes(wv.layer))
+  if(wv&&['provider','cpu','client','disk','limit','missing','fleet','knee','solecap'].includes(wv.layer))
     rows.push([t('diag.title','Why is this slow?'),
       whyPhrase(wv)+(wv.held_secs>5
         ? ` <span class="dim">(${esc(t('diag.held','for {n}s',{n:wv.held_secs}))})</span>`:'')]);
@@ -9356,6 +9546,36 @@ function landOnServer(host){
 }
 
 let searchResults=[];
+// Poster thumbnails on the Browse results. Shares one preference with
+// the wall's Releases table (`nzbfastRowArt`) - "show me posters in
+// release lists" is one wish, and both surfaces carry their own
+// visible control for it, so neither changes behind the user's back.
+// Default ON: showing them is what was asked for; the toggle is there
+// for whoever wants the tighter rows back.
+let browseArt = localStorage.nzbfastRowArt !== 'off';
+// The <img> for a result, or ''. `art` is a URL the daemon only hands
+// out when the file is really in its art cache; `onerror` covers the
+// window between that check and this fetch, since art eviction runs on
+// a timer. alt="" on purpose: the release name is spelled out in the
+// very same cell, so a name here would be read out twice.
+function artImg(a){
+  return a ? `<img class="rowart" loading="lazy" decoding="async" alt=""
+    src="${esc(a)}" onerror="this.classList.add('gone')">` : '';
+}
+// A REPAINT and never a re-search: `art` rides on the results already
+// held, so flipping this asks the daemon nothing and cannot lose the
+// results the user is looking at.
+function setBrowseArt(on){
+  browseArt=!!on;
+  localStorage.nzbfastRowArt=browseArt?'on':'off';
+  renderSearch();
+}
+{
+  // This script block sits below the card's markup, so the checkbox is
+  // already there to be synced to the stored preference.
+  const b=document.getElementById('browseArt');
+  if(b) b.checked=browseArt;
+}
 async function doSearch(btn){ await busy(btn,t('busy.searching','Searching…'), async()=>{
   const q=document.getElementById('q').value;
   const j=await api('index_search',`&q=${encodeURIComponent(q)}`);
@@ -9380,7 +9600,7 @@ function renderSearch(){
           onclick="watchFrom(this.dataset.kind,this.dataset.title,this.dataset.year,this)"
           title="${escA(wtip)}" aria-label="${escA(wtip)}">☆</button>`
       :'';
-    return `<tr><td>${esc(r.name)}${r.quality?`<span class="qbadge">${esc(r.quality)}</span>`:''}</td>
+    return `<tr><td>${browseArt?artImg(r.art):''}${esc(r.name)}${r.quality?`<span class="qbadge">${esc(r.quality)}</span>`:''}</td>
       <td class="nowrap">${gb(r.size)} ${unit('GB')}</td><td>${r.files}</td>
       <td class="${r.complete?'ok':'dim'}">${r.complete?t('browse.complete','complete'):t('browse.partial','partial')}${r.par2?' <span class="dim">+par2</span>':''}</td>
       <td style="white-space:nowrap">${watch} <button onclick="grab(${r.id},this)" ${r.complete?'':'disabled'}>${t('browse.get','Get')}</button></td></tr>`;
@@ -9574,7 +9794,7 @@ function actSub(s){
   // speed needs no caveat, and a verdict still forming is not news.
   const w=lastQ&&lastQ.whyslow;
   const whyTxt=(s.status==='Downloading'&&w&&w.nzo_id===s.nzo_id
-    &&['provider','cpu','client','disk','limit','missing','fleet','knee'].includes(w.layer))
+    &&['provider','cpu','client','disk','limit','missing','fleet','knee','solecap'].includes(w.layer))
     ?whyPhrase(w):'';
   // ...and it is a CONTROL, not a remark. The panel that backs this
   // sentence up - what the line can do, what the providers delivered,
@@ -9629,6 +9849,18 @@ function whyPhrase(w){
     // moment they were replayed. They ride in the receipts line.
     case 'knee':return d?t('diag.layer.knee.host','{s} is held at a connection limit nzbfast measured itself, not one your provider set',{s:d})
       :t('diag.layer.knee','held at a connection limit nzbfast measured itself, not one your provider set');
+    // TODO 318: ONE server has this post and its PROVIDER caps it. Not
+    // the provider arm above, whose sentence invites switching away
+    // from the named host - here that host is the only one with the
+    // content, so switching away finishes nothing. Not the fleet or
+    // knee arms either: those are our own number and are fixed on this
+    // page, and no setting here lifts a provider's ceiling. Numberless
+    // like every other arm, for this list's standing reason - the
+    // timeline replays past verdicts carrying only a layer and a token,
+    // so this second's figures would be false the moment they were
+    // replayed. They ride in the receipts line.
+    case 'solecap':return d?t('diag.layer.solecap.host','{s} is the only one of your providers that still has this post, and it will not give any more connections right now',{s:d})
+      :t('diag.layer.solecap','only one of your providers still has this post, and it will not give any more connections right now');
     // Not a layer of the stack at all: the run is asking for articles
     // that are not there, and a miss costs a round trip and returns no
     // bytes. Without this the same evidence read as a shaped provider,
@@ -9792,10 +10024,54 @@ function whyslowBlock(s){
         +w.post_unix>0?` · ${esc(t('diag.receipts.posted','posted {a} ago',
           {a:postAge(Math.max(0,Date.now()/1000-w.post_unix))}))}`:''}${
         +w.missing_backbones>1?` · ${esc(t('diag.receipts.backbones',
-          '{n} unrelated providers report the same gaps',{n:w.missing_backbones}))}`:''}`:''}</div>
+          '{n} unrelated providers report the same gaps',{n:w.missing_backbones}))}`:''}${
+        // TODO 318 item 1: the fleet-wide rate above is an AVERAGE over
+        // servers that do not all hold the same spool, so on its own it
+        // reads as a post nobody has - 98%, 47% and 0.1% average to
+        // 85.1%. This clause is the number that says the post is
+        // completable, and it is the reason the daemon declines to say
+        // "waiting will not help" on the very evidence that used to
+        // license it. `missing_completable` is the DAEMON's decision,
+        // not a comparison made here: the bar for "most of it" lives in
+        // serve/whyslow.rs and this page must not grow a second one.
+        w.missing_completable&&w.missing_best_host?` · ${esc(t('diag.receipts.missing.best',
+          '{s} still has nearly all of it - only {p}% missing there',
+          {s:String(w.missing_best_host).replace(/^(news|reader)\./,''),p:num(+w.missing_best_pct||0,1)}))}`:''}`:''}${
+      // TODO 318: the working behind a `solecap` verdict, on the same
+      // always-shipped rule as the blocks above - and it matters as
+      // much here as it does for `gone`, because this sentence
+      // contradicts the miss rate sitting next to it. Four facts: how
+      // little of the post that one server is actually missing, how
+      // much of it the others have lost, what its provider granted
+      // against what was asked, and the provider's own words.
+      // GATED ON THE LIVE EVIDENCE, not on the layer alone (30 Aug 2026
+      // sweep). The verdict is majority-held and sticky for up to ~20 s
+      // after `sole_capped()` stops holding, while these numbers are
+      // recomputed fresh on every payload - so between the two the
+      // clause rendered the payload's zero defaults and told the user
+      // "only 0.0% of this post is missing there, against 85.1% across
+      // your providers", which is not a rounding artefact but a
+      // sentence asserting the opposite of the verdict carrying it. The
+      // two clauses beside it are already gated this way, and so is the
+      // remedy button for this same layer a dozen lines below; this one
+      // was the only member of the group left on the bare layer test.
+      w.layer==='solecap'&&w.sole_host?` · ${esc(t('diag.receipts.solecap',
+        'only {p}% of this post is missing there, against {f}% across your providers as a whole',
+        {p:num(+w.sole_missing_pct||0,1),f:num(+w.missing_pct||0,1)}))}${
+        +w.sole_asked>0?` · ${esc(t('diag.receipts.solecap.cap',
+          'it granted {g} of the {n} connections asked for',
+          {g:+w.sole_granted||0,n:+w.sole_asked||0}))}`:''}${
+        // The provider's own sentence, verbatim and untranslated - the
+        // same treatment the Providers card already gives a refusal
+        // line, and for the same reason: it is the thing the user can
+        // quote at their provider.
+        w.sole_said?` · ${esc(String(w.sole_said))}`:''}`:''}</div>
     ${w.layer==='fleet'?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('s_line_cap_fleet')">${
       esc(t('diag.fleet.setting','Change the connection budget'))}</button> <span class="dim">${
       esc(t('diag.fleet.setting.note','the new number applies from the next download; a per-server "Use exactly this many" in the server editor lifts it for that server alone'))}</span></div>`:''}
+    ${w.layer==='solecap'&&w.sole_host?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnServer('${escA(w.sole_host)}')">${
+      esc(t('prov.refused.open','Open this server’s settings'))}</button> <span class="dim">${
+      esc(t('diag.solecap.note','This provider will not give more connections at once, and it is the only one of yours that still has this post - so switching to another provider will not finish it. A second connection slot on that account, or fewer of its connections spent elsewhere, is what would.'))}</span></div>`:''}
     ${w.layer==='knee'&&w.knee_host?`<div style="margin-top:6px"><button type="button" class="ghost" onclick="landOnRow('ladderCard')">${
       esc(t('diag.knee.remeasure','Measure this provider again'))}</button> <button type="button" class="ghost" onclick="landOnServer('${escA(w.knee_host)}')">${
       esc(t('prov.refused.open','Open this server’s settings'))}</button> <span class="dim">${
@@ -9983,7 +10259,7 @@ function renderQueue(){
         // no way to know that - one reported hunting for "that blue
         // icon". The label costs a little width on the rows that are
         // stuck and says nothing on the rows that are not.
-        (s.priority==='Duplicate'
+        (dupHeld(s)
           ? `<button class="ghost mini" title="${escA(t('queue.dup.force.title','Download this copy anyway: it releases the duplicate hold and starts this job next.'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫ ${esc(t('queue.dup.force','download anyway'))}</button>`
           : `<button class="ghost mini" title="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" aria-label="${escA(t('queue.force.title','Download this next (force: starts even while paused)'))}" data-snd="top" onclick="forceJob('${s.nzo_id}')">⏫</button>`)+
         // Buttoned reorder beside the drag: drag does not exist on touch,
@@ -10060,7 +10336,7 @@ function renderQueue(){
       // After the health dot deliberately - the health verdict is about
       // the POST and colours the row, this is about an errand of ours.
       insChip(s);
-    const pzLabel=s.priority==='Duplicate'
+    const pzLabel=dupHeld(s)
       ? `<span class="dim" title="${escA(t('queue.dup.title2','An equivalent release is already downloaded or queued: this copy is held, not stuck. Download it anyway with ⏫, or open the row and give it a priority - either one releases the hold.')+(s.duplicate_key?` [${s.duplicate_key}]`:''))}">· ${t('queue.dup','held (duplicate)')}</span>`
       : `<span class="dim">· ${t('status.paused','paused')}</span>`;
     // Truth-audit I: identName() and the Smart Folder rule badge on the
@@ -10656,7 +10932,12 @@ const JF_STATE={queued:['drawer.fs.queued','waiting'], active:['drawer.fs.active
   published:['drawer.fs.published','at destination']};
 function jfState(w){ const e=JF_STATE[w]; return e?t(e[0],e[1]):(w||''); }
 function jfRow(id,f,live,bare){
-  const b=+f.bytes||0, left=Math.max(0,Math.min(b,+f.bytes_left||0)), got=b-left;
+  // `bytes_total` and not `bytes`: get_files answers SAB's spelling with
+  // SAB's TYPE, which is a "%.2f" string, so the numeric reading has a
+  // key of its own beside it (the same split `mbleft`/`bytes_left`
+  // already has). `+f.bytes` still coerces correctly and is kept as the
+  // fallback for a daemon older than 31 Aug 2026.
+  const b=+f.bytes_total||+f.bytes||0, left=Math.max(0,Math.min(b,+f.bytes_left||0)), got=b-left;
   const st=f.state||f.status||'';
   // A tail job the daemon can no longer describe (see jfBody): the name
   // and the declared size are the only two things in this row that are
@@ -10879,7 +11160,7 @@ function drawerHtml(s){
         // PAUSE. Now the write releases it, so the sentence is true - and
         // worth stating, because "held" is not a state a priority menu
         // obviously escapes.
-        s.priority==='Duplicate'
+        dupHeld(s)
           ? `<br><span class="dim" style="font-size:11.5px">${t('drawer.dup.hint','Picking a priority downloads this copy anyway: it releases the hold as well as setting the priority. ⏫ does both in one click.')}</span>`
           : ''}</span>
       <span class="dim">${t('drawer.category','category')}</span><span>${esc(s.cat==='*'?t('drawer.nocat','none'):s.cat)}</span>
@@ -11009,6 +11290,9 @@ async function qMove(id, delta){
     const tr=e.target.closest('tr.qrow'); if(!tr) return;
     e.preventDefault();
     openDrawer = openDrawer===tr.dataset.id ? null : tr.dataset.id;
+    // The same cue the pointer path plays: this IS the same toggle, and
+    // a keyboard user pressing Enter got silence where a click sounded.
+    actSnd(openDrawer?'open':'close');
     renderQueue();
     // The re-render replaced the row the user was standing on.
     const again=tb.querySelector(`tr.qrow[data-id="${tr.dataset.id}"]`);
@@ -11107,9 +11391,12 @@ async function qMove(id, delta){
     const to=[...tb.querySelectorAll('tr.qrow')].indexOf(tr);
     tb.__h=null;                       // DOM was hand-mutated - force a redraw
     if(commit && to>=0 && to!==+tr.dataset.i){
-      actSnd('drop');
+      // AFTER the daemon takes it. `drop` is the success-shaped cue, and
+      // playing it up front meant a refused move sounded like it landed
+      // and was then contradicted by the refuse blip and the red toast.
       const j=await api('queue',`&name=switch&value=${tr.dataset.id}&value2=${to}`);
-      if(!j.status) toast(tErr(j.error)||t('toast.movefail','Could not move the item.'), true);
+      if(j.status) actSnd('drop');
+      else toast(tErr(j.error)||t('toast.movefail','Could not move the item.'), true);
     }
     tick();
   };
@@ -11786,16 +12073,24 @@ function pauseCostOf(ids){
 }
 // GB, the unit every figure of this size on this page is already in.
 function pauseCostGB(pc){ return (((pc&&pc.bytes)||0)/1e9).toFixed(1); }
-// True to go ahead. Only the `refetch` kind asks: `disk` is the same
-// download arriving by a slower route, which costs time and no data, and
-// a modal in front of a speed cost is how people learn to click through
-// modals.
-function okToPause(ids){
+// A download that unpacks as it arrives has nothing on disk for a resume
+// to pick up, so pausing it re-fetches the bytes already fetched when it
+// resumes. Worth SAYING, but NOT worth a modal in front of it. TODO 309(b)
+// gated the pause on a blocking confirm(): Cancel returns false and the
+// pause then silently did nothing - no toast, no word for it. The mac app
+// puts up a native NSAlert for confirm() (its WKUIDelegate), so there the
+// silent no-op is the Cancel / scary-modal path; an embedded webview with
+// no confirm panel (the iOS harness WKWebView, a bare WKWebView) returns
+// false without even showing a dialog. Either way plain Pause could do
+// nothing, and Pause now had grown the same guard (Gary, 30 Aug 2026).
+// Non-blocking note instead, and the pause ALWAYS acts. Only the `refetch`
+// kind is worth a word; `disk` costs time not data, and the header tooltip
+// (paintPauseHint) already carries it. Reuses the button's own cost string
+// so no new i18n key is minted.
+function notePauseCost(ids){
   const pc=pauseCostOf(ids);
-  if(!pc || pc.kind!=='refetch') return true;
-  return confirm(t('confirm.pausecost',
-    'Pause this download?\n\nIt unpacks as it arrives, so there is nothing on disk for a resume to pick up: the {gb} GB it has already fetched would be fetched again when it starts. That does not change with time, so there is no hurry to resume it.',
-    {gb:pauseCostGB(pc)}));
+  if(pc && pc.kind==='refetch')
+    toast(t('hdr.pause.cost','Pausing costs this download the {gb} GB it has already fetched: it unpacks as it arrives, so nothing on disk can be picked up again and it starts over. Waiting does not make that worse.',{gb:pauseCostGB(pc)}));
 }
 // The hover half, on the header Pause button, repainted from the queue
 // poll. It DROPS data-i18n-title while a live hint is up - applyI18n
@@ -11817,10 +12112,11 @@ function paintPauseHint(){
     : t('hdr.pause.cost.disk','Pausing does not lose any of this download. It has {gb} GB on disk, which is more than can be replayed in one pass, so it will unpack from the parts on disk when it resumes and that is slower.',{gb:pauseCostGB(pc)});
 }
 async function qOp(name,id){
-  // TODO 309(b): the one op here that can cost the user work asks first.
+  // TODO 309(b): the one op here that can cost the user work says so - a
+  // non-blocking note, never a modal that can silently swallow the click.
   // The PAGE does not decide which rows those are - `pause_cost` on the
   // row does - so this stays right if a queued row ever grows one.
-  if(name==='pause' && !okToPause([id])) return {status:false};
+  if(name==='pause') notePauseCost([id]);
   const j=await api('queue',`&name=${name}&value=${id}`);
   if(!j.status) toast(t('toast.nochange','Nothing to change. The item may have just finished.'), true);
   else if(name==='delete') toast(t('toast.qRemoved','Removed from the queue.'));
@@ -12273,6 +12569,21 @@ async function clearHistDone(btn){
     tick();
   });
 }
+// clearHistDone's sibling for the Failed bucket. Same shape and the same
+// two things it must never do: no del_files (the per-row ✕ is what
+// deletes files, and this stays a list-housekeeping action), and no
+// posted id list (the daemon picks the records itself, off value=failed,
+// so a job that finishes between paint and click is never raced). A
+// password-locked failure carries the only 🔑 that unpacks it once the
+// user supplies one, so it stays exactly as a locked Completed row does.
+async function clearHistFailed(btn){
+  if(!confirm(t('confirm.histclearfailed','Clear the failed downloads out of this list?\nAnything waiting for a password stays, and no files are deleted.'))) return;
+  await busy(btn, t('busy.clearing','Clearing…'), async()=>{
+    const j=mustOk(await api('history','&name=delete&value=failed'));
+    toast(t('toast.histCleared','Cleared {n} from the list.',{n:num(j.removed||0,0)}));
+    tick();
+  });
+}
 async function delHistFiles(id){
   if(!confirm(t('confirm.delfiles','Remove this entry AND delete its downloaded files from disk?\nThis cannot be undone.'))) return;
   const j=await api('history',`&name=delete&value=${id}&del_files=1`);
@@ -12390,8 +12701,9 @@ async function qBulk(op){
   // rather than on the button so it holds however the op was fired.
   const f=document.querySelector('#qselbar :focus'); if(f) f.blur();
   const ids=[...qSel]; if(!ids.length) return;
-  // TODO 309(b): one of the selected rows may be the one on the wire.
-  if(op==='pause' && !okToPause(ids)) return;
+  // TODO 309(b): one of the selected rows may be the one on the wire -
+  // note the cost, non-blocking, then pause regardless.
+  if(op==='pause') notePauseCost(ids);
   // The id list rides a JSON POST body (the m_config door): 250 ids is
   // ~7 KB, and one Show more page past that 414s on the request line.
   const j=await apiPost('queue',{name:op, value:ids.join(',')});
@@ -14217,7 +14529,16 @@ function eventsNearSample(i){
     const ago=(n-1-i)*PERIOD;
     // §125: with a link-peak anchor, name the sample as % of it too.
     const pk=linkPeak>0?` · ${pctOfPeak(v)}`:'';
-    tip.innerHTML=`${fmtRate(v)}${pk}<br><span class="dim">${ago===0?t('chart.now','now'):t('chart.ago','{n}s ago',{n:ago})}</span>`
+    // The early start at the SAME sample, when there was one. Named
+    // rather than left as an unexplained second line, and given as its
+    // own figure plus the total: the two traces are two pipelines on one
+    // line, so the sum is the only number that describes the line.
+    const pf=pfHist[i]||0;
+    const pfLine = pf>0
+      ? `<br><span style="color:var(--ok)">\u25cf</span> ${esc(t('chart.prefetch','early start {r}',{r:fmtRate(pf)}))}`
+        +` <span class="dim">${esc(t('chart.prefetch.total','· {r} on the line',{r:fmtRate(v+pf)}))}</span>`
+      : '';
+    tip.innerHTML=`${fmtRate(v)}${pk}${pfLine}<br><span class="dim">${ago===0?t('chart.now','now'):t('chart.ago','{n}s ago',{n:ago})}</span>`
       +eventsNearSample(i);
     tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-8)+'px'; tip.style.opacity='1';
   });
@@ -16555,11 +16876,15 @@ async function loadSettings(){
   if(!peu.checked) extUnrarNote(false);
   put('s_mem_limit', sizeStr(c.mem_limit));
   put('s_out_dir', c.out_dir); put('s_move_completed', c.move_completed||'');
+  // TODO 317. Same focus guard as the two ticks above: a settings
+  // poll landing while the box is being clicked must not fight it.
+  const wtg=document.getElementById('s_write_through');
+  if(document.activeElement!==wtg) wtg.checked=c.write_through===true||c.write_through===1;
   initMovePace(c.move_pace||'yield');
   // Same guard as #smartrows / #catrows below: register_cat adds a
   // category the moment a job arrives carrying one, and rebuilding the
   // table under the user would discard a half-typed row.
-  if(!document.querySelector('#catfilerows :focus')) renderCatFiles(c.categories||'', c.move_completed_cats||'', c.cat_meta||{});
+  if(!document.querySelector('#catfilerows :focus')) renderCatFiles(c.categories||'', c.move_completed_cats||'', c.cat_meta||{}, c.write_through_cats||'');
   put('s_out_umask', c.out_umask||''); put('s_min_free', sizeStr(c.min_free)); put('s_quota', sizeStr(c.quota));
   put('s_quota_period', c.quota_period||'d');
   put('s_dupe_action', c.dupe_action||'pause');
@@ -17284,7 +17609,7 @@ const patCls = v => v ? ' patbad' : '';
 // letting someone discover it: name read-only, delete disabled, folder
 // still editable, because WHERE a built-in lands is genuinely yours.
 const BUILTIN_CATS = ['tv', 'movies', 'music', 'books'];
-function catFileRowHtml(name, dir, meta){
+function catFileRowHtml(name, dir, meta, wt){
   const fixed = BUILTIN_CATS.includes((name||'').toLowerCase());
   const m = meta||{};
   const why = escA(t('set.disk.cats.builtin.title','always available, so it cannot be renamed or removed - its folder is still yours to set'));
@@ -17297,6 +17622,7 @@ function catFileRowHtml(name, dir, meta){
   return `<div class="catfilerow">
     <input class="txt" data-k="name" value="${escA(name||'')}"${fixed?` readonly title="${why}"`:''} placeholder="${escA(t('set.disk.cats.name.ph','category'))}" ${fixed?'':`title="${escA(t('set.disk.cats.name.title','the name Sonarr, Radarr or your app is configured with'))}"`} oninput="catFileCheck(this)">
     <div class="pathrow"><input class="txt" data-k="dir" value="${escA(dir||m.dir||'')}" placeholder="${escA(t('set.disk.cats.dir.ph','a subfolder of the download root'))}" title="${escA(t('set.disk.cats.dir.title','where this category lands. Blank = its own subfolder of the download root; a plain name = that subfolder instead; a full path = downloads land in the root as usual and finished jobs move there'))}" oninput="catFileCheck(this)"><button class="mini" onclick="browseDir(this.previousElementSibling,'dir')" data-i18n-title="btn.browse.title" title="Browse for a folder - including other drives" data-i18n="btn.browse">Browse…</button></div>
+    <label class="wtick" title="${escA(t('set.disk.cats.wt.title','download straight into the full path on the left instead of moving there when the job finishes. Only does anything for a full path - a plain subfolder name is already on the download drive. Leave it off if that path is a network share'))}"><input type="checkbox" data-k="wt"${wt?' checked':''}><span data-i18n="set.disk.cats.wt">write there</span></label>
     <select class="sel" data-k="prio" title="${escA(t('set.disk.cats.prio.title','default priority for downloads added in this category; an add that names its own priority wins'))}">
       ${popt('',t('set.disk.cats.prio.def','priority: default'))}${popt('2',t('set.disk.cats.prio.force','force'))}${popt('1',t('set.disk.cats.prio.high','high'))}${popt('0',t('set.disk.cats.prio.normal','normal'))}${popt('-1',t('set.disk.cats.prio.low','low'))}${popt('-2',t('set.disk.cats.prio.paused','add paused'))}</select>
     <input class="txt" data-k="groups" value="${escA(m.groups||'')}" placeholder="${escA(t('set.disk.cats.groups.ph','auto-assign: groups / indexer category'))}" title="${escA(t('set.disk.cats.groups.title','pick this category for downloads added without one: comma-separated keywords or regexes matched against the NZB\'s own category tag and its newsgroups, e.g. alt.binaries.teevee. An NZB whose category tag equals this name matches with nothing here'))}">
@@ -17331,7 +17657,7 @@ function catFileCheck(el){
 // `categories` is a comma list; `move_completed_cats` is `name=path`
 // pairs. Joined here into one row per category - which is the pairing
 // the two strings never showed.
-function renderCatFiles(cats, dests, meta){
+function renderCatFiles(cats, dests, meta, wtcats){
   const dir={};
   for(const item of String(dests||'').split(/[,;]/)){
     const i=item.indexOf('='); if(i<0) continue;
@@ -17341,15 +17667,18 @@ function renderCatFiles(cats, dests, meta){
   // A destination for a category that is not in the list would vanish on
   // the next Apply, so show it rather than silently drop it.
   for(const k of Object.keys(dir)) if(!names.includes(k)) names.push(k);
+  // TODO 317: a bare NAME list, so the row's tick and the setting are
+  // one fact rather than two.
+  const wt=new Set(String(wtcats||'').split(/[,;]/).map(x=>x.trim()).filter(Boolean));
   setHtml('catfilerows', names.length
-    ? names.map(n=>catFileRowHtml(n, dir[n], (meta||{})[n])).join('')
+    ? names.map(n=>catFileRowHtml(n, dir[n], (meta||{})[n], wt.has(n))).join('')
     : `<div class="dim">${t('set.disk.cats.none','no categories yet')}</div>`);
 }
 function addCatFileRow(){
   const cr=document.getElementById('catfilerows');
   if(cr.firstElementChild&&!cr.firstElementChild.classList.contains('catfilerow')) cr.innerHTML='';
   cr.__h=null;
-  cr.insertAdjacentHTML('beforeend', catFileRowHtml('','',null));
+  cr.insertAdjacentHTML('beforeend', catFileRowHtml('','',null,false));
   cr.lastElementChild.querySelector('[data-k=name]').focus();
 }
 // An absolute path is a MOVE destination (the mover's contract needs
@@ -17358,7 +17687,7 @@ function addCatFileRow(){
 function catDirIsAbsolute(p){ return /^([\/\\]|[A-Za-z]:[\/\\])/.test(p); }
 async function saveCatFiles(btn){ await busy(btn,t('busy.applying','Applying…'), async()=>{
   const rows=[...document.querySelectorAll('#catfilerows .catfilerow')];
-  const names=[], dests=[], meta={};
+  const names=[], dests=[], meta={}, wt=[];
   for(const r of rows){
     const g=k=>((r.querySelector(`[data-k=${k}]`)||{}).value||'').trim();
     const name=g('name'); if(!name) continue;
@@ -17367,6 +17696,11 @@ async function saveCatFiles(btn){ await busy(btn,t('busy.applying','Applying…'
     const dir=g('dir');
     if(dir && catDirIsAbsolute(dir)) dests.push(`${name}=${dir}`);
     else if(dir) m.dir=dir;
+    // TODO 317. Kept even when this row names no destination: the two
+    // settings are edited in either order, and dropping the tick here
+    // would silently undo it for anyone who ticked the box before
+    // filling the path in.
+    if((r.querySelector('[data-k=wt]')||{}).checked) wt.push(name);
     const prio=g('prio'); if(prio!=='') m.priority=+prio;
     const script=g('script'); if(script) m.script=script;
     const groups=g('groups'); if(groups) m.groups=groups;
@@ -17377,6 +17711,7 @@ async function saveCatFiles(btn){ await busy(btn,t('busy.applying','Applying…'
   // list does not carry yet would be refused.
   if(await setCfg('categories', names.join(', ')) === false) return;
   if(await setCfg('move_completed_cats', dests.join(', ')) === false) return;
+  if(await setCfg('write_through_cats', wt.join(', ')) === false) return;
   await setCfg('cat_meta', Object.keys(meta).length?JSON.stringify(meta):'');
 }); }
 
@@ -19278,6 +19613,12 @@ function applyPreset(which){
   const st=document.getElementById('s_theme'); if(st) st.value=classic?'light':'auto';
   LOOK_CARDS.filter(id=>document.getElementById(id))
     .forEach(id=>hideCard(id, classic || (dense && (id==='setupCard'||id==='benchCard'))));
+  // The hero is deliberately NOT in LOOK_CARDS - Classic's promise is
+  // "queue, history and the headline", so a wholesale hide there would
+  // take the headline with it. Every preset shows it: a user who hid
+  // the throughput card and then asks for a canned look gets the look
+  // as designed, hero included, and can hide it again afterwards.
+  hideCard('heroCard', false);
   // Remember WHICH preset, and a fingerprint of the state it produced.
   // The fingerprint is what lets the row say "(modified)" honestly: a
   // preset only SETS the controls, so the moment one is changed the user
@@ -19660,6 +20001,25 @@ function renderSpeedEquiv(){
   const eq = (!UNIT_BITS && targetSpeed>0) ? bitsEquivalent(shownSpeed) : '';
   const s = eq ? t('hero.equiv','about {n}', {n:eq}) : '';
   if(el.textContent!==s) el.textContent=s;
+}
+// The early start's own live figure, and the key to its green trace on
+// the chart. Both jobs are hidden behind one headline number otherwise:
+// the hero reports the ACTIVE job's rate, and on the night this was
+// built that number was ~1 MB/s while a second pipeline pulled 68.8.
+//
+// Off the last sample rather than off a tween of its own - it is a
+// second reading of the same chart, and two glides on one card
+// disagreeing by a frame is worse than a figure that steps once a
+// second. Empty (its row reserved in CSS) whenever nothing is
+// prefetching, which is most of the time.
+function renderPrefetchNow(){
+  const el=document.getElementById('pfNow'); if(!el) return;
+  const v=pfHist.length?pfHist[pfHist.length-1]:0;
+  const s = v>0 ? t('hero.prefetch','early start · {r}', {r:fmtRate(v)}) : '';
+  if(el.dataset.s===s) return;
+  el.dataset.s=s;
+  el.innerHTML = s ? `<span style="color:var(--ok)">\u25cf</span> ${esc(s)}` : '';
+  el.title = s ? t('hero.prefetch.title','A second download is running on servers the active job cannot use - the green line on the chart. Its progress is banked against the queued job it belongs to.') : '';
 }
 function drawAllCharts(frac){
   drawSpeed(frac);
@@ -20392,7 +20752,11 @@ function applyDensity(){
   document.body.classList.toggle('dense', uiDense());
   applyDenseMasonry();
   const p=layoutPrefs();
-  movableCards().forEach(c=>{
+  // The hero takes the per-card override like everyone else - it is not
+  // movable, but its density is the user's (see manageableCards).
+  const hero=document.getElementById('heroCard');
+  const dcards=movableCards(); if(hero) dcards.unshift(hero);
+  dcards.forEach(c=>{
     const on=p.density[c.id]==='compact';
     c.classList.toggle('compact', on);
     const b=c.querySelector('.carddense');
@@ -20404,8 +20768,12 @@ function applyDensity(){
   redrawCanvases();
 }
 function movableCards(){
-  // Everything but the welcome banner and the throughput hero (it hosts
-  // the drop overlay and stays the headline).
+  // Everything but the welcome banner and the throughput hero: the hero
+  // stays the headline, pinned above the tiles, so it never enters the
+  // order or the drag set. Hide and compact still reach it - through
+  // manageableCards, applyDensity and applyCardArrangement, each of
+  // which folds it in by id - so "not movable" is exactly what this
+  // exclusion means, and no more.
   return [...document.querySelectorAll('#dashview>.card')]
     .filter(c=>c.id && c.id!=='welcomeCard' && c.id!=='heroCard');
 }
@@ -20469,7 +20837,10 @@ function cardFixedReason(c){
   return '';
 }
 function cardLabel(c){
-  const h=c.querySelector('h3');
+  // The hero has no h3; its "Throughput" .sub line is the heading, and
+  // it is already translated in place, so reading it here keeps every
+  // label on one rule (the card's own visible title, whatever language).
+  const h=c.querySelector('h3, .hero .sub');
   const t=h && h.childNodes.length ? h.childNodes[0].textContent.trim() : '';
   return t || c.id;
 }
@@ -20569,9 +20940,16 @@ function manageableCards(){
   // Same exclusions as the first-run look chooser: a card a body class
   // already suppresses must not be listed, because a tick that visibly
   // does nothing reads as broken.
-  return movableCards()
+  // The hero leads the list: it is hideable and compactable like any
+  // other card (the Reddit ask), just never movable - so its row's
+  // arrows come out disabled through the ordinary i===-1 path in
+  // renderCardMgr, the same state a system-hidden card gets.
+  const hero=document.getElementById('heroCard');
+  const mcards=movableCards()
     .filter(c=>!(c.id==='browseCard'&&document.body.classList.contains('noidx')))
     .filter(c=>!(c.id==='watchCard'&&document.body.classList.contains('nowatch')));
+  if(hero) mcards.unshift(hero);
+  return mcards;
 }
 // History's density button means "list fewer rows", not "less padding"
 // (see toggleCardDensity), so its state lives somewhere else. Reading it
@@ -20891,7 +21269,10 @@ function persistChartH(){
   document.querySelectorAll('.chartwrap>canvas[id]').forEach(cv=>{
     // Idle auto-compaction squashes wrappers temporarily; persisting that
     // height would turn a transient state into the user's saved size.
-    if(cv.closest('.idlecompact')) return;
+    // The hero's per-card compact pins its wraps at the same 38px with
+    // the same !important, so it is the same trap: un-compacting must
+    // give the chart its dragged height back, not the squashed one.
+    if(cv.closest('.idlecompact') || cv.closest('#heroCard.compact')) return;
     const h=cv.parentElement.offsetHeight;
     if(h>=34) p.chartH[cv.id]=Math.min(h, 800);
   });
@@ -21229,6 +21610,11 @@ function applyCardArrangement(){
     .concat(cards.map(c=>c.id).filter(id=>!p.order.includes(id)));
   seq.forEach(id=>dash.insertBefore(byId[id], bar));
   for(const c of cards) c.classList.toggle('userhidden', p.hidden.includes(c.id));
+  // The hero is outside movableCards (never re-ordered - it stays the
+  // headline inside #heroTiles), but a saved hide is applied to it the
+  // same as everyone else, or hiding it would not survive a reload.
+  const hero=document.getElementById('heroCard');
+  if(hero) hero.classList.toggle('userhidden', p.hidden.includes('heroCard'));
   renderHiddenBar();
 }
 // The EDITING half: drag handles, the two icon buttons, the grips, the
@@ -21237,11 +21623,42 @@ function applyCardArrangement(){
 // LAYOUT_EDIT. Mouse-dragging a card inside a page that scrolls under
 // your finger is a genuinely bad control on touch; the answer is the
 // card manager in Settings, not this code running there.
+// The two card tools every hideable card carries, shared between the
+// movable-card loop below and the hero (which gets these two and no
+// drag handle). The titles are restamped when the catalogue arrives by
+// the same `.carddense`/`.cardhide` selectors the i18n restamp already
+// walks, so building them in two places costs no second restamp entry.
+function cardDenseBtn(c){
+  const d=document.createElement('button');
+  d.className='carddense'; d.innerHTML='<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-density"/></svg><span class="ctlbl" data-i18n="layout.lbl.dense">Compact</span>';
+  d.title=t('layout.dense.title','compact this card: same figures, less space');
+  d.setAttribute('aria-label', d.title);
+  d.onclick=()=>toggleCardDensity(c.id);
+  return d;
+}
+function cardHideBtn(c){
+  const x=document.createElement('button');
+  x.className='cardhide'; x.innerHTML='<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg><span class="ctlbl" data-i18n="layout.lbl.hide">Hide</span>';
+  x.title=t('layout.hide.title','hide this card: bring it back from the Hidden bar at the bottom, or Settings → Interface → Reset layout');
+  x.setAttribute('aria-label', x.title);
+  x.onclick=()=>hideCard(c.id, true);
+  return x;
+}
 function initLayout(){
   if(!LAYOUT_EDIT) return;
   const p=layoutPrefs(), dash=document.getElementById('dashview');
   const cards=movableCards();
   const byId={}; cards.forEach(c=>byId[c.id]=c);
+  // The hero: hide and compact like every other card, no Move (it is
+  // the headline - movableCards says why). It has no h3, so the tools
+  // sit as a direct child of the card, pinned to the top-right corner
+  // by the #heroCard>.cardtools rule instead of floating in a heading.
+  const heroC=document.getElementById('heroCard');
+  if(heroC && !heroC.querySelector('.cardtools')){
+    const htools=document.createElement('span'); htools.className='cardtools';
+    htools.append(cardDenseBtn(heroC), cardHideBtn(heroC));
+    heroC.appendChild(htools);
+  }
   for(const c of cards){
     const h=c.querySelector('h3'); if(!h) continue;
     // Arm the drag from anywhere on the heading, not just the glyph built
@@ -21286,17 +21703,7 @@ function initLayout(){
       cardMenu(e, c.id, grab);
     });
     // §12a per-card density toggle, left of the hide button.
-    const d=document.createElement('button');
-    d.className='carddense'; d.innerHTML='<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-density"/></svg><span class="ctlbl" data-i18n="layout.lbl.dense">Compact</span>';
-    d.title=t('layout.dense.title','compact this card: same figures, less space');
-    d.setAttribute('aria-label', d.title);
-    d.onclick=()=>toggleCardDensity(c.id);
-    const x=document.createElement('button');
-    x.className='cardhide'; x.innerHTML='<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg><span class="ctlbl" data-i18n="layout.lbl.hide">Hide</span>';
-    x.title=t('layout.hide.title','hide this card: bring it back from the Hidden bar at the bottom, or Settings → Interface → Reset layout');
-    x.setAttribute('aria-label', x.title);
-    x.onclick=()=>hideCard(c.id, true);
-    tools.append(grab, d, x); h.appendChild(tools);
+    tools.append(grab, cardDenseBtn(c), cardHideBtn(c)); h.appendChild(tools);
     // §6d honesty: a card that can never grow says so, but only inside the
     // mode - at rest it would be a permanent apology on three cards. Built
     // here rather than on entry so the tool row is never rebuilt, and

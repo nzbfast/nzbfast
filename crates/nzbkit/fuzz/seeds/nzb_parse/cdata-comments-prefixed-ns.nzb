@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<n:nzb xmlns:n="http://www.newzbin.com/DTD/2003/nzb">
+  <n:head><n:meta type="password"><![CDATA[se&cr<et]]></n:meta></n:head>
+  <n:file subject='"quoted with apostrophe delimiters.mkv" yEnc (1/3)' poster="p@news.example" date="1">
+    <n:groups><n:group>alt.<!-- split -->binaries.test</n:group></n:groups>
+    <?some-pi ignore me?>
+    <n:segments>
+      <n:segment bytes="10" number="1">a<!-- split -->@news.example</n:segment>
+      <n:segment bytes="10" number="2"><![CDATA[b@news.example]]></n:segment>
+      <n:segment bytes="10" number="3"/>
+    </n:segments>
+  </n:file>
+</n:nzb>

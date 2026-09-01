@@ -85,7 +85,6 @@ async fn the_shipped_alternate_defaults_are_switch_on_search_off_and_a_real_hold
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §282 item 18: promoting a held alternate says so on the lifecycle
@@ -194,7 +193,7 @@ async fn promoting_a_held_alternate_announces_the_switch_on_the_ring() {
         upload(&bad_xml, "Show.Name.S04E02.720p.WEB.nzb");
         upload(&good_xml, "Show.Name.S04E02.1080p.WEB.nzb");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains("\"Duplicate\""), "the spare was not held: {q}");
+        assert!(any_held_behind_a_copy(&q), "the spare was not held: {q}");
         http(port, "/api?mode=resume&output=json", None);
 
         // The 720p fails, its automatic retry is spent, and THAT failure
@@ -268,7 +267,6 @@ async fn promoting_a_held_alternate_announces_the_switch_on_the_ring() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M14f: a queued duplicate is held as ALTERNATIVE and auto-promoted
@@ -370,7 +368,7 @@ async fn duplicate_held_then_promoted() {
         upload(&bad_xml, "Show.Name.S01E02.720p.WEB.nzb");
         upload(&good_xml, "Show.Name.S01E02.1080p.WEB.nzb");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains("\"Duplicate\""), "{q}");
+        assert!(any_held_behind_a_copy(&q), "{q}");
         assert!(q.contains("show name/s1e2"), "{q}");
 
         // Resume: 720p fails → 1080p ALTERNATIVE must promote and finish.
@@ -385,7 +383,7 @@ async fn duplicate_held_then_promoted() {
             if h.contains("\"Failed\"") {
                 let q = http(port, "/api?mode=queue&output=json", None);
                 assert!(
-                    q.contains("\"Duplicate\""),
+                    any_held_behind_a_copy(&q),
                     "promoted while an automatic retry was pending: {q}"
                 );
                 held = true;
@@ -411,7 +409,6 @@ async fn duplicate_held_then_promoted() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §282 item 18, the OTHER door: the user-clicked switch announces
@@ -628,5 +625,4 @@ async fn switching_by_hand_announces_the_switch_on_the_ring_and_says_who_did_it(
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

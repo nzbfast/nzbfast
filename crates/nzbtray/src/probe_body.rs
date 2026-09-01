@@ -1118,7 +1118,6 @@ mod tests {
         EngineVersion, apikey, body_version, bundled_version, dash_url, find_bytes, is_nzbfast,
         keyed_url, proof_minted_for_tests, query_value, stored_key, unique_boundary,
     };
-    use std::path::PathBuf;
 
     #[test]
     fn version_body_is_ours() {
@@ -1222,10 +1221,14 @@ mod tests {
 
     /// A scratch data dir holding whichever of the two key sources
     /// the case needs.
-    fn data_dir(name: &str, settings: Option<&str>, keyfile: Option<&str>) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nzbtray-key-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn data_dir(
+        name: &str,
+        settings: Option<&str>,
+        keyfile: Option<&str>,
+    ) -> crate::testscratch::ScratchDir {
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbtray-key-{}-{name}", std::process::id())),
+        );
         if let Some(s) = settings {
             std::fs::write(dir.join("settings.json"), s).unwrap();
         }

@@ -71,56 +71,200 @@ impl Index {
     /// [`Par2Set::member_hash16k`](crate::par2::Par2Set::member_hash16k);
     /// the member names are not stored (they are volume names, not
     /// identities) - `name` is the release the whole set belongs to.
+    /// `evidence` is what PROVED that name against these bytes.
     ///
-    /// First writer wins. A fingerprint already on file was recorded
-    /// when we named that release, and the later download of the same
-    /// bytes has no better claim - overwriting would let one badly
-    /// named repost erase the good name for every future one.
+    /// This is the only naming tier in the product with MEMORY, and it
+    /// used to be the only one that never declined anything. It was
+    /// first-writer-wins forever - whatever named a fingerprint first
+    /// owned it, a later job that named the same bytes correctly could
+    /// not displace it, and nothing reported the disagreement (W7-01).
+    /// Three rules replace that, all of them decided on the §131
+    /// evidence ladder rather than on arrival order:
+    ///
+    /// * **Strictly stronger evidence corrects.** A PAR2-set-id proof
+    ///   (`pesto_confirm`, which matched the payload's own bytes
+    ///   against the FileDesc) outranks a posted stem, so the wrong
+    ///   name a weak lane taught is repaired rather than permanent.
+    /// * **Weaker evidence loses, silently.** A subject parse
+    ///   disagreeing with a byte-level proof is not news.
+    /// * **Equal evidence is AMBIGUITY, and ambiguity is a refusal.**
+    ///   The key is `hash16k` - the identical-head twin family
+    ///   (zero-filled VOB heads, padded disc images) that `try_match_whole`
+    ///   exists for and that every in-job tier declines. Two jobs with
+    ///   equally good claims and different names mark the row
+    ///   `contested`, and [`Index::par_hash_lookup`] then refuses it
+    ///   (W7-03). The row is kept rather than deleted so a later proof
+    ///   can still settle it.
+    ///
+    /// The name must LOOK like a name here as well as at the call site
+    /// (W7-02): the guard is on the write rather than left to each
+    /// caller, so an obfuscated stem can neither be filed - which would
+    /// hand every future repost the same non-answer - nor CONTEST a
+    /// good name it has no standing to argue with.
+    ///
+    /// Returns how many rows this call wrote (inserted, corrected, or
+    /// marked contested).
     pub fn par_hash_remember(
         &self,
         pairs: &[(String, String)],
         name: &str,
         title_key: &str,
         now: i64,
+        evidence: NameEvidence,
     ) -> rusqlite::Result<usize> {
-        if name.trim().is_empty() {
+        let name = name.trim();
+        if name.is_empty() || !crate::release::stem_is_a_name(name) {
             return Ok(0);
         }
-        let mut stmt = self.db.prepare_cached(
-            "INSERT INTO par_hashes(hash16k, name, title_key, at) VALUES(?1, ?2, ?3, ?4)
+        let mut read = self
+            .db
+            .prepare_cached("SELECT name, tier, contested FROM par_hashes WHERE hash16k = ?1")?;
+        let mut ins = self.db.prepare_cached(
+            "INSERT INTO par_hashes(hash16k, name, title_key, at, tier, contested)
+             VALUES(?1, ?2, ?3, ?4, ?5, 0)
              ON CONFLICT(hash16k) DO NOTHING",
         )?;
+        let mut replace = self.db.prepare_cached(
+            "UPDATE par_hashes SET name=?2, title_key=?3, at=?4, tier=?5, contested=0
+             WHERE hash16k=?1",
+        )?;
+        let mut upgrade = self
+            .db
+            .prepare_cached("UPDATE par_hashes SET tier=?2, contested=0 WHERE hash16k=?1")?;
+        let mut contest = self
+            .db
+            .prepare_cached("UPDATE par_hashes SET contested=1 WHERE hash16k=?1")?;
         let mut n = 0;
         for (hash, _member) in pairs {
-            n += stmt.execute(rusqlite::params![hash, name, title_key, now])?;
+            let held: Option<(String, String, i64)> = read
+                .query_row([hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?;
+            let Some((held_name, held_tier, contested)) = held else {
+                n += ins.execute(rusqlite::params![
+                    hash,
+                    name,
+                    title_key,
+                    now,
+                    evidence.tag()
+                ])?;
+                continue;
+            };
+            // An unreadable tag is treated as the weakest thing on the
+            // ladder rather than as a reason to refuse: the tags are
+            // append-only by contract, so this is a row from a future
+            // version read by an older binary, and letting a proof
+            // correct it is the safer of the two mistakes.
+            let held_rank = NameEvidence::parse(&held_tier)
+                .unwrap_or(NameEvidence::Adjacency)
+                .rank();
+            if held_name == name {
+                // The same answer again. Only a STRICTLY STRONGER
+                // proof of it changes anything: it upgrades the row's
+                // tier - so the next weak disagreement loses instead
+                // of contesting - and settles any contest, because
+                // the contest was between this name and some other
+                // one and this side just won on evidence.
+                //
+                // Re-teaching at the SAME tier deliberately does not,
+                // which is the whole point of contesting on evidence
+                // rather than on arrival: a twin that happens to be
+                // downloaded twice would otherwise clear an ambiguity
+                // it never resolved, and the more-frequent poster
+                // would win - first-writer-wins wearing a different
+                // hat.
+                if evidence.rank() > held_rank {
+                    n += upgrade.execute(rusqlite::params![hash, evidence.tag()])?;
+                }
+            } else if evidence.rank() > held_rank {
+                n += replace.execute(rusqlite::params![
+                    hash,
+                    name,
+                    title_key,
+                    now,
+                    evidence.tag()
+                ])?;
+            } else if evidence.rank() == held_rank && contested == 0 {
+                // SAY SO. This is the moment the product learns that
+                // two releases share a 16 KiB head, which is a fact
+                // about the CORPUS and not about this job - the twin
+                // family the whole matcher ladder is built around -
+                // and without this line the discovery is one bit
+                // written to a table that nothing anywhere reports.
+                // The sibling decline in `par_hash_lookup` already
+                // speaks; the contest that CAUSES it did not.
+                //
+                // `warn!` rather than `info!` precisely because nobody
+                // has measured how often this fires. If a mature index
+                // turns out to contest routinely then these lines ARE
+                // that measurement, and the level is the thing to
+                // revisit - not the reporting.
+                warn!(
+                    target: "identity",
+                    "repost table: {hash} is claimed by both {held_name:?} and {name:?} \
+                     at the same evidence tier ({}) - refusing it until a proof settles it",
+                    evidence.tag()
+                );
+                n += contest.execute([hash])?;
+            }
         }
         Ok(n)
     }
 
     /// What we last called a release carrying any of these member
-    /// fingerprints. Returns `(hash16k, name, title_key)` for the first
-    /// hash that is on file, in the order given - a set's volumes all
-    /// belong to one release, so one hit answers for the set. The
-    /// matched hash comes back with the name because it is the proving
-    /// key the §131 claims layer records beside the answer.
+    /// fingerprints. Returns `(hash16k, name, title_key)` for the hash
+    /// that proved it, or `None` when the set does not have one answer.
+    ///
+    /// Two ways it declines, and both are the same rule every in-job
+    /// naming tier already follows - ambiguity is a refusal, not a
+    /// guess. A row two equally-evidenced jobs named differently is
+    /// `contested` and is skipped outright. And the members are ALL
+    /// consulted rather than the first hit being taken: the old
+    /// reasoning was that "a set's volumes all belong to one release,
+    /// so one hit answers for the set", which is true of an honest set
+    /// and false the moment one member's 16 KiB head collides with
+    /// another release's - so members that answer two different names
+    /// answer nothing (W7-03).
+    ///
+    /// When they agree, the STRONGEST-evidenced hit is returned: the
+    /// hash comes back with the name because it is the proving key the
+    /// §131 claims layer records beside the answer, and it should be
+    /// the best-proved one on offer.
     pub fn par_hash_lookup(
         &self,
         pairs: &[(String, String)],
     ) -> rusqlite::Result<Option<(String, String, String)>> {
-        let mut stmt = self
-            .db
-            .prepare_cached("SELECT name, title_key FROM par_hashes WHERE hash16k = ?1")?;
+        let mut stmt = self.db.prepare_cached(
+            "SELECT name, title_key, tier FROM par_hashes WHERE hash16k = ?1 AND contested = 0",
+        )?;
+        let mut best: Option<(i32, (String, String, String))> = None;
         for (hash, _member) in pairs {
-            let hit = stmt
-                .query_row([hash], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })
+            let hit: Option<(String, String, String)> = stmt
+                .query_row([hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .optional()?;
-            if let Some((name, title_key)) = hit {
-                return Ok(Some((hash.clone(), name, title_key)));
+            let Some((name, title_key, tier)) = hit else {
+                continue;
+            };
+            if let Some((_, (_, held, _))) = &best
+                && *held != name
+            {
+                // One set, two releases. Nothing here is an answer -
+                // and it is worth saying, because a fingerprint two
+                // releases share is a fact about the CORPUS that no
+                // other surface reports.
+                warn!(
+                    target: "identity",
+                    "repost table: one set names two releases ({held:?} and {name:?}) - declining"
+                );
+                return Ok(None);
+            }
+            let rank = NameEvidence::parse(&tier)
+                .unwrap_or(NameEvidence::Adjacency)
+                .rank();
+            if best.as_ref().is_none_or(|(r, _)| rank > *r) {
+                best = Some((rank, (hash.clone(), name, title_key)));
             }
         }
-        Ok(None)
+        Ok(best.map(|(_, hit)| hit))
     }
 
     /// One release's name, by id. `None` when there is no such row.

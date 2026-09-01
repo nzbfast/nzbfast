@@ -2,7 +2,16 @@
 //!
 //! Both references below are the pre-fan-out code, kept verbatim so the
 //! comparison is against the shipped behaviour rather than against a
-//! restatement of the new one. What is being defended is not "the repair
+//! restatement of the new one - with ONE later edit, applied to both
+//! sides in the same commit: the M4-40 virtual-padding bound (see
+//! `scan_candidate`). It had to move here too, because this oracle is a
+//! statement about what the SERIAL walk does, and leaving it behind
+//! would make the differential test red about a difference nobody
+//! introduced. What that costs is stated rather than hidden: a mistake
+//! made identically in both copies is invisible to this test, which is
+//! why the bound has its own direct pin
+//! (`padding_never_donates_a_full_block_from_a_shorter_candidate`) and
+//! an e2e row of its own. What is being defended is not "the repair
 //! still works" - the end-to-end cases in `unit_tests.rs` cover that -
 //! but that the DECISIONS are identical: which candidate a slice is
 //! adopted from and at which offset, because both reach the user through
@@ -24,12 +33,18 @@ fn sliding_scan_serial(
 ) {
     let mut by_crc: HashMap<u32, Vec<usize>> = HashMap::new();
     let mut md5s: HashMap<usize, [u8; 16]> = HashMap::new();
+    let mut tail: HashMap<usize, usize> = HashMap::new();
     for t in targets {
         for (i, c) in t.file.blocks.iter().enumerate() {
             let g = t.first_slice + i;
             if missing_set.contains(&g) && !adopted.contains_key(&g) {
                 by_crc.entry(c.crc32).or_default().push(g);
                 md5s.insert(g, c.md5);
+                let start = (i as u64) * bs as u64;
+                tail.insert(
+                    g,
+                    crate::disk::chunk_len(t.file.length.saturating_sub(start), bs),
+                );
             }
         }
     }
@@ -55,6 +70,7 @@ fn sliding_scan_serial(
             &filter,
             &by_crc,
             &md5s,
+            &tail,
             ci,
             adopted,
             &mut remaining,
@@ -71,6 +87,7 @@ fn scan_candidate_serial(
     filter: &[u64],
     by_crc: &HashMap<u32, Vec<usize>>,
     md5s: &HashMap<usize, [u8; 16]>,
+    tail: &HashMap<usize, usize>,
     cand: usize,
     adopted: &mut HashMap<usize, AdoptSrc>,
     remaining: &mut usize,
@@ -123,7 +140,11 @@ fn scan_candidate_serial(
             h.update(&ring[..pos]);
             let md5: [u8; 16] = h.finalize().into();
             let offset = i - bs as u64;
+            let real = len - offset;
             for &g in slices {
+                if real < tail[&g] as u64 {
+                    continue;
+                }
                 if md5s[&g] == md5 && !adopted.contains_key(&g) {
                     adopted.insert(g, AdoptSrc { cand, offset });
                     *remaining -= 1;
@@ -216,15 +237,12 @@ impl Rng {
     }
 }
 
-fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!(
+fn tmpdir(tag: &str) -> crate::testscratch::ScratchDir {
+    crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join(format!(
         "nzbfast-adopt-{tag}-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    )))
 }
 
 fn crc32_of(data: &[u8]) -> u32 {
@@ -364,7 +382,6 @@ fn parallel_sliding_scan_reproduces_the_serial_adoption_decisions() {
             adoptions += got.len();
             donors.extend(got.values().map(|s| s.cand));
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
     // The comparison is worthless if the corpus adopts nothing, or
     // always from the same slot - the tie-breaks are the whole subject.
@@ -412,7 +429,6 @@ fn every_worker_racing_for_the_same_slices_still_yields_the_first_slot() {
         sliding_scan(&cands, &indices, 0..0, &targets, &missing_set, bs, &mut got).unwrap();
         assert_eq!(fmt_adopted(&want), fmt_adopted(&got));
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -447,7 +463,6 @@ fn a_pre_adopted_slice_is_never_re_sourced_by_the_parallel_scan() {
     for (g, s) in &seed_adopted {
         assert_eq!(got[g].cand, s.cand, "slice {g} was re-sourced");
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -470,7 +485,6 @@ fn the_parallel_scan_is_byte_identical_run_to_run() {
             Some(f) => assert_eq!(f, &s, "adoption drifted between runs"),
         }
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -488,7 +502,6 @@ fn a_missing_candidate_still_fails_the_scan() {
     let err = sliding_scan(&cands, &indices, 0..0, &targets, &missing_set, bs, &mut got)
         .expect_err("an unreadable candidate is an error, not a silent skip");
     assert!(matches!(err, RepairError::Io(_)), "{err:?}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same vanished file, this time inside the donor range: the slot
@@ -537,7 +550,6 @@ fn a_vanished_donor_candidate_is_dropped_not_fatal() {
         "the surviving candidates' decisions must be untouched"
     );
     assert!(!got.is_empty(), "the corpus must actually adopt something");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -603,7 +615,6 @@ fn prefetched_whole_file_adoption_matches_the_lazy_walk() {
             wholes.iter().filter(|h| h.is_some()).count() <= probing.len(),
             "seed {seed}: prefetch over-read"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -674,4 +685,207 @@ fn fmt_adopted(a: &HashMap<usize, AdoptSrc>) -> Vec<(usize, usize, u64)> {
     let mut v: Vec<(usize, usize, u64)> = a.iter().map(|(&g, s)| (g, s.cand, s.offset)).collect();
     v.sort_unstable();
     v
+}
+
+/// One target built by hand, so the two halves of the M4-40 rule can be
+/// asked separately of the same scan.
+fn one_target(dir: &Path, bs: usize, content: &[u8]) -> Vec<Target> {
+    let n_slices = content.len().div_ceil(bs);
+    let mut blocks = Vec::new();
+    for i in 0..n_slices {
+        let mut blk = vec![0u8; bs];
+        let off = i * bs;
+        let take = bs.min(content.len() - off);
+        blk[..take].copy_from_slice(&content[off..off + take]);
+        blocks.push(BlockCheck {
+            md5: md5_of(&blk),
+            crc32: crc32_of(&blk),
+        });
+    }
+    let head = &content[..content.len().min(16384)];
+    vec![Target {
+        file: Par2File {
+            file_id: [7u8; 16],
+            name: "t.bin".into(),
+            length: content.len() as u64,
+            md5: md5_of(content),
+            md5_16k: md5_of(head),
+            blocks,
+        },
+        path: dir.join("t.bin"),
+        first_slice: 0,
+        n_slices,
+        present: vec![false; n_slices],
+        intact: false,
+        exists: false,
+        resume: None,
+    }]
+}
+
+fn scan_one(bs: usize, targets: &[Target], cand: &Path) -> HashMap<usize, AdoptSrc> {
+    let len = std::fs::metadata(cand).unwrap().len();
+    let cands = vec![(cand.to_path_buf(), len)];
+    let n: usize = targets.iter().map(|t| t.n_slices).sum();
+    let missing: HashSet<usize> = (0..n).collect();
+    let mut got: HashMap<usize, AdoptSrc> = HashMap::new();
+    sliding_scan(&cands, &[0], 0..0, targets, &missing, bs, &mut got).unwrap();
+    got
+}
+
+/// M4-40 (no-RAR matrix, third extreme pass). The scan runs `bs - 1`
+/// virtual zero bytes past a candidate's EOF so a PAR2 tail slice - whose
+/// checksum covers zero padding - is findable at end-of-file. Unbounded,
+/// that padding MANUFACTURES content: a one-byte `0x00` file yields
+/// exactly one window, all zeros, and could donate any all-zero block of
+/// any target. It is not a harmless over-match. `proven_spent`'s
+/// fully-donated arm is satisfied by one adoption covering a one-byte
+/// file, so the junk was reported spent and deleted - measured
+/// end-to-end before the bound
+/// (`e2e_norar::a_one_byte_zero_decoy_never_donates_a_full_all_zero_block`).
+///
+/// Both halves are asked of the same rule, because a bound that kills
+/// the legitimate case is not a fix: the padding must still reach a
+/// candidate that genuinely ENDS with a target's partial tail block.
+#[test]
+fn padding_never_donates_a_full_block_from_a_shorter_candidate() {
+    let dir = tmpdir("padbound");
+    let bs = 64usize;
+
+    // (a) two full blocks, the second all zeros. A one-byte 0x00 file
+    // holds one byte of it and 63 bytes of nothing.
+    let mut content = vec![0u8; 2 * bs];
+    for (i, b) in content[..bs].iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(37).wrapping_add(11) | 1;
+    }
+    let targets = one_target(&dir, bs, &content);
+    let decoy = dir.join("decoy");
+    std::fs::write(&decoy, [0u8]).unwrap();
+    let got = scan_one(bs, &targets, &decoy);
+    assert!(
+        got.is_empty(),
+        "a 1-byte zero file donated a full all-zero block: {got:?}"
+    );
+    // The block really is all zeros - the refusal is the bound, not a
+    // fixture that never matched. A file of `bs` real zeros holds it.
+    let honest = dir.join("honest");
+    std::fs::write(&honest, vec![0u8; bs]).unwrap();
+    assert_eq!(
+        scan_one(bs, &targets, &honest).len(),
+        1,
+        "the all-zero block is unfindable even in a full block of real zeros"
+    );
+
+    // (b) the legitimate padded match: a target ending mid-slice, and a
+    // candidate that IS its bytes. The tail block is reachable only
+    // through the virtual padding, and must still be reached.
+    let partial: Vec<u8> = (0..(bs + bs / 2))
+        .map(|i| (i as u8).wrapping_mul(97).wrapping_add(5) | 1)
+        .collect();
+    let targets = one_target(&dir, bs, &partial);
+    let twin = dir.join("twin");
+    std::fs::write(&twin, &partial).unwrap();
+    let got = scan_one(bs, &targets, &twin);
+    assert_eq!(
+        got.len(),
+        2,
+        "the bound ate a genuine partial tail block at the candidate's own EOF: {got:?}"
+    );
+    assert_eq!(
+        got[&1].offset, bs as u64,
+        "tail block found at the wrong offset"
+    );
+
+    // And the same tail block still matches when the candidate carries
+    // it followed by REAL zeros rather than by end-of-file - those are
+    // bytes the file has, not bytes the scan invented.
+    let mut padded = partial.clone();
+    padded.extend(std::iter::repeat_n(0u8, bs));
+    let inner = dir.join("inner");
+    std::fs::write(&inner, &padded).unwrap();
+    assert_eq!(
+        scan_one(bs, &targets, &inner).len(),
+        2,
+        "a real zero-padded copy of the tail block stopped matching"
+    );
+}
+
+/// Claim `adopt-sniff-window-outlier` (31 Aug 2026) at the ENGINE seam:
+/// [`adoption_candidates`] must not offer a prefixed volume as a donor.
+///
+/// [`is_recovery_by_name_and_content`] is what excludes this
+/// directory's own parity from the candidate list, and until this claim
+/// it asked for the magic at byte 0 while every other packet sniff in
+/// the product asked [`par2::head_is_packet_file`] - the magic
+/// BEGINNING within [`par2::SNIFF_WINDOW`], which row M4-65 widened it
+/// to because a volume behind a UTF-8 BOM is still the post's parity.
+/// So a prefixed volume was recovery data to `collect_packet_files` and
+/// a PAYLOAD here, in the same repair. Measured before the fix on a real
+/// `repair_dir`: `blocks_adopted: 1`, `adopted_from:
+/// ["post.vol000+01.par2"]` - the set's own parity named to the user as
+/// a donor.
+///
+/// That donation is structural rather than a 2^-160 coincidence, which
+/// is why it is worth a pin here and not only at the gate: for exponent
+/// 0 every input's Reed-Solomon coefficient is 1, so a one-input-block
+/// set has a `vol000+01` slice byte-identical to that block, and the
+/// sliding scan matches at any offset.
+///
+/// The far side of the window is the control, exactly as the collect
+/// seam's `a_short_prefix_in_front_of_the_magic_does_not_hide_a_volume`
+/// pins it: past [`par2::SNIFF_WINDOW`] a file is a candidate again, so
+/// this widening cannot be read as "any `.par2` name is skipped" - which
+/// is the NAME rule row M4-52 ended and must not come back.
+#[test]
+fn a_prefixed_volume_is_not_offered_as_an_adoption_source() {
+    let dir = tmpdir("adopt-sniff-window");
+    let bs = 4096usize;
+    let content: Vec<u8> = (0..bs as u32 * 2).map(|i| (i % 251) as u8).collect();
+    let targets = one_target(&dir, bs, &content);
+    let volume = {
+        let mut v = Vec::from(par2::MAGIC.as_slice());
+        v.resize(4096, 0u8);
+        v
+    };
+    let behind = |n: usize| -> Vec<u8> {
+        let mut v = vec![0xEFu8; n];
+        v.extend_from_slice(&volume);
+        v
+    };
+    std::fs::write(dir.join("plain.par2"), &volume).unwrap();
+    std::fs::write(dir.join("bom.par2"), {
+        let mut v = vec![0xEFu8, 0xBB, 0xBF];
+        v.extend_from_slice(&volume);
+        v
+    })
+    .unwrap();
+    std::fs::write(dir.join("edge.par2"), behind(par2::SNIFF_WINDOW)).unwrap();
+    std::fs::write(dir.join("past.par2"), behind(par2::SNIFF_WINDOW + 1)).unwrap();
+    // The M4-52 payload the screen exists to KEEP: the extension
+    // nominates, the content decides, and this content denies.
+    std::fs::write(dir.join("9f3a1c40b2.par2"), vec![7u8; 210_000]).unwrap();
+
+    let (cands, _) = adoption_candidates(&dir, &[], &targets, &HashSet::new()).expect("walk");
+    let names: Vec<String> = cands
+        .iter()
+        .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !names.contains(&"bom.par2".to_string())
+            && !names.contains(&"plain.par2".to_string())
+            && !names.contains(&"edge.par2".to_string()),
+        "a volume within the sniff window is this directory's own parity, \
+         prefix or not - offering it to the sliding scan makes one file \
+         both the repair's recovery data and its donor: {names:?}"
+    );
+    assert!(
+        names.contains(&"past.par2".to_string()),
+        "past the window the sniff denies nothing, so the name cannot be \
+         what decides - this is the control against re-reading the \
+         extension as proof (M4-52): {names:?}"
+    );
+    assert!(
+        names.contains(&"9f3a1c40b2.par2".to_string()),
+        "M4-52's own composition: a payload wearing the extension and \
+         carrying no magic is still a donor: {names:?}"
+    );
 }

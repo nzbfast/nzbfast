@@ -27,7 +27,7 @@ use crate::repair::{
     SideCancel, VolumeOpen, fetch_volume_articles_with, volume_prealloc_cap, volume_reqs,
 };
 use crate::*;
-use nzbkit::disk::sanitize_filename;
+use nzbkit::disk::{join_out_name, sanitize_out_name};
 use std::path::Path;
 use tracing::{info, warn};
 
@@ -112,10 +112,10 @@ pub(super) async fn refetch_dropped_volumes(
         // Leaving the claim would only make the next hook fetch the
         // same articles from the same servers again.
         extractor.note_dropped_refetched(d.slot);
-        let fetched = out_dir.join(sanitize_filename(&d.posted));
+        let fetched = join_out_name(out_dir, &sanitize_out_name(&d.posted));
         let own = extractor
             .slot_path(d.slot)
-            .unwrap_or_else(|| out_dir.join(sanitize_filename(&d.current)));
+            .unwrap_or_else(|| join_out_name(out_dir, &sanitize_out_name(&d.current)));
         match install_for(short, paths.contains(&fetched), own != fetched) {
             Install::Absent => warn!(
                 target: "par2",

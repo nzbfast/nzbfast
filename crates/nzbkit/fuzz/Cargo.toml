@@ -57,6 +57,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "nzb_semantic"
+path = "fuzz_targets/nzb_semantic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "nzblnk_parse"
 path = "fuzz_targets/nzblnk_parse.rs"
 test = false

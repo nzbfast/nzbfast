@@ -296,12 +296,10 @@ mod tests {
     use super::*;
     use crate::serve::testutil::test_daemon;
 
-    fn tmp(tag: &str) -> std::path::PathBuf {
+    fn tmp(tag: &str) -> crate::testscratch::ScratchDir {
         let d =
             std::env::temp_dir().join(format!("nzbfast-insurance-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+        crate::testscratch::ScratchDir::attach(&d)
     }
 
     /// A queued row shaped like the enqueue stamp would leave it.

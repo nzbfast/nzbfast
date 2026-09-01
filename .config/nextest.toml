@@ -489,12 +489,45 @@ retries = 0
 # conn_tuner is deliberately NOT here: it is the one elapsed-time suite
 # that never carried --test-threads=1, so giving it a group now would
 # change its behaviour rather than preserve it.
+# e2e IS NO LONGER ONE OF THEM, since 31 Aug 2026, and the paragraph
+# above is why it ever was: its `--test-threads=1` was MIGRATED here to
+# preserve behaviour, never derived from a property of the suite. That
+# was true of 108 runnable tests and is now applied to 439.
+#
+# MEASURED on one box, one binary, clean TMPDIR per arm: serial 1105 s
+# against 179 s at `--test-threads=16`, and 220 of 224 tests pass in
+# both. The four-test gap is the whole finding, and only TWO of those
+# are the class: `e2e_qprog`'s shipped-threshold tests, whose
+# assertions are about what the daemon does inside a 69 s demotion
+# window. The other two were stale-tree artifacts of that binary.
+#
+# THEY ARE NOT CPU-STARVED, which is the thing to know before narrowing
+# this further. `e2e_qprog` run ALONE at 10 threads is 153 s wall for
+# 26.5 s user and 22.3 s sys - 97% idle - and TWO of its ten still
+# fail. So it is not thread pressure: ten concurrent daemons perturb
+# what the eleventh measures, and a smaller `max-threads` would only
+# make that less likely rather than false. `threads-required` is the
+# primitive that says it properly - such a test takes the whole budget
+# and runs with nothing beside it, which is the condition its
+# assertions were written under.
+#
+# Scoped by the NAME the module gives the class rather than by a list
+# of two, because `queue_progress_at_shipped_thresholds` is the same
+# kind of test and passing once under contention is luck rather than a
+# property - `e2e_qprog/mod.rs`'s own header names five regression
+# tests pinning the shipped numbers. The cost of that caution is one
+# test's wall (~151 s) on a suite this change takes from ~24 minutes to
+# roughly 8.
+#
+# Do NOT "fix" a red here by shortening the thresholds: those five are
+# the only tests anywhere that pin the SHIPPED values, and seven other
+# sites in the tree already shorten them with NZBFAST_DEFER_WARMUP_SECS.
+# The full measurement, and the two options rejected (a smaller group,
+# and moving qprog to its own binary), are in
+# research/E2E-SERIALIZATION-COST-2026-08-31.md.
 [[profile.default.overrides]]
-filter = 'package(nzbfast) and binary(e2e)'
-test-group = 'e2e-serial'
-
-[test-groups.e2e-serial]
-max-threads = 1
+filter = 'package(nzbfast) and binary(e2e) and test(/_at_shipped_thresholds$/)'
+threads-required = 'num-test-threads'
 
 [[profile.default.overrides]]
 filter = 'package(nzbfast) and binary(index_size_cap)'
@@ -793,3 +826,44 @@ test-group = 'daemon-spawners'
 
 [test-groups.daemon-spawners]
 max-threads = 6
+
+# The pool rigs (TODO claim `pool-rigs-run-in-no-job`, 31 Aug 2026).
+# 29 `#[ignore]`d wall-clock rigs under crates/nzbkit/src/pool/ ran in
+# NO CI job at all until this - the population turned out to be 26 on a
+# fresh count, not 29; `research/IGNORED-POOL-RIGS-RED-2026-08-31.md`'s
+# figure carried the same over-broad grep this file's own header warns
+# about elsewhere (it counted two doc-comment mentions of "`#[ignore]`d"
+# as attributes). `cargo test -p nzbkit --lib pool:: -- --list --ignored`
+# and `cargo nextest list ... --run-ignored ignored-only` both agree at
+# 26.
+#
+# More than half of these carry `#[ignore = "...flaky under suite load,
+# run with --ignored"]`, and it was not an idle warning: two of the 26
+# (`safety_ttfb_hedge_kills_nothing_on_a_jittery_link`,
+# `the_taper_costs_nothing_when_the_client_is_the_bottleneck`) FAILED once
+# each during a census that ran all 26 back to back on a box also
+# compiling two other things, and PASSED three-for-three each in
+# isolation immediately after. So this group exists for the same reason
+# `daemon-serial` above does - serialization that lives in
+# config cannot be forgotten at a call site - except here it also has to
+# hold against a wedge that has already been demonstrated, not merely
+# feared.
+#
+# Scoped to the 26 test NAMES, not to the four modules they live in
+# (`fault_rigs`, `rig_tests`, `tail_rigs`, `queue_tests`), because those
+# modules also carry the ordinary, fast, currently-parallel unit tests
+# that the main documented CI sweep already runs on every push - a
+# module-wide group would silently serialize all of those too. All 26
+# are named (not only the 21 actually wired into nightly.yml below):
+# five are excluded from that job pending a product decision (see the
+# nightly.yml comment beside them), and a test that is unsafe to run
+# concurrently with itself does not become safe by being temporarily
+# unwired.
+[[profile.default.overrides]]
+filter = '''
+package(nzbkit) and binary(nzbkit) and test(/^pool::(fault_rigs::(fight_flap_clamp_still_reaches_missing_verdicts|fight_recycle_slow_must_not_churn_the_flap_keeper|fight_slope_plus_adaptive_must_not_double_punish|gauntlet_four_faults_three_config_tiers)|queue_tests::queue_control_cancel_cost_at_field_scale|rig_tests::(payout_adaptive_timeout_cuts_dead_air_stalls|payout_adaptive_timeout_survives_cgnat_evictions|payout_brownout_recovery_across_config_tiers|payout_channel_depth_smooths_a_stalling_write_side|payout_flap_breaker_collapses_ip_cap_churn|payout_flap_cap_keepers_hold_the_caps_worth|payout_hedge_rescues_stalls_in_under_a_second_not_eight|payout_hot_spare_hides_reconnect_latency|payout_hot_spare_skips_the_slow_start_trickle|payout_multiwan_fanout_rescues_the_frozen_wan|payout_rain_fade_drains_to_the_healthy_wan|payout_recycle_slope_probes_an_asymmetric_multiwan|payout_slope_recycle_frees_a_degraded_session|payout_ttfb_hedge_beats_the_budget_on_dead_air|payout_ttfb_hedge_still_pays_when_dials_cost|safety_adaptive_timeout_kills_nothing_on_a_jittery_link|safety_shipped_defaults_survive_starlink_handovers|safety_ttfb_hedge_kills_nothing_on_a_jittery_link)|tail_rigs::(the_queue_dry_tail_is_the_dial_not_the_job|the_taper_costs_nothing_when_the_client_is_the_bottleneck|the_taper_shortens_the_drain_without_paying_wall_for_it))$/)
+'''
+test-group = 'pool-rigs-serial'
+
+[test-groups.pool-rigs-serial]
+max-threads = 1

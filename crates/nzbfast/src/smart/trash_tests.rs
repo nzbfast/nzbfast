@@ -12,7 +12,7 @@
 /// never claim `Trashed`.
 #[test]
 fn a_removal_reports_what_it_actually_did() {
-    let dir = std::env::temp_dir().join(format!("nzbfast-removed-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-removed-{}", probe_tag()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -37,7 +37,7 @@ fn a_removal_reports_what_it_actually_did() {
     // directory has not landed in any Trash.
     #[cfg(target_os = "macos")]
     {
-        let never = dir.join("nzbfast-not-in-any-trash-9f3a.bin");
+        let never = dir.join(format!("nzbfast-not-in-any-trash-{}.bin", probe_tag()));
         std::fs::write(&never, b"x").unwrap();
         assert!(
             !super::landed_in_a_trash(&never, &super::trash_snapshot(&never)),
@@ -51,9 +51,10 @@ fn a_removal_reports_what_it_actually_did() {
         // last week then made the destroyed one read as restorable.
         if let Some(home) = std::env::var_os("HOME") {
             let root = std::path::PathBuf::from(home).join(".Trash");
-            let planted = root.join("nzbfast-stale-trash-probe-4b21.bin");
+            let stale = format!("nzbfast-stale-trash-probe-{}.bin", probe_tag());
+            let planted = root.join(&stale);
             if std::fs::create_dir_all(&root).is_ok() && std::fs::write(&planted, b"old").is_ok() {
-                let target = dir.join("nzbfast-stale-trash-probe-4b21.bin");
+                let target = dir.join(&stale);
                 let before = super::trash_snapshot(&target);
                 assert!(
                     !super::landed_in_a_trash(&target, &before),
@@ -72,6 +73,58 @@ fn a_removal_reports_what_it_actually_did() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 use super::*;
+
+/// A probe name no other run on this machine can mint.
+///
+/// `$HOME/.Trash` is ONE directory for the whole box, and every worktree
+/// building this tree at once asserts into it. `still_recoverable` reads a
+/// name there and then DELETES what it found, so a name two runs can both
+/// produce is two failures waiting. One run's cleanup removes the other's
+/// evidence between its trash call and its assertion - and, worse, a probe
+/// left behind by a run that died mid-test lets a LATER run's "recoverable"
+/// assertion pass without that run's delete having reached the Trash at
+/// all. A silent pass is the exact defect this whole file exists to catch,
+/// so it is worse here than a red.
+///
+/// Both directions were reproduced deliberately on 31 Aug 2026 by planting
+/// and by purging a colliding name under a live run's PID: the first fails
+/// "opt-out still used the Trash", the second "not recoverable".
+///
+/// `std::process::id()` does not give uniqueness. macOS recycles PIDs
+/// freely under this much process churn, and a counter beside it does not
+/// rescue it either - two processes run these same tests in the same order,
+/// so their counters agree. The entropy therefore comes from `RandomState`,
+/// the stdlib's own OS-seeded hasher state, which is the answer
+/// `nzbkit::disk::identity`'s case probe reached for and for the same
+/// reason: no `rand` dependency and no hand-rolled seed. The PID stays in
+/// front of it only so a stray probe can be traced back to a run.
+fn probe_tag() -> String {
+    use std::hash::BuildHasher as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let h = std::collections::hash_map::RandomState::new().hash_one(seq);
+    format!("{}-{h:016x}", std::process::id())
+}
+
+/// The property above, pinned: a probe name is not a function of the PID.
+///
+/// Nothing a single process can observe covers the cross-process half - two
+/// live processes never share a PID, which is why eight-way concurrency did
+/// not reproduce the original failure. What this refuses is the edit that
+/// brings the defect back: a tag simplified to the PID alone answers the
+/// same string twice.
+#[test]
+fn a_probe_name_is_not_a_function_of_the_pid() {
+    let (a, b) = (probe_tag(), probe_tag());
+    assert_ne!(a, b, "two probes in one process must not share a name");
+    let pid = std::process::id().to_string();
+    assert!(a.starts_with(&pid), "the run must still be traceable: {a}");
+    assert!(
+        a.len() > pid.len() + 1,
+        "the PID alone is not a name another run cannot mint: {a}"
+    );
+}
 
 /// Did a file this test just deleted actually reach the Trash, under
 /// the name it had? Purges it when it did, so the suite never leaves
@@ -155,14 +208,14 @@ fn a_junk_delete_is_recoverable_and_the_opt_out_is_not() {
     // This one really does reach the Trash, so it must not overlap a
     // test that latches the Trash off underneath it.
     let _serial = one_trash_test_at_a_time();
-    let dir = std::env::temp_dir().join(format!("nzbfast-trash-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-trash-{}", probe_tag()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
     // Recoverable: the file leaves the download folder but is still
     // there to be put back. Asserting only that it is GONE would pass
     // just as well for a permanent delete, which is the whole point.
-    let name = format!("nzbfast-trash-probe-{}.par2", std::process::id());
+    let name = format!("nzbfast-trash-probe-{}.par2", probe_tag());
     let f = dir.join(&name);
     std::fs::write(&f, b"junk").unwrap();
     remove_user_file(&f, true).expect("trash delete");
@@ -178,7 +231,7 @@ fn a_junk_delete_is_recoverable_and_the_opt_out_is_not() {
     }
 
     // Opted out: a real delete, not a silent Trash.
-    let name2 = format!("nzbfast-notrash-probe-{}.par2", std::process::id());
+    let name2 = format!("nzbfast-notrash-probe-{}.par2", probe_tag());
     let g = dir.join(&name2);
     std::fs::write(&g, b"junk").unwrap();
     remove_user_file(&g, false).unwrap();
@@ -198,10 +251,10 @@ fn a_junk_delete_is_recoverable_and_the_opt_out_is_not() {
 #[test]
 fn a_job_dir_delete_is_recoverable_and_the_opt_out_is_not() {
     let _serial = one_trash_test_at_a_time();
-    let root = std::env::temp_dir().join(format!("nzbfast-trashdir-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("nzbfast-trashdir-{}", probe_tag()));
     let _ = std::fs::remove_dir_all(&root);
 
-    let name = format!("nzbfast-trashdir-probe-{}", std::process::id());
+    let name = format!("nzbfast-trashdir-probe-{}", probe_tag());
     let d = root.join(&name);
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join("payload.mkv"), b"x").unwrap();
@@ -220,7 +273,7 @@ fn a_job_dir_delete_is_recoverable_and_the_opt_out_is_not() {
         let _ = std::fs::remove_dir_all(std::path::Path::new(&home).join(".Trash").join(&name));
     }
 
-    let name2 = format!("nzbfast-notrashdir-probe-{}", std::process::id());
+    let name2 = format!("nzbfast-notrashdir-probe-{}", probe_tag());
     let g = root.join(&name2);
     std::fs::create_dir_all(&g).unwrap();
     std::fs::write(g.join("payload.mkv"), b"x").unwrap();
@@ -253,12 +306,12 @@ fn a_job_dir_delete_is_recoverable_and_the_opt_out_is_not() {
 #[test]
 fn the_volume_trash_takes_over_when_finder_will_not() {
     let _serial = one_trash_test_at_a_time();
-    let dir = std::env::temp_dir().join(format!("nzbfast-nsfm-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-nsfm-{}", probe_tag()));
     std::fs::create_dir_all(&dir).unwrap();
 
     // Directly first: the route itself has to work before the
     // fall-through to it means anything.
-    let name = format!("nzbfast-nsfm-probe-{}.par2", std::process::id());
+    let name = format!("nzbfast-nsfm-probe-{}.par2", probe_tag());
     let f = dir.join(&name);
     std::fs::write(&f, b"junk").unwrap();
     trash_via_file_manager(&f).expect("NSFileManager must bin a file with no Finder");
@@ -271,7 +324,7 @@ fn the_volume_trash_takes_over_when_finder_will_not() {
 
     // Then through the real entry point with Finder latched out, which
     // is the state a -10010 or a headless timeout leaves behind.
-    let name2 = format!("nzbfast-nsfm-latched-{}.par2", std::process::id());
+    let name2 = format!("nzbfast-nsfm-latched-{}.par2", probe_tag());
     let g = dir.join(&name2);
     std::fs::write(&g, b"junk").unwrap();
     let was_out = finder_is_out();
@@ -309,7 +362,7 @@ fn the_volume_trash_takes_over_when_finder_will_not() {
 #[test]
 fn a_temp_path_is_never_worth_the_trash() {
     let tmp = std::env::temp_dir();
-    let scratch = tmp.join(format!("nzbfast-tempgate-{}", std::process::id()));
+    let scratch = tmp.join(format!("nzbfast-tempgate-{}", probe_tag()));
     std::fs::create_dir_all(&scratch).unwrap();
     let f = scratch.join("spent.par2");
     std::fs::write(&f, b"x").unwrap();

@@ -384,7 +384,6 @@ async fn an_arriving_release_is_grabbed_without_waiting_for_the_pass() {
          this test can no longer tell the two paths apart",
         started.elapsed()
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The completeness gate. A post seen seconds after it starts going up is
@@ -443,7 +442,6 @@ async fn a_post_still_going_up_is_not_grabbed_until_it_is_complete() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The design constraint: the instant path does not grab anything - it
@@ -493,7 +491,6 @@ async fn the_quality_ladder_still_applies_on_the_instant_path() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §74's OTHER ingest leg. The tip watcher is not the only thing that

@@ -123,5 +123,4 @@ async fn a_download_shorter_than_one_tick_still_gets_its_chip() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

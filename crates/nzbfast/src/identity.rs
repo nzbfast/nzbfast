@@ -12,7 +12,15 @@
 //! - **PAR2 hash16k repost table** (`Index::par_hash_lookup`): the
 //!   sidecar fingerprints the OUTER volumes, so it identifies a repost
 //!   of something we named before even when the archive headers are
-//!   encrypted. The one path here that survives `-hp`.
+//!   encrypted. The one path here that survives `-hp`. It is also the
+//!   only rung with MEMORY, so it is the only one whose mistakes
+//!   outlive the job that made them - which is why what it stores
+//!   beside a name is the EVIDENCE that proved it, why a later proof
+//!   can correct a name a weak lane taught, and why a fingerprint two
+//!   equally-evidenced jobs called different things is refused rather
+//!   than answered (`par_hash_remember`, W7-01..03). hash16k is the
+//!   identical-head twin family, so declining is not caution, it is
+//!   the same rule the in-job tiers follow.
 //! - **Matroska Title** (`nzbkit::mkv`): the muxer's own name for the
 //!   file, which a reposter who scrambled the subject line usually
 //!   never reached inside the container to clear.
@@ -283,8 +291,14 @@ pub fn container_title(dir: &std::path::Path) -> Option<String> {
     nzbkit::mkv::probe(&video)?.title
 }
 
+/// `pub(crate)` for ONE item: `par2_index_hashed`, the PAR2 index
+/// fixture builder, which `serve::naming::repost_tests` needs to
+/// construct two sets that share a chosen member fingerprint. A second
+/// packet writer in that file is how two fixture builders start
+/// disagreeing about the format they both claim to emit; everything
+/// else in here stays private.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::srrdb::SrrHit;
 
@@ -473,6 +487,22 @@ mod tests {
     /// which is how these fixtures choose their sort order.
     #[cfg(feature = "indexer")]
     fn par2_index(set: u8, members: &[&str], pad: usize) -> Vec<u8> {
+        let m: Vec<(&str, u8)> = members
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (*n, set ^ (i as u8) ^ 0x80))
+            .collect();
+        par2_index_hashed(set, &m, pad)
+    }
+
+    /// The same builder with each member's `md5_16k` fill byte chosen by
+    /// the caller. Two sets that must share EXACTLY ONE fingerprint -
+    /// the W7-14 shape, one collision and no disagreement - cannot be
+    /// spelled by picking `set` values: the derived byte is
+    /// `set ^ i ^ 0x80`, so any overlap between two runs of consecutive
+    /// `i` comes in twos.
+    #[cfg(feature = "indexer")]
+    pub(crate) fn par2_index_hashed(set: u8, members: &[(&str, u8)], pad: usize) -> Vec<u8> {
         use md5::{Digest, Md5};
         let pkt = |ptype: &[u8; 16], body: &[u8]| -> Vec<u8> {
             let mut p = Vec::new();
@@ -494,11 +524,11 @@ mod tests {
             main.extend_from_slice(&fid(i));
         }
         let mut out = pkt(b"PAR 2.0\0Main\0\0\0\0", &main);
-        for (i, name) in members.iter().enumerate() {
+        for (i, (name, h16k)) in members.iter().enumerate() {
             let mut d = Vec::new();
             d.extend_from_slice(&fid(i));
             d.extend_from_slice(&[set ^ (i as u8) ^ 0x40; 16]); // whole-file md5
-            d.extend_from_slice(&[set ^ (i as u8) ^ 0x80; 16]); // md5_16k
+            d.extend_from_slice(&[*h16k; 16]); // md5_16k
             d.extend_from_slice(&(64u64 << 10).to_le_bytes());
             d.extend_from_slice(name.as_bytes());
             while !d.len().is_multiple_of(4) {

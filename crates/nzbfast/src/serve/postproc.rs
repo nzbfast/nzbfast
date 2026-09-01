@@ -545,7 +545,7 @@ async fn settle_manifest_and_deferred_par2_sweep(
     // into a shared season folder.
     //
     // What this does NOT close, said rather than half-fixed: the
-    // SNIFFED-volume sweep in `get/settle.rs` deletes spent volumes
+    // SNIFFED-volume sweep in `get/settle/noset.rs` deletes spent volumes
     // during the download, long before either of these. It cannot be
     // deferred to here - settle does not know the final directory and its
     // sniff is directory-wide - and threading the manifest flag down to
@@ -1237,6 +1237,21 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let d = crate::serve::testutil::test_daemon(&dir);
         f(&d);
+        // A submission `f` made to a non-inline `PostprocLane` (`d.clone()`
+        // held by a `tokio::spawn`ed supervisor) can still be writing
+        // `spool/queue.json` after `f` returns - `submit` only awaits its
+        // supervisor when the lane is `inline`. Wait for the backlog to
+        // drain before the tree comes down, or a still-running lane task
+        // recreates it after the removal below
+        // (`research/TMPDIR-SCRATCH-LEAK-2026-08-31.md` section 4).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while d.postproc_backlog.load(Ordering::Relaxed) != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a lane submission from this fixture never drained its backlog"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         drop(d);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1371,6 +1386,42 @@ mod tests {
             d.clear_postproc_hold();
             assert!(d.queue_hold.lock_ok().is_none());
         });
+    }
+
+    /// X5-03 section 9c: the insurance arm and `finalize_completed_gen`
+    /// are only ever correct TOGETHER, and in ONE order. A banking run
+    /// re-queues the row and returns from the insurance arm before
+    /// finalize retires it; a promotion run has nothing to re-queue and
+    /// falls through to finalize. Moved below finalize, both break
+    /// silently - a banked payload's journal would be unlinked there and
+    /// the promotion would report the whole bank as missing segments,
+    /// the exact 25 Aug 2026 `no_extract` A/B failure. Nothing else
+    /// checks the ordering, and a runtime test would have to lose a race
+    /// to notice a hoist - source-scanning, like
+    /// `every_queue_hold_set_edge_goes_through_one_helper` in
+    /// `tasks_tests.rs`.
+    #[test]
+    fn the_insurance_arm_returns_before_finalize_ever_runs() {
+        let src = include_str!("postproc.rs");
+        let body = src
+            .split_once("pub(super) async fn run_tail(")
+            .expect("run_tail exists")
+            .1
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("run_tail is the last item before the test module")
+            .0;
+        let insurance = body
+            .find("if insurance && !job2.lock_ok().tombstone {")
+            .expect("the insurance arm exists in run_tail");
+        let finalize = body
+            .find("finalize_completed_gen(&d2, &job2, Some(gen0)).await;")
+            .expect("the finalize call exists in run_tail");
+        assert!(
+            insurance < finalize,
+            "the insurance arm must sit ABOVE finalize_completed_gen - \
+             moved below it, a banked payload's journal is unlinked \
+             before the re-queue that was meant to keep it"
+        );
     }
 
     /// A ticket for a job that is already whole on disk: the download

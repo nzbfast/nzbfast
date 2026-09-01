@@ -154,6 +154,36 @@ pub(super) fn parse_cat_dests(v: &str) -> Result<Vec<(String, PathBuf)>, String>
     Ok(out)
 }
 
+/// TODO 317: parse a bare category NAME list ("tv, movies"; comma or
+/// semicolon separated; empty = none) into the canonical, deduplicated,
+/// order-preserving form.
+///
+/// Names are sanitized exactly as [`parse_cat_dests`] sanitizes its
+/// left-hand side, and for the same reason spelled there: the enqueue
+/// path sanitizes the category before it becomes a folder, so a rule
+/// written any other way would silently match nothing. Total rather
+/// than fallible - a name that sanitizes away is dropped, since the
+/// only thing a refusal could protect here is a typo, and refusing the
+/// whole list would take the categories that ARE usable down with it.
+pub(super) fn parse_cat_names(v: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for item in v.split([',', ';']) {
+        let item = item.trim();
+        // BEFORE sanitizing, not after: `sanitize_filename` answers an
+        // empty string with the literal `unnamed`, so a trailing comma
+        // in "tv, movies," would otherwise mint a rule for a category
+        // called `unnamed` that the user never typed.
+        if item.is_empty() {
+            continue;
+        }
+        let name = nzbkit::disk::sanitize_filename(item);
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 /// Inverse of [`parse_cat_dests`] - the canonical echo/persist form.
 pub(super) fn fmt_cat_dests(list: &[(String, PathBuf)]) -> String {
     list.iter()

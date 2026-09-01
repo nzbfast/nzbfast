@@ -197,6 +197,56 @@ fn over(number: u64, subject: &str, msgid: &str, bytes: u64) -> OverEntry {
     }
 }
 
+/// How long [`settle_index`] will wait for the daemon's startup index
+/// open to finish. See `integration/nzblnk.rs`'s copy of this constant
+/// for the measurement it is based on (60 s is an 11x margin over the
+/// longest settle seen under 8x concurrent load).
+const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Block until the daemon's index will answer a read.
+///
+/// Every test below pre-seeds its database with `Index::open` before the
+/// daemon starts, then reads it back over `mode=wall2` / `index_browse` /
+/// `index_get` moments after the daemon's own port is ready. All three
+/// go through `Daemon::index_read_checked`, which before the daemon's
+/// first read-write open falls back to the write mutex on a BOUNDED 2 s
+/// wait and reports `{"busy":true,"error":"the index is busy - try again
+/// in a moment"}` rather than parking an HTTP worker on it (TODO 143's
+/// second half, TODO 166). Under box load that open is still running
+/// when this file's first read arrives, and none of the assertions below
+/// admit that answer.
+///
+/// Mirrors `integration/nzblnk.rs::settle_index` exactly - same seam,
+/// same probe mode, same budget - and is duplicated rather than shared
+/// because `http_get` itself is already duplicated per test module in
+/// this crate. `key` is the `&apikey=...` this daemon needs, or empty
+/// where it has none. An auth refusal PANICS rather than returning: a
+/// probe the daemon answers "API Key Incorrect" carries no `busy` flag,
+/// so it would exit the loop at once and disable the settle in silence.
+fn settle_index(port: u16, key: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        let last = http_get(
+            port,
+            &format!("/api?mode=index_search&q=nzbfastsettleprobe{key}&output=json"),
+        )
+        .1;
+        assert!(
+            !last.contains("API Key"),
+            "the settle probe was refused, so it was never settling anything:\n{last}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_default();
+        if v["busy"] != true {
+            return;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index never settled in {SETTLE_BUDGET:?}:\n{last}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn wall_groups_dedupes_and_serves() {
     let dir = std::env::temp_dir().join(format!("nzbfast-wall-{}", std::process::id()));
@@ -304,6 +354,12 @@ async fn wall_groups_dedupes_and_serves() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
+        // Before anything is asserted: rung 1 of the index reads below
+        // is refused as busy while the daemon's own startup index open
+        // still holds the write mutex, and this test demands the real
+        // cards.
+        settle_index(port, "&apikey=sekrit");
+
         // Cards come from wall2 now (the legacy mode=wall was removed in
         // 3b). No enrichment in this test, so read unmatched cards
         // (matched=0). The seed's tiny sizes score as junk, so the curated
@@ -930,6 +986,10 @@ async fn wall_arrivals_and_expanded_rows_answer_the_page_honestly() {
             assert_eq!(code, 200, "{body}");
             serde_json::from_str(&body).unwrap_or_else(|e| panic!("{q}: {e}\n{body}"))
         };
+        // Before anything is asserted: the daemon's own startup index
+        // open may still hold the write mutex, and every read below
+        // (including wall_tip's flattened one) needs the settled index.
+        settle_index(port, "&apikey=sekrit");
 
         // 26 Jul finding 28. A wall that opened on an empty index holds
         // cursor 0, and 0 is a REAL cursor - "I have seen nothing yet" -
@@ -1079,6 +1139,10 @@ async fn a_grab_names_the_job_from_the_index_however_deep_the_row_is() {
             assert_eq!(code, 200, "{body}");
             serde_json::from_str(&body).unwrap_or_else(|e| panic!("{q}: {e}\n{body}"))
         };
+        // Before anything is asserted: the daemon's own startup index
+        // open may still hold the write mutex, and this test demands
+        // the real rows on the first search page.
+        settle_index(port, "&apikey=sekrit");
         // Ids the way the wall gets them: off a search page.
         let id_of = |stem: &str| -> i64 {
             let term = stem.split('.').next().unwrap();
@@ -1248,6 +1312,10 @@ async fn session_siblings_surface_on_the_sheet_and_grab() {
             assert_eq!(code, 200, "{body}");
             serde_json::from_str(&body).unwrap_or_else(|e| panic!("{q}: {e}\n{body}"))
         };
+        // Before anything is asserted: the daemon's own startup index
+        // open may still hold the write mutex, and this test demands
+        // the seeded show on the first search page.
+        settle_index(port, "&apikey=sekrit");
         // The named episode's card key, the way the sheet gets it.
         let page = json("/api?mode=index_browse&all=1&q=Watched&apikey=sekrit");
         let row = page["results"]
@@ -1387,6 +1455,12 @@ async fn a_wall_poll_seeds_its_page_without_disturbing_enriched_rows() {
 
     let db2 = db.clone();
     let keys = tokio::task::spawn_blocking(move || {
+        // Before anything is asserted: the daemon's own startup index
+        // open may still hold the write mutex, and `poll` below asserts
+        // on its first call rather than retrying - it has no chance to
+        // recover from a busy answer here.
+        settle_index(port, "&apikey=sekrit");
+
         let poll = || {
             let (code, body) = http_get(port, "/api?mode=wall2&matched=0&all=1&apikey=sekrit");
             assert_eq!(code, 200, "{body}");
@@ -1536,6 +1610,11 @@ async fn wall_art_and_refresh_seed_the_row_they_act_on() {
     let port = d.port;
 
     let (movie, tv) = tokio::task::spawn_blocking(move || {
+        // Before anything is asserted: the daemon's own startup index
+        // open may still hold the write mutex, and this test demands
+        // the real rows on the first index_browse page.
+        settle_index(port, "&apikey=sekrit");
+
         // Release rows, not cards: index_browse hands back each row's
         // wall-card key and writes nothing to `titles`.
         let (code, body) = http_get(port, "/api?mode=index_browse&all=1&apikey=sekrit");

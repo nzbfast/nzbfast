@@ -42,6 +42,13 @@ mod scratch;
 #[path = "../harness/mod.rs"]
 mod harness;
 
+// The forward guard on the repeating-payload trap, reached from
+// `harness::DaemonLog`'s own Drop - so every daemon this binary starts
+// is read whether or not the module looks at its log. Same `#[path]`
+// and the same reason as `harness` above.
+#[path = "../adoptguard/mod.rs"]
+mod adoptguard;
+
 // These two are real product sources compiled straight in via #[path] -
 // the source is NOT edited, only included - so the tests exercise the
 // shipped code rather than a copy. Hoisted to the root because the

@@ -235,7 +235,6 @@ async fn a_slow_jobs_verdict_reaches_history_and_survives_a_restart() {
     .await
     .unwrap();
     drop(b);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// ...and the other half of the rule: a history record written before
@@ -336,7 +335,6 @@ async fn a_history_record_from_before_the_field_reads_as_absent() {
     .unwrap();
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 312 items 1+3, closing the coverage hole they shipped with:
@@ -467,7 +465,6 @@ async fn the_fleet_verdict_is_produced_end_to_end_on_a_running_daemon() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `conntune::SCHEMA`, which the test binary cannot name directly: these
@@ -639,5 +636,4 @@ async fn the_knee_verdict_is_produced_end_to_end_on_a_running_daemon() {
 
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }

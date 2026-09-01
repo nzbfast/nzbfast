@@ -30,9 +30,28 @@ pub(super) fn nofile() -> io::Error {
 /// Linux container/NAS build writing to a CIFS/SMB or exFAT share is
 /// case-insensitive, and that is precisely the deployment where losing an
 /// output file hurts most.
+///
+/// The fold itself is `disk::case_fold_key` and NOT `str::to_lowercase`
+/// (M4-44, 31 Aug 2026). Lowercasing is weaker than what the volume does:
+/// measured against APFS's own partition on the dev box, it misses 103 of
+/// the 104 characters that fold into more than one - the sharp s, the fi
+/// and dz ligatures, the Greek iota-subscript forms - so `Straße.mkv` and
+/// `STRASSE.MKV` were two keys and ONE inode, both claims succeeded, and
+/// the second `FileWriter::create` truncated the first. Read that
+/// function's header before touching this: it also states what the fold
+/// still does NOT cover (normalization) and why one caller in the tree
+/// must not use it.
+///
+/// PRICED in the direction that matters, which is the whole reason the
+/// answer is not the same at all five identity-key sites. An OVER-fold
+/// here costs a `{slot:03}-` prefix on an output that did not need one:
+/// visible, bounded, both files land. An UNDER-fold costs a payload,
+/// silently, at rc=0. That asymmetry is what makes folding harder right
+/// here and WRONG in `nzbfast::rarfix`, whose guard resolves a collision
+/// by DROPPING an entry.
 pub(super) fn name_collision_key(fold: bool, name: &str) -> String {
     if fold {
-        name.to_lowercase()
+        crate::disk::case_fold_key(name)
     } else {
         name.to_string()
     }

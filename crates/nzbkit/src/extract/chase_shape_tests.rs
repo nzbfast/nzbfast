@@ -800,18 +800,25 @@ pub(in crate::extract) fn chase_decodes_a_volume_before_its_tail_arrives() {
             .unwrap();
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let want = held as u64 / 2;
+    let mut seen = ex.chase_watermark_bytes();
+    let mut deadline = std::time::Instant::now() + NO_PROGRESS;
     while ex.chase_watermark_bytes() < want && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(2));
+        let w = ex.chase_watermark_bytes();
+        if w > seen {
+            seen = w;
+            deadline = std::time::Instant::now() + NO_PROGRESS;
+        }
     }
     let watermark = ex.chase_watermark_bytes();
     assert!(
         watermark >= want,
         "the engine consumed {watermark} B of the {held} B that had arrived \
-         of volume 0 ({} B): it is waiting for the volume's tail instead of \
-         decoding behind the frontier",
-        vols[0].len()
+         of volume 0 ({} B) with no progress for {}s: it is waiting for the \
+         volume's tail instead of decoding behind the frontier",
+        vols[0].len(),
+        NO_PROGRESS.as_secs()
     );
 
     // And it still finishes byte-exact once the rest lands: the walk
@@ -967,18 +974,25 @@ fn a_v4_chase_decodes_a_volume_before_its_tail_arrives() {
         ex.write(0, &names[0], total, s as u64, &vols[0][s..e])
             .unwrap();
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let want = held as u64 / 2;
+    let mut seen = ex.chase_watermark_bytes();
+    let mut deadline = std::time::Instant::now() + NO_PROGRESS;
     while ex.chase_watermark_bytes() < want && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(2));
+        let w = ex.chase_watermark_bytes();
+        if w > seen {
+            seen = w;
+            deadline = std::time::Instant::now() + NO_PROGRESS;
+        }
     }
     let watermark = ex.chase_watermark_bytes();
     assert!(
         watermark >= want,
         "the v4 engine consumed {watermark} B of the {held} B that had arrived \
-         of volume 0 ({} B): it is waiting for the volume's tail instead of \
-         decoding behind the frontier",
-        vols[0].len()
+         of volume 0 ({} B) with no progress for {}s: it is waiting for the \
+         volume's tail instead of decoding behind the frontier",
+        vols[0].len(),
+        NO_PROGRESS.as_secs()
     );
     ex.write(0, &names[0], total, held as u64, &vols[0][held..])
         .unwrap();

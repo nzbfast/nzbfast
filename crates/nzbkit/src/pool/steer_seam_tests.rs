@@ -62,6 +62,7 @@ fn work(id: &str) -> Work {
         prebyte_expiries: 0,
         soft_430: 0,
         recheck_430: 0,
+        recheck_at: 0,
         fenced: false,
         rearms: 0,
         ladder: false,
@@ -298,6 +299,258 @@ async fn a_bad_fill_body_keeps_the_spent_evidence_that_opened_its_tier() {
         rx.try_recv().is_err(),
         "the article was never declared lost"
     );
+}
+
+/// A peerless fleet must re-ask its own bad body.
+///
+/// The 31 Aug 2026 finding
+/// (`research/CORRUPT-BODY-NO-SECOND-ASK-2026-08-31.md`): the steer was
+/// the ONLY retry a corrupt body ever got, so with no eligible peer the
+/// article was terminal damage on the first bad copy, while a genuinely
+/// MISSING article was requeued and could still complete. On a
+/// single-server install that is every corrupt article there is.
+///
+/// The re-ask needs no routing rule of its own, which is what makes it
+/// small: the requeue folds the deliverer's group into `tried_fail`
+/// exactly as a peer steer does, and `next_work` already lets a server
+/// retake an article it failed when nobody else can have it - the
+/// pre-tier behaviour `Work::tried_fail` documents for a transport
+/// failure. So the same-server re-ask IS the transport-failure ladder,
+/// reached from the decode verdict.
+#[tokio::test]
+async fn a_peerless_fleet_re_asks_its_own_bad_body() {
+    let servers = vec![(server("solo", 0), PoolConfig::default())];
+    let id: Arc<str> = "<solo@x>".into();
+    let (sh, _) = Shared::new(fresh(&[&id]), &servers);
+    sh.workers_live.store(1, Ordering::Release);
+    sh.alive[0].store(1, Ordering::Relaxed);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let (tx, mut rx) = mpsc::channel(4);
+    let ctx = ctx_for(&servers, 0);
+    let budget0 = sh.reask_waste.load(Ordering::Acquire);
+    assert!(budget0 >= 1, "even a one-article run gets one re-ask");
+
+    let w = deliver(&sh, &servers, 0, &tx).await;
+    assert!(
+        matches!(
+            ctl.note_decoded(&id, DecodeReport::Bad { why: "pcrc32" }),
+            DecodeAck::Steered
+        ),
+        "the only server there is must be asked again rather than owning the damage"
+    );
+    assert_eq!(
+        sh.reask_waste.load(Ordering::Acquire),
+        budget0 - 1,
+        "the ask is charged while its outcome is unknown"
+    );
+    assert!(
+        !sh.done.lock_ok().contains(w.ord),
+        "un-claimed for the retry"
+    );
+
+    // The same server picks its own casualty back up.
+    sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
+    let again = next_work(&sh, ctx, &tx, Pipeline::payload(0))
+        .await
+        .expect("with nobody else to take it, the deliverer retakes its own casualty");
+    assert_eq!(&*again.id, &*id);
+    assert_eq!(
+        again.tried_fail & ctx.group_bits,
+        ctx.group_bits,
+        "the bad deliverer is still recorded, so a peer that appears is preferred"
+    );
+
+    // Second copy is clean: no damage, and the wasted-ask budget comes
+    // back because the ask was not wasted.
+    sh.register_inflight(&again, 0);
+    sh.deregister_inflight_done(&again);
+    let spent_ev = sh.spent_mask(&again.id);
+    assert!(sh.claim_done(&again.id, again.ord));
+    sh.stash_handed(&again, ctx, spent_ev);
+    assert!(matches!(
+        ctl.note_decoded(&id, DecodeReport::Clean { part: None }),
+        DecodeAck::Owned
+    ));
+    assert_eq!(
+        sh.reask_waste.load(Ordering::Acquire),
+        budget0,
+        "a re-ask that WORKED is not waste and must not shrink the budget"
+    );
+    assert_eq!(sh.pending.load(Ordering::Acquire), 0);
+    assert!(
+        rx.try_recv().is_err(),
+        "the article was never declared lost"
+    );
+}
+
+/// The second bad copy from the only server ends it, and keeps the
+/// unit: that is the ONLY thing that ever depletes the budget.
+///
+/// `crc_retried` is one decode-seam requeue per id ever, shared by both
+/// destinations, so this arm is reached by the per-id pass and not by
+/// the run budget - which is what keeps the same-server re-ask strictly
+/// additive to the shipped steer.
+#[tokio::test]
+async fn a_second_bad_copy_from_the_only_server_is_owned() {
+    let servers = vec![(server("solo", 0), PoolConfig::default())];
+    let id: Arc<str> = "<twice@x>".into();
+    let (sh, _) = Shared::new(fresh(&[&id]), &servers);
+    sh.workers_live.store(1, Ordering::Release);
+    sh.alive[0].store(1, Ordering::Relaxed);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let (tx, _rx) = mpsc::channel(4);
+    let ctx = ctx_for(&servers, 0);
+    let budget0 = sh.reask_waste.load(Ordering::Acquire);
+
+    deliver(&sh, &servers, 0, &tx).await;
+    assert!(matches!(
+        ctl.note_decoded(&id, DecodeReport::Bad { why: "pcrc32" }),
+        DecodeAck::Steered
+    ));
+    sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
+    let again = next_work(&sh, ctx, &tx, Pipeline::payload(0))
+        .await
+        .unwrap();
+    sh.register_inflight(&again, 0);
+    sh.deregister_inflight_done(&again);
+    let spent_ev = sh.spent_mask(&again.id);
+    assert!(sh.claim_done(&again.id, again.ord));
+    sh.stash_handed(&again, ctx, spent_ev);
+    assert!(
+        matches!(
+            ctl.note_decoded(&id, DecodeReport::Bad { why: "pcrc32" }),
+            DecodeAck::Owned
+        ),
+        "one ask per article: the second bad copy is damage, as it was before"
+    );
+    assert_eq!(
+        sh.reask_waste.load(Ordering::Acquire),
+        budget0 - 1,
+        "an ask that came back bad again is exactly what the budget counts"
+    );
+    assert_eq!(sh.pending.load(Ordering::Acquire), 0);
+}
+
+/// A part mismatch is never re-asked from the same server, and this
+/// carve-out is what makes the seam safe to leave on for a peerless
+/// fleet.
+///
+/// A mismatch is a disagreement about IDENTITY between the NZB's
+/// segment numbering and this backbone, not damage to a body - the body
+/// passed its own CRC. The same backbone answers the same way every
+/// time, and the `part_latch` stand-down that ends the doubled fetch
+/// needs a DIFFERENT group to agree with the first, which one server can
+/// never provide. Without this, a poster with synthesized segment
+/// numbers would cost a single-server install a second fetch of every
+/// article of the file.
+#[tokio::test]
+async fn a_part_mismatch_is_never_re_asked_from_the_same_server() {
+    let servers = vec![(server("solo", 0), PoolConfig::default())];
+    let id: Arc<str> = "<partmm@x>".into();
+    let mut reqs = fresh(&[&id]);
+    reqs[0].part = 7;
+    let (sh, _) = Shared::new(reqs, &servers);
+    sh.workers_live.store(1, Ordering::Release);
+    sh.alive[0].store(1, Ordering::Relaxed);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let (tx, _rx) = mpsc::channel(4);
+    let budget0 = sh.reask_waste.load(Ordering::Acquire);
+
+    deliver(&sh, &servers, 0, &tx).await;
+    assert!(
+        matches!(
+            ctl.note_decoded(&id, DecodeReport::Clean { part: Some(3) }),
+            DecodeAck::Owned
+        ),
+        "asking the same backbone again just re-states its own numbering"
+    );
+    assert_eq!(
+        sh.reask_waste.load(Ordering::Acquire),
+        budget0,
+        "and it must not spend the damage budget doing so"
+    );
+    assert_eq!(sh.pending.load(Ordering::Acquire), 0);
+}
+
+/// The budget stops a peerless corrupt storm, and stops nothing else.
+///
+/// Sized off the run's articles (an eighth, clamped to
+/// [`REASK_WASTE_CAP`]), so this nine-article run gets exactly one - and
+/// the tenth article of a spool that is damaged outright is owned
+/// without an ask, which is the doubled fetch TODO 114 chose the steer
+/// to avoid.
+#[tokio::test]
+async fn the_re_ask_budget_bounds_a_peerless_corrupt_storm() {
+    let servers = vec![(server("solo", 0), PoolConfig::default())];
+    let ids: Vec<String> = (0..9).map(|i| format!("<storm{i}@x>")).collect();
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let (sh, _) = Shared::new(fresh(&refs), &servers);
+    sh.workers_live.store(1, Ordering::Release);
+    sh.alive[0].store(1, Ordering::Relaxed);
+    let ctl = QueueControl::default();
+    ctl.attach(&sh);
+    let (tx, _rx) = mpsc::channel(32);
+    assert_eq!(
+        sh.reask_waste.load(Ordering::Acquire),
+        1,
+        "nine articles buy one wasted ask, not thirty-two"
+    );
+
+    let mut steered = 0;
+    for _ in 0..9 {
+        let w = deliver(&sh, &servers, 0, &tx).await;
+        if matches!(
+            ctl.note_decoded(&w.id, DecodeReport::Bad { why: "pcrc32" }),
+            DecodeAck::Steered
+        ) {
+            steered += 1;
+            // The retry is also bad: the ask is wasted and stays charged.
+            let ctx = ctx_for(&servers, 0);
+            sh.scan_futile[0].store(u64::MAX, Ordering::Relaxed);
+            let again = next_work(&sh, ctx, &tx, Pipeline::payload(0))
+                .await
+                .unwrap();
+            sh.register_inflight(&again, 0);
+            sh.deregister_inflight_done(&again);
+            let ev = sh.spent_mask(&again.id);
+            assert!(sh.claim_done(&again.id, again.ord));
+            sh.stash_handed(&again, ctx, ev);
+            assert!(matches!(
+                ctl.note_decoded(&again.id, DecodeReport::Bad { why: "pcrc32" }),
+                DecodeAck::Owned
+            ));
+        }
+    }
+    assert_eq!(
+        steered, 1,
+        "a server whose copies are all bad is asked twice for ONE article and then believed"
+    );
+    assert_eq!(sh.pending.load(Ordering::Acquire), 0);
+}
+
+/// One delivery, in pool/session.rs's order, from the queue's own next
+/// pick. Returns the `Work` the server picked, already stashed for the
+/// verdict.
+async fn deliver(
+    sh: &Arc<Shared>,
+    servers: &[(ServerConfig, PoolConfig)],
+    si: usize,
+    tx: &mpsc::Sender<FetchOutcome>,
+) -> Work {
+    let ctx = ctx_for(servers, si);
+    sh.scan_futile[si].store(u64::MAX, Ordering::Relaxed);
+    let w = next_work(sh, ctx, tx, Pipeline::payload(0))
+        .await
+        .expect("the server has work to take");
+    sh.register_inflight(&w, si);
+    sh.deregister_inflight_done(&w);
+    let spent_ev = sh.spent_mask(&w.id);
+    assert!(sh.claim_done(&w.id, w.ord), "the delivering worker claims");
+    sh.stash_handed(&w, ctx, spent_ev);
+    w
 }
 
 fn fresh(ids: &[&str]) -> Vec<ArticleReq> {

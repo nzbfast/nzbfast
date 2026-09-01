@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::Command;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::harness::serve;
@@ -34,6 +35,10 @@ use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 const ART: usize = 20_000;
 const ARTICLES: usize = 60;
 const DELAY_MS: u64 = 120;
+/// Connections the daemon is given, and so the exact number of articles
+/// that can still land after the freeze arms - see the guard at the foot
+/// of the test.
+const CONNS: u64 = 2;
 
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
@@ -197,7 +202,7 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
     std::fs::write(
         &cfg,
         format!(
-            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false,\"connections\":2}}]}}",
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false,\"connections\":{CONNS}}}]}}",
             mock.addr.ip(),
             mock.addr.port()
         ),
@@ -219,7 +224,7 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
             .arg("--out")
             .arg(dir.join("complete"))
             .arg("--connections")
-            .arg("2");
+            .arg(CONNS.to_string());
         c
     })
     .await;
@@ -253,12 +258,40 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
     );
     assert_eq!(row(&queued, "pack.part01.rar")["status"], "queued");
     assert_eq!(row(&queued, "pack.part01.rar")["state"], "queued");
+    // `bytes` is SAB's spelling and carries SAB's TYPE - a "%.2f"
+    // STRING, which is what `build_file_list` writes in 4.5.0, 5.1.2 and
+    // develop alike. It was a JSON number here until 31 Aug 2026, which
+    // is GH #69's crash exactly: a statically-typed client
+    // deserializing a String from a number throws at parse time. The
+    // numeric reading has a key of its own beside it, the way
+    // `bytes_left` already sits beside SAB's `mbleft`. Both are pinned,
+    // because a test that pins only one of them cannot see the pair
+    // drifting.
+    let part = row(&queued, "pack.part01.rar");
     assert!(
-        row(&queued, "pack.part01.rar")["bytes"]
-            .as_u64()
-            .unwrap_or(0)
-            > 0,
+        part["bytes"].as_str().is_some_and(|s| s.ends_with(".00")),
+        "SAB's `bytes` is a \"%.2f\" string: {queued:?}"
+    );
+    assert!(
+        part["bytes"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            > 0.0,
         "the NZB's declared bytes are reported: {queued:?}"
+    );
+    assert_eq!(
+        part["bytes_total"].as_u64().map(|n| n as f64),
+        part["bytes"].as_str().and_then(|s| s.parse::<f64>().ok()),
+        "the two spellings describe one number: {queued:?}"
+    );
+    // SAB emits `age` on every file row and we emitted none, which is
+    // the absent-key half of the same class. The fixture's NZB carries
+    // no date attribute, so SAB's own "-" fallback is the right answer -
+    // present, and honest about being unknown.
+    assert!(
+        part["age"].as_str().is_some(),
+        "SAB sends `age` on every file row: {queued:?}"
     );
     // The recovery set is told apart BEFORE the job starts, from the
     // NZB's own classification (`NzbFile::kind`) rather than from a slot
@@ -293,14 +326,55 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
     );
     assert_eq!(unknown["files"].as_array().map(Vec::len), Some(0));
     assert_eq!(unknown["error"], "unknown nzo_id", "{unknown}");
+    // ...and `status: false` beside it, which is SAB's error shape, so a
+    // client that switches on that key rather than on `files` is not
+    // left reading a null.
+    assert_eq!(unknown["status"], false, "{unknown}");
 
     // --- the same job, now on the wire -------------------------------
     let r = json(port, "/api?mode=resume&apikey=sekrit&output=json");
     assert_eq!(r["status"], true, "resume: {r}");
-    // Waited out until a payload file has provably MOVED, not merely
-    // until the table exists: a row that reports the plan's opening
-    // numbers proves nothing about the counters being read live.
+
+    // THE PREMISE OF EVERYTHING BELOW is that this job is still in
+    // flight, and until 31 Aug 2026 nothing held it there. The loop
+    // here polled `files_of` over HTTP until part01 reported
+    // `segments_remaining < 60` and then asserted on the row it had
+    // just read - which is a race the daemon always wins on a loaded
+    // box, because the whole job is only ~14 s of mock (240 articles,
+    // `DELAY_MS` each, over two connections) while ONE HTTP round trip
+    // to a starved daemon is seconds. Measured under 8x load on 30 Aug
+    // 2026: this test inflated from 1.99 s to 93 s. It failed with
+    // `left: "complete"`, `right: "active"` on a row reporting
+    // `segments_remaining: 0`, `bytes_left: 0` - the file had finished
+    // between the poll noticing movement and the assertion reading the
+    // state. A longer deadline cannot fix that; the deadline was never
+    // what expired.
+    //
+    // So the world is FROZEN before anything is read, and the freeze is
+    // triggered off the MOCK's own counter rather than off a reply to
+    // an HTTP request. That ordering is the whole fix: there is no
+    // round trip between deciding to stop and stopping, so the job
+    // cannot run to completion inside the gap. `pause` exists for
+    // exactly this ("freeze the world ... no wall-clock races" - see
+    // [`nzbkit::mock::MockServer::pause`]).
     let deadline = Instant::now() + Duration::from_secs(60);
+    while mock.served.load(Ordering::Relaxed) < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "the job never started - the mock served nothing: {}",
+            d.log()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Frozen.
+    mock.pause.store(true, Ordering::Release);
+    let served_at_arm = mock.served.load(Ordering::Relaxed);
+
+    // NOW poll the daemon's own view. This poll cannot overshoot: the
+    // articles it is waiting to see counted are already served and no
+    // further one can be, so the state it settles on is the state every
+    // assertion below reads. It is a wait for the daemon to CATCH UP,
+    // which is a different quantity from the wait it replaced.
     let live = loop {
         let rows = files_of(port, &nzo);
         let moved = rows.iter().any(|r| {
@@ -312,10 +386,11 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
         }
         assert!(
             Instant::now() < deadline,
-            "the job never started: {}",
+            "the mock served {} articles and the job never counted one: {}",
+            mock.served.load(Ordering::Relaxed),
             d.log()
         );
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(50));
     };
 
     // THE point of the test: the handles did not move across the
@@ -330,7 +405,7 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
     assert_eq!(part1["state"], "active", "{part1}");
     assert_eq!(part1["status"], "active", "{part1}");
     assert!(
-        part1["bytes_left"].as_u64().unwrap_or(u64::MAX) < part1["bytes"].as_u64().unwrap(),
+        part1["bytes_left"].as_u64().unwrap_or(u64::MAX) < part1["bytes_total"].as_u64().unwrap(),
         "the remainder shrinks with the segments: {part1}"
     );
 
@@ -367,9 +442,12 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
     );
     assert_eq!(moved["status"], true, "{moved}");
     assert_eq!(moved["nzf_id"], part2["nzf_id"], "{moved}");
-    // Most of this file is still pending at this point - the loop above
-    // broke on the FIRST article of the job to land - so a promote that
-    // reordered nothing would mean the ids never reached the queue.
+    // Most of this file is still pending at this point - the mock was
+    // frozen after three articles, so ~237 of the job's 240 are still
+    // queued and CANNOT drain while these assertions run. That is the
+    // freeze earning its keep a second time: this premise used to hold
+    // only because the job was slower than the test, which is the same
+    // bet the `active` assertion above lost under load.
     assert!(
         moved["moved"].as_u64().unwrap_or(0) > 0,
         "a file with pending articles must move some of them: {moved}"
@@ -385,5 +463,58 @@ async fn a_job_s_files_carry_the_same_handles_queued_and_downloading_and_one_can
     assert_eq!(bad["status"], false, "{bad}");
     assert_eq!(bad["error"], "unknown file id", "{bad}");
 
+    // A GREEN RUN CANNOT TELL A WORKING FREEZE FROM AN INERT ONE, and
+    // the freeze is the premise of every assertion above - so it is
+    // asserted rather than assumed. The idea is `stream_repair.rs`'s
+    // `Freeze::assert_held`, which reached it in the same week for the
+    // same reason; the QUANTITY is different, and the difference is
+    // measured rather than stylistic.
+    //
+    // THE FREEZE HAS AN EXACT RESIDUE, AND IT IS NOT ZERO. The mock
+    // tests `pause` at the top of its command loop, so a connection
+    // already blocked in `read_line` has passed the gate and will serve
+    // the next command the client sends it, whenever that comes, before
+    // parking. That is at most ONE PER CONNECTION for the life of the
+    // freeze - and it is not theoretical: asserting no growth at all
+    // over a 300 ms window failed here with exactly +2 on a 2-connection
+    // config, seconds after arming, with the freeze working perfectly.
+    //
+    // So the bound is on the TOTAL growth since arming, which is exact,
+    // and it needs no observation window - no wall clock anywhere in it,
+    // which is the point of this whole change. A window would have to be
+    // long enough to outrun ~2.5 articles per 300 ms of unfrozen mock,
+    // which is the same order as the residue it has to tolerate.
+    // The settle is not a threshold and nothing is compared against it:
+    // it gives a download that is still running time to SHOW itself, so
+    // that the exact bound below has something to catch. Without it the
+    // check is inert on an idle box, where every assertion above
+    // finishes in less time than one article takes - measured, a freeze
+    // deleted from this test still passed. The mock's pacing is its own
+    // wall clock and does not slow when the box is starved, so this
+    // reveals a live download under load too.
+    std::thread::sleep(Duration::from_millis(300));
+    let leaked = mock.served.load(Ordering::Relaxed) - served_at_arm;
+    assert!(
+        leaked <= CONNS,
+        "the provider served {leaked} more article(s) after the freeze armed, \
+         against the {CONNS} a connection already past the pause gate can \
+         still take - the freeze is inert and this test is racing the download \
+         again"
+    );
+    // AND DID IT STOP THE WORLD SHORT OF THE END - a freeze armed after
+    // the last article was already served is perfectly stable and holds
+    // nothing back.
+    let served = mock.served.load(Ordering::Relaxed);
+    assert!(
+        served < (ARTICLES * 4) as u64,
+        "all {} of the fixture's articles had been asked for by the time the \
+         freeze armed, so it is holding nothing back",
+        ARTICLES * 4
+    );
+
+    // Thawed before the shutdown: every assertion above is done, and a
+    // daemon asked to stop while its connections are parked against a
+    // frozen server pays a read timeout it has nothing to learn from.
+    mock.pause.store(false, Ordering::Release);
     d.stop();
 }

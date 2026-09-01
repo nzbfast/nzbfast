@@ -182,7 +182,6 @@ async fn passworded_archive_flow() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// SAB/NZBGet-parity passwords file: with `password_file` configured, a
@@ -333,7 +332,6 @@ async fn passwords_file_unlocks_at_completion() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 100 (Gary's 14.87 GB re-download): an ENOSPC after a finished
@@ -586,7 +584,6 @@ async fn enospc_after_decrypt_publish_retries_without_refetching() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// password_prompt=never: a locked job completes QUIETLY - no failure
@@ -714,5 +711,4 @@ async fn password_prompt_never_leaves_archive_packed() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

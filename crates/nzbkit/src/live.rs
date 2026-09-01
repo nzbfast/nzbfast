@@ -32,7 +32,7 @@
 //! read-back and the no-IFSC whole-file check always keep full MD5.
 
 use crate::sync::{MutexExt, RwLockExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -275,118 +275,6 @@ impl ChaseGate for SlotGate {
     }
 }
 
-/// A boundary block accumulating bytes from more than one article.
-struct Partial {
-    /// Real bytes of this block (final block may be shorter than block_size).
-    buf: Vec<u8>,
-    /// Filled intervals within `buf`, sorted + merged.
-    filled: Vec<(usize, usize)>,
-}
-
-impl Partial {
-    fn new(len: usize) -> Partial {
-        Partial {
-            buf: vec![0; len],
-            filled: Vec::with_capacity(2),
-        }
-    }
-
-    fn fill(&mut self, at: usize, bytes: &[u8]) {
-        self.buf[at..at + bytes.len()].copy_from_slice(bytes);
-        let (mut s, mut e) = (at, at + bytes.len());
-        // Merge into the sorted interval list.
-        let mut merged = Vec::with_capacity(self.filled.len() + 1);
-        for &(fs, fe) in &self.filled {
-            if fe < s || fs > e {
-                merged.push((fs, fe));
-            } else {
-                s = s.min(fs);
-                e = e.max(fe);
-            }
-        }
-        merged.push((s, e));
-        merged.sort_unstable();
-        self.filled = merged;
-    }
-
-    fn complete(&self) -> bool {
-        self.filled == [(0, self.buf.len())]
-    }
-}
-
-/// B1: a boundary block held as per-fragment CRC32s instead of bytes.
-/// CRC32 composes over concatenation (`crc32_combine`), so fragments can
-/// arrive in any order and merge whenever neighbors touch - ~24 bytes per
-/// fragment against a block-sized buffer. Only valid when the block will
-/// be claimed on CRC alone (fast/lean verify - the default); full-MD5
-/// mode keeps byte buffers because MD5 cannot be composed.
-///
-/// This erases the partials RSS term entirely in default mode - the term
-/// that grew linearly on big jobs (25.8 GB at 190 GB pre-cap) and that at
-/// the 256 MB MemBudget floor forced constant spill → settle read-back on
-/// exactly the boxes with the slowest disks. When the PAR2 block size
-/// exceeds the article size, EVERY block straddles articles and the old
-/// buffers approached a full copy of the in-flight file.
-struct CrcParts {
-    /// (start, end, crc32 of that range) - sorted, non-overlapping,
-    /// adjacent entries eagerly merged.
-    parts: Vec<(usize, usize, u32)>,
-}
-
-impl CrcParts {
-    fn new() -> CrcParts {
-        CrcParts {
-            parts: Vec::with_capacity(2),
-        }
-    }
-
-    /// Merge a fragment. Returns false on overlap with an existing part -
-    /// impossible for decoder-fresh spans (each article is fed once), so
-    /// the caller treats it as "this block can't be tracked losslessly"
-    /// and abandons the block to settle read-back.
-    fn insert(&mut self, s: usize, e: usize, crc: u32) -> bool {
-        let at = self.parts.partition_point(|&(ps, _, _)| ps < s);
-        if at > 0 && self.parts[at - 1].1 > s {
-            return false;
-        }
-        if at < self.parts.len() && self.parts[at].0 < e {
-            return false;
-        }
-        self.parts.insert(at, (s, e, crc));
-        // Merge with the right neighbor, then the left (order matters for
-        // index stability; combine() appends the RIGHT part's crc).
-        if at + 1 < self.parts.len() && self.parts[at].1 == self.parts[at + 1].0 {
-            let (rs, re, rc) = self.parts.remove(at + 1);
-            let _ = rs;
-            let p = &mut self.parts[at];
-            p.2 = crate::yenc_simd::crc32_combine(p.2, rc, (re - p.1) as u64);
-            p.1 = re;
-        }
-        if at > 0 && self.parts[at - 1].1 == self.parts[at].0 {
-            let (_, e2, c2) = self.parts.remove(at);
-            let p = &mut self.parts[at - 1];
-            p.2 = crate::yenc_simd::crc32_combine(p.2, c2, (e2 - p.1) as u64);
-            p.1 = e2;
-        }
-        true
-    }
-
-    /// CRC of the whole block's real bytes once every fragment landed.
-    fn complete(&self, blen: usize) -> Option<u32> {
-        match self.parts.as_slice() {
-            [(0, e, crc)] if *e == blen => Some(*crc),
-            _ => None,
-        }
-    }
-}
-
-/// A boundary block in flight: bytes (full-MD5 mode) or fragment CRCs
-/// (fast/lean mode).
-enum PartialBuf {
-    Bytes(Partial),
-    Crc(CrcParts),
-}
-
 /// How the backfill pass must re-feed one slot's pre-activation spans -
 /// the public half of [`Src`], returned by
 /// [`LiveVerifier::take_pre_spans`].
@@ -431,10 +319,36 @@ struct SlotState {
     /// First min(16 KiB, file) bytes for md5_16k matching - articles arrive
     /// out of order, so this fills interval-wise like a boundary block.
     head: Option<Partial>,
+    /// `head`'s MD5, once the head is complete. Cached because an
+    /// unmatched slot re-matches on EVERY article, and a slot whose name
+    /// the content denies stays unmatched for the rest of the run - see
+    /// [`SlotState::head_key`]. Reset wherever `head` is restarted.
+    head_md5: Option<[u8; 16]>,
     /// yEnc-declared file size (caps head capture for small files).
     file_size: u64,
-    /// Index into the active set's `files` once matched.
+    /// Index into the active set's `files` once matched. BOUND is not
+    /// CLAIMED: see `confirmed`.
     file: Option<usize>,
+    /// Does this slot hold the CLAIM on `file` (`active.claimed[file] ==
+    /// this slot`), or is the binding still only a name's nomination?
+    ///
+    /// A name is poster-controlled, so a slot bound on the name alone is
+    /// bound TENTATIVELY: it verifies its blocks against the nominated
+    /// descriptor exactly as a claim would - which is what keeps
+    /// out-of-order arrival at zero read-back - but it takes no claim, so
+    /// it locks nobody out and the descriptor's real owner can still
+    /// claim it on content. The first block that verifies Ok IS the
+    /// content proof, and promotes the binding to a claim
+    /// ([`LiveVerifier::promote_binding`]); a binding that never earns one
+    /// is settled at finish by [`SlotState::settle_binding`].
+    confirmed: bool,
+    /// A denied nomination has been re-judged and NO descriptor in the
+    /// set carries this slot's head - so no later claim can produce one,
+    /// and [`LiveVerifier::rejudge_binding`] need not scan the set again
+    /// on every remaining article. Latched only for the empty answer:
+    /// two candidates today can become one unique rival tomorrow, which
+    /// is exactly the case that must stay live.
+    head_rival_ruled_out: bool,
     /// One entry per PAR2 block once matched.
     blocks: Vec<BlockState>,
     partials: HashMap<usize, PartialBuf>,
@@ -458,7 +372,15 @@ struct SlotState {
     pre_unvouched: bool,
     /// Matching was attempted and failed permanently (name + head both
     /// exhausted) - avoids rescanning every article.
-    unmatchable: bool,
+    ///
+    /// `Some(g)` carries the [`Active::adopted_gen`] the refusal was reached
+    /// under, because the refusal is a statement ABOUT a descriptor
+    /// population and means nothing once that population is a
+    /// different one. Read through [`SlotState::refused`], never
+    /// directly, at every site that GATES a match on it - the raw
+    /// `is_some()` answers "was a verdict ever reached", which is a
+    /// different question and the one `slot_undecided` asks.
+    unmatchable: Option<u64>,
     /// Blocks verified in-stream (for the zero-read-back accounting).
     live_ok: u64,
     live_bad: u64,
@@ -466,6 +388,32 @@ struct SlotState {
     /// incrementally so watermark publication is O(advance), not
     /// O(blocks) per span.
     ok_prefix: usize,
+    /// M4-69: at least one IFSC entry of this slot's descriptor was
+    /// caught saying two different things about ONE block's bytes - the
+    /// CRC32 matched and the MD5 did not. Latched, never cleared.
+    ///
+    /// It costs nothing to notice: [`check_block`] runs the CRC first
+    /// and only reaches the MD5 once the CRC has matched, so the pair
+    /// that disagrees is the one pair already fully computed. On any
+    /// well-formed set it never fires - the two digests cover the same
+    /// bytes, so an honest entry cannot disagree with itself, and a
+    /// damaged block fails the CRC and never consults the MD5 (a chance
+    /// CRC32 hit on damaged bytes is 2^-32).
+    ///
+    /// What it arms is the escalation in [`LiveVerifier::finish_slot_from`]:
+    /// an entry that contradicts itself is not evidence of damage, it is
+    /// an unusable entry, and the bytes it fails to describe are covered
+    /// by the FileDesc whole-file MD5 - which is the strongest evidence
+    /// the settled file admits.
+    ///
+    /// IT CANNOT LATCH ON THE MIRROR SHAPE, and that is a refusal rather
+    /// than an oversight: a lying CRC32 beside an honest MD5 fails the
+    /// CRC, so no MD5 is ever reached and nothing has disagreed with
+    /// itself. Detecting it costs an MD5 pass over damaged blocks -
+    /// priced and refused at [`BlockVerdict::Damaged`]. The escalation's
+    /// third trigger, every block of a file bad, covers what that leaves
+    /// at a cost bounded by what it prevents; see `finish_slot_from`.
+    ifsc_self_contradicted: bool,
 }
 
 enum Plan {
@@ -521,6 +469,18 @@ struct Active {
     /// equality implies ASCII-case equality, so no third map is needed).
     by_fold: HashMap<String, Vec<usize>>,
     by_sanitized: HashMap<String, Vec<usize>>,
+    /// How many times the adopted set list has GROWN, counted from 0.
+    ///
+    /// A slot's permanent refusal ([`SlotState::unmatchable`]) is a
+    /// statement ABOUT a descriptor population - "hashed whole, this
+    /// head matched nothing here" - so it means nothing once that
+    /// population is a different one. `extended` bumps this exactly
+    /// when a set id nothing had adopted is appended, and
+    /// [`SlotState::refused`] compares it, which is what re-opens a
+    /// latched slot for the tiers a second activation put descriptors
+    /// in front of. See `extended` for why a re-activation that adds
+    /// nothing must NOT bump it.
+    adopted_gen: u64,
 }
 
 impl Active {
@@ -537,7 +497,7 @@ impl Active {
                     .or_default()
                     .push(flat);
                 by_sanitized
-                    .entry(crate::disk::sanitize_filename(&f.name))
+                    .entry(crate::disk::sanitize_out_name(&f.name))
                     .or_default()
                     .push(flat);
             }
@@ -549,7 +509,64 @@ impl Active {
             claimed,
             by_fold,
             by_sanitized,
+            adopted_gen: 0,
         }
+    }
+
+    /// This `Active` plus every set in `extra` whose recovery set id is
+    /// not already live, with existing flat indices and their claims
+    /// preserved. See [`LiveVerifier::activate`] for why a second
+    /// activation must extend rather than replace.
+    fn extended(&self, extra: &[Arc<Par2Set>]) -> Active {
+        let mut sets = self.sets.clone();
+        for s in extra {
+            if !sets.iter().any(|x| x.recovery_set_id == s.recovery_set_id) {
+                sets.push(s.clone());
+            }
+        }
+        let grew = sets.len() > self.sets.len();
+        let mut out = Active::new(sets);
+        // The generation moves ONLY when a set id nothing had adopted
+        // was appended, and both halves of that are load-bearing.
+        //
+        // It has to move at all because `SlotState::unmatchable` is a
+        // refusal reached against the descriptors live at the time, and
+        // this is the moment that population stops being the one the
+        // refusal was about - the same argument `capture_head` already
+        // makes for a head that GREW, with the other operand moving.
+        // Left unbumped, a slot whose only descriptor arrives in a
+        // deferred set never claims however intact its bytes are:
+        // `finish_slot` skips the whole-file and named tiers for it, so
+        // it stays in `missing_files` and is charged WHOLLY MISSING to
+        // whichever set names it, sending a repair to rebuild a file
+        // that is byte-perfect on disk. Measured 31 Aug 2026 on a
+        // two-set post - "verified 0 file(s)" over a file present and
+        // byte-exact in `out_dir`.
+        //
+        // And it must NOT move when nothing was appended, which is the
+        // ordinary re-activation: this function DISCARDS an already-live
+        // set deliberately - see the note above, and `LiveVerifier`'s
+        // own `activate` - so a bump there would re-open every latched slot
+        // on a post that learned nothing, and each one costs a
+        // whole-file read in `try_match_whole` at settle. Nothing new
+        // to match against is not a reason to match again.
+        out.adopted_gen = if grew {
+            self.adopted_gen + 1
+        } else {
+            self.adopted_gen
+        };
+        // The prefix is the same sets in the same order with the same
+        // files, so flat index N still names the same descriptor.
+        let old = self.claimed.lock_ok();
+        let mut new = out.claimed.lock_ok();
+        debug_assert!(
+            new.len() >= old.len(),
+            "extending a set list may only append"
+        );
+        new[..old.len()].copy_from_slice(&old);
+        drop(new);
+        drop(old);
+        out
     }
 
     /// The descriptor behind a flat file index.
@@ -875,8 +892,33 @@ impl LiveVerifier {
             .map(|f| f.blocks.len() as u64)
             .sum();
         crate::memgauge::set_at_least(crate::memgauge::Sub::VerifierMeta, blocks * 24);
-        *self.plan.write_ok() = Plan::Active(Active::new(sets.clone()));
-        Ok(sets)
+        // W4-15: MERGE, never replace. A post carrying two recovery sets
+        // reaches this TWICE - the in-stream sniff elects one bootstrap
+        // volume for the whole job, so the second set is activated later,
+        // from the bytes its deferred volumes already have on disk
+        // (`get::settle::activate_deferred_sets`).
+        // Replacing built a fresh `Active` with an empty `claimed`
+        // vector and a fresh flat index, so every slot already bound
+        // kept a `file` index into the OLD table: its claim vanished,
+        // its descriptor read as unclaimed, and the same member was
+        // charged BOTH as damaged (the stale binding's blocks) and as
+        // wholly missing (the unclaimed descriptor) - 24 blocks of
+        // demand on a 4-block loss.
+        //
+        // Sets already live keep their position, so every flat index
+        // that exists stays pointing at the descriptor it pointed at,
+        // and `claimed` is carried across; only genuinely new set ids
+        // are appended, at the end. Re-parsing an already-live set is
+        // DISCARDED rather than swapped in for the same reason - the
+        // bound slots' block vectors were sized from the live copy.
+        let mut plan = self.plan.write_ok();
+        let merged = match &*plan {
+            Plan::Active(a) => a.extended(&sets),
+            _ => Active::new(sets),
+        };
+        let all = merged.sets.clone();
+        *plan = Plan::Active(merged);
+        Ok(all)
     }
 
     /// M32 perf: true when this slot's bytes will be FULLY verified
@@ -910,6 +952,12 @@ impl LiveVerifier {
     /// to consult about it. Name matching alone cannot answer it - an
     /// obfuscated post's slot hint is a hash, and the set's FileDesc
     /// carries the real name.
+    ///
+    /// BOUND, which after settle is the same thing as CLAIMED: a
+    /// name-only binding ([`SlotState::confirmed`]) is either promoted or
+    /// dropped by `finish_slot`, so no slot reaches a caller of this
+    /// still holding one. Mid-run it answers about the binding, which is
+    /// what the pre-nomination code answered too.
     pub fn slot_in_set(&self, slot: usize) -> bool {
         matches!(&*self.plan.read_ok(), Plan::Active(_))
             && self.slots[slot].lock_ok().file.is_some()
@@ -946,7 +994,17 @@ impl LiveVerifier {
             return false;
         }
         let s = self.slots[slot].lock_ok();
-        s.file.is_none() && !s.unmatchable
+        // The RAW latch and not `refused`, deliberately. This asks
+        // whether a verdict was ever reached, not whether it is still
+        // about the population now live, and by the time the only
+        // caller runs every latch is current: `get::settle` activates
+        // any deferred set BEFORE `settle_slots`, and `finish_slot`
+        // re-runs the tiers for a slot whose refusal that activation
+        // staled and re-latches it at the new generation. Reading
+        // `refused` here would instead report a slot the matcher HAS
+        // judged as one it has no opinion on, which is the one thing
+        // this predicate's own doc says it must not do.
+        s.file.is_none() && s.unmatchable.is_none()
     }
 
     /// Every adopted recovery set, in the order [`pick_sets`] fixed
@@ -1008,6 +1066,73 @@ impl LiveVerifier {
             Plan::Active(a) => self.slots[slot].lock_ok().file.map(|fi| a.set_of(fi)),
             _ => None,
         }
+    }
+
+    /// Sets OTHER than this slot's owning one that describe the SAME
+    /// file, with `bad` restated in each one's own block geometry:
+    /// `(set index, damaged block count there)`.
+    ///
+    /// W4-15. Damage is charged per SET because repair is per set, and a
+    /// slot has exactly one owning descriptor - so where two overlapping
+    /// sets name one member, the set that did NOT win the binding
+    /// charged zero and never spent the parity it was holding. Measured:
+    /// two active sets over one damaged 200 KB member, the weak one
+    /// (1 recovery block) owning it and the strong one (8) sitting idle,
+    /// and the job failed with `2 block(s) damaged, only 1 recovery
+    /// block(s) on disk` while five usable volumes lay on disk beside
+    /// it. Which set owns the slot is decided by the in-stream arrival
+    /// race; which set can HEAL it is not, so the damage is told to
+    /// both and whichever has the parity repairs.
+    ///
+    /// Identity is `(length, md5_16k, whole-file md5)` - the same test
+    /// `try_match` uses to tell one file described twice from two files
+    /// sharing a head. Block indices are mapped through BYTE RANGES
+    /// rather than rescaled, because the two sets rarely share a block
+    /// size (10000 against 10004 in the fixture) and a count scaled by
+    /// a ratio is not a count of anything.
+    pub fn slot_twin_damage(&self, slot: usize, bad: &[usize]) -> Vec<(usize, usize)> {
+        let plan = self.plan.read_ok();
+        let Plan::Active(a) = &*plan else {
+            return Vec::new();
+        };
+        let Some(flat) = self.slots[slot].lock_ok().file else {
+            return Vec::new();
+        };
+        if bad.is_empty() {
+            return Vec::new();
+        }
+        let owner = a.set_of(flat);
+        let f = a.file(flat);
+        let obs = a.block_size(flat).max(1);
+        let mut out = Vec::new();
+        for (si, set) in a.sets.iter().enumerate() {
+            if si == owner {
+                continue;
+            }
+            let Some(t) = set
+                .files
+                .iter()
+                .find(|g| g.length == f.length && g.md5 == f.md5 && g.md5_16k == f.md5_16k)
+            else {
+                continue;
+            };
+            let tbs = set.block_size.max(1);
+            let mut touched: HashSet<u64> = HashSet::new();
+            for &b in bad {
+                let start = (b as u64).saturating_mul(obs);
+                let end = start.saturating_add(obs).min(t.length);
+                if start >= end {
+                    continue;
+                }
+                for k in (start / tbs)..=((end - 1) / tbs) {
+                    touched.insert(k);
+                }
+            }
+            if !touched.is_empty() {
+                out.push((si, touched.len()));
+            }
+        }
+        out
     }
 
     /// [`slot_set`](Self::slot_set) for every slot in one pass, under one
@@ -1118,8 +1243,38 @@ impl LiveVerifier {
         if s.name.is_none() && !name.is_empty() {
             s.name = Some(name.to_string());
         }
+        // W4-11: the yEnc `size=` is a PER-ARTICLE declaration of the
+        // WHOLE file's length, so an N-part post carries N copies of it
+        // and nothing makes them agree. Latching the first nonzero copy
+        // let ARRIVAL ORDER pick which one is authoritative: on a 120 KB
+        // obfuscated post one article declaring `size=8192`, decoded
+        // first, set `head_want` to 8192, so `head_key` hashed 8 KiB
+        // where the FileDesc's md5_16k covers 16 KiB, the slot never
+        // bound by content, and an intact file was priced `file missing
+        // entirely` - its bytes recovered only by a full-file adoption
+        // plus a 2000-block rebuild.
+        //
+        // A declaration is a claim; the bytes in hand are proof. This
+        // span occupies `offset .. offset + len`, which is the article's
+        // OWN `=ypart` range (the decoder refuses a part whose payload
+        // and range disagree), so a `size=` below it is the same article
+        // contradicting itself and is raised rather than believed. Never
+        // lowered, and never raised above what some article really
+        // carries, so this is a floor on the truth and not a second
+        // guess at it - and it is monotone, which is what lets
+        // `capture_head` grow rather than restart below.
+        let seen_end = offset.saturating_add(data.len() as u64);
         if s.file_size == 0 {
             s.file_size = file_size;
+        }
+        // Only ever CORRECTS a declaration, never manufactures one:
+        // zero means "no article has declared a length", and its
+        // `head_want` is the full 16 KiB - the safe answer. Promoting
+        // that zero to one span's end would SHRINK the head instead,
+        // which is the very defect above. The backfill and disk feeds
+        // pass `file_size: 0` for exactly this reason.
+        if s.file_size != 0 && s.file_size < seen_end {
+            s.file_size = seen_end;
         }
 
         let active = match &*plan {
@@ -1146,13 +1301,29 @@ impl LiveVerifier {
             }
         };
 
+        // The head fills for the whole run, bound or not. It stopped at
+        // the claim once, which was invisible while a claim was final:
+        // now that a name-only binding can be dropped at finish, the slot
+        // that is re-matched then needs the head it would otherwise have
+        // stopped collecting on its first article.
+        s.capture_head(offset, data);
+        // The article carrying a file's first 16 KiB may land at any
+        // point, and until it does a NAME is all a slot has to bind on.
+        // So a tentative binding is re-judged the moment the head
+        // completes - which is what makes the crossed-name answer
+        // independent of arrival order rather than merely usually right.
+        if s.file.is_some() && !s.confirmed {
+            self.rejudge_binding(slot, &mut s, active);
+        }
         if s.file.is_none() {
-            s.capture_head(offset, data);
-            if s.unmatchable || !s.try_match(slot, active) {
+            if s.refused(active) || !s.try_match(slot, active, true) {
                 return;
             }
             // §94 B: a fresh claim engages the gate - from here the chase
-            // decode for this slot waits on verification.
+            // decode for this slot waits on verification. A TENTATIVE
+            // binding engages too: engaging is the conservative side (it
+            // makes the chase wait), and dropping the binding at finish
+            // releases it.
             if let Some(g) = self.gate.lock_ok().clone() {
                 g.engage(slot);
             }
@@ -1307,19 +1478,22 @@ impl LiveVerifier {
         // ALWAYS full-MD5 - lean does not weaken that contract.
         // (`crc_claims` above is the same condition - boundary fragments
         // of such spans were queued as CRC jobs.)
-        let check = if crc_claims {
-            check_block_crc
+        // M4-69: three-valued, so a self-contradicting IFSC entry is
+        // told apart from damage. The CRC-only arm can never report one -
+        // it never reaches the MD5 - which is exactly right: a CRC-only
+        // claim is not evidence about the pair.
+        let check: fn(&BlockCheck, usize, &[u8]) -> BlockVerdict = if crc_claims {
+            check_block_crc_verdict
         } else {
-            check_block
+            check_block_verdict
         };
         let file = &set.files[local_fi];
-        let mut results: Vec<(usize, bool)> = Vec::with_capacity(full.len() + ready.len());
+        let mut results: Vec<(usize, BlockVerdict)> = Vec::with_capacity(full.len() + ready.len());
         for bi in full {
             let bstart = bi as u64 * bs64;
             let blen = block_len(file.length, bs, bi);
             let rel = (bstart - span.start) as usize;
-            let ok = check(&file.blocks[bi], bs, &data[rel..rel + blen]);
-            results.push((bi, ok));
+            results.push((bi, check(&file.blocks[bi], bs, &data[rel..rel + blen])));
         }
         // Completed byte partials ALWAYS take full MD5, regardless of what
         // THIS span may claim. A byte partial exists only because some
@@ -1329,8 +1503,7 @@ impl LiveVerifier {
         // started it - a disk-fed fragment completed by a fresh article
         // would otherwise be claimed on the block CRC32 alone.
         for (bi, buf) in ready {
-            let ok = check_block(&file.blocks[bi], bs, &buf);
-            results.push((bi, ok));
+            results.push((bi, check_block_verdict(&file.blocks[bi], bs, &buf)));
         }
         // B1: fragment CRCs, also outside the lock (hardware CRC is fast,
         // but a block-sized fragment is still real work at 2 cores).
@@ -1358,8 +1531,12 @@ impl LiveVerifier {
                     }
                 }
             };
-            for (bi, ok) in results {
-                record(&mut s, bi, ok);
+            for (bi, v) in results {
+                // The BLOCK verdict is unchanged - a contradicted entry
+                // still fails the block, which is the safe direction. What
+                // the latch changes is what settle does about it (M4-69).
+                s.ifsc_self_contradicted |= v == BlockVerdict::Contradicted;
+                record(&mut s, bi, v == BlockVerdict::Ok);
             }
             for (bi, os, oe, crc) in crc_frags {
                 if s.blocks[bi] != BlockState::Pending {
@@ -1396,14 +1573,113 @@ impl LiveVerifier {
                         crc_data
                     };
                     s.partials.remove(&bi);
-                    record(&mut s, bi, final_crc == file.blocks[bi].crc32);
+                    record(&mut s, bi, file.blocks[bi].crc_matches(final_crc));
                 }
             }
             // §94 B: every claim above may have extended the contiguous
             // Ok prefix - publish before the slot lock drops so a gated
             // chase parked at the old watermark wakes.
             self.gate_publish(slot, &mut s, bs);
+            let earned = !s.confirmed && s.live_ok > 0;
+            drop(s);
+            if earned {
+                self.promote_binding(slot);
+            }
         }
+    }
+
+    /// An Ok block is content proof, and the first one turns a name's
+    /// tentative nomination into a claim ([`SlotState::confirmed`]).
+    ///
+    /// Its own function, taking the plan and then the slot, because that
+    /// is the order `on_data_inner` takes them in and the promotion is
+    /// decided at the foot of the span path where the plan lock has been
+    /// released for hashing. Taking it back under the slot lock there
+    /// would invert the order against every other caller.
+    ///
+    /// A descriptor the real owner claimed by content in the meantime
+    /// simply drops the binding: two slots may nominate the same
+    /// descriptor precisely because a nomination locks nobody out.
+    fn promote_binding(&self, slot: usize) {
+        let plan = self.plan.read_ok();
+        let Plan::Active(active) = &*plan else {
+            return;
+        };
+        let mut s = self.slots[slot].lock_ok();
+        let Some(fi) = s.file else {
+            return;
+        };
+        if s.confirmed || s.live_ok == 0 {
+            return;
+        }
+        let mut claimed = active.claimed.lock_ok();
+        if claimed[fi].is_none() {
+            claimed[fi] = Some(slot);
+            s.confirmed = true;
+            return;
+        }
+        drop(claimed);
+        self.forget_binding(&mut s);
+    }
+
+    /// Re-judge a tentative binding once the head has completed.
+    ///
+    /// The binding is DROPPED only when the head both denies the
+    /// nominated descriptor AND names another one outright - a unique
+    /// unclaimed md5-16k match. Denial alone is not enough and must not
+    /// be: a truthfully-named member damaged inside its own first
+    /// 16 KiB denies exactly the same way, and dropping that one would
+    /// cost it its in-stream verification and price a repairable file as
+    /// wholly missing. What is left after this is the case with no rival
+    /// at all, which `settle_binding` settles at finish on the whole
+    /// file.
+    ///
+    /// The blocks verified under the old binding go with it: they were
+    /// judged against the wrong descriptor. They are read back at
+    /// finish, which is the right price for a slot whose name lied.
+    fn rejudge_binding(&self, slot: usize, s: &mut SlotState, active: &Active) {
+        let Some(fi) = s.file else {
+            return;
+        };
+        if s.head_rival_ruled_out {
+            return;
+        }
+        let Some(key) = s.head_key() else {
+            return;
+        };
+        let want = s.head_want();
+        if head_says(active.file(fi), want, key) != HeadSays::Deny {
+            return;
+        }
+        let (rival, seen) = {
+            let claimed = active.claimed.lock_ok();
+            let (mut hit, mut seen) = (None, 0usize);
+            for (gi, g) in active.files() {
+                if gi == fi || claimed[gi].is_some() {
+                    continue;
+                }
+                if head_says(g, want, key) == HeadSays::Confirm {
+                    seen += 1;
+                    hit = if seen == 1 { Some(gi) } else { None };
+                }
+            }
+            (hit, seen)
+        };
+        let Some(_) = rival else {
+            s.head_rival_ruled_out = seen == 0;
+            return;
+        };
+        self.forget_binding(s);
+        s.try_match(slot, active, true);
+    }
+
+    /// [`SlotState::unbind`] plus the global wind-back it owes.
+    fn forget_binding(&self, s: &mut SlotState) {
+        use std::sync::atomic::Ordering;
+        let (ok, bad, held) = s.unbind();
+        self.live_ok_total.fetch_sub(ok, Ordering::Relaxed);
+        self.live_bad_total.fetch_sub(bad, Ordering::Relaxed);
+        self.partials_used.fetch_sub(held, Ordering::Relaxed);
     }
 
     /// Crash resume: register spans a previous run already persisted (and
@@ -1523,6 +1799,30 @@ impl LiveVerifier {
         )
     }
 
+    /// Drop every in-stream Ok verdict for a slot back to Pending so the
+    /// next [`finish_slot`] re-hashes those blocks from the bytes actually
+    /// on disk. Settle calls this for a slot whose writer saw an
+    /// overlapping write ([`crate::extract::Extractor::slot_had_rewrite`]):
+    /// an in-stream Ok proves the bytes that WERE hashed, not the bytes on
+    /// disk now, and a maliciously-duplicated article can overwrite a
+    /// verified block after it was marked Ok. Re-hashing from disk is the
+    /// authority in that case - a legitimate identical duplicate re-hashes
+    /// clean, a conflicting one is caught as damage. Bad verdicts are left
+    /// as-is (already scheduled for read-back/repair).
+    pub fn force_readback(&self, slot: usize) {
+        let mut s = self.slots[slot].lock_ok();
+        // Reset EVERY settled verdict, Ok and Bad alike: the final bytes on
+        // disk are whichever write landed last, so an earlier Ok may now be
+        // garbage and an earlier Bad may now be the good copy. Re-hashing
+        // the whole slot from disk is the only authority once a range was
+        // written twice - it recovers the good-copy-last case and catches
+        // the garbage-last case, deterministically.
+        for st in s.blocks.iter_mut() {
+            *st = BlockState::Pending;
+        }
+        s.ok_prefix = 0;
+    }
+
     /// Settle a slot when all its articles are terminal: read back every
     /// still-pending block from `path` (None if no file was ever created)
     /// and return the verdict. Returns None when no PAR2 file matched this
@@ -1544,14 +1844,40 @@ impl LiveVerifier {
             _ => return None,
         };
         let mut s = self.slots[slot].lock_ok();
+        // A binding the NAME alone made earns its claim here, on content,
+        // or is dropped - and a drop puts the slot back through the whole
+        // ladder below with the file now available.
+        let dropped = s.file.is_some() && !s.confirmed && !s.settle_binding(slot, active, &src);
+        if dropped {
+            self.forget_binding(&mut s);
+        }
         // Last-chance match (e.g. every article of the slot arrived before
-        // activation, so on_data never ran while Active).
+        // activation, so on_data never ran while Active). The whole-file
+        // and named tiers run only here, never in on_data: both need the
+        // slot's complete bytes, and finish is the first moment they
+        // exist. Order is strongest evidence first - head-confirmed name
+        // or unique md5-16k, then whole-file MD5 among identical-head
+        // twins, then a name the head denied or never judged, which is
+        // the weakest and must not pre-empt either of the others.
         if s.file.is_none()
-            && !s.unmatchable
-            && s.try_match(slot, active)
+            && !s.refused(active)
+            && (s.try_match(slot, active, false)
+                || s.try_match_whole(slot, active, &src)
+                || s.try_match_named(slot, active, &src))
             && let Some(g) = self.gate.lock_ok().clone()
         {
             g.engage(slot);
+        }
+        if s.file.is_none() {
+            if dropped && let Some(g) = self.gate.lock_ok().clone() {
+                // The dropped binding had engaged the gate and nothing
+                // will verify this slot now: release whatever chase is
+                // parked on it, the way the no-IFSC verdict does. The
+                // chase then demotes to the disk ladder, which is
+                // bounded where a parked reader is not.
+                g.advance(slot, u64::MAX);
+            }
+            return None;
         }
         let fi = s.file?;
         let file = active.file(fi);
@@ -1628,7 +1954,7 @@ impl LiveVerifier {
             for bi in pending {
                 readback += 1;
                 let blen = block_len(file.length, bs, bi);
-                let ok = if bs <= READBACK_CHUNK {
+                let v = if bs <= READBACK_CHUNK {
                     let got = match (&src, &f) {
                         (ReadAt::Path(_), Some(f)) => {
                             crate::disk::read_exact_at(f, &mut buf[..blen], bi as u64 * bs as u64)
@@ -1639,12 +1965,23 @@ impl LiveVerifier {
                         }
                         _ => false,
                     };
-                    got && check_block(&file.blocks[bi], bs, &buf[..blen])
+                    if got {
+                        check_block_verdict(&file.blocks[bi], bs, &buf[..blen])
+                    } else {
+                        // Unreadable is damage, never a contradiction:
+                        // no digest was compared.
+                        BlockVerdict::Damaged
+                    }
                 } else {
                     read_block_chunked(&src, f.as_ref(), bi as u64 * bs as u64, blen, &mut buf)
-                        .is_some_and(|check| check.finish(&file.blocks[bi], bs))
+                        .map_or(BlockVerdict::Damaged, |c| c.finish(&file.blocks[bi], bs))
                 };
-                s.blocks[bi] = if ok { BlockState::Ok } else { BlockState::Bad };
+                s.ifsc_self_contradicted |= v == BlockVerdict::Contradicted;
+                s.blocks[bi] = if v == BlockVerdict::Ok {
+                    BlockState::Ok
+                } else {
+                    BlockState::Bad
+                };
             }
             // §94 B: settle read-back claims advance the watermark too.
             self.gate_publish(slot, &mut s, bs);
@@ -1653,6 +1990,116 @@ impl LiveVerifier {
             if *st == BlockState::Bad {
                 bad.push(bi);
             }
+        }
+        // TWO reasons a file's block grid cannot settle it, one action.
+        // Both were measured on 30 Aug 2026 and both end the same way: no
+        // block-level claim may outrank the FileDesc whole-file MD5,
+        // which covers every byte of every block, so where it matches the
+        // settled file IS the file the set describes.
+        //
+        // A grid fitted from a SHORT IFSC (`par2::fit_ifsc`) carries
+        // slices the set never described. Nothing can satisfy them, so
+        // they read Bad forever and the block tier alone would price a
+        // byte-perfect file as damaged - and a post with no recovery
+        // volumes would then fail a download that is entirely fine. That
+        // arm fires only when nothing PROVEN failed: a proven failure has
+        // already settled the question and the MD5 could only agree.
+        //
+        // M4-69 is the other, and its blocks ARE proven, which is why the
+        // two conditions are an OR and not one test. An IFSC entry that
+        // contradicts ITSELF - the CRC32 matched and the MD5 did not -
+        // describes two different blocks and so describes neither; it is
+        // an unusable entry rather than a report of damage. Without this a
+        // byte-exact post whose block MD5s were forged reported 100%
+        // damage and spent a full reconstruct on intact bytes, or failed
+        // Unrepairable when the parity fell short. It costs one read of a
+        // file already on its way into a repair that reads it anyway, and
+        // only ever on a set whose own packets contradict each other:
+        // ordinary damage fails the CRC, and the latch needs a CRC that
+        // MATCHED.
+        //
+        // THE THIRD is M4-69's own stated limit, closed 31 Aug 2026 and
+        // narrower than the two above BECAUSE IT IS NOT FREE. The mirror
+        // shape - honest block MD5s beside a LYING CRC32 - fails every
+        // block on the CRC, so nothing latches and no digest disagreed
+        // with itself. Measured end to end that day, and worse than the
+        // row predicted: with 20% redundancy a byte-exact download is
+        // reported `2000/2000 blocks bad` and the JOB FAILS
+        // `unrepairable: 2000 blocks needed, only 400 recovery blocks`,
+        // in the DEFAULT configuration - in-stream fast verify is
+        // CRC32-only, so the lying half is the only half it reads.
+        //
+        // It fires on the ONE shape whose price is bounded by what it
+        // prevents: EVERY block of the file is bad. Acting on that claim
+        // is a full-file recovery fetch and reconstruct, or the failure
+        // above; one pass over the file to refute it is cheaper than
+        // either. On PARTIAL damage the arithmetic inverts - the hash
+        // still scales with the FILE while the spend it saves scales
+        // with the DAMAGE - which is why this is not "hash any damaged
+        // file", and why the mirror stays uncovered there.
+        //
+        // A COUNT OF BAD BLOCKS AND NOTHING FINER, deliberately. The
+        // first cut screened on `live_bad` instead, to hold out a file
+        // nothing arrived for, and it was LOAD-DEPENDENT - the partials
+        // budget spills under memory pressure, so the trigger stopped
+        // firing on a busy box. What it was guarding is unreachable
+        // anyway: `settle_binding` drops a binding no content tier
+        // earned. Both measurements, and the residue this does pay for,
+        // are with the pin in `live/ifsc_contra_tests.rs`.
+        //
+        // THE READ CANNOT PARK, which matters because this arm makes
+        // `src_md5` reachable far more often than the two above did: a
+        // mapped or chased slot is read through `Extractor::read_at`,
+        // which preads, and never the frontier's
+        // `read_covered_blocking`, whose gate an all-bad file would wait
+        // on forever. Checked 31 Aug 2026; see the pins.
+        //
+        // A MISS leaves the block report exactly as it stood - the file
+        // really is wrong, and which blocks to rebuild is still the best
+        // guess available.
+        //
+        // Clearing it releases the §94 B chase gate too, for the reason
+        // the no-IFSC branch above releases its own: the watermark stops
+        // at the first non-Ok block, and here that block is one no
+        // evidence will ever advance, so a frontier reader waiting past
+        // it would block until `chase_finish` joined the worker. The MD5
+        // just proved every byte of this file, so `u64::MAX` is the
+        // truth and not a concession.
+        if !bad.is_empty()
+            && (s.ifsc_self_contradicted
+                || bad.iter().all(|&bi| !file.blocks[bi].is_proven())
+                || bad.len() == file.blocks.len())
+            && src_md5(&src, file.length).is_ok_and(|md5| md5 == file.md5)
+        {
+            readback += 1;
+            if s.ifsc_self_contradicted {
+                tracing::warn!(
+                    target: "verify",
+                    "{}: IFSC entries contradict themselves ({} of {} blocks) and \
+                     the whole-file MD5 matches - the file is intact and the block \
+                     checksums are not usable",
+                    file.name,
+                    bad.len(),
+                    file.blocks.len()
+                );
+            } else if bad.len() == file.blocks.len() {
+                // Said out loud rather than silently cleared: this arm
+                // turns a report of total damage into a clean file, so
+                // the run log has to carry why.
+                tracing::warn!(
+                    target: "verify",
+                    "{}: all {} block(s) failed their IFSC checksums and the \
+                     whole-file MD5 matches - the file is intact and the block \
+                     checksums do not describe it",
+                    file.name,
+                    file.blocks.len()
+                );
+            }
+            bad.clear();
+            for st in s.blocks.iter_mut() {
+                *st = BlockState::Ok;
+            }
+            self.gate_publish(slot, &mut s, bs);
         }
         Some(SlotReport {
             par2_name: Some(file.name.clone()),
@@ -1702,18 +2149,22 @@ impl SlotState {
             name: None,
             name_keys: None,
             head: None,
+            head_md5: None,
             file_size: 0,
             file: None,
+            confirmed: false,
+            head_rival_ruled_out: false,
             blocks: Vec::new(),
             partials: HashMap::new(),
             partial_bytes: 0,
             pre_spans: Vec::new(),
             resume_seeded: false,
             pre_unvouched: false,
-            unmatchable: false,
+            unmatchable: None,
             live_ok: 0,
             live_bad: 0,
             ok_prefix: 0,
+            ifsc_self_contradicted: false,
         }
     }
 
@@ -1738,9 +2189,81 @@ impl SlotState {
         }
         let head = self.head.get_or_insert_with(|| Partial::new(want));
         if head.buf.len() != want {
-            // file_size learned after the first capture changed `want`;
-            // restart (rare, only when the very first article lacked a size).
-            *head = Partial::new(want);
+            // file_size learned after the first capture changed `want`.
+            //
+            // NEITHER DIRECTION MAY DISCARD A BYTE, and that is one rule
+            // rather than two cases: every byte in this buffer was
+            // written at the file offset its own article declared, so
+            // the buffer is always a true PREFIX of the file and a
+            // prefix stays true whatever the length turns out to be.
+            // What changes is only how much of it the digest covers.
+            if want > head.buf.len() {
+                // GROW, never restart, when `want` only got bigger -
+                // which since W4-11 is the ordinary case: a later
+                // article disproves an under-declared `size=` and the
+                // head this slot needs gets longer. The bytes already
+                // captured are still the file's FIRST bytes and their
+                // intervals still describe them, so discarding them
+                // would strand a slot whose offset-0 article has already
+                // been consumed and can never be re-fed - the head would
+                // then never complete and the content tier would be dead
+                // for that slot for the rest of the run.
+                head.buf.resize(want, 0);
+            } else {
+                // M4-94: SHRINK, which the grow arm above cannot reach
+                // and which restarted from empty until 31 Aug 2026 -
+                // "rare, only when the very first article lacked a
+                // size" was the note on it, and that is precisely the
+                // shape it broke. `file_size` is monotone once nonzero
+                // (W4-11 raises it, never lowers it), so the only way
+                // `want` gets SMALLER is the 0 -> nonzero latch: an
+                // article omitting `size=` captures its bytes under the
+                // full 16 KiB `want`, and the first article to declare a
+                // length below that shrinks it. The restart threw those
+                // offset-0 bytes away, and the offset-0 article has by
+                // then been consumed and can never be re-fed - so the
+                // head never completed again, `head_key` stayed `None`
+                // for the rest of the run, and the md5-16k tier (the
+                // ONLY identity an obfuscated post has) was dead for
+                // that slot. Measured on an INTACT 20 KB file whose
+                // second article declared 8192: unclaimed, where the
+                // same spans with honest sizes claim.
+                //
+                // Truncation is what the prefix argument above buys:
+                // bytes 0..want are already the right bytes, and the
+                // intervals are clipped to match. `filled` is sorted and
+                // merged, and clipping a sorted merged list to a prefix
+                // keeps it sorted and merged, so `complete()` still
+                // recognises a filled head as the single span
+                // `[(0, want)]`.
+                //
+                // The head is NOT held at a high-water mark instead:
+                // PAR2's `md5_16k` covers the first 16 KiB OR THE WHOLE
+                // FILE IF SHORTER, so a genuinely 5000-byte file must
+                // hash exactly 5000 bytes. A `want` that refused to
+                // shrink would hash 5000 real bytes plus 11384 zeros and
+                // match nothing, which trades this defect for a wider
+                // one.
+                head.truncate(want);
+            }
+            // The cached digest described the OLD span. Leaving it would
+            // let `head_key` answer about bytes this slot no longer holds,
+            // and the rival latch is an answer ABOUT that digest.
+            self.head_md5 = None;
+            self.head_rival_ruled_out = false;
+            // ...and so is the permanent refusal, which is the half W4-11
+            // turned up. `unmatchable` means "this head, hashed whole,
+            // matched no descriptor"; a head that has just got LONGER is
+            // not that head, and the digest the refusal was reached on no
+            // longer exists. Left latched it froze the slot for the rest
+            // of the run - `on_data` returns before matching and
+            // `finish_slot` skips the whole-file and named tiers too - so
+            // an under-declared `size=` on the article that happened to
+            // arrive first was a permanent verdict about a file that was
+            // merely described short. Cleared here rather than weakened
+            // at the latch site so every slot whose head never changes
+            // keeps exactly the behaviour it had.
+            self.unmatchable = None;
         }
         if head.complete() {
             return;
@@ -1754,12 +2277,101 @@ impl SlotState {
         }
     }
 
-    /// Try to claim a PAR2 file for this slot. Name match first, md5-16k
-    /// second. Requires `self.file.is_none()`.
-    fn try_match(&mut self, slot: usize, active: &Active) -> bool {
+    /// The MD5 of this slot's captured head, once the head is COMPLETE -
+    /// the content key every name tier is arbitrated by. `None` means
+    /// "no evidence yet", never "no evidence ever": the head fills
+    /// interval-wise, so a slot whose first article has not landed
+    /// simply has not been judged.
+    ///
+    /// Cached because an unmatched slot re-matches on every article and a
+    /// denied name never becomes matchable, so the digest would otherwise
+    /// be recomputed per article for the whole run.
+    fn head_key(&mut self) -> Option<[u8; 16]> {
+        if self.head_md5.is_some() {
+            return self.head_md5;
+        }
+        let want = self.head_want();
+        if want == 0 {
+            return None;
+        }
+        let h = self.head.as_ref()?;
+        if h.buf.len() != want || !h.complete() {
+            return None;
+        }
+        self.head_md5 = Some(Md5::digest(&h.buf).into());
+        self.head_md5
+    }
+
+    /// Is this slot's permanent refusal still ABOUT the descriptors now
+    /// live?
+    ///
+    /// Every site that skips a match tier because the slot "will never
+    /// match" asks this rather than reading the field, because a refusal
+    /// reached before a second recovery set was adopted is a refusal
+    /// about descriptors that are no longer the whole of what there is
+    /// to match against. [`Active::adopted_gen`] moves exactly when the
+    /// adopted set list grows, so a stale latch re-opens the slot for one
+    /// more pass and [`try_match`](Self::try_match) re-latches it at the
+    /// current generation if the answer has not changed.
+    fn refused(&self, active: &Active) -> bool {
+        self.unmatchable == Some(active.adopted_gen)
+    }
+
+    /// Try to claim a PAR2 file for this slot. Name NOMINATES, content
+    /// FINALIZES; md5-16k second. Requires `self.file.is_none()`.
+    ///
+    /// A NAME IS A NOMINATION AND NEVER A PROOF (W4-02, 30 Aug 2026).
+    /// The exact tier used to `find` the first unclaimed descriptor with
+    /// a matching name and claim it on the spot, ahead of every content
+    /// tier. yEnc names are attacker- and poster-controlled, so that made
+    /// three measured failures out of one seam: two intact payloads whose
+    /// yEnc names are CROSSED each claimed the other's descriptor and both
+    /// verified 1000/1000 blocks bad, so an intact post died unrepairable
+    /// at r=10; two descriptors sharing one exact name with distinct
+    /// content were settled by FileDesc order, which is arrival-order
+    /// dependent and paid a full phantom repair on the losing run; and an
+    /// UNCOVERED file posted honestly under a name the set also uses was
+    /// claimed by the set, verified all-bad and failed the whole job.
+    ///
+    /// So the head key arbitrates every name candidate:
+    ///   * exactly one candidate CONFIRMED by the head - claim it;
+    ///   * several confirmed (identical heads) - the first, bound
+    ///     TENTATIVELY, since a shared 16 KiB head is not a shared file;
+    ///   * none confirmed but exactly one INCOMPARABLE (the descriptor's
+    ///     `md5_16k` covers a different span than this slot's head, so the
+    ///     digests can never be equal and the head is silent about it) -
+    ///     claim it, which is the pre-W4-02 answer for that shape;
+    ///   * every candidate DENIED - decline, and let the md5-16k tier
+    ///     below find the descriptor the content actually names.
+    /// A DENIAL NEVER LATCHES `unmatchable`: a truthfully-named file
+    /// damaged inside its own first 16 KiB denies too, and
+    /// [`try_match_named`](Self::try_match_named) settles that one at
+    /// finish on per-block IFSC evidence.
+    ///
+    /// Nothing here throws the nomination away. What the head has not
+    /// settled is bound TENTATIVELY instead (see
+    /// [`SlotState::confirmed`]): the first candidate while the head is
+    /// still filling, the sole candidate the head denied. The slot
+    /// verifies its blocks against it exactly as a claim would, so
+    /// out-of-order arrival still costs zero read-back and the ordinary
+    /// post is untouched - but it takes no claim, so a crossed pair
+    /// locks nothing out and each slot's md5-16k tier still finds the
+    /// descriptor its CONTENT names. The first Ok block promotes the
+    /// binding to a claim; the head completing RE-JUDGES it
+    /// ([`LiveVerifier::rejudge_binding`]), which is what makes the
+    /// crossed answer independent of which article landed first; and one
+    /// that never earns a promotion is settled at finish by
+    /// [`settle_binding`](Self::settle_binding).
+    ///
+    /// `tentative` is false at finish: by then the whole file is
+    /// available, so a nomination is either proved or dropped and there
+    /// is nothing left for a provisional binding to wait for.
+    fn try_match(&mut self, slot: usize, active: &Active, tentative: bool) -> bool {
+        let head_key = self.head_key();
         let mut claimed = active.claimed.lock_ok();
 
         let mut name_ambiguous = false;
+        let mut nominee: Option<usize> = None;
         if let Some(name) = &self.name {
             // EXACT first, across the whole set, before any approximate
             // tier is allowed to claim. One first-hit loop over the
@@ -1775,25 +2387,36 @@ impl SlotState {
             let (fold, sname) = self.name_keys.get_or_insert_with(|| {
                 (
                     name.to_ascii_lowercase(),
-                    crate::disk::sanitize_filename(name),
+                    crate::disk::sanitize_out_name(name),
                 )
             });
             let folded: &[usize] = active.by_fold.get(fold.as_str()).map_or(&[], |v| v);
             let sanit: &[usize] = active.by_sanitized.get(sname.as_str()).map_or(&[], |v| v);
-            let exact = folded
+            let exact: Vec<usize> = folded
                 .iter()
                 .copied()
-                .find(|&fi| claimed[fi].is_none() && active.file(fi).name == **name);
-            let hit = exact.or_else(|| {
-                // Approximate (case-folded or sanitized) only when it is
-                // UNIQUE among the unclaimed descriptors. Two candidates
-                // is ambiguity, not a choice for FileDesc order to make:
-                // leave the slot unclaimed and let the md5-16k fallback
-                // below settle it by content. The two sorted candidate
-                // lists are merge-walked with dedup so a descriptor
-                // matching both keys counts once, in FileDesc order -
-                // identical answers to the pre-index linear drain
-                // (`try_match_linear`, kept below as the test oracle).
+                .filter(|&fi| claimed[fi].is_none() && active.file(fi).name == **name)
+                .collect();
+            // Approximate (case-folded or sanitized) only when the exact
+            // tier produced NO candidate at all, and only when it is
+            // UNIQUE among the unclaimed descriptors. Two candidates is
+            // ambiguity, not a choice for FileDesc order to make: leave
+            // the slot unclaimed and let the md5-16k fallback below
+            // settle it by content. The two sorted candidate lists are
+            // merge-walked with dedup so a descriptor matching both keys
+            // counts once, in FileDesc order - identical answers to the
+            // pre-index linear drain (`try_match_linear`, kept below as
+            // the test oracle). An exact candidate the head DENIED does
+            // not fall through to here: a case-folded name is weaker
+            // evidence than the exact one the content just refused, so
+            // the content tiers own the slot from that point.
+            //
+            // `try_match_linear` in live/matchref.rs mirrors this whole
+            // tier; the differential tests hold the two to the same
+            // answers, `confirmed` included.
+            let cands: Vec<usize> = if !exact.is_empty() {
+                exact
+            } else {
                 let (mut i, mut j) = (0usize, 0usize);
                 let mut first = None;
                 while i < folded.len() || j < sanit.len() {
@@ -1818,17 +2441,56 @@ impl SlotState {
                         }
                     }
                 }
-                first
-            });
-            if let Some(fi) = hit {
-                claimed[fi] = Some(slot);
+                first.into_iter().collect()
+            };
+            let want = self.head_want();
+            let hit = arbitrate_by_head(&cands, active, want, head_key);
+            if hit.is_none() && !cands.is_empty() {
+                // Confirmed-plural, denied, or waiting on the head: all
+                // three are "not yet", never "never" (see the fn note).
+                name_ambiguous = true;
+                // The tentative nominee, taken below only if the
+                // content tiers find nothing better. With NO head yet
+                // the first candidate is taken however many there are -
+                // that is the pre-nomination answer, and it is safe
+                // again because the binding is tentative: the head
+                // completing re-judges it (`rejudge_binding`) and moves
+                // it to the descriptor the content names, so FileDesc
+                // order no longer DECIDES anything (W4-02B). With a head
+                // that denied every candidate there is nothing to
+                // re-judge, so a sole candidate is the only one worth
+                // verifying against.
+                nominee = if head_key.is_none() {
+                    cands.first().copied()
+                } else if cands.len() == 1 {
+                    Some(cands[0])
+                } else {
+                    None
+                };
+            }
+            if let Some((fi, sure)) = hit {
+                if sure {
+                    claimed[fi] = Some(slot);
+                }
                 self.file = Some(fi);
+                self.confirmed = sure;
                 self.blocks = vec![BlockState::Pending; active.file(fi).blocks.len()];
                 return true;
             }
         }
-        // md5-16k fallback (obfuscated names).
+        // md5-16k fallback (obfuscated names). UNIQUE among the unclaimed
+        // descriptors, same rule as the approximate name tier above: two
+        // same-length files sharing an identical first 16 KiB (zero-filled
+        // heads - padded VOBs, disk images) both match both descriptors,
+        // and taking the first hit made WHICH slot claimed which a
+        // worker-thread race (matrix finding F1, measured 29 Aug 2026:
+        // crossed ~1 run in 5 on a loaded box; at r=10 the crossed pairing
+        // reads every differing block as damage and FAILS an intact post).
+        // Declined ambiguity resolves later: a twin's claim makes the
+        // remaining candidate unique on retry, and `try_match_whole` at
+        // finish settles what is left by whole-file MD5.
         let want = self.head_want();
+        let mut head_ambiguous = false;
         if want > 0
             && self
                 .head
@@ -1836,130 +2498,192 @@ impl SlotState {
                 .is_some_and(|h| h.buf.len() == want && h.complete())
         {
             let head_md5: [u8; 16] = Md5::digest(&self.head.as_ref().unwrap().buf).into();
+            let mut hit: Option<usize> = None;
             for (fi, f) in active.files() {
                 if claimed[fi].is_some() || f.length.min(HEAD_LEN as u64) != want as u64 {
                     continue;
                 }
-                if f.md5_16k == head_md5 {
-                    claimed[fi] = Some(slot);
-                    self.file = Some(fi);
-                    self.blocks = vec![BlockState::Pending; f.blocks.len()];
-                    return true;
+                if f.md5_16k != head_md5 {
+                    continue;
+                }
+                match hit {
+                    None => hit = Some(fi),
+                    // W4-15: ONE FILE DESCRIBED BY TWO RECOVERY SETS IS
+                    // NOT TWO FILES. The rivalry this tier declines on is
+                    // two DIFFERENT files that happen to share a 16 KiB
+                    // head - zero-filled heads, padded VOBs - and what
+                    // makes them different is the whole-file MD5. Two
+                    // descriptors agreeing on the length AND that MD5
+                    // describe the same bytes, which is the ordinary
+                    // shape of a post carrying two overlapping sets over
+                    // one member. Declining there cost the whole row:
+                    // with both sets live the payload matched two entries
+                    // and neither, the slot stayed unclaimed, and a
+                    // 4-block loss on an intact-but-damaged file was
+                    // priced WHOLLY MISSING - `try_match_whole` cannot
+                    // rescue it either, because a damaged file matches
+                    // no candidate's whole-file MD5 at all.
+                    //
+                    // Safe where claiming a real twin by elimination is
+                    // not (see `try_match_whole`'s note): the objection
+                    // there is that settle could publish this slot's
+                    // bytes under the OTHER file's name, and here the
+                    // other descriptor declares the same length and the
+                    // same content hash, so there is no other file to be
+                    // wrong about.
+                    Some(h) if active.file(h).length == f.length && active.file(h).md5 == f.md5 => {
+                        continue;
+                    }
+                    Some(_) => {
+                        head_ambiguous = true;
+                        hit = None;
+                        break;
+                    }
                 }
             }
-            // Head is complete and matched nothing: if the name also failed,
-            // this slot will never match (nfo/sfv/sample files). NOT when the
-            // name tier declined on ambiguity - those candidates are real, and
-            // a later claim by the twin slot makes the approximate match
-            // unique. Latching here froze the slot forever and downgraded a
-            // patchable file to wholly-missing (found by the 14 Aug sweep).
-            if self.name.is_some() && !name_ambiguous {
-                self.unmatchable = true;
+            if let Some(fi) = hit {
+                claimed[fi] = Some(slot);
+                self.file = Some(fi);
+                self.confirmed = true;
+                self.blocks = vec![BlockState::Pending; active.file(fi).blocks.len()];
+                return true;
             }
+            // Head is complete and matched nothing: if the name also failed,
+            // this slot will never match (nfo/sfv/sample files). NOT when
+            // EITHER tier declined on ambiguity - those candidates are real,
+            // and a later claim by the twin slot makes the match unique.
+            // Latching here froze the slot forever and downgraded a
+            // patchable file to wholly-missing (found by the 14 Aug sweep).
+            if self.name.is_some() && !name_ambiguous && !head_ambiguous {
+                self.unmatchable = Some(active.adopted_gen);
+            }
+        }
+        // Nothing the content vouches for. Bind the name's sole nominee
+        // TENTATIVELY so the slot keeps verifying in-stream, and let the
+        // blocks say whether the name told the truth.
+        if tentative
+            && let Some(fi) = nominee
+            && claimed[fi].is_none()
+        {
+            self.file = Some(fi);
+            self.confirmed = false;
+            self.blocks = vec![BlockState::Pending; active.file(fi).blocks.len()];
+            return true;
         }
         false
     }
 
-    /// The pre-B6 linear matcher, byte-for-byte: full descriptor scans and
-    /// per-candidate `sanitize_filename` calls. NOT called in production -
-    /// kept as the oracle for the differential tests and as the baseline
-    /// leg of [`bench_match`], so any drift between the indexed tiers and
-    /// the original semantics fails a test instead of crossing a claim.
-    fn try_match_linear(&mut self, slot: usize, active: &Active) -> bool {
-        let mut claimed = active.claimed.lock_ok();
-
-        let mut name_ambiguous = false;
-        if let Some(name) = &self.name {
-            let sname = crate::disk::sanitize_filename(name);
-            let exact = active
-                .files()
-                .find(|(fi, f)| claimed[*fi].is_none() && f.name == **name)
-                .map(|(fi, _)| fi);
-            let hit = exact.or_else(|| {
-                let mut it = active.files().filter(|(fi, f)| {
-                    claimed[*fi].is_none()
-                        && (f.name.eq_ignore_ascii_case(name)
-                            || crate::disk::sanitize_filename(&f.name) == sname)
-                });
-                let first = it.next();
-                if it.next().is_none() {
-                    first.map(|(fi, _)| fi)
-                } else {
-                    name_ambiguous = true;
-                    None
-                }
-            });
-            if let Some(fi) = hit {
-                claimed[fi] = Some(slot);
-                self.file = Some(fi);
-                self.blocks = vec![BlockState::Pending; active.file(fi).blocks.len()];
-                return true;
-            }
-        }
-        let want = self.head_want();
-        if want > 0
-            && self
-                .head
-                .as_ref()
-                .is_some_and(|h| h.buf.len() == want && h.complete())
-        {
-            let head_md5: [u8; 16] = Md5::digest(&self.head.as_ref().unwrap().buf).into();
-            for (fi, f) in active.files() {
-                if claimed[fi].is_some() || f.length.min(HEAD_LEN as u64) != want as u64 {
-                    continue;
-                }
-                if f.md5_16k == head_md5 {
-                    claimed[fi] = Some(slot);
-                    self.file = Some(fi);
-                    self.blocks = vec![BlockState::Pending; f.blocks.len()];
-                    return true;
-                }
-            }
-            if self.name.is_some() && !name_ambiguous {
-                self.unmatchable = true;
-            }
-        }
-        false
+    /// Drop a tentative binding and everything measured under it,
+    /// returning the (ok, bad, partial bytes) it discards.
+    ///
+    /// The block states, the live counts and the watermark prefix were
+    /// all judged against a descriptor this slot turns out not to be, so
+    /// none of them means anything now. The PARTIALS have to go with
+    /// them and not merely be forgotten: they are keyed by BLOCK INDEX,
+    /// and the next descriptor this slot binds has its own block size,
+    /// so a surviving entry would be handed to a block it holds no bytes
+    /// of. The caller winds the returned figures out of the GLOBAL
+    /// counters too - the live gauge would otherwise keep the phantom
+    /// damage a lying name produced, and the partials budget would hold
+    /// headroom for memory that is gone. Idempotent: a second call
+    /// discards nothing.
+    fn unbind(&mut self) -> (u64, u64, usize) {
+        self.file = None;
+        self.confirmed = false;
+        self.blocks = Vec::new();
+        self.ok_prefix = 0;
+        // The latch is a statement about a DESCRIPTOR's entries, so it
+        // goes with the binding it was made against (M4-69). Carrying it
+        // to the next descriptor would cost a whole-file MD5 the honest
+        // set beside it never asked for; it could never make a wrong
+        // verdict, since the MD5 comparison is what gates the
+        // escalation, only a wasted read.
+        self.ifsc_self_contradicted = false;
+        self.partials.clear();
+        (
+            std::mem::take(&mut self.live_ok),
+            std::mem::take(&mut self.live_bad),
+            std::mem::take(&mut self.partial_bytes),
+        )
     }
 }
 
-/// Matcher microbench hook (`examples/live_match_bench.rs`) - drives the
-/// match tiers the way `on_data` hits them: `calls` attempts round-robin
-/// over one slot per probe name, against a fresh claim table for `set`
-/// (map build included, as activation pays it). `indexed` picks the
-/// production pre-index matcher or the pre-B6 linear reference. Returns
-/// how many probes ended claimed, so the harness can assert both paths
-/// agree and the work is not optimized away.
-#[doc(hidden)]
-pub fn bench_match(
-    set: &Arc<Par2Set>,
-    probe_names: &[String],
-    calls: usize,
-    indexed: bool,
-) -> usize {
-    let active = Active::new(vec![set.clone()]);
-    let mut slots: Vec<SlotState> = probe_names
-        .iter()
-        .map(|n| {
-            let mut s = SlotState::empty();
-            if !n.is_empty() {
-                s.name = Some(n.clone());
+/// What a slot's complete-head digest says about one name candidate.
+///
+/// `Unknown` is NOT a soft no: the descriptor's `md5_16k` covers
+/// `min(16 KiB, its own length)` bytes and the slot's head covers
+/// `min(16 KiB, the yEnc-declared size)`, so when those spans differ the
+/// two digests can never be equal however right the name is. Comparing
+/// them anyway would read "the poster's size header disagrees with the
+/// FileDesc" as "this file is an impostor".
+#[derive(PartialEq)]
+enum HeadSays {
+    Confirm,
+    Deny,
+    Unknown,
+}
+
+fn head_says(f: &crate::par2::Par2File, want: usize, key: [u8; 16]) -> HeadSays {
+    if f.length.min(HEAD_LEN as u64) != want as u64 {
+        HeadSays::Unknown
+    } else if f.md5_16k == key {
+        HeadSays::Confirm
+    } else {
+        HeadSays::Deny
+    }
+}
+
+/// Arbitrate name candidates by the slot's head digest - the shared rule
+/// behind both matchers' name tiers, so the indexed and linear drains
+/// cannot drift on it. `Some((fi, true))` is a CLAIM, `Some((fi, false))`
+/// a tentative binding, and `None` a DECLINE - never "unmatchable":
+/// every path to it is resolvable later, by a twin's claim, by the
+/// whole-file tier, or by [`SlotState::try_match_named`] at finish.
+///
+/// `key` is `None` while the head is still filling. The name tier then
+/// claims NOTHING - a name is a nomination and the evidence that
+/// finalizes it has not arrived. See [`SlotState::try_match`] for the
+/// three measured crossings that rule exists for.
+///
+/// SEVERAL candidates confirming is the duplicate POSTING: one file in
+/// two recovery sets, which is what a poster running par2create twice
+/// over a directory emits, and the everyday per-file-set shape. Their
+/// heads agree because their bytes do, so the first is taken - but
+/// TENTATIVELY, because a shared 16 KiB head is not a shared file and
+/// the blocks are what tell two of them apart. The first Ok block
+/// promotes it in the same call for the duplicate-posting case, and a
+/// pairing the blocks refuse is dropped at finish for the whole-file
+/// tier to settle (matrix finding F1's rule, reached through a name).
+fn arbitrate_by_head(
+    cands: &[usize],
+    active: &Active,
+    want: usize,
+    key: Option<[u8; 16]>,
+) -> Option<(usize, bool)> {
+    let key = key?;
+    let mut confirm: Option<usize> = None;
+    let mut unknown: Option<usize> = None;
+    let (mut n_confirm, mut n_unknown) = (0usize, 0usize);
+    for &fi in cands {
+        match head_says(active.file(fi), want, key) {
+            HeadSays::Confirm => {
+                n_confirm += 1;
+                confirm.get_or_insert(fi);
             }
-            s
-        })
-        .collect();
-    for c in 0..calls {
-        let i = c % slots.len();
-        let s = &mut slots[i];
-        if s.file.is_none() && !s.unmatchable {
-            if indexed {
-                s.try_match(i, &active);
-            } else {
-                s.try_match_linear(i, &active);
+            HeadSays::Unknown => {
+                n_unknown += 1;
+                unknown.get_or_insert(fi);
             }
+            HeadSays::Deny => {}
         }
     }
-    slots.iter().filter(|s| s.file.is_some()).count()
+    if n_confirm > 0 {
+        return confirm.map(|fi| (fi, n_confirm == 1));
+    }
+    if n_unknown == 1 {
+        return unknown.map(|fi| (fi, true));
+    }
+    None
 }
 
 /// Real (unpadded) length of block `bi` of a `length`-byte file.
@@ -1974,121 +2698,6 @@ fn block_len(length: u64, bs: usize, bi: usize) -> usize {
     (length - start.min(length)).min(bs as u64) as usize
 }
 
-/// Hash `bytes` (the real bytes of one block, zero-padded to `block_size`
-/// per spec) and compare with the IFSC checksums. MD5 + CRC32 must both
-/// match - identical semantics to `par2::verify_file_blocks`. CRC32 runs
-/// first: hardware CRC is ~13× faster than MD5, so a mismatching (damaged)
-/// block never pays for the MD5 pass.
-pub fn check_block(check: &BlockCheck, block_size: usize, bytes: &[u8]) -> bool {
-    if !check_block_crc(check, block_size, bytes) {
-        return false;
-    }
-    let mut md5 = Md5::new();
-    md5.update(bytes);
-    pad_to(block_size, bytes.len(), |z| md5.update(z));
-    <[u8; 16]>::from(md5.finalize()) == check.md5
-}
-
-/// CRC32-only block check - the fast-verify hot path. The caller must only
-/// use this for bytes that already carry an independent integrity check
-/// (in-stream spans passed their yEnc pcrc32 in the decoder); a false
-/// accept then requires corruption that survives two independent CRC32s
-/// over differently-aligned spans.
-pub fn check_block_crc(check: &BlockCheck, block_size: usize, bytes: &[u8]) -> bool {
-    debug_assert!(bytes.len() <= block_size);
-    let mut crc = crc32fast::Hasher::new();
-    crc.update(bytes);
-    // O(log n) through the padding rather than hashing it, exactly as
-    // `StreamedBlock::finish` does. Saturating so a caller that broke
-    // the assert above pays a wrong answer, not a wrapped length.
-    // (The MD5 half of `check_block` keeps the real zero bytes - MD5
-    // has no zero-extension trick.)
-    crate::yenc_simd::crc32_zeros(
-        crc.finalize(),
-        (block_size.saturating_sub(bytes.len())) as u64,
-    ) == check.crc32
-}
-
-/// [`check_block`] fed in pieces, for a block too big to hold at once.
-///
-/// Both digests run together, so the CRC-before-MD5 short circuit is gone -
-/// which is why the caller only uses this above the chunking threshold, where
-/// holding the whole block is the larger cost by far.
-struct StreamedBlock {
-    crc: crc32fast::Hasher,
-    md5: Md5,
-    len: usize,
-}
-
-impl StreamedBlock {
-    fn new() -> Self {
-        Self {
-            crc: crc32fast::Hasher::new(),
-            md5: Md5::new(),
-            len: 0,
-        }
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        self.crc.update(bytes);
-        self.md5.update(bytes);
-        self.len += bytes.len();
-    }
-
-    /// Pad to `block_size` per spec and compare both digests.
-    fn finish(mut self, check: &BlockCheck, block_size: usize) -> bool {
-        // O(log n) through the padding rather than hashing it: the padding on
-        // a 256 MiB block is itself most of a block.
-        if crate::yenc_simd::crc32_zeros(self.crc.finalize(), (block_size - self.len) as u64)
-            != check.crc32
-        {
-            return false;
-        }
-        pad_to(block_size, self.len, |z| self.md5.update(z));
-        <[u8; 16]>::from(self.md5.finalize()) == check.md5
-    }
-}
-
-/// Read one block through `buf` in `buf.len()` pieces, hashing as it goes.
-/// `None` if any read failed - a block that cannot be read is damage.
-fn read_block_chunked(
-    src: &ReadAt<'_>,
-    file: Option<&std::fs::File>,
-    base: u64,
-    blen: usize,
-    buf: &mut [u8],
-) -> Option<StreamedBlock> {
-    let mut check = StreamedBlock::new();
-    let mut done = 0usize;
-    while done < blen {
-        let n = (blen - done).min(buf.len());
-        let ok = match (src, file) {
-            (ReadAt::Path(_), Some(f)) => {
-                crate::disk::read_exact_at(f, &mut buf[..n], base + done as u64).is_ok()
-            }
-            (ReadAt::Reader(r), _) => r(base + done as u64, &mut buf[..n]).is_ok(),
-            _ => false,
-        };
-        if !ok {
-            return None;
-        }
-        check.update(&buf[..n]);
-        done += n;
-    }
-    Some(check)
-}
-
-/// Feed `block_size - len` zero-padding bytes to a hasher, chunk-wise.
-fn pad_to(block_size: usize, len: usize, mut update: impl FnMut(&[u8])) {
-    const ZEROS: [u8; 4096] = [0; 4096];
-    let mut rem = block_size - len;
-    while rem > 0 {
-        let n = rem.min(ZEROS.len());
-        update(&ZEROS[..n]);
-        rem -= n;
-    }
-}
-
 /// A source of file bytes for read-back settling.
 pub enum ReadAt<'a> {
     /// No backing data at all (file never created).
@@ -2097,6 +2706,18 @@ pub enum ReadAt<'a> {
     Path(&'a Path),
     /// Reconstructed bytes (direct-extracted volumes): read `buf.len()`
     /// bytes at the given offset.
+    ///
+    /// CONTRACT, and it is load-bearing rather than a nicety: a range
+    /// the source cannot FULLY serve must come back as `Err`. Never a
+    /// short read, never zero padding, never a panic. `src_md5` has no
+    /// `metadata()` to ask how long a closure is, so it asks by reading
+    /// one byte past the descriptor's end - a source that answers `Ok`
+    /// there is longer than the descriptor and is not its file (M4-41).
+    /// A source that pads instead would fail every healthy slot; one
+    /// that panics takes the process with it. `Extractor::read_at` -
+    /// the one production reader - returns `nofile()` from every mode
+    /// for a range it cannot cover, which is what makes the answer mean
+    /// what it says.
     Reader(&'a (dyn Fn(u64, &mut [u8]) -> io::Result<()> + Sync)),
 }
 
@@ -2125,6 +2746,60 @@ fn src_md5(src: &ReadAt<'_>, expect_len: u64) -> io::Result<[u8; 16]> {
             Ok(md5.finalize().into())
         }
         ReadAt::Reader(r) => {
+            // M4-42's sibling, M4-41 (30 Aug 2026): the Path arm above
+            // refuses a source whose length is not the descriptor's, and
+            // this arm used to hash exactly `expect_len` bytes from
+            // offset 0 without ever asking how long the source was - so a
+            // FileDesc for a PREFIX of a longer mapped or chased buffer
+            // whole-file-MATCHED and the suffix bytes vanished into a
+            // file the set then called proved. Direct-extracted and
+            // chased slots are precisely the ones that take this arm
+            // (`get/settle.rs`: `is_mapped(sidx) || is_chased(sidx)`), so
+            // M4-09's Path-slot prefix pair being green said nothing
+            // about it.
+            //
+            // A closure has no `metadata()`, so it is asked the only way
+            // a closure can be: read one byte at `expect_len`. A source
+            // that SERVES that byte spans more than the descriptor
+            // describes and is not that descriptor's file.
+            // `Extractor::read_at` refuses any range it cannot fully
+            // serve - every mode returns `nofile()` rather than padding -
+            // which is what makes the answer mean what it says.
+            //
+            // IT IS ASKED FIRST, and until X5-21 (31 Aug 2026) it was
+            // asked LAST, after the whole file had already been hashed -
+            // an ordering change and not a rule change, since the
+            // verdict either way is the same. What it is worth is the
+            // row: the finish-time tiers ask this once per candidate
+            // LENGTH over identical-head twins, so a candidate shorter
+            // than the bytes that landed cost a full hash of its
+            // declared length before the probe threw the answer away.
+            // Measured, 24 such candidates over one 32 KiB slot: 665,113
+            // bytes for 32,256 of file, 20.6x, and the multiplier is the
+            // same over gigabytes. It is not new work - the same call
+            // stood at the foot of this arm - it has only stopped being
+            // paid for after the fact.
+            let mut past = [0u8; 1];
+            if r(expect_len, &mut past).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "length mismatch",
+                ));
+            }
+            // And the OTHER end of the same question, which the probe
+            // above cannot answer alone: it refuses a source LONGER than
+            // the descriptor and says nothing about a SHORTER one, so an
+            // over-declaring descriptor was paid for by hashing the
+            // whole covered prefix and failing at the chunk that crossed
+            // the end. One byte at `expect_len - 1` settles it, and the
+            // two probes together pin the length EXACTLY before a byte
+            // is hashed. Measured, 12 over-declaring candidates over one
+            // 2 MiB slot: 38,830,093 bytes for 2,113,536 of file, 18.4x,
+            // one byte each afterwards. The reader's own error is
+            // propagated rather than replaced (X5-21).
+            if expect_len > 0 {
+                r(expect_len - 1, &mut past)?;
+            }
             let mut buf = vec![0u8; 1 << 20];
             let mut off = 0u64;
             while off < expect_len {
@@ -2225,6 +2900,51 @@ pub fn summarize_damage<'a>(reports: impl Iterator<Item = &'a SlotReport>) -> Da
     d
 }
 
+// The finish-time name tier - a nomination proved on content or
+// dropped. Split off for the size gate; see the file header.
+#[path = "live/nametier.rs"]
+mod nametier;
+
+pub use nametier::declared_block_evidence;
+
+// The finish-time TWIN tier - which of several identical-head
+// descriptors a slot's bytes are, by whole-file MD5 when the slot is
+// intact and by per-block IFSC evidence when it is damaged. Split off
+// for the size gate; see the file header.
+#[path = "live/twintier.rs"]
+mod twintier;
+
+// The matcher's reference drain and its microbench hook - production
+// code, and the only production module here that is never on a download
+// path. Split off for the size gate; see the file header.
+#[path = "live/matchref.rs"]
+mod matchref;
+pub use matchref::bench_match;
+
+// The boundary-block interval trackers and the merged run store under
+// both. Its own file for the reason `live/blockcheck.rs` is: one subject,
+// and live.rs is at the size-gate ceiling (TODO 106). X5-18's hybrid
+// store and the measurement behind it are in that file's header.
+#[path = "live/runs.rs"]
+mod runs;
+use runs::{CrcParts, Partial, PartialBuf};
+
+// The IFSC block-check primitives - one subject, its own file under the
+// size gate (TODO 106). `pub use` because `check_block`,
+// `check_block_verdict`, `check_block_crc` and `BlockVerdict` are this
+// module's public surface and callers outside the crate name them at
+// `live::`; the rest is `pub(super)` and stays inside.
+#[path = "live/blockcheck.rs"]
+mod blockcheck;
+pub use blockcheck::{BlockVerdict, check_block, check_block_crc, check_block_verdict};
+use blockcheck::{block_digest, check_block_crc_verdict, read_block_chunked};
+// `pad_to` is reached by name from `live/tests.rs`, which builds its
+// expected digests exactly as the production path does - that identity
+// is the point of the test, so the helper is imported here rather than
+// spelled out a second time there.
+#[cfg(test)]
+use blockcheck::pad_to;
+
 #[cfg(test)]
 #[path = "live/tests.rs"]
 mod tests;
@@ -2236,3 +2956,15 @@ mod tests;
 #[cfg(test)]
 #[path = "live/verdict_tests.rs"]
 mod verdict_tests;
+
+// M4-69: an IFSC entry that contradicts itself about one block, and the
+// whole-file MD5 that outranks it. Its own file, one subject per file.
+#[cfg(test)]
+#[path = "live/ifsc_contra_tests.rs"]
+mod ifsc_contra_tests;
+
+// X5-21: what the finish-time whole-file tiers COST the mapped reader,
+// asserted as read counts. Its own file, one subject per file.
+#[cfg(test)]
+#[path = "live/readcount_tests.rs"]
+mod readcount_tests;

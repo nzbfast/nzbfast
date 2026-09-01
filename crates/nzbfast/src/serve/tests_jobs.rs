@@ -342,10 +342,12 @@ fn deleting_a_superseded_record_spares_the_newer_jobs_directory() {
     let canon = PathBuf::from("/dl/Movie.2024");
     let rec = |id: &str, state: JobState, dir: &PathBuf, filed: bool| super::DeleteRecord {
         nzo_id: id.to_string(),
+        name: id.to_string(),
         state,
         out_dir: dir.clone(),
         filed,
         locked: false,
+        published_failed: state == JobState::Failed,
     };
     // Both records name the canonical directory; "new" lives there.
     let shared = vec![
@@ -353,7 +355,7 @@ fn deleting_a_superseded_record_spares_the_newer_jobs_directory() {
         rec("new", JobState::Completed, &canon, false),
     ];
 
-    let plan = super::plan_history_delete(&shared, "old", &[]);
+    let plan = super::plan_history_delete(&shared, "old", None, &[]);
     assert!(plan[0].doomed, "the record still goes");
     assert!(
         !plan[0].may_remove_files,
@@ -368,7 +370,7 @@ fn deleting_a_superseded_record_spares_the_newer_jobs_directory() {
         &PathBuf::from("/dl/A"),
         false,
     )];
-    let plan = super::plan_history_delete(&solo, "solo", &[]);
+    let plan = super::plan_history_delete(&solo, "solo", None, &[]);
     assert!(plan[0].doomed && plan[0].may_remove_files);
 
     // value=all must still delete. The claimant test runs against the
@@ -376,13 +378,13 @@ fn deleting_a_superseded_record_spares_the_newer_jobs_directory() {
     // testing it against the pre-delete list would find every record's
     // directory "claimed" by a doomed sibling and silently stop
     // deleting anything at all.
-    let plan = super::plan_history_delete(&shared, "all", &[]);
+    let plan = super::plan_history_delete(&shared, "all", None, &[]);
     assert!(
         plan.iter().all(|p| p.doomed && p.may_remove_files),
         "value=all still removes files"
     );
     // ...but a LIVE queue job in that directory does survive, and wins.
-    let plan = super::plan_history_delete(&shared, "all", std::slice::from_ref(&canon));
+    let plan = super::plan_history_delete(&shared, "all", None, std::slice::from_ref(&canon));
     assert!(plan.iter().all(|p| p.doomed && !p.may_remove_files));
 
     // value=failed: the failed record goes, the completed one survives
@@ -391,7 +393,7 @@ fn deleting_a_superseded_record_spares_the_newer_jobs_directory() {
         rec("f", JobState::Failed, &canon, false),
         rec("c", JobState::Completed, &canon, false),
     ];
-    let plan = super::plan_history_delete(&mixed, "failed", &[]);
+    let plan = super::plan_history_delete(&mixed, "failed", None, &[]);
     assert!(plan[0].doomed && !plan[0].may_remove_files);
     assert!(!plan[1].doomed);
 
@@ -404,41 +406,100 @@ fn deleting_a_superseded_record_spares_the_newer_jobs_directory() {
         rec("e5", JobState::Completed, &season, true),
         rec("e6", JobState::Completed, &season, true),
     ];
-    let plan = super::plan_history_delete(&filed, "e5", &[]);
+    let plan = super::plan_history_delete(&filed, "e5", None, &[]);
     assert!(
         plan[0].doomed && plan[0].may_remove_files,
         "the per-episode delete still runs"
     );
 
     // A comma list still selects exactly what it names.
-    let plan = super::plan_history_delete(&mixed, "c,missing", &[]);
+    let plan = super::plan_history_delete(&mixed, "c,missing", None, &[]);
     assert!(!plan[0].doomed && plan[1].doomed);
 }
 
-/// The dashboard's one-click "Clear completed" tidies the list without
-/// throwing away anything the user still has to act on.
+/// Read-only sweep finding 13 (31 Aug 2026): the bulk words classify on
+/// the word the ROW PUBLISHES, not on `state`.
 ///
-/// The trap is that "completed" is NOT the same set as the card's
-/// Completed filter chip: a password-locked job downloaded fine, so its
-/// state is Completed and the chip counts it - but its payload is still
-/// packed and that history row carries the only 🔑 to unlock it. A
-/// sweep that took it would silently strand the download.
+/// A §96 storage-deleted job is `Completed` on paper - every byte
+/// arrived - and its output folder has since been deleted, so the row
+/// renders `"status": "Failed"` with the sentence saying why.
+/// `plan_history_delete` read `state`, so "Clear failed" left the row a
+/// user was looking at as Failed and "Clear completed" removed it: a
+/// bulk DELETE disagreeing with the word on the row it removes, in both
+/// directions at once.
+///
+/// Driven off the `published_failed` snapshot rather than the
+/// filesystem, which is what that field is for - `history_page` takes it
+/// under the same lock it renders the row from, so the two cannot
+/// disagree about one record.
 #[test]
-fn clear_completed_spares_failures_and_password_locked_records() {
+fn the_bulk_words_follow_the_word_the_row_publishes() {
+    let rec = |id: &str, state: JobState, published_failed: bool| super::DeleteRecord {
+        nzo_id: id.to_string(),
+        name: id.to_string(),
+        state,
+        out_dir: PathBuf::from(format!("/dl/{id}")),
+        filed: false,
+        locked: false,
+        published_failed,
+    };
+    // "gone" is the storage-deleted row: Completed, published Failed.
+    let recs = vec![
+        rec("done", JobState::Completed, false),
+        rec("gone", JobState::Completed, true),
+        rec("failed", JobState::Failed, true),
+    ];
+    let doomed = |value: &str| -> Vec<String> {
+        super::plan_history_delete(&recs, value, None, &[])
+            .iter()
+            .zip(&recs)
+            .filter(|(p, _)| p.doomed)
+            .map(|(_, r)| r.nzo_id.clone())
+            .collect()
+    };
+    assert_eq!(
+        doomed("failed"),
+        vec!["gone".to_string(), "failed".to_string()],
+        "a row the user is shown as Failed must be swept by 'Clear failed'"
+    );
+    assert_eq!(
+        doomed("completed"),
+        vec!["done".to_string()],
+        "'Clear completed' must not remove a row the user is shown as Failed"
+    );
+    // `all` is unchanged: it is the one word that reads no status.
+    assert_eq!(doomed("all").len(), 3);
+}
+
+/// The dashboard's one-click "Clear completed" and "Clear failed" tidy
+/// the list without throwing away anything the user still has to act on.
+///
+/// The trap is that neither bulk word is the same set as its filter
+/// chip: a password-locked job that downloaded fine has state Completed
+/// and the Completed chip counts it, and a job whose unpack failed for
+/// want of a password (`settle_locked_failure`'s "raise the 🔑" branch)
+/// has state Failed and the Failed chip counts it too - but either way
+/// that history row carries the only 🔑 to unlock the payload. A sweep
+/// that took it would silently strand the download.
+#[test]
+fn clear_completed_and_clear_failed_spare_password_locked_records() {
     let rec = |id: &str, state: JobState, locked: bool| super::DeleteRecord {
         nzo_id: id.to_string(),
+        name: id.to_string(),
         state,
         out_dir: PathBuf::from(format!("/dl/{id}")),
         filed: false,
         locked,
+        published_failed: state == JobState::Failed,
     };
     let recs = vec![
         rec("done", JobState::Completed, false),
         rec("failed", JobState::Failed, false),
         rec("locked", JobState::Completed, true),
+        rec("failed-locked", JobState::Failed, true),
     ];
 
-    let plan = super::plan_history_delete(&recs, "completed", &[]);
+    let plan = super::plan_history_delete(&recs, "completed", None, &[]);
     assert!(
         plan[0].doomed && plan[0].may_remove_files,
         "the finished one goes"
@@ -451,27 +512,32 @@ fn clear_completed_spares_failures_and_password_locked_records() {
         !plan[2].doomed,
         "password-locked stays: only this row can unlock it"
     );
+    assert!(
+        !plan[3].doomed,
+        "a failed+locked row is not even Completed - stays either way"
+    );
 
-    // The neighbouring selectors keep their own meaning. `failed` is
-    // the exact complement of what `completed` takes ONLY for the
-    // unlocked records - the locked one is in neither sweep, which is
-    // the point: it leaves by an explicit ✕, never by a bulk clear.
-    let plan = super::plan_history_delete(&recs, "failed", &[]);
+    // The neighbouring selectors keep their own meaning. `failed` takes
+    // the plain failure and leaves both locked rows - completed-locked
+    // because its state isn't Failed, failed-locked because a bulk
+    // sweep must never take the only 🔑, exactly as `completed` doesn't.
+    let plan = super::plan_history_delete(&recs, "failed", None, &[]);
     assert_eq!(
         plan.iter().map(|p| p.doomed).collect::<Vec<_>>(),
-        vec![false, true, false]
+        vec![false, true, false, false],
+        "failed-locked leaves by an explicit ✕, never by a bulk clear"
     );
-    let plan = super::plan_history_delete(&recs, "all", &[]);
+    let plan = super::plan_history_delete(&recs, "all", None, &[]);
     assert!(
         plan.iter().all(|p| p.doomed),
         "`all` still means all of them"
     );
     // And an nzo_id that happens to read like a bulk word is still
     // matched by the id arm, not the word arm.
-    let plan = super::plan_history_delete(&recs, "locked", &[]);
+    let plan = super::plan_history_delete(&recs, "locked", None, &[]);
     assert_eq!(
         plan.iter().map(|p| p.doomed).collect::<Vec<_>>(),
-        vec![false, false, true]
+        vec![false, false, true, false]
     );
 }
 
@@ -489,13 +555,15 @@ fn a_published_over_directory_is_not_the_old_records_to_delete() {
 
     let rec = |id: &str| super::DeleteRecord {
         nzo_id: id.to_string(),
+        name: id.to_string(),
         state: JobState::Completed,
         out_dir: canon.clone(),
         filed: false,
         locked: false,
+        published_failed: false,
     };
     let records = vec![rec("old"), rec("new")];
-    let plan = super::plan_history_delete(&records, "old", &[]);
+    let plan = super::plan_history_delete(&records, "old", None, &[]);
     for (r, p) in records.iter().zip(&plan) {
         if p.doomed && p.may_remove_files {
             super::remove_job_files(
@@ -513,7 +581,7 @@ fn a_published_over_directory_is_not_the_old_records_to_delete() {
 
     // Once the new record is gone too, the directory is deletable.
     let last = vec![rec("new")];
-    let plan = super::plan_history_delete(&last, "new", &[]);
+    let plan = super::plan_history_delete(&last, "new", None, &[]);
     assert!(plan[0].may_remove_files);
     super::remove_job_files(
         &canon,
@@ -1102,4 +1170,160 @@ fn the_filed_suffix_round_trips_through_the_queue_file() {
         None,
         "and \"never recorded\" stays distinct from it"
     );
+}
+
+/// A job name too long to be a directory entry still gets a directory.
+///
+/// `refile_out_dir` turns the job's name into ONE component under the
+/// download root, and the name arrives from the .nzb filename or from
+/// an *arr's `nzbname=` - neither of which is bounded by anything. It
+/// went through the UNCAPPED `sanitize_filename` until 31 Aug 2026, so
+/// a 300-byte name produced a 300-byte component and every `mkdir`
+/// under it was `ENAMETOOLONG` (measured on APFS the same day: 255
+/// creates, 300 does not).
+///
+/// CAP and not refuse, which is the division
+/// `disk::sanitize_filename_capped_for` carries: by the time a job has
+/// an output directory there is no request left to fail, so the only
+/// answers available are a usable name or no name at all.
+///
+/// Asserted at the CALL SITE and not only at the helper, because what
+/// a future edit reverts is the call.
+#[test]
+fn an_overlong_job_name_still_gets_a_writable_directory() {
+    let out_root = std::env::temp_dir().join(format!("nzbfast-longname-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&out_root);
+    let long = "L".repeat(300);
+    let (dir, _replaces) = refile_out_dir(&out_root, &long, &format!("{long}.nzb"), &|_| {
+        DirClaim::Free
+    });
+    // Every component the caller will have to create is writable, the
+    // category one included - that one is a second uncapped site on the
+    // same line.
+    let rel = dir.strip_prefix(&out_root).expect("stayed under the root");
+    let comps: Vec<_> = rel.components().collect();
+    assert_eq!(comps.len(), 2, "category then stem: {}", dir.display());
+    for c in &comps {
+        let n = c.as_os_str().to_string_lossy();
+        assert!(n.len() <= 255, "{} bytes: {n}", n.len());
+    }
+    // And it really creates, which is the assertion the byte count is
+    // standing in for everywhere else.
+    std::fs::create_dir_all(&dir).expect("the capped path must be creatable");
+
+    // The half that matters more than the length: `refile_out_dir`'s
+    // whole contract is that it picks the directory the job would have
+    // got on a FRESH ADD, so it has to spell the stem the same way
+    // `Daemon::enqueue` does. Capping one and not the other would send
+    // a refile to a directory nobody owns - or, worse, to somebody
+    // else's. Asserted against the same transform enqueue applies
+    // rather than against a literal, so the pin follows a rename.
+    let enqueue_stem = nzbkit::disk::sanitize_filename_capped(&long);
+    assert_eq!(
+        comps[1].as_os_str().to_string_lossy(),
+        enqueue_stem,
+        "refile and enqueue must spell one job's directory the same way"
+    );
+    let _ = std::fs::remove_dir_all(&out_root);
+}
+
+/// SAB's `search=` narrowing on the history CLASS SWEEPS, which
+/// `plan_history_delete` ignored outright until 31 Aug 2026.
+///
+/// An unread filter on a READ shows extra rows; an unread filter on a
+/// DELETE destroys extra jobs, and this one was live: a four-row history
+/// answered `mode=history&name=delete&value=all&search=Alpha` by
+/// removing all four, where SAB's `remove_with_status(status, search)`
+/// removes the two that matched.
+///
+/// Three separate claims, because each is its own way to get it wrong:
+/// the sweep narrows, the narrowing is case-blind and a substring (SAB's
+/// `name LIKE %x%`), and a per-ID delete is NOT narrowed - SAB threads
+/// `search` into the class branch only, so an id a caller named is an id
+/// it gets.
+#[test]
+fn a_history_sweep_deletes_only_what_search_names() {
+    let rec = |id: &str, name: &str, state: JobState| super::DeleteRecord {
+        nzo_id: id.to_string(),
+        name: name.to_string(),
+        state,
+        out_dir: PathBuf::from(format!("/dl/{id}")),
+        filed: false,
+        locked: false,
+        published_failed: state == JobState::Failed,
+    };
+    let recs = vec![
+        rec("a", "Alpha.Movie", JobState::Completed),
+        rec("b", "Beta.Show", JobState::Completed),
+        rec("c", "Alpha.Fail", JobState::Failed),
+        rec("d", "Gamma.Fail", JobState::Failed),
+    ];
+    let doomed = |value: &str, search: Option<&str>| -> Vec<&str> {
+        super::plan_history_delete(&recs, value, search, &[])
+            .iter()
+            .zip(&recs)
+            .filter(|(p, _)| p.doomed)
+            .map(|(_, r)| r.nzo_id.as_str())
+            .collect()
+    };
+
+    assert_eq!(
+        doomed("all", None),
+        ["a", "b", "c", "d"],
+        "no filter is no filter"
+    );
+    assert_eq!(doomed("all", Some("Alpha")), ["a", "c"]);
+    // Case-blind, and a substring rather than a whole name: SAB lowers
+    // the pattern and wraps it in `%`.
+    assert_eq!(doomed("all", Some("alpha")), ["a", "c"]);
+    assert_eq!(doomed("all", Some("Fail")), ["c", "d"]);
+    // The state class and the search compose - neither alone.
+    assert_eq!(doomed("failed", Some("Alpha")), ["c"]);
+    assert_eq!(doomed("completed", Some("Alpha")), ["a"]);
+    // A pattern nothing matches deletes NOTHING. This is the assertion
+    // the old code failed hardest: it deleted everything.
+    assert!(doomed("all", Some("nothing-here")).is_empty());
+    // Blank and whitespace-only are "no search given", as in SAB.
+    assert_eq!(doomed("all", Some("")), ["a", "b", "c", "d"]);
+    assert_eq!(doomed("all", Some("   ")), ["a", "b", "c", "d"]);
+    // ...and a named id is never search-filtered.
+    assert_eq!(doomed("b", Some("Alpha")), ["b"]);
+    assert_eq!(doomed("a,d", Some("nothing-here")), ["a", "d"]);
+}
+
+/// The predicate itself, including the two wildcard families SAB's
+/// history half understands and this deliberately does not.
+///
+/// `database.convert_search` reads `*` as a wildcard and `^` / `$` as
+/// anchors; `NzbQueue.remove_all` reads none of them and does a plain
+/// `search in name.lower()`. One rule is used for both arms here, and it
+/// is the plain one - so an unhandled pattern matches FEWER rows and
+/// deletes LESS, never more. That direction is the whole point and is
+/// pinned rather than left to be rediscovered.
+#[test]
+fn the_sab_search_predicate_never_matches_more_than_sab_would() {
+    use crate::serve::api::queue::sab_search_matches as m;
+
+    assert!(m("Alpha.Movie", None), "no pattern matches everything");
+    assert!(m("Alpha.Movie", Some("")), "a blank pattern is no pattern");
+    assert!(m("Alpha.Movie", Some(" \t ")), "whitespace is no pattern");
+
+    assert!(m("Alpha.Movie", Some("Alpha")));
+    assert!(m("Alpha.Movie", Some("alpha")), "case-blind");
+    assert!(m("alpha.movie", Some("MOVIE")), "case-blind both ways");
+    assert!(
+        m("Alpha.Movie", Some("pha.Mo")),
+        "a substring, not a prefix"
+    );
+    assert!(
+        m("Alpha.Movie", Some("  Alpha  ")),
+        "the pattern is trimmed"
+    );
+    assert!(!m("Alpha.Movie", Some("Beta")));
+
+    // The wildcards, taken literally. Each of these matches in SAB's
+    // history arm and must simply match nothing here - under-deleting.
+    assert!(!m("Alpha.Movie", Some("Al*ie")), "`*` is not a wildcard");
+    assert!(!m("Alpha.Movie", Some("^Alpha")), "`^` is not an anchor");
+    assert!(!m("Alpha.Movie", Some("Movie$")), "`$` is not an anchor");
 }

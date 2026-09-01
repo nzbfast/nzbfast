@@ -3,6 +3,7 @@
 //! sibling dir, harness reached through `super::*`).
 
 use super::*;
+use crate::payloads;
 
 /// Codex sweep 10 Aug M3: par2cmdline is an OPTIONAL escape hatch, so a
 /// machine without one must still reach the escalation that fetches
@@ -478,7 +479,18 @@ async fn an_unservable_recovery_set_declines_as_short_not_malformed() {
         return;
     }
     let mut fx = Fixture::new("recovery-unservable");
-    let notes = payload(600_000, 23);
+    // The shared generator and not `payload`, resolving follow-up 13c.5
+    // (31 Aug 2026). This row was never in the parity-budget class -
+    // every one of its assertions is about the decline verdict and it
+    // ignores the exit status on purpose - but on `payload` it went on
+    // to complete `0 block(s) rebuilt, 600 block(s) adopted from
+    // notes.bin` over a set whose every recovery volume 430s, which
+    // reads alarming out of context. On bytes with no repeating block
+    // the holes have no twin, so the decline is the run's real terminal
+    // state rather than a decline followed by a coincidental self-heal -
+    // which is closer to the incident this row reproduces, where the
+    // payload served and the recovery did not.
+    let notes = payloads::unique_payload(600_000, 23);
     fx.add_file("notes.bin", &notes, 60_000);
     assert!(
         fx.add_par2(50, &["notes.bin"], 60_000),
@@ -552,36 +564,6 @@ async fn an_unservable_recovery_set_declines_as_short_not_malformed() {
     );
 }
 
-/// Payload bytes with no repeating block, which this file's two §282
-/// legs need and `payload` cannot give them.
-///
-/// `payload(n, seed)` is `(i as u8) * 37 + seed + (i >> 9) as u8`: the
-/// first term has period 256, the second advances every 512 bytes and
-/// wraps after 256 of those, so the whole sequence REPEATS every 128 KB
-/// exactly. PAR2 repair's sliding scan adopts blocks by content, and a
-/// block with an identical twin every 128 KB is adoptable from anywhere
-/// else in the file - so a hole punched in such a payload heals with no
-/// parity at all, and both legs below green with the recovery set never
-/// consulted. Measured 24 Aug 2026: "54 block(s) adopted from
-/// r.part2.rar", repair complete, job exit 0.
-///
-/// That adoption is a real and good feature (it is one of the two ways
-/// `par2repair` goes past par2cmdline). It just makes the fixture
-/// unable to state the thing these legs are about. An xorshift64
-/// sequence has no twin inside a 900 kB file, so the only route to a
-/// repair is the recovery set - which is the whole premise.
-fn aperiodic(n: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed | 1;
-    (0..n)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            (x >> 24) as u8
-        })
-        .collect()
-}
-
 /// The §282 incident fixture: a post whose PAYLOAD serves and whose
 /// RECOVERY VOLUMES do not.
 ///
@@ -598,7 +580,7 @@ fn aperiodic(n: usize, seed: u64) -> Vec<u8> {
 /// needs recovery, not how much of it there is.
 fn recovery_starved_release(tag: &str) -> (Fixture, Vec<u8>) {
     let mut fx = Fixture::new(tag);
-    let inner = aperiodic(900_000, 0x0000_0282);
+    let inner = payloads::unique_payload(900_000, 0x0000_0282);
     let vols = [
         fixtures::rar5_volume_n(&[("movie.mkv", 900_000, &inner[..350_001], false, true)], 0),
         fixtures::rar5_volume_n(
@@ -806,5 +788,65 @@ async fn no_recovery_on_disk_does_not_advertise_par2cmdline() {
     assert!(
         log.contains("could not have helped"),
         "the honest replacement message never printed:\n{log}"
+    );
+}
+
+// Moved out of e2e.rs 30 Aug 2026, which was ONE line under its
+// size-gate baseline when a `mod` declaration for a new child module
+// took it over. This module's own header says what it is for - "a child
+// module so e2e.rs stays inside its size-gate baseline" - and the gate's
+// rule is that the numbers only go down, so the fix for a full e2e.rs is
+// to move a subject out and never to raise the baseline. This test was
+// the natural one to take: it is the offline CLI twin of the par-only
+// reconstruction the async tests above cover, so it belongs with the
+// repair ladder rather than in the file that holds the shared fixtures.
+
+/// The CLI flow of the same par-only case: `nzbfast extract <dir>` on a
+/// directory holding ONLY the par2 set (the data file deleted). The
+/// offline pipeline must recreate the rar from recovery blocks and then
+/// extract it. rc=0.
+#[test]
+fn extract_local_par_only_dir_recreates_and_extracts() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("nzbfast-e2e-paronly-cli-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    let movie = payload(220_000, 73);
+    let rar = fixtures::rar5_volume(&[("movie.mkv", 220_000, &movie, false, false)]);
+    std::fs::write(dir.join("r.rar"), &rar).unwrap();
+    let st = Command::new("par2")
+        .arg("create")
+        .arg("-s4096")
+        .arg("-r100")
+        .arg("-q")
+        .arg("cliset")
+        .arg("r.rar")
+        .current_dir(&dir)
+        .status()
+        .expect("run par2");
+    assert!(st.success(), "par2 create failed");
+    std::fs::remove_file(dir.join("r.rar")).unwrap();
+
+    let o = Command::new(env!("CARGO_BIN_EXE_nzbfast"))
+        .env("NZBFAST_OPEN", "1")
+        .arg("extract")
+        .arg(&dir)
+        .output()
+        .expect("run nzbfast extract");
+    // stdout/stderr are separate pipes with no shared clock - label the
+    // seam so a bare join can't be misread as one chronology. Copy the
+    // comment along with the string.
+    let log = format!(
+        "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+    assert!(o.status.success(), "extract failed:\n{log}");
+    assert_eq!(
+        std::fs::read(dir.join("movie.mkv")).expect("payload extracted"),
+        movie,
+        "payload bytes differ after CLI reconstruction"
     );
 }

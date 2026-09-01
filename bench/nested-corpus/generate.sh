@@ -44,6 +44,7 @@ done
 
 # ---- tools ------------------------------------------------------------
 command -v rar >/dev/null || die "rar CLI not found (brew install rar / rarlab.com)"
+command -v zip >/dev/null || die "zip not found (ships with macOS; apt install zip)"
 command -v par2 >/dev/null || die "par2 not found (brew install par2)"
 SEVENZ=""
 for c in 7zz 7z 7za; do
@@ -104,9 +105,11 @@ gen_r1() {
     leg_init realistic r1-depth1-store
     rand_file "$L/work/movie.bin" $SZ_REAL
     rand_file "$L/work/sample.bin" $SZ_SIB
+    passed_file "$L/work" r1-depth1-store
     add_payload "$L/work/movie.bin" 1
     add_payload "$L/work/sample.bin" 1
-    outer_post r1 movie.bin sample.bin
+    add_payload "$L/work/$_pf" 1
+    outer_post r1 movie.bin sample.bin "$_pf"
     finish_leg "rar(store,vols)+par2 > payload" 1 \
         '{"nzbfast":"auto-complete","nzbget":"auto-complete","sabnzbd":"auto-complete","rustnzb":"auto-complete"}' \
         "Baseline: single store-mode layer, the shape every client automates."
@@ -115,8 +118,10 @@ gen_r1() {
 gen_r2() {
     leg_init realistic r2-depth2-store-store
     rand_file "$L/work/movie.bin" $SZ_REAL
+    passed_file "$L/work" r2-depth2-store-store
     add_payload "$L/work/movie.bin" 2
-    ( cd "$L/work" && rar_a inner.rar -m0 -- movie.bin && rm movie.bin )
+    add_payload "$L/work/$_pf" 2
+    ( cd "$L/work" && rar_a inner.rar -m0 -- movie.bin "$_pf" && rm movie.bin "$_pf" )
     outer_post r2 inner.rar
     finish_leg "rar(store,vols)+par2 > rar(store) > payload" 2 \
         '{"nzbfast":"auto-complete","nzbget":"manual-intervention","sabnzbd":"auto-complete","rustnzb":"manual-intervention"}' \
@@ -126,8 +131,10 @@ gen_r2() {
 gen_r2c() {
     leg_init realistic r2c-depth2-store-compressed
     rand_file "$L/work/movie.bin" $SZ_REAL
+    passed_file "$L/work" r2c-depth2-store-compressed
     add_payload "$L/work/movie.bin" 2
-    ( cd "$L/work" && rar_a inner.rar -m3 -- movie.bin && rm movie.bin )
+    add_payload "$L/work/$_pf" 2
+    ( cd "$L/work" && rar_a inner.rar -m3 -- movie.bin "$_pf" && rm movie.bin "$_pf" )
     outer_post r2c inner.rar
     finish_leg "rar(store,vols)+par2 > rar(m3) > payload" 2 \
         '{"nzbfast":"auto-complete","nzbget":"manual-intervention","sabnzbd":"auto-complete","rustnzb":"manual-intervention"}' \
@@ -137,9 +144,11 @@ gen_r2c() {
 gen_r3() {
     leg_init realistic r3-rar-wrap-7z
     rand_file "$L/work/movie.bin" $SZ_REAL
+    passed_file "$L/work" r3-rar-wrap-7z
     add_payload "$L/work/movie.bin" 2
-    ( cd "$L/work" && "$SEVENZ" a -bso0 -bsp0 -mx1 payload.7z movie.bin \
-        && rm movie.bin ) || die "7z a failed"
+    add_payload "$L/work/$_pf" 2
+    ( cd "$L/work" && "$SEVENZ" a -bso0 -bsp0 -mx1 payload.7z movie.bin "$_pf" \
+        && rm movie.bin "$_pf" ) || die "7z a failed"
     outer_post r3 payload.7z
     finish_leg "rar(store,vols)+par2 > 7z(lzma2) > payload" 2 \
         '{"nzbfast":"auto-complete","nzbget":"manual-intervention","sabnzbd":"auto-complete","rustnzb":"manual-intervention"}' \
@@ -154,7 +163,10 @@ gen_ladder() {
     leg_init extreme "$1"
     _depth=$2
     rand_file "$L/work/payload.bin" "$3"
+    passed_file "$L/work" "$1"
+    _marker="$_pf"
     add_payload "$L/work/payload.bin" "$_depth"
+    add_payload "$L/work/$_marker" "$_depth"
     _k=$_depth
     while [ "$_k" -ge 1 ]; do
         rand_file "$L/work/sibling_$_k.bin" $SZ_SIB
@@ -164,8 +176,13 @@ gen_ladder() {
     _k=$_depth
     _inner=payload.bin
     while [ "$_k" -ge 2 ]; do
-        ( cd "$L/work" && rar_a "level_$_k.rar" -m0 -- "$_inner" "sibling_$_k.bin" \
-            && rm "$_inner" "sibling_$_k.bin" )
+        if [ "$_k" = "$_depth" ]; then
+            ( cd "$L/work" && rar_a "level_$_k.rar" -m0 -- "$_inner" "sibling_$_k.bin" "$_marker" \
+                && rm "$_inner" "sibling_$_k.bin" "$_marker" )
+        else
+            ( cd "$L/work" && rar_a "level_$_k.rar" -m0 -- "$_inner" "sibling_$_k.bin" \
+                && rm "$_inner" "sibling_$_k.bin" )
+        fi
         _inner="level_$_k.rar"
         _k=$((_k - 1))
     done
@@ -182,15 +199,17 @@ gen_x1() {
 gen_x2() {
     gen_ladder x2-depth10-ladder 10 $SZ_X2
     finish_leg "rar(store,vols)+par2 > rar(store) x9 > payload (sibling file at every level)" 10 \
-        '{"nzbfast":"manual-intervention","nzbget":"manual-intervention","sabnzbd":"manual-intervention","rustnzb":"manual-intervention"}' \
-        "Depth-10 ladder. nzbfast defaults the nested depth cap to 5 (the in-stream child chain and the disk post-pass share one nested_max_depth setting), so at the default this leg exercises graceful materialization at the cap - the deepest reached layer is left as a healthy archive, rc=0, never a failed job. Raise nested_max_depth (or NZBFAST_NESTED_MAX_DEPTH=10) to auto-complete the whole ladder."
+        '{"nzbfast":"auto-complete","nzbget":"manual-intervention","sabnzbd":"manual-intervention","rustnzb":"manual-intervention"}' \
+        "Depth-10 all-store ladder. PASS expectation for nzbfast since the 31 Aug 2026 ruling that only COMPRESSING layers count against nested_max_depth (a stored layer is the same bytes with a header on the front, so it cannot be a decompression bomb); the engine change landed as c0b1c788a, store backstop pinned by 36381cce6. Every layer here is store, so the ladder spends zero levels of the cap and auto-completes at the default; graded manual-intervention before that ruling, when the leg exercised graceful materialization at the cap."
 }
 
 gen_x3() {
     leg_init extreme x3-mixed-7z-rar-store
     rand_file "$L/work/payload.bin" $SZ_X3
+    passed_file "$L/work" x3-mixed-7z-rar-store
     add_payload "$L/work/payload.bin" 3
-    ( cd "$L/work" && rar_a inner.rar -m0 -- payload.bin && rm payload.bin )
+    add_payload "$L/work/$_pf" 3
+    ( cd "$L/work" && rar_a inner.rar -m0 -- payload.bin "$_pf" && rm payload.bin "$_pf" )
     ( cd "$L/work" && "$SEVENZ" a -bso0 -bsp0 -mx1 mid.7z inner.rar \
         && rm inner.rar ) || die "7z a failed"
     outer_post x3 mid.7z
@@ -214,7 +233,9 @@ gen_r4() {
     # Level 2 (inner): a plain store RAR of the payload. Its PAR2 is computed
     # BEFORE the damage and travels with it, so the recovery set is complete
     # and the repair is genuinely available to any client that looks for it.
-    ( cd "$L/work" && rar_a inner.rar -m0 -- movie.bin && rm movie.bin )
+    passed_file "$L/work" r4-inner-damaged
+    add_payload "$L/work/$_pf" 2
+    ( cd "$L/work" && rar_a inner.rar -m0 -- movie.bin "$_pf" && rm movie.bin "$_pf" )
     ( cd "$L/work" && par2 create -r10 -q -q inner.par2 inner.rar >/dev/null )
     poison "$L/work/inner.rar"
     # Level 1 (outer, posted): HEALTHY volumes and a HEALTHY posted PAR2.
@@ -235,7 +256,9 @@ gen_a1() {
     add_payload "$L/work/payload.bin" 3
     # Level 3 (innermost): store RAR with a 10% recovery record, then
     # 64 poisoned bytes. rar's own RR can repair it (rar r).
-    ( cd "$L/work" && rar_a level3.rar -m0 -rr10p -- payload.bin && rm payload.bin )
+    passed_file "$L/work" a1-damage-every-level
+    add_payload "$L/work/$_pf" 3
+    ( cd "$L/work" && rar_a level3.rar -m0 -rr10p -- payload.bin "$_pf" && rm payload.bin "$_pf" )
     poison "$L/work/level3.rar"
     # Level 2: wraps the (damaged-inside) level3, gets its own PAR2, then
     # 64 poisoned bytes AFTER the PAR2 was computed. The level-2 PAR2
@@ -258,8 +281,10 @@ gen_a1() {
 gen_a2() {
     leg_init apocalypse a2-par-only
     rand_file "$L/work/payload.bin" $SZ_APOC
+    passed_file "$L/work" a2-par-only
     add_payload "$L/work/payload.bin" 1
-    ( cd "$L/work" && rar_a "$L/post/a2.rar" -m0 -v$VOL -- payload.bin )
+    add_payload "$L/work/$_pf" 1
+    ( cd "$L/work" && rar_a "$L/post/a2.rar" -m0 -v$VOL -- payload.bin "$_pf" )
     # 100% recovery data: enough blocks to rebuild the ENTIRE volume set.
     ( cd "$L/post" && par2 create -r100 -q -q a2.par2 a2.*rar >/dev/null )
     # The volumes are listed in the NZB but every article answers 430:
@@ -274,8 +299,10 @@ gen_a3() {
     leg_init apocalypse a3-password-chain
     PW1=corpus-a3-l1 PW2=corpus-a3-l2 PW3=corpus-a3-l3
     rand_file "$L/work/payload.bin" $SZ_APOC
+    passed_file "$L/work" a3-password-chain
     add_payload "$L/work/payload.bin" 3
-    ( cd "$L/work" && rar_a level3.rar -m0 "-p$PW3" -- payload.bin && rm payload.bin )
+    add_payload "$L/work/$_pf" 3
+    ( cd "$L/work" && rar_a level3.rar -m0 "-p$PW3" -- payload.bin "$_pf" && rm payload.bin "$_pf" )
     printf '%s\n' "$PW3" > "$L/work/password_l3.txt"
     add_payload "$L/work/password_l3.txt" 2
     ( cd "$L/work" && rar_a level2.rar -m0 "-p$PW2" -- level3.rar password_l3.txt \
@@ -290,6 +317,57 @@ gen_a3() {
         '{"nzbfast":"manual-intervention","nzbget":"manual-intervention","sabnzbd":"manual-intervention","rustnzb":"fail"}' \
         "Password chain: each level is AES-encrypted and ships the NEXT level's password as a sibling text file. The outer password rides in the clear (password_l1.txt) and in the manifest. No client automates reading a password out of an extracted file; every layer past the first is a manual step." \
         '{"level1":"'"$PW1"'","level2":"'"$PW2"'","level3":"'"$PW3"'"}'
+}
+
+
+gen_r5() {
+    leg_init realistic r5-zip
+    rand_file "$L/work/movie.bin" $SZ_REAL
+    passed_file "$L/work" r5-zip
+    add_payload "$L/work/movie.bin" 1
+    add_payload "$L/work/$_pf" 1
+    ( cd "$L/work" && zip -q -0 "$L/post/r5.zip" movie.bin "$_pf" ) \
+        || die "zip failed ($LEG)"
+    ( cd "$L/post" && par2 create -r10 -q -q r5.par2 r5.zip >/dev/null ) \
+        || die "par2 create failed ($LEG)"
+    finish_leg "zip(store)+par2 > payload" 1 \
+        '{"nzbfast":"auto-complete","nzbget":"auto-complete","sabnzbd":"auto-complete","rustnzb":"fail"}' \
+        "Zip container: the second-commonest archive on the wire. Store mode, one file, PAR2 over the zip."
+}
+
+gen_r6() {
+    leg_init realistic r6-7z-split
+    rand_file "$L/work/movie.bin" $SZ_REAL
+    passed_file "$L/work" r6-7z-split
+    add_payload "$L/work/movie.bin" 1
+    add_payload "$L/work/$_pf" 1
+    ( cd "$L/work" && "$SEVENZ" a -t7z -mx=0 "-v$VOL" "$L/post/r6.7z" movie.bin "$_pf" >/dev/null ) \
+        || die "7z split failed ($LEG)"
+    ( cd "$L/post" && par2 create -r10 -q -q r6.par2 r6.7z.* >/dev/null ) \
+        || die "par2 create failed ($LEG)"
+    finish_leg "7z(copy,split vols)+par2 > payload" 1 \
+        '{"nzbfast":"auto-complete","nzbget":"auto-complete","sabnzbd":"auto-complete","rustnzb":"fail"}' \
+        "7-Zip split volumes (.7z.001..): the join must happen before extraction."
+}
+
+gen_a4() {
+    leg_init apocalypse a4-meta-password
+    PW=corpus-a4-meta
+    rand_file "$L/work/payload.bin" $SZ_APOC
+    passed_file "$L/work" a4-meta-password
+    add_payload "$L/work/payload.bin" 1
+    add_payload "$L/work/$_pf" 1
+    ( cd "$L/work" && rar_a "$L/post/a4.rar" -m0 -v$VOL "-p$PW" -- payload.bin "$_pf" )
+    ( cd "$L/post" && par2 create -r10 -q -q a4.par2 a4.*rar >/dev/null ) \
+        || die "par2 create failed ($LEG)"
+    # The password rides ONLY in the NZB's own <head><meta
+    # type="password"> block (nzbserve reads nzbpass.txt) - the common
+    # indexer shape: nothing in the group, everything in the NZB.
+    printf '%s\n' "$PW" > "$L/nzbpass.txt"
+    finish_leg "rar(store,vols,pw)+par2, password ONLY in NZB meta" 1 \
+        '{"nzbfast":"auto-complete","nzbget":"auto-complete","sabnzbd":"auto-complete","rustnzb":"fail"}' \
+        "AES-encrypted volumes whose password is carried in the NZB meta block and nowhere else. A client that reads NZB metadata automates it fully; one that does not stops at the password prompt." \
+        '{"meta":"'"$PW"'"}'
 }
 
 # ---- dispatch ---------------------------------------------------------
@@ -309,6 +387,8 @@ if tier_on realistic; then
     if want r2c-depth2-store-compressed; then gen_r2c; fi
     if want r3-rar-wrap-7z; then gen_r3; fi
     if want r4-inner-damaged; then gen_r4; fi
+    if want r5-zip; then gen_r5; fi
+    if want r6-7z-split; then gen_r6; fi
 fi
 if tier_on extreme; then
     if want x1-depth5-ladder; then gen_x1; fi
@@ -319,5 +399,6 @@ if tier_on apocalypse; then
     if want a1-damage-every-level; then gen_a1; fi
     if want a2-par-only; then gen_a2; fi
     if want a3-password-chain; then gen_a3; fi
+    if want a4-meta-password; then gen_a4; fi
 fi
 msg "done in $(( $(date +%s) - START ))s -> $OUT"

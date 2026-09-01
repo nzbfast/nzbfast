@@ -1987,13 +1987,112 @@ async fn crc_steer_covers_split_brain_from_the_consumer_seam() {
     );
 }
 
-/// TODO 114 anti-wedge: `crc_steer` on a SINGLE-server config (no
-/// elsewhere - `other_can_take` can never say yes). Every corrupt
-/// body must be delivered as-is and the run must terminate: the
-/// deferred `complete_one` settles at the consumer's verdict, so a
-/// finalize that never fired would hang the fetch with pending > 0
-/// forever. This is the exact shape the graduated default must be
-/// free on.
+/// M4-59 - articles whose yEnc header declares the out-of-spec
+/// `part=0` while the NZB numbers its segments from 1.
+///
+/// MEASURED on the 30 Aug 2026 baseline, before `yenc::declared_part`
+/// existed: every such article was steered as "valid body for the wrong
+/// article (part mismatch)" and refetched from the other server, so a
+/// post that was never damaged was fetched TWICE. Nothing was lost
+/// (`done` = every article, `bad` = 0), which is what falsifies the
+/// row's predicted "silent drop or a sparse hole"; the cost is wire.
+///
+/// WHAT THE ROW IS AND IS NOT. A fully 0-BASED poster (parts 0..n-1
+/// against segments 1..n) is a different animal and is NOT fixed here:
+/// its later articles declare real part numbers that are genuinely off
+/// by one, and the F-09 synthesized-numbering latch is the mechanism
+/// for that. Measured on the same baseline, that shape steered all 20
+/// articles and latched on the LAST one - the latch stands down only
+/// when a REFETCH of an already-steered id agrees, and with a window of
+/// 2 every id is steered before any refetch returns. That lateness is a
+/// property of the latch, not of the zero, and is left alone
+/// deliberately: it is a judgement about how eagerly a whole file's
+/// identity gate may be given up, which is not this row's to make.
+///
+/// THE "ALL 20" ABOVE IS TRUE OF A 20-ARTICLE FILE AND OF NOTHING
+/// ELSE - re-measured 30 Aug 2026, and the correction is the point.
+/// "The whole file was fetched twice" reads as a cost that scales with
+/// the FILE. It does not. The window that gets steered is the
+/// pipeline's depth - fleet x window, plus whatever sits in the
+/// consumer's decode queue - and it is the same window whatever the
+/// file's length, which is why the two pins below measure the shape
+/// this one cannot. See `a_zero_based_files_steer_cost_is_the_pipeline_
+/// depth_not_the_file` and `a_zero_based_post_re_earns_the_same_verdict_
+/// once_per_file`.
+///
+/// `crc_steer_covers_split_brain_from_the_consumer_seam` above is the
+/// CONTROL: bodies that really are the wrong article still steer. So a
+/// red here is the zero, not the gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_zero_header_does_not_steer_the_article() {
+    let data: Vec<u8> = (0..48_000u32).map(|i| (i >> 2) as u8).collect();
+    let art = 8_000usize;
+    // Every article declares `part=0` - a writer that never fills the
+    // field while `=ypart` carries the real offsets - and the NZB
+    // numbers its segments 1..n as every NZB does.
+    let mk = || {
+        let mut arts = std::collections::HashMap::new();
+        let mut segs = Vec::new();
+        for (i, chunk) in data.chunks(art).enumerate() {
+            let a = crate::yenc::encode(
+                "z.bin",
+                data.len() as u64,
+                Some((0, 0)),
+                (i * art) as u64 + 1,
+                chunk,
+            );
+            let id = format!("pz-{i}@mock");
+            arts.insert(format!("<{id}>"), a.clone());
+            segs.push((id, a.len() as u64, i as u32 + 1));
+        }
+        (arts, segs)
+    };
+    let (arts_a, segs) = mk();
+    let (arts_b, _) = mk();
+    let ids: Vec<ArticleReq> = segs
+        .iter()
+        .map(|(id, _, part)| ArticleReq {
+            id: format!("<{id}>").into(),
+            age_days: 0,
+            part: *part,
+            file: 0,
+        })
+        .collect();
+    let a = crate::mock::MockServer::start(arts_a, Default::default()).await;
+    let b = crate::mock::MockServer::start(arts_b, Default::default()).await;
+    let cfg = PoolConfig {
+        crc_steer: true,
+        window: 2,
+        ..Default::default()
+    };
+    let servers = vec![payout_server(&a, 3, cfg.clone()), payout_server(&b, 1, cfg)];
+    let (_, done, bad, _, notes) = payout_leg_steered(servers, ids).await;
+    assert_eq!(done, segs.len(), "every article must still be delivered");
+    assert_eq!(bad, 0, "these bodies pass their own pcrc32");
+    let steers = notes.iter().filter(|n| n.contains("wrong article")).count();
+    assert_eq!(
+        steers, 0,
+        "an out-of-spec part=0 must not be read as a part number: {notes:?}"
+    );
+}
+
+/// TODO 114 anti-wedge: `crc_steer` on a SINGLE-server config, where
+/// `other_can_take` can never say yes. The run must TERMINATE with
+/// every id owned: the deferred `complete_one` settles at the
+/// consumer's verdict, so a finalize that never fired would hang the
+/// fetch with pending > 0 forever. That is what this leg is for and it
+/// is unchanged.
+///
+/// What changed on 31 Aug 2026 is the second half, which used to assert
+/// that nothing was refetched ("steered with nowhere to go"). A peerless
+/// fleet now re-asks the DELIVERER under the run's `REASK_WASTE_CAP`
+/// budget - see `note_decoded` and
+/// `research/CORRUPT-BODY-NO-SECOND-ASK-2026-08-31.md` - so refetch
+/// notes here are the new behaviour rather than a wedge, and what has to
+/// be pinned instead is that they stay BOUNDED. The exact-count pins for
+/// the rule itself live at `pool::steer_seam_tests` and at
+/// `integration::steer_rig`, which run a serial pipeline; this leg is
+/// deliberately concurrent, so it asserts the shape and not the count.
 #[tokio::test(flavor = "multi_thread")]
 async fn crc_steer_single_server_delivers_as_is_and_terminates() {
     let data: Vec<u8> = (0..160_000u32).map(|i| (i >> 2) as u8).collect();
@@ -2026,10 +2125,15 @@ async fn crc_steer_single_server_delivers_as_is_and_terminates() {
     println!("consumer-steer single-server: {bad} damaged of {done} owned");
     assert_eq!(done, segs.len(), "run must terminate with every id owned");
     assert_eq!(wrong, 0);
-    assert!(bad >= 3, "the storm never bit ({bad} corrupt) - rig broken");
+    let refetched = notes.iter().filter(|n| n.contains("refetching")).count();
     assert!(
-        !notes.iter().any(|n| n.contains("refetching")),
-        "steered with nowhere to go: {notes:?}"
+        bad + refetched >= 3,
+        "the storm never bit ({bad} corrupt, {refetched} re-asked) - rig broken"
+    );
+    assert!(
+        refetched <= done,
+        "{refetched} re-asks for {done} articles - one per id is the bound, \
+         so this is a steer loop: {notes:?}"
     );
 }
 
@@ -2077,5 +2181,189 @@ async fn crc_steer_second_bad_copy_is_owned_not_looped() {
         bad,
         segs.len(),
         "every id's second copy is also corrupt and must be owned as-is"
+    );
+}
+
+/// F-09 shape, first half (30 Aug 2026): the part latch's steer cost is
+/// the PIPELINE's depth, not the FILE's length.
+///
+/// The F-09 write-up measured a 20-article 0-based file, saw every
+/// article steered, and recorded it as "the whole file was fetched
+/// twice". That sentence is true of a 20-article file and misleading
+/// about every other one, and the difference decides whether the latch
+/// is worth changing at all. The latch stands down when a REFETCH of an
+/// already-steered id comes back agreeing, so what gets steered is
+/// whatever was already decoded when that verdict lands: articles in
+/// flight (fleet x window) plus articles buffered awaiting the
+/// consumer's decode verdict. That is a CONSTANT, and the whole file
+/// only when the file is shorter than it.
+///
+/// MEASURED on this rig (4 connections, window 2, an mpsc depth of 64
+/// in `payout_leg_steered`) at three lengths, three runs each: 20
+/// articles -> 19 steers; 50 -> 25/26/35; 100 -> 25/26/35; 200 ->
+/// 22/28/38. Flat from 50 articles up.
+///
+/// THE ASSERTION IS STRUCTURAL AND NOT A REGRESSION LINE. The steer
+/// count is scheduler-dependent and moves run to run, so what is pinned
+/// is only that it is bounded well below the article count - the bound
+/// itself is structural (nothing can be steered that has not been
+/// delivered, and the consumer channel is bounded at 64), so the
+/// generous ceiling here cannot go soft under load. A red means the
+/// latch has stopped standing down at all, which is the failure worth
+/// catching.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_based_files_steer_cost_is_the_pipeline_depth_not_the_file() {
+    let nseg: u32 = 200;
+    let art = 8_000usize;
+    let data: Vec<u8> = (0..(nseg * art as u32)).map(|i| (i >> 2) as u8).collect();
+    // Fully 0-BASED poster: yEnc parts 0..n-1, NZB segments 1..n.
+    let mk = || {
+        let mut arts = std::collections::HashMap::new();
+        let mut ids: Vec<ArticleReq> = Vec::new();
+        for (i, chunk) in data.chunks(art).enumerate() {
+            let a = crate::yenc::encode(
+                "zb.bin",
+                data.len() as u64,
+                Some((i as u32, nseg)),
+                (i * art) as u64 + 1,
+                chunk,
+            );
+            let id = format!("<zb-{i}@mock>");
+            arts.insert(id.clone(), a);
+            ids.push(ArticleReq {
+                id: id.into(),
+                age_days: 0,
+                part: i as u32 + 1,
+                file: 0,
+            });
+        }
+        (arts, ids)
+    };
+    let (arts_a, ids) = mk();
+    let (arts_b, _) = mk();
+    let a = crate::mock::MockServer::start(arts_a, Default::default()).await;
+    let b = crate::mock::MockServer::start(arts_b, Default::default()).await;
+    let cfg = PoolConfig {
+        crc_steer: true,
+        window: 2,
+        ..Default::default()
+    };
+    let servers = vec![payout_server(&a, 3, cfg.clone()), payout_server(&b, 1, cfg)];
+    let (_, done, bad, _, notes) = payout_leg_steered(servers, ids).await;
+    let steers = notes.iter().filter(|n| n.contains("wrong article")).count();
+    let standdown = notes.iter().filter(|n| n.contains("synthesized")).count();
+    println!("F-09 depth: {steers} steers over {nseg} articles, {standdown} stand-downs");
+    assert_eq!(done, nseg as usize, "every article must still be delivered");
+    assert_eq!(bad, 0, "these bodies pass their own pcrc32");
+    assert_eq!(standdown, 1, "the latch must stand this file's gate down");
+    assert!(
+        steers > 0,
+        "no part-mismatch steer fired - the rig is measuring nothing: {notes:?}"
+    );
+    assert!(
+        steers <= 100,
+        "{steers} steers over {nseg} articles - the latch is no longer bounded by \
+         the pipeline's depth, which is the whole finding this pins"
+    );
+}
+
+/// F-09 shape, second half (30 Aug 2026): the same verdict is
+/// independently re-earned ONCE PER FILE, and that is where the cost
+/// actually lives.
+///
+/// `PartLatch::off` is keyed by [`Work::file`] - F-09 narrowed it from
+/// per-run to per-file so that "one mislabelled file must not switch
+/// off the wrong-part check for every other file in the job". The cost
+/// of that narrowing is this: a poster who numbers from zero numbers
+/// EVERY file from zero, and every file pays its own adjudication
+/// window before the latch will say so again. When the file is SHORTER
+/// than that window - which a release's par2 volumes all are - the
+/// window is the whole file, and the "fetched twice" the F-09 write-up
+/// reported for one 20-article file is the real steady state for the
+/// whole set.
+///
+/// MEASURED, 40 files of 3 articles from one 0-based post: 80 steers
+/// over 120 articles, 67% extra payload, and the identical verdict
+/// earned 40 separate times. Stable across runs, because with three
+/// articles per file essentially every article is steered before its
+/// file's verdict can land.
+///
+/// This test asserts the STRUCTURE and not the payload number: one
+/// stand-down per file is exact and scheduler-independent, and it is
+/// the fact that a fix would change. Whether the run should generalise
+/// an already-earned verdict across a post's files is a judgement about
+/// how eagerly the gate may be given up and is deliberately NOT made
+/// here.
+///
+/// WHAT A WRONGLY-OWNED BODY COSTS, if anyone weighs that judgement
+/// later: less than it looks, and nothing in the tree said so. The
+/// consumer places a decoded body at the offset the body's OWN yEnc
+/// header declares and never at the one the NZB implied, so a misfiled
+/// body owned with the gate off lands where it really belongs and the
+/// article that was asked for leaves a HOLE - which the verifier sees
+/// and par2 repairs. Within one file this gate avoids a repair; it is
+/// not the last line before bad bytes. (A misfile from ANOTHER file is
+/// corruption, and the gate never saw those anyway - it compares the
+/// part number inside the expected slot and nothing else.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zero_based_post_re_earns_the_same_verdict_once_per_file() {
+    let nfiles: u32 = 40;
+    let per: u32 = 3;
+    let art = 8_000usize;
+    let data: Vec<u8> = (0..(per * art as u32)).map(|i| (i >> 2) as u8).collect();
+    let mk = || {
+        let mut arts = std::collections::HashMap::new();
+        let mut ids: Vec<ArticleReq> = Vec::new();
+        for f in 0..nfiles {
+            for (i, chunk) in data.chunks(art).enumerate() {
+                let a = crate::yenc::encode(
+                    &format!("z{f}.bin"),
+                    data.len() as u64,
+                    Some((i as u32, per)),
+                    (i * art) as u64 + 1,
+                    chunk,
+                );
+                let id = format!("<mf-{f}-{i}@mock>");
+                arts.insert(id.clone(), a);
+                ids.push(ArticleReq {
+                    id: id.into(),
+                    age_days: 0,
+                    part: i as u32 + 1,
+                    file: f,
+                });
+            }
+        }
+        (arts, ids)
+    };
+    let (arts_a, ids) = mk();
+    let (arts_b, _) = mk();
+    let total = ids.len();
+    let a = crate::mock::MockServer::start(arts_a, Default::default()).await;
+    let b = crate::mock::MockServer::start(arts_b, Default::default()).await;
+    let cfg = PoolConfig {
+        crc_steer: true,
+        window: 2,
+        ..Default::default()
+    };
+    let servers = vec![payout_server(&a, 3, cfg.clone()), payout_server(&b, 1, cfg)];
+    let (_, done, bad, _, notes) = payout_leg_steered(servers, ids).await;
+    let steers = notes.iter().filter(|n| n.contains("wrong article")).count();
+    let standdown = notes.iter().filter(|n| n.contains("synthesized")).count();
+    println!(
+        "F-09 per-file: {steers} steers over {total} articles ({}% extra), \
+         {standdown} stand-downs for {nfiles} files",
+        100 * steers / total
+    );
+    assert_eq!(done, total, "every article must still be delivered");
+    assert_eq!(bad, 0, "these bodies pass their own pcrc32");
+    assert_eq!(
+        standdown, nfiles as usize,
+        "one stand-down per file is the whole shape of the cost - {standdown} for \
+         {nfiles} files means the latch's scope has moved and this pin is stale"
+    );
+    assert!(
+        steers >= nfiles as usize,
+        "{steers} steers over {total} articles - a file shorter than the \
+         adjudication window should pay for very nearly all of itself: {notes:?}"
     );
 }

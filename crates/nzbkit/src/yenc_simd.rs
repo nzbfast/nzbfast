@@ -25,6 +25,15 @@
 //!   would cost a full extra scan of every article on the hot path to catch
 //!   a shape no poster produces. The length/CRC gates still fire, so it is a
 //!   rejected article, not silent corruption.
+//!
+//! The first two of those are reachable from a CR-FRAMED body too, since
+//! 31 Aug 2026: both decoders retry such a body on the CRLF rewrite of
+//! itself (M4-76, `yenc::cr_framed_to_crlf`), and a `\r.\r` or a `\r`-ended
+//! payload line only BECOMES a line once that rewrite has happened. Same
+//! two deviations, same reason they are unreachable from the wire - the
+//! NNTP layer strips the terminator and dot-stuffs every payload line - so
+//! the differential fuzz target judges its guard over the reframed bytes as
+//! well as the raw ones. Measured while landing the retry, not predicted.
 
 use std::ffi::{c_int, c_void};
 use std::sync::Once;
@@ -111,6 +120,7 @@ pub fn decode(body: &[u8]) -> Result<Decoded, YencError> {
         begin: m.begin,
         end: m.end,
         data,
+        encryption: m.encryption,
     })
 }
 
@@ -164,20 +174,56 @@ pub fn decode_into_integrity(
     out: &mut Vec<u8>,
     verify_crc: bool,
 ) -> Result<(Meta, DecodeIntegrity), YencError> {
+    decode_into_integrity_opts(body, out, verify_crc, crate::yencrypt::wire_enabled())
+}
+
+/// [`decode_into_integrity`] with the body-encryption capture arm
+/// explicit - the in-process seam the unit tests use, same reasoning as
+/// `yenc::decode_checked_opts`.
+pub(crate) fn decode_into_integrity_opts(
+    body: &[u8],
+    out: &mut Vec<u8>,
+    verify_crc: bool,
+    enc_ok: bool,
+) -> Result<(Meta, DecodeIntegrity), YencError> {
+    match decode_framed(body, out, verify_crc, enc_ok) {
+        // M4-76: the same CR-framed retry the oracle does, on the same two
+        // errors and for the same reasons - see yenc::decode_checked. Both
+        // decoders must answer identically or the differential fuzz oracle
+        // is meaningless.
+        Err(e @ (YencError::MissingBegin | YencError::Truncated)) => {
+            match crate::yenc::cr_framed_to_crlf(body) {
+                Some(reframed) => decode_framed(&reframed, out, verify_crc, enc_ok),
+                None => Err(e),
+            }
+        }
+        other => other,
+    }
+}
+
+/// [`decode_into_integrity`] over a body already framed with LF or CRLF.
+fn decode_framed(
+    body: &[u8],
+    out: &mut Vec<u8>,
+    verify_crc: bool,
+    enc_ok: bool,
+) -> Result<(Meta, DecodeIntegrity), YencError> {
     init();
     out.clear();
+    // M4-78: a UTF-8 BOM glued to the first header, stripped at the start of
+    // the body only. Same rule, same one function, as the oracle.
+    let body = crate::yenc::strip_bom(body);
 
     let mut name = String::new();
     let mut file_size: u64 = 0;
     let mut part: Option<u32> = None;
-    let mut yend_part: Option<u32> = None;
     let mut begin: u64 = 1;
     let mut end: u64 = 0;
-    let mut expected_crc: Option<u32> = None;
-    let mut expected_len: Option<u64> = None;
+    let mut trailer = crate::yenc::Trailer::default();
     let mut seen_begin = false;
     let mut seen_yend = false;
     let mut seen_ypart = false;
+    let mut encryption = None;
     let data = out;
 
     let mut pos = 0usize;
@@ -210,9 +256,15 @@ pub fn decode_into_integrity(
                 pos = next;
                 continue;
             }
-            if line.starts_with(b"=ybegin ") {
+            if let Some(h) = crate::yenc::header_fields(line, b"begin", false) {
+                // M4-63: a second header contradicts the first rather than
+                // updating it - refuse, exactly as the oracle does. See
+                // YencError::DuplicateBegin in yenc.rs.
+                if seen_begin {
+                    return Err(YencError::DuplicateBegin);
+                }
                 seen_begin = true;
-                let h = &line[8..];
+                let h = h.as_ref();
                 if let Some(v) = field_name(h) {
                     name = String::from_utf8_lossy(v).into_owned();
                 }
@@ -220,30 +272,50 @@ pub fn decode_into_integrity(
                 part = field_u64(h, b"part")
                     .filter(|n| *n <= u64::from(u32::MAX))
                     .map(|n| n as u32);
-                end = file_size;
+                // M4-77: never overwrite a range `=ypart` has already
+                // declared - see the oracle's twin for the whole argument.
+                if !seen_ypart {
+                    end = file_size;
+                }
                 pos = next;
-            } else if line.starts_with(b"=ypart ") {
+            } else if let Some(h) = crate::yenc::header_fields(line, b"part", false) {
                 seen_ypart = true;
-                let h = &line[7..];
+                let h = h.as_ref();
                 // Clamp `begin` to its 1-based floor: a hostile `begin=0`
                 // would underflow Meta::offset() to u64::MAX (see yenc.rs).
                 begin = field_u64(h, b"begin").filter(|&b| b >= 1).unwrap_or(1);
                 end = field_u64(h, b"end").unwrap_or(0);
                 pos = next;
-            } else if line == b"=yend" || line.starts_with(b"=yend ") {
+            } else if let Some(h) = crate::yenc::header_fields(line, b"end", true) {
                 seen_yend = true;
                 // A bare `=yend` carries no size/crc - nothing to gate on, but
-                // it still proves the article was not cut short. Assign
-                // unconditionally (not `if line.len() > 6`): the oracle
-                // overwrites on every trailer, so a second, bare `=yend` after
-                // a fielded one must CLEAR the gates on both paths or the two
-                // disagree on a multi-trailer body (fuzz find).
-                let h = line.get(6..).unwrap_or(&[]);
-                expected_len = field_u64(h, b"size");
-                expected_crc = field_hex(h, b"pcrc32").or_else(|| field_hex(h, b"crc32"));
-                yend_part = field_u64(h, b"part")
-                    .filter(|n| *n <= u64::from(u32::MAX))
-                    .map(|n| n as u32);
+                // it still proves the article was not cut short.
+                let h = h.as_ref();
+                trailer = crate::yenc::Trailer {
+                    size: field_u64(h, b"size"),
+                    pcrc32: field_hex(h, b"pcrc32"),
+                    crc32: field_hex(h, b"crc32"),
+                    part: field_u64(h, b"part")
+                        .filter(|n| *n <= u64::from(u32::MAX))
+                        .map(|n| n as u32),
+                };
+                // M4-84: the first trailer ends the article on this path too.
+                // See the oracle's twin. This also retires the older rule
+                // that a SECOND, bare `=yend` cleared the gates a fielded
+                // one had set: there is no second trailer to reach now, on
+                // either decoder, so the two still agree on a multi-trailer
+                // body - they simply agree on the first one.
+                break;
+            } else if enc_ok && let Some(h) = crate::yenc::header_fields(line, b"encryption", false)
+            {
+                // Body-encryption spike: capture, never decode as payload.
+                // ONE parser with the scalar oracle (yencrypt.rs), and the
+                // same refusal on malformed fields - the differential
+                // fuzzer compares acceptance, so the arms must agree.
+                encryption = Some(
+                    crate::yencrypt::EncHeader::parse_fields(h.as_ref())
+                        .ok_or(YencError::BadEncryption)?,
+                );
                 pos = next;
             } else if seen_begin {
                 // First payload line: switch to SIMD block mode from the raw
@@ -299,19 +371,39 @@ pub fn decode_into_integrity(
                     if rest.last() == Some(&b'\r') {
                         rest = &rest[..rest.len() - 1];
                     }
-                    if rest == b"end" || rest.starts_with(b"end ") {
+                    if let Some(h) = rest
+                        .strip_prefix(b"end")
+                        .and_then(|t| crate::yenc::header_tail(t, true))
+                    {
                         seen_yend = true;
-                        // Unconditional for the same reason as the line-mode
-                        // arm above: a later bare `=yend` clears the gates.
-                        let h = rest.get(4..).unwrap_or(&[]);
-                        expected_len = field_u64(h, b"size");
-                        expected_crc = field_hex(h, b"pcrc32").or_else(|| field_hex(h, b"crc32"));
-                        yend_part = field_u64(h, b"part")
-                            .filter(|n| *n <= u64::from(u32::MAX))
-                            .map(|n| n as u32);
-                    } else if rest.starts_with(b"begin ") {
+                        let h = h.as_ref();
+                        trailer = crate::yenc::Trailer {
+                            size: field_u64(h, b"size"),
+                            pcrc32: field_hex(h, b"pcrc32"),
+                            crc32: field_hex(h, b"crc32"),
+                            part: field_u64(h, b"part")
+                                .filter(|n| *n <= u64::from(u32::MAX))
+                                .map(|n| n as u32),
+                        };
+                        // M4-84: the first trailer ends the article. Reached
+                        // through block mode rather than line mode, and the
+                        // same rule either way - the oracle's twin carries
+                        // the argument.
+                        break;
+                    } else if let Some(h) = rest
+                        .strip_prefix(b"begin")
+                        .and_then(|t| crate::yenc::header_tail(t, false))
+                    {
+                        // The same M4-63 refusal as the line-mode arm above.
+                        // This is the arm a real second header reaches: the
+                        // first payload line has already put us in block
+                        // mode, so rapidyenc stops at the `\r\n=y` and hands
+                        // the control line back here.
+                        if seen_begin {
+                            return Err(YencError::DuplicateBegin);
+                        }
                         seen_begin = true;
-                        let h = &rest[6..];
+                        let h = h.as_ref();
                         if let Some(v) = field_name(h) {
                             name = String::from_utf8_lossy(v).into_owned();
                         }
@@ -319,9 +411,15 @@ pub fn decode_into_integrity(
                         part = field_u64(h, b"part")
                             .filter(|n| *n <= u64::from(u32::MAX))
                             .map(|n| n as u32);
-                        end = file_size;
-                    } else if rest.starts_with(b"part ") {
-                        let h = &rest[5..];
+                        // M4-77: `=ypart` may have already declared the real
+                        // range - see the oracle's twin.
+                        if !seen_ypart {
+                            end = file_size;
+                        }
+                    } else if let Some(h) = rest
+                        .strip_prefix(b"part")
+                        .and_then(|t| crate::yenc::header_tail(t, false))
+                    {
                         // Set it here too, exactly as the line-mode twin
                         // does. `seen_ypart` is read at one site - the
                         // `check_part_geometry` short-circuit - so leaving
@@ -333,10 +431,25 @@ pub fn decode_into_integrity(
                         // differential fuzz target, which compares
                         // acceptance).
                         seen_ypart = true;
+                        let h = h.as_ref();
                         // Same 1-based clamp as the line-mode arm above and the
                         // oracle (yenc.rs): `begin=0` must not underflow offset().
                         begin = field_u64(h, b"begin").filter(|&b| b >= 1).unwrap_or(1);
                         end = field_u64(h, b"end").unwrap_or(0);
+                    } else if enc_ok
+                        && let Some(h) = rest
+                            .strip_prefix(b"encryption")
+                            .and_then(|t| crate::yenc::header_tail(t, false))
+                    {
+                        // The mid-payload spelling of the spike arm above -
+                        // rapidyenc stops at any `\r\n=y`, so a nonconforming
+                        // poster's late `=yencryption` lands here. Same
+                        // parser, same refusal, same last-one-wins as the
+                        // oracle, which handles every position in one arm.
+                        encryption = Some(
+                            crate::yencrypt::EncHeader::parse_fields(h.as_ref())
+                                .ok_or(YencError::BadEncryption)?,
+                        );
                     } else {
                         // Not a yEnc control line, just a payload line that
                         // happens to start with the `=y` escape (`=y` decodes
@@ -381,7 +494,7 @@ pub fn decode_into_integrity(
                     // both guards. A well-formed CRLF article never reaches
                     // here, so the hot path keeps the SIMD speed.
                     debug_assert_eq!(pos, body.len());
-                    let (d, crc_verified) = crate::yenc::decode_checked(body)?;
+                    let (d, crc_verified) = crate::yenc::decode_checked_opts(body, enc_ok)?;
                     data.clear();
                     data.extend_from_slice(&d.data);
                     // The scalar oracle enforced length + CRC itself. Report
@@ -399,6 +512,7 @@ pub fn decode_into_integrity(
                             begin: d.begin,
                             end: d.end,
                             len: data.len(),
+                            encryption: d.encryption,
                         },
                         DecodeIntegrity {
                             crc_checked: crc_verified && verify_crc,
@@ -431,12 +545,26 @@ pub fn decode_into_integrity(
     // position: both decoders must agree or the differential fuzz oracle is
     // meaningless. Placement never uses either part number, so this only ever
     // turns a silently-inconsistent article into a named error.
-    if let (Some(b), Some(e)) = (part, yend_part)
+    if let (Some(b), Some(e)) = (part, trailer.part)
         && b != e
     {
         return Err(YencError::PartNumberMismatch { begin: b, end: e });
     }
-    if let Some(len) = expected_len
+    // M4-87 / M4-93: which trailer fields may decide this article. ONE
+    // function, shared with the oracle, for the reason `check_part_geometry`
+    // is - see yenc::trailer_gates.
+    let gates = crate::yenc::trailer_gates(
+        &trailer,
+        &crate::yenc::Declared {
+            part,
+            seen_ypart,
+            begin,
+            end,
+            file_size,
+            len: data.len() as u64,
+        },
+    );
+    if let Some(len) = gates.len
         && len != data.len() as u64
     {
         return Err(YencError::LengthMismatch {
@@ -448,13 +576,13 @@ pub fn decode_into_integrity(
     crate::yenc::check_part_geometry(seen_ypart, begin, end, data.len() as u64)?;
     let mut crc_checked = false;
     let mut verified_article_crc = None;
-    if let Some(header) = expected_crc {
-        // NZBFAST_SKIP_PCRC=1 is the loopback-rig MEASUREMENT switch -
-        // it force-skips regardless of delegation (bench only; the CRC
-        // is the sole guard on PAR2-less sets - bare-LF trailer bug).
-        static SKIP_PCRC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let force_skip =
-            *SKIP_PCRC.get_or_init(|| std::env::var("NZBFAST_SKIP_PCRC").is_ok_and(|v| v == "1"));
+    // NZBFAST_SKIP_PCRC=1 is the loopback-rig MEASUREMENT switch -
+    // it force-skips regardless of delegation (bench only; the CRC
+    // is the sole guard on PAR2-less sets - bare-LF trailer bug).
+    static SKIP_PCRC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let force_skip =
+        *SKIP_PCRC.get_or_init(|| std::env::var("NZBFAST_SKIP_PCRC").is_ok_and(|v| v == "1"));
+    if let Some(header) = gates.crc {
         if verify_crc && !force_skip {
             // SAFETY: reads exactly data.len() bytes from the live `data`
             // buffer; init() ran at function entry.
@@ -467,16 +595,35 @@ pub fn decode_into_integrity(
             // decoded bytes in `data`.
             verified_article_crc = Some(computed);
         }
+    } else if let Some(advisory) = gates.crc_advisory
+        && verify_crc
+        && !force_skip
+    {
+        // M4-87: a whole-file `crc32` on a part trailer may not refuse the
+        // article, but a match still verifies these bytes. Same answer as
+        // the oracle's twin, which is what the differential fuzzer compares.
+        // SAFETY: as above.
+        let computed = unsafe { rapidyenc_crc(data.as_ptr().cast(), data.len(), 0) };
+        if computed == advisory {
+            crc_checked = true;
+            verified_article_crc = Some(computed);
+        }
     }
 
     Ok((
         Meta {
             name,
             file_size,
-            part,
+            // M4-59: the same normalization as the scalar oracle, in the
+            // same position and through the same function - an
+            // out-of-spec `part=0` declares no part. The two decoders
+            // are held equal by the differential fuzzer, so this cannot
+            // be spelled twice or moved on one side alone.
+            part: crate::yenc::declared_part(part),
             begin,
             end,
             len: data.len(),
+            encryption,
         },
         DecodeIntegrity {
             crc_checked,

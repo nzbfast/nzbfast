@@ -3,7 +3,8 @@
 //! fleet cap's share, and the note that says so.
 //!
 //! A sibling file rather than more of `conntune.rs` because that file
-//! is at its size-gate ceiling, and these two are one subject.
+//! was at 2,949 of the size gate's 3,000-line ceiling on 28 Aug 2026,
+//! and these two are one subject.
 
 use super::*;
 

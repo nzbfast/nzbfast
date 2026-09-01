@@ -199,6 +199,15 @@ pub struct Status {
     line: StatusLine,
 }
 
+impl Status {
+    /// The three-digit NNTP status code. Public because callers outside
+    /// this crate (the probe's posting-capability check) branch on it;
+    /// the field itself stays crate-private.
+    pub fn code(&self) -> u16 {
+        self.code
+    }
+}
+
 impl std::fmt::Debug for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Status")
@@ -2050,8 +2059,6 @@ impl Connection {
         Ok(parse_list_newsgroups(&raw))
     }
 
-    /// OVER (falling back to XOVER) for an article-number range in the
-    /// currently selected group.
     /// Watch this connection's OVER body reads: every chunk taken off
     /// the wire is added to `counter` as it lands.
     ///
@@ -2066,6 +2073,8 @@ impl Connection {
         self.over_progress = Some(counter);
     }
 
+    /// OVER (falling back to XOVER) for an article-number range in the
+    /// currently selected group.
     pub async fn over(&mut self, from: u64, to: u64) -> Result<Vec<OverEntry>, NntpError> {
         let mut st = if self.over_supported == Some(false) {
             // Known XOVER-only server: don't burn a round-trip on a

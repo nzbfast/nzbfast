@@ -32,9 +32,11 @@ fn frozen_table() -> crate::streamhub::TailTable {
     let slot = std::sync::Arc::new(crate::unpack::FileSlot {
         hint: "pack.part01.rar".into(),
         hint_is_posted_name: nzbkit::release::stem_is_a_name("pack.part01.rar"),
+        yenc_votes: Default::default(),
         name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
         is_par2_main: false,
         sample_skipped: false,
+        par2_name_demoted: Default::default(),
         par2_sniffed: AtomicBool::new(false),
         total_segments: 10,
         remaining: AtomicUsize::new(0),
@@ -49,6 +51,9 @@ fn frozen_table() -> crate::streamhub::TailTable {
             id: "aaaaaaaaaaaaaaaa".into(),
             name: "pack.part01.rar".into(),
             bytes: 1_000_000,
+            // A real NZB date, so the `age` field has something to
+            // format; the second row leaves it 0 to pin SAB's "-".
+            date: 1_690_000_000,
             segments: 10,
             slot: Some(0),
         },
@@ -56,6 +61,7 @@ fn frozen_table() -> crate::streamhub::TailTable {
             id: "bbbbbbbbbbbbbbbb".into(),
             name: "pack.vol000+01.par2".into(),
             bytes: 40_000,
+            date: 0,
             segments: 2,
             slot: None,
         },
@@ -116,6 +122,23 @@ fn a_job_in_its_tail_is_listed_from_the_table_its_run_left_behind() {
     assert_eq!(rows[0]["status"], "finished", "SAB's word for it: {rows:?}");
     assert_eq!(rows[1]["state"], "recovery", "{rows:?}");
     assert_eq!(rows[1]["recovery"], true, "{rows:?}");
+    // SAB's two spellings, with SAB's types. `bytes` is a "%.2f" STRING
+    // in `build_file_list` (4.5.0, 5.1.2 and develop alike) and we sent
+    // a JSON number until 31 Aug 2026 - GH #69's crash one mode over,
+    // since a client deserializing a String from a number throws before
+    // it reads a field. `age` was absent outright, the other half of the
+    // same class. The numeric reading keeps its own key beside the
+    // string, so the pair cannot drift without a test noticing.
+    assert_eq!(rows[0]["bytes"], "1000000.00", "{rows:?}");
+    assert_eq!(rows[0]["bytes_total"], 1_000_000, "{rows:?}");
+    assert!(
+        rows[0]["age"].as_str().is_some_and(|a| a.ends_with('d')),
+        "a dated file gets SAB's calc_age token: {rows:?}"
+    );
+    assert_eq!(
+        rows[1]["age"], "-",
+        "an NZB with no date gets SAB's own fallback, not an absent key: {rows:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -164,6 +187,7 @@ fn row_with(
     let r = crate::streamhub::JobFileRow {
         id: "cccccccccccccccc".into(),
         name: "pack.part02.rar".into(),
+        date: 0,
         bytes: 500_000,
         segments: 5,
         slot: Some(0),
@@ -246,6 +270,7 @@ fn a_published_file_says_so_and_is_joined_by_handle_not_by_name() {
         // obfuscated post writes.
         name: "Show.S01E01.1080p-GRP.mkv".into(),
         bytes: 500_000,
+        date: 0,
         segments: 5,
         slot: Some(0),
     };

@@ -30,6 +30,7 @@ use nzbkit::faultplan::{FaultPlan, Role};
 use nzbkit::mock::{Chaos, MockServer, make_file_articles};
 
 use super::{Fixture, have_par2, run_get};
+use crate::payloads;
 
 /// One payload file of `blocks` blocks, covered by a PAR2 set of
 /// EXACTLY `recovery` blocks. Returns the payload bytes, so a shape that
@@ -84,7 +85,7 @@ pub(crate) fn matrix_post_art(
     vols: Option<usize>,
     par2_art: usize,
 ) -> Vec<u8> {
-    let data = unique_payload(blocks * bs, 0x5eed_0283);
+    let data = payloads::unique_payload(blocks * bs, 0x5eed_0283);
     fx.add_file("payload.bin", &data, bs);
     // Every caller gates on `have_par2()`, and CI's TWELFTH gate holds
     // them to it - so a failure HERE is the create call, never a
@@ -302,30 +303,6 @@ fn trace(tag: &str, log: &str) {
     if std::env::var_os("NZBFAST_FAULT_TRACE").is_some() {
         eprintln!("--- {tag} ---\n{log}\n--- end {tag} ---");
     }
-}
-
-/// A payload whose every PAR2 block is unique.
-///
-/// `super::payload` is a byte pattern of period 65536 in its index plus
-/// a 512-byte-granular ramp that itself wraps at 256, so over 64 KiB
-/// blocks it repeats every SECOND block - and the repair engine's
-/// adoption scan then legitimately recovers a "missing" block from a
-/// duplicate elsewhere in the same file. That is the engine being
-/// clever, but it silently converts a shape about recovery data into a
-/// shape about self-similarity, which is not what any of these tests
-/// mean. splitmix64 keeps every block distinct and stays deterministic.
-fn unique_payload(n: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed;
-    let mut out = Vec::with_capacity(n);
-    while out.len() < n {
-        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = x;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        out.extend_from_slice(&(z ^ (z >> 31)).to_le_bytes());
-    }
-    out.truncate(n);
-    out
 }
 
 /// How many times the run escalated its recovery fetch.
@@ -678,8 +655,11 @@ fn run_check(config: &std::path::Path, nzb: &std::path::Path) -> (String, bool) 
         .output()
         .expect("run nzbfast check");
     (
+        // stdout/stderr are separate pipes with no shared clock - label
+        // the seam so a bare join can't be misread as one chronology.
+        // Copy the comment along with the string.
         format!(
-            "{}{}",
+            "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         ),
@@ -706,7 +686,7 @@ fn run_check(config: &std::path::Path, nzb: &std::path::Path) -> (String, bool) 
 async fn a_fresh_post_that_430s_everywhere_is_not_called_dead() {
     let build = |age_days: i64, tag: &str| {
         let mut fx = Fixture::new(tag);
-        let data = unique_payload(400_000, 0x0283_0005);
+        let data = payloads::unique_payload(400_000, 0x0283_0005);
         fx.add_file("fresh.bin", &data, 40_000);
         fx.date = super::unix_now() - age_days * 86_400;
         fx
@@ -757,7 +737,7 @@ async fn a_fresh_post_that_430s_everywhere_is_not_called_dead() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_replaced_post_sweeps_clean_and_still_cannot_complete() {
     let mut fx = Fixture::new("fault-replaced");
-    let data = unique_payload(400_000, 0x0283_0006);
+    let data = payloads::unique_payload(400_000, 0x0283_0006);
     fx.add_file("taken.bin", &data, 40_000);
     let p = plan(&fx);
     let mut chaos = Chaos::default();
@@ -824,7 +804,7 @@ async fn a_replaced_post_sweeps_clean_and_still_cannot_complete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_both_stalled_and_collected_430s_reports_both() {
     let mut fx = Fixture::new("fault-both");
-    let data = unique_payload(2_000_000, 0x0283_0007);
+    let data = payloads::unique_payload(2_000_000, 0x0283_0007);
     fx.add_file("both.bin", &data, 40_000);
     let p = plan(&fx);
     let mut chaos = Chaos {
@@ -960,7 +940,7 @@ async fn junk_named_recovery_volumes_are_found_by_packet_magic() {
         return;
     }
     let mut fx = Fixture::new("fault-junkpar2");
-    let data = unique_payload(40 * 65_536, 0x0283_0009);
+    let data = payloads::unique_payload(40 * 65_536, 0x0283_0009);
     fx.add_file("payload.bin", &data, 65_536);
     assert!(
         fx.add_par2_obfuscated(20, &["payload.bin"], 65_536),
@@ -1089,7 +1069,7 @@ async fn a_second_backbone_fills_the_hole_that_kills_a_single_provider() {
 async fn a_dead_queue_at_cold_provider_latency_still_terminates() {
     let mut fx = Fixture::new("fault-cold");
     let arts = 60usize;
-    let data = unique_payload(arts * 40_000, 0x0283_0011);
+    let data = payloads::unique_payload(arts * 40_000, 0x0283_0011);
     fx.add_file("cold.bin", &data, 40_000);
     fx.date = super::unix_now() - 30 * 86_400;
     let p = plan(&fx);
@@ -1158,8 +1138,8 @@ async fn a_dead_queue_at_cold_provider_latency_still_terminates() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_backend_serving_the_wrong_article_cannot_pass_as_complete() {
     let mut fx = Fixture::new("fault-splitbrain");
-    let a = unique_payload(400_000, 0x0283_0012);
-    let b = unique_payload(400_000, 0x0283_00b2);
+    let a = payloads::unique_payload(400_000, 0x0283_0012);
+    let b = payloads::unique_payload(400_000, 0x0283_00b2);
     fx.add_file("alpha.bin", &a, 40_000);
     fx.add_file("beta.bin", &b, 40_000);
     let p = plan(&fx);

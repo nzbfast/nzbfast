@@ -50,6 +50,7 @@
 
 use crate::*;
 use nzbkit::nzb::FileKind;
+use nzbkit::par2::Par2Set;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -83,7 +84,7 @@ const PROBE_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 /// `census.rs` folds it: the PAR2 FileDesc and the NZB subject are two
 /// records of one filename written by different tools.
 fn fold(name: &str) -> String {
-    nzbkit::disk::sanitize_filename(name).to_lowercase()
+    nzbkit::disk::sanitize_out_name(name).to_lowercase()
 }
 
 /// Per NZB file index: has this run's resume journal accounted for NO
@@ -130,6 +131,166 @@ fn a_donation_may_already_be_here(
     })
 }
 
+/// Which member names this NZB actually posts, folded, to NZB file
+/// index - the map every later step in this pass looks a set member up
+/// in.
+///
+/// A free function rather than the inline loop it was until 31 Aug
+/// 2026, so that [`bridge_obfuscated_by_length`]'s tests start from the
+/// map `adopt_from_donors` really builds. A test helper that MIRRORS a
+/// production loop is a test of the mirror: this arm's whole obfuscated
+/// defect is a statement about what these keys are, so a copy would
+/// have gone on agreeing with itself after the original moved.
+fn wanted_names(nzb: &Nzb) -> std::collections::HashMap<String, usize> {
+    let mut want: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (fi, f) in nzb.files.iter().enumerate() {
+        if f.kind() != FileKind::Data || f.segments.is_empty() {
+            continue;
+        }
+        if let Some(hint) = f.filename_hint_lenient() {
+            // A repeated name identifies no single file, so NEITHER
+            // claim is trusted - the same rule `probe_recovery_set`
+            // applies to a FileDesc length two members disagree about.
+            // Donating to the first would put the bytes at a name the
+            // second file's writer then has to be disambiguated away
+            // from, which is worse than fetching both.
+            match want.entry(fold(hint)) {
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    o.insert(usize::MAX);
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(fi);
+                }
+            }
+        }
+    }
+    want.retain(|_, fi| *fi != usize::MAX);
+    want
+}
+
+/// Cut the probed set down to the members this pass may hand to
+/// `donate_whole_files`, and leave `want` able to attribute what comes
+/// back. Returns how many members the length bridge had to place.
+///
+/// One function and not three statements at the call site, because the
+/// three are one decision and because the middle one is invisible
+/// otherwise: a lift whose helper is tested but whose CALL is not is a
+/// lift that a later edit can drop in silence, with every test still
+/// green. Removing the bridge from this body reddens
+/// `an_obfuscated_post_survives_the_narrowing_that_used_to_empty_it`,
+/// which was verified by driving exactly that mutation.
+fn narrow_to_donatable(
+    nzb: &Nzb,
+    set: &mut Par2Set,
+    want: &mut std::collections::HashMap<String, usize>,
+    unfetched: &[bool],
+) -> usize {
+    // The obfuscated lift, and it goes FIRST because this is where the
+    // FileDesc names first exist: `want` is keyed on NZB subjects, the
+    // retains below read the set's own names, and on a hash-subject
+    // post those two vocabularies never meet. Before the retains, so
+    // the set is still the full probed one - the census's gate is about
+    // how many members the POST has, not how many survived a filter.
+    let bridged = bridge_obfuscated_by_length(nzb, set, want);
+    set.files.retain(|f| want.contains_key(&fold(&f.name)));
+    // On the donors_offer == 0 path nothing can be COPIED - the donors
+    // hold nothing - so every member handed on is a whole-file read
+    // looking for a previous donation, and only an unfetched member can
+    // be one; this is the half that keeps the R6 widening free (see the
+    // gate in the caller for what it costs without it). On the offer > 0
+    // path the same retain is what makes `donate_whole_files`' caller
+    // contract true: a resumed switch with unswept donors would
+    // otherwise hand the already-here arm every partially-fetched
+    // member - right length from preallocation, right first 16k from
+    // offset-0-first - and buy a whole-file MD5 per member that can
+    // only ever answer no, and a member the journal already owns
+    // articles of is not a donation target either way.
+    set.files
+        .retain(|f| want.get(&fold(&f.name)).is_some_and(|&fi| unfetched[fi]));
+    bridged
+}
+
+/// Extend `want` with the members the NAME bridge could not place, by
+/// LENGTH - the lift of this arm's obfuscated limit.
+///
+/// # What was actually in the way, which is not what the limit said
+///
+/// `want` is keyed on the NZB SUBJECT's filename hint, and on an
+/// obfuscated post that hint is a hash - `nzb::quoted_filename`'s last
+/// fallback takes the first non-empty quoted run, dot or no dot - so
+/// the map is populated, just under the wrong name. The FileDesc
+/// packets carry the REAL names. So the two name bridges either side -
+/// `set.files.retain(|f| want.contains_key(..))` and the
+/// `want.get(&fold(&d.name))` in the placement loop - both miss, the
+/// retain empties the set, and the pass donates nothing.
+///
+/// The arm's own comment used to call that unfixable "because the
+/// pre-fetch has no yEnc `name=` to read", and the handoff that
+/// commissioned this lift first repeated it. Both were wrong: this pass
+/// FETCHES the recovery index (`probe_par2_sets` below) before either
+/// bridge is consulted, so the FileDesc lengths are in hand at exactly
+/// the point the names fail. Nothing has to be re-ordered and no extra
+/// article is fetched - the lift is this map gaining the entries the
+/// subject could not give it. (What order DOES still cost is written up
+/// at the `donors_offer == 0` gate below, and is a different, narrower
+/// case.)
+///
+/// # The gate is the set's member COUNT, and it is the only guard here
+///
+/// [`super::dupefill::donor_file_by_length`] carries the rule and the
+/// census behind it: single-member sets only, an encoded/decoded ratio
+/// window, and unique-or-refuse. Its single-member gate is what makes
+/// this loop run over at most one member and insert at most one entry,
+/// so there is deliberately no second "is this NZB file already
+/// claimed" check - two guards either of which suffices leaves both
+/// unfalsifiable, which is the trap `tools/cfg-safety-gate.py`'s header
+/// records and which cost the dupefill lane a surviving mutation.
+/// `a_multi_volume_obfuscated_post_bridges_nothing` is the ratchet.
+///
+/// # What a wrong answer costs HERE, which is not what it costs in
+/// `dupefill`
+///
+/// That module's header says a wrong pairing buys "a wasted fetch and
+/// nothing else", because every borrowed block is proved against the
+/// target's own MD5 before a byte is written. THAT DOES NOT TRANSFER.
+/// This arm STRIKES articles out of the fetch plan, which this module's
+/// own opening calls the one mistake it has no way back from - so a
+/// wrong `fi` here would place the right bytes under the right name and
+/// then never ask for a DIFFERENT file at all.
+///
+/// What keeps that unreachable is a necessary condition rather than a
+/// second guard, and it is worth spelling out because it is not
+/// obvious. Striking wrongly needs the NZB to post two or more `Data`
+/// files, exactly ONE of them inside the window (or uniqueness refuses),
+/// and that one to be the wrong carrier. But the member's TRUE carrier
+/// has the member's own length, so it is in the window by definition of
+/// the window - which means the wrong one being alone in there requires
+/// the true one to be OUTSIDE it, i.e. a client family no census has
+/// seen, `[1.0167, 1.0328]` measured against `[1.005, 1.045]` allowed.
+/// The digest `donate_whole_files` takes before placing is what makes
+/// the bytes right regardless; this is what makes the STRIKE right.
+///
+/// Returns how many members were bridged, for the caller's log line.
+fn bridge_obfuscated_by_length(
+    nzb: &Nzb,
+    set: &Par2Set,
+    want: &mut std::collections::HashMap<String, usize>,
+) -> usize {
+    let mut bridged = 0usize;
+    for f in &set.files {
+        let key = fold(&f.name);
+        if want.contains_key(&key) {
+            continue;
+        }
+        let Some(fi) = super::dupefill::donor_file_by_length(nzb, set, f.length) else {
+            continue;
+        };
+        want.insert(key, fi);
+        bridged += 1;
+    }
+    bridged
+}
+
 pub(super) async fn adopt_from_donors(
     servers: &[nzbkit::config::ServerConfig],
     nzb: &Nzb,
@@ -168,33 +329,13 @@ pub(super) async fn adopt_from_donors(
     // Which member names this NZB actually posts, so a member the plan
     // could not strike out is never copied: bytes in `out_dir` under a
     // name no slot writes are bytes the fetch would then write a second
-    // copy of beside. An obfuscated post - whose subjects are hashes and
-    // whose real names live only in the FileDesc packets - maps nothing
-    // here and donates nothing, which is a stated limit of this arm
-    // rather than a bug: the pre-fetch has no yEnc `name=` to read.
-    let mut want: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (fi, f) in nzb.files.iter().enumerate() {
-        if f.kind() != FileKind::Data || f.segments.is_empty() {
-            continue;
-        }
-        if let Some(hint) = f.filename_hint_lenient() {
-            // A repeated name identifies no single file, so NEITHER
-            // claim is trusted - the same rule `probe_recovery_set`
-            // applies to a FileDesc length two members disagree about.
-            // Donating to the first would put the bytes at a name the
-            // second file's writer then has to be disambiguated away
-            // from, which is worse than fetching both.
-            match want.entry(fold(hint)) {
-                std::collections::hash_map::Entry::Occupied(mut o) => {
-                    o.insert(usize::MAX);
-                }
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(fi);
-                }
-            }
-        }
-    }
-    want.retain(|_, fi| *fi != usize::MAX);
+    // copy of beside. An obfuscated post - whose subjects are
+    // hashes and whose real names live only in the FileDesc packets -
+    // maps its files under those HASHES here, so it meets the set's own
+    // names nowhere. That used to end the pass, written up as a limit of
+    // the pre-fetch; it is not one. `bridge_obfuscated_by_length` lifts
+    // it off the recovery index this pass already fetches.
+    let mut want = wanted_names(nzb);
     if want.is_empty() {
         return out;
     }
@@ -229,6 +370,34 @@ pub(super) async fn adopt_from_donors(
     // answer whichever way the offer went. On a fresh job `completed`
     // is empty and every entry is true, so nothing narrows.
     let unfetched = unfetched_files(nzb, completed);
+    // A STATED LIMIT of the obfuscated lift, priced and left unbought.
+    //
+    // This gate is the ONE place the lift does not reach, and it is
+    // reached by ORDER rather than by vocabulary: `want` is hash-keyed
+    // and `placed_names` returns the FileDesc names an earlier donation
+    // wrote, so on an obfuscated post the two miss here exactly as they
+    // miss after the probe - but here there is no probe behind us to
+    // read real names out of, and buying one is the whole cost of this
+    // pass. So the case this gate cannot see is narrow and specific: an
+    // earlier pass of THIS job donated obfuscated members, died, and the
+    // donors have been swept since, leaving bytes only `out_dir` knows
+    // about (a donated file has no journal placements - its articles
+    // were never fetched - so the resume path is blind to it too).
+    //
+    // What lifting it would cost is what this gate was built to refuse:
+    // an index fetch, plus up to `PROBE_BUDGET`, on every donor-bearing
+    // job whose donors are swept - which is the COMMON case here, a
+    // fresh switch - to salvage a second-order one that is only
+    // reachable at all now that the lift above lets an obfuscated
+    // donation happen in the first place. The failure mode of not
+    // buying it is a re-download this arm has always had, never a wrong
+    // byte. Not worth it on today's evidence.
+    //
+    // The tempting free version - reading the SIZES `donor_files`
+    // already returns and asking the ratio question of them - is not
+    // built either, and deliberately: the census's rule is single-member
+    // ONLY, that gate needs the SET, and the set is what we do not have
+    // yet. A size-only arm would be the rule with its one guard removed.
     if donors_offer == 0
         && !a_donation_may_already_be_here(
             &nzbkit::par2repair::placed_names(out_dir),
@@ -274,21 +443,7 @@ pub(super) async fn adopt_from_donors(
         );
         return out;
     };
-    set.files.retain(|f| want.contains_key(&fold(&f.name)));
-    // On the donors_offer == 0 path nothing can be COPIED - the donors
-    // hold nothing - so every member handed on is a whole-file read
-    // looking for a previous donation, and only an unfetched member can
-    // be one; this is the half that keeps the R6 widening free (see the
-    // gate above for what it costs without it). On the offer > 0 path
-    // the same retain is what makes `donate_whole_files`' caller
-    // contract true: a resumed switch with unswept donors would
-    // otherwise hand the already-here arm every partially-fetched
-    // member - right length from preallocation, right first 16k from
-    // offset-0-first - and buy a whole-file MD5 per member that can
-    // only ever answer no, and a member the journal already owns
-    // articles of is not a donation target either way.
-    set.files
-        .retain(|f| want.get(&fold(&f.name)).is_some_and(|&fi| unfetched[fi]));
+    let bridged = narrow_to_donatable(nzb, &mut set, &mut want, &unfetched);
     if set.files.is_empty() {
         return out;
     }
@@ -321,10 +476,14 @@ pub(super) async fn adopt_from_donors(
             "donor adoption: {} whole file(s) taken off the predecessor's disk{} in {:.2?} - \
              {:.1} MB of this post will not be fetched",
             out.placed.len() - regained,
-            if regained > 0 {
-                format!(", {regained} already here from an earlier pass")
-            } else {
-                String::new()
+            match (regained, bridged) {
+                (0, 0) => String::new(),
+                (0, _) => format!(", {bridged} named by length off the recovery index"),
+                (_, 0) => format!(", {regained} already here from an earlier pass"),
+                _ => format!(
+                    ", {regained} already here from an earlier pass, \
+                     {bridged} named by length off the recovery index"
+                ),
             },
             t0.elapsed(),
             out.bytes as f64 / 1e6,
@@ -336,10 +495,91 @@ pub(super) async fn adopt_from_donors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use md5::Digest as _;
     use std::collections::HashSet;
 
     fn nzb(xml: &str) -> Nzb {
         Nzb::parse(xml.as_bytes()).expect("test NZB parses")
+    }
+
+    /// A minimal but well-formed PAR2 index: a Main packet listing one
+    /// id per member and a FileDesc for each, carrying the two facts
+    /// `bridge_obfuscated_by_length` reads - the member's NAME and its
+    /// LENGTH. No IFSC and no recovery slices; `Par2Set::parse` leaves
+    /// `blocks` empty for a file with no IFSC packet and nothing here
+    /// asks about blocks. Same builder as `smart::setclaim`'s, kept
+    /// local for the same reason it is: `identity.rs`'s copy is
+    /// `#[cfg(feature = "indexer")]` and this must hold on the slim
+    /// build too.
+    fn par2_set(members: &[(&str, u64)]) -> Par2Set {
+        let set = 7u8;
+        let pkt = |ptype: &[u8; 16], body: &[u8]| -> Vec<u8> {
+            let mut p = Vec::new();
+            p.extend_from_slice(nzbkit::par2::MAGIC);
+            p.extend_from_slice(&(64 + body.len() as u64).to_le_bytes());
+            p.extend_from_slice(&[0u8; 16]);
+            p.extend_from_slice(&[set; 16]);
+            p.extend_from_slice(ptype);
+            p.extend_from_slice(body);
+            let md5: [u8; 16] = md5::Md5::digest(&p[32..]).into();
+            p[16..32].copy_from_slice(&md5);
+            p
+        };
+        let fid = |i: usize| -> [u8; 16] { [set.wrapping_add(i as u8).wrapping_add(1); 16] };
+        let mut main = Vec::new();
+        main.extend_from_slice(&4096u64.to_le_bytes());
+        main.extend_from_slice(&(members.len() as u32).to_le_bytes());
+        for i in 0..members.len() {
+            main.extend_from_slice(&fid(i));
+        }
+        let mut idx = pkt(b"PAR 2.0\0Main\0\0\0\0", &main);
+        for (i, (name, len)) in members.iter().enumerate() {
+            let mut d = Vec::new();
+            d.extend_from_slice(&fid(i));
+            d.extend_from_slice(&[set ^ (i as u8) ^ 0x40; 16]);
+            d.extend_from_slice(&[set ^ (i as u8) ^ 0x80; 16]);
+            d.extend_from_slice(&len.to_le_bytes());
+            d.extend_from_slice(name.as_bytes());
+            while !d.len().is_multiple_of(4) {
+                d.push(0);
+            }
+            idx.extend(pkt(b"PAR 2.0\0FileDesc", &d));
+        }
+        Par2Set::parse(&[idx.as_slice()]).expect("the fixture index parses")
+    }
+
+    /// One NZB file per (subject, encoded segment sizes). The subject is
+    /// what `want` is keyed on, so a HASH here is the whole obfuscated
+    /// case; the segment `bytes` are what the ratio is taken over.
+    fn posting(files: &[(&str, &[u64])]) -> Nzb {
+        let mut x = String::from(
+            "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n",
+        );
+        for (subject, segs) in files {
+            x.push_str(&format!(
+                "<file poster=\"a@b\" date=\"1\" subject=\"&quot;{subject}&quot; yEnc (1/{})\">\n\
+                 <groups><group>alt.bin</group></groups>\n<segments>\n",
+                segs.len()
+            ));
+            for (i, b) in segs.iter().enumerate() {
+                x.push_str(&format!(
+                    "<segment bytes=\"{b}\" number=\"{}\">{subject}-{i}@t</segment>\n",
+                    i + 1
+                ));
+            }
+            x.push_str("</segments>\n</file>\n");
+        }
+        x.push_str("</nzb>\n");
+        nzb(&x)
+    }
+
+    /// A real post's encoded sum over its decoded length, at the census
+    /// MEDIAN (1.03232 over 369 wire-probed obfuscated postings). Every
+    /// fixture below posts at this ratio rather than at an arbitrary one
+    /// inside the window, so no test here can be read as licence to
+    /// widen the window to fit it.
+    fn encoded_for(len: u64) -> u64 {
+        (len as f64 * 1.03232) as u64
     }
 
     fn two_file_nzb() -> Nzb {
@@ -427,6 +667,228 @@ mod tests {
             a_donation_may_already_be_here(&["M.PART2.RAR".to_string()], &want, &[false, true]),
             "case must not lose the match - the FileDesc and the NZB \
              subject are two records of one filename"
+        );
+    }
+
+    /// The premise this whole lift rests on, asserted rather than
+    /// assumed, and it is not what the arm's old comment said.
+    ///
+    /// A hash subject IS a parseable filename hint, so `want` is
+    /// POPULATED on an obfuscated post - keyed under the hash. What
+    /// fails is not the map being empty, it is the map and the FileDesc
+    /// packets speaking two different vocabularies. Anyone who reads
+    /// "maps nothing" literally, as the census's own prescription
+    /// invites, builds a fallback that never fires.
+    ///
+    /// The rule it rests on is `nzb::quoted_filename`'s LAST fallback,
+    /// "else the first non-empty quoted run" - not `filename_hint`
+    /// versus `filename_hint_lenient`, which is the natural guess and is
+    /// wrong: a dotless hash needs neither the unquoted parse nor the
+    /// dotted-run rule, and swapping the lenient call for the strict one
+    /// changes nothing here. Measured by driving both mutations; only
+    /// dropping that fallback reddens this.
+    #[test]
+    fn an_obfuscated_subject_is_a_hint_so_want_is_full_and_still_meets_nothing() {
+        const LEN: u64 = 4 << 20;
+        let n = posting(&[("a1b2c3d4e5f60718", &[encoded_for(LEN)])]);
+        let want = wanted_names(&n);
+        assert_eq!(want.len(), 1, "the hash subject parses as a hint");
+        assert!(
+            want.contains_key(&fold("a1b2c3d4e5f60718")),
+            "and the map is keyed under that HASH, not under nothing"
+        );
+        let set = par2_set(&[("Real.Name.mkv", LEN)]);
+        assert!(
+            !want.contains_key(&fold(&set.files[0].name)),
+            "which is why the retain empties the set: the FileDesc's real \
+             name is a key this map does not have"
+        );
+    }
+
+    /// The lift. One obfuscated payload plus a readable PAR2 - 712 of
+    /// the 718 wire-probed obfuscated recovery sets in the census - is
+    /// named by the only other thing the NZB states about a file.
+    #[test]
+    fn an_obfuscated_single_member_post_is_bridged_by_encoded_length() {
+        const LEN: u64 = 4 << 20;
+        let n = posting(&[("a1b2c3d4e5f60718", &[encoded_for(LEN)])]);
+        let set = par2_set(&[("Real.Name.mkv", LEN)]);
+        let mut want = wanted_names(&n);
+        assert_eq!(bridge_obfuscated_by_length(&n, &set, &mut want), 1);
+        assert_eq!(
+            want.get(&fold(&set.files[0].name)),
+            Some(&0),
+            "the member now resolves to the NZB file that carries it"
+        );
+        // Which is the whole point: both name bridges either side of the
+        // probe now answer, so the retain keeps the member and the
+        // placement loop can attribute the donation to a file index.
+        let mut files = set.files.clone();
+        files.retain(|f| want.contains_key(&fold(&f.name)));
+        assert_eq!(files.len(), 1, "the retain no longer empties the set");
+    }
+
+    /// The lift WIRED IN, which is a different claim from the lift
+    /// working: `narrow_to_donatable` is the one place the bridge is
+    /// called, and this drives the whole post-probe path an obfuscated
+    /// post used to die on.
+    ///
+    /// It exists because the first cut of these tests called the bridge
+    /// directly and NOTHING failed when the call site was reverted -
+    /// a helper with tests and a call with none is a lift a later edit
+    /// drops in silence. Verified by driving exactly that mutation.
+    #[test]
+    fn an_obfuscated_post_survives_the_narrowing_that_used_to_empty_it() {
+        const LEN: u64 = 4 << 20;
+        let n = posting(&[("a1b2c3d4e5f60718", &[encoded_for(LEN)])]);
+        let mut want = wanted_names(&n);
+        let mut set = par2_set(&[("Real.Name.mkv", LEN)]);
+        assert_eq!(
+            narrow_to_donatable(&n, &mut set, &mut want, &[true]),
+            1,
+            "one member named by length off the recovery index"
+        );
+        assert_eq!(
+            set.files.len(),
+            1,
+            "and the member SURVIVES the retain that used to empty the set - \
+             which is the whole defect, and is invisible to a test that calls \
+             the bridge itself"
+        );
+        assert_eq!(
+            want.get(&fold("Real.Name.mkv")),
+            Some(&0),
+            "so the placement loop can attribute the donation to a file index"
+        );
+    }
+
+    /// A member this job has already fetched an article of is an
+    /// in-progress download and not a donation target, and the bridge
+    /// must not smuggle one past that rule - the R6 cost model is the
+    /// same whichever vocabulary named the member.
+    #[test]
+    fn a_bridged_member_this_job_is_already_downloading_is_still_dropped() {
+        const LEN: u64 = 4 << 20;
+        let n = posting(&[("a1b2c3d4e5f60718", &[encoded_for(LEN)])]);
+        let mut want = wanted_names(&n);
+        let mut set = par2_set(&[("Real.Name.mkv", LEN)]);
+        assert_eq!(
+            narrow_to_donatable(&n, &mut set, &mut want, &[false]),
+            1,
+            "the bridge still names it - that is not the question here"
+        );
+        assert!(
+            set.files.is_empty(),
+            "and the unfetched retain still drops it, so a partially fetched \
+             member never buys a whole-file MD5 that can only answer no"
+        );
+    }
+
+    /// The measured-dead half, and the ratchet on refusing it: 99.6% of
+    /// real multi-volume sets post every body volume at ONE length, so
+    /// there is nothing for a length rule to read and the answer is
+    /// refusal rather than a nearest match.
+    ///
+    /// The fixture is deliberately the one multi-volume shape where
+    /// length WOULD otherwise work - N-1 equal plus one short, queried
+    /// through its short last volume - with a single candidate posted,
+    /// so the member count is the only thing that can refuse it. Two
+    /// guards either of which sufficed would leave both unfalsifiable,
+    /// which is what let a mutation survive in the dupefill lane.
+    #[test]
+    fn a_multi_volume_obfuscated_post_bridges_nothing() {
+        const BODY: u64 = 4 << 20;
+        const LAST: u64 = 1 << 20;
+        let n = posting(&[("beefcafebeefcafe", &[encoded_for(LAST)])]);
+        let multi = par2_set(&[("m.part1.rar", BODY), ("m.part2.rar", LAST)]);
+        // The premise, asserted: on a ONE-member set this very candidate
+        // at this very length IS bridged, so nothing but the member
+        // count separates the two answers.
+        let single = par2_set(&[("m.part2.rar", LAST)]);
+        let mut w1 = wanted_names(&n);
+        assert_eq!(bridge_obfuscated_by_length(&n, &single, &mut w1), 1);
+        let mut w2 = wanted_names(&n);
+        assert_eq!(
+            bridge_obfuscated_by_length(&n, &multi, &mut w2),
+            0,
+            "and refused outright the moment the post has a second member"
+        );
+        assert_eq!(w2, wanted_names(&n), "a refusal leaves the map untouched");
+    }
+
+    /// A NAMED post must take the name, not the length - the bridge is a
+    /// fallback and never a second opinion. Worth its own test because
+    /// the two answers differ here: the set's `readme.txt` is the NZB's
+    /// file 1, while its ENCODED size would put it against file 0.
+    #[test]
+    fn a_name_that_already_bridges_is_never_relitigated_by_length() {
+        const LEN: u64 = 4 << 20;
+        let n = posting(&[("readme.txt", &[encoded_for(LEN)])]);
+        let set = par2_set(&[("readme.txt", LEN)]);
+        let mut want = wanted_names(&n);
+        assert_eq!(
+            bridge_obfuscated_by_length(&n, &set, &mut want),
+            0,
+            "the name bridge answered, so the length one is never asked"
+        );
+        assert_eq!(want.get(&fold("readme.txt")), Some(&0));
+    }
+
+    /// Ambiguity refuses, exactly as two NZB files posting one NAME
+    /// refuse in the `want` build above. A wrong pairing here spends a
+    /// fetch, so the rule is unique-or-refuse and never nearest-match.
+    #[test]
+    fn two_nzb_files_of_one_length_bridge_neither() {
+        const LEN: u64 = 4 << 20;
+        let n = posting(&[
+            ("a1b2c3d4e5f60718", &[encoded_for(LEN)]),
+            ("f7e6d5c4b3a29180", &[encoded_for(LEN)]),
+        ]);
+        let set = par2_set(&[("Real.Name.mkv", LEN)]);
+        let mut want = wanted_names(&n);
+        assert_eq!(bridge_obfuscated_by_length(&n, &set, &mut want), 0);
+        assert!(
+            !want.contains_key(&fold("Real.Name.mkv")),
+            "two candidates in the window identify neither"
+        );
+    }
+
+    /// The par2-volume decoy the census measured at 7.6% of the
+    /// payload's encoded size: outside the window, refused. This is the
+    /// arm that keeps the bridge from pairing a member against the
+    /// recovery data protecting it.
+    #[test]
+    fn a_candidate_outside_the_ratio_window_bridges_nothing() {
+        const LEN: u64 = 4 << 20;
+        let n = posting(&[("a1b2c3d4e5f60718", &[encoded_for(LEN)])]);
+        let mut want = wanted_names(&n);
+        assert_eq!(
+            bridge_obfuscated_by_length(&n, &par2_set(&[("Real.Name.mkv", LEN)]), &mut want),
+            1,
+            "at its own length the single candidate is the member"
+        );
+        let mut want = wanted_names(&n);
+        assert_eq!(
+            bridge_obfuscated_by_length(&n, &par2_set(&[("Real.Name.mkv", LEN / 2)]), &mut want),
+            0,
+            "and at a length no client family could explain it is refused"
+        );
+    }
+
+    /// The fixtures above state their encoded sums outright rather than
+    /// running an encoder, so this is what stops them drifting into a
+    /// shape the population does not have: the ratio they post at must
+    /// be the census MEDIAN, not merely somewhere inside the window.
+    /// A fixture that only passes on the margin is one drift from
+    /// proving nothing, and widening the window to rescue one would be
+    /// moving a measured rule to fit a synthetic post.
+    #[test]
+    fn the_fixtures_post_at_the_censuss_median_ratio() {
+        const LEN: u64 = 4 << 20;
+        let ratio = encoded_for(LEN) as f64 / LEN as f64;
+        assert!(
+            (1.0322..=1.0324).contains(&ratio),
+            "fixture ratio {ratio:.5} has drifted off the measured median 1.03232"
         );
     }
 }

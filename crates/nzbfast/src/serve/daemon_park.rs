@@ -137,6 +137,27 @@ fn deleted_cost(job: &Arc<Mutex<Job>>) -> String {
     )
 }
 
+/// What `park_gen` has settled about a job by the time it files it: the
+/// three flags its two closing steps read between them.
+///
+/// One value rather than three loose `bool` parameters, for two reasons.
+/// [`Daemon::park_file_terminal`] and [`Daemon::park_settle_spares`] want
+/// overlapping subsets of them, so passing them loose puts the second at
+/// the `clippy::too_many_arguments` line; and the two steps must never be
+/// handed disagreeing answers, which one value makes unrepresentable.
+#[derive(Clone, Copy)]
+struct ParkVerdict {
+    /// The job's state was `Failed` when the park took its snapshot.
+    failed: bool,
+    /// Re-read LIVE just before filing, never from that snapshot: a
+    /// delete verb landing inside the park moves it, which is the whole
+    /// reason `park_gen` reads it a second time.
+    tombstone: bool,
+    /// An automatic retry is armed, so this is not a terminal verdict -
+    /// the original comes back through the queue in minutes.
+    armed_auto_retry: bool,
+}
+
 impl Daemon {
     /// Will [`park`](Daemon::park) arm an M32 automatic retry for this
     /// job? See [`auto_retry_eligible`], which both this and the hook
@@ -1142,7 +1163,7 @@ impl Daemon {
                 release.wait();
             }
         }
-        let mut publish = Some(self.add_lock.lock_ok());
+        let publish = Some(self.add_lock.lock_ok());
         // The generation once more, and this time under the hold that
         // makes it a guard rather than a guess: `retry` takes
         // `add_lock` for its whole critical section, so a retry is
@@ -1178,14 +1199,52 @@ impl Daemon {
         }
         // Re-read once more: the demote arm above returns, so this is the
         // first point the history/promotion decisions are actually taken.
-        let tombstone = job.lock_ok().tombstone;
+        let verdict = ParkVerdict {
+            failed,
+            tombstone: job.lock_ok().tombstone,
+            armed_auto_retry,
+        };
+        self.park_file_terminal(&job, &id, filed_early, verdict, publish);
+        self.park_settle_spares(&job, &id, key, &nzb_path, verdict);
+        // Coalesced: the record is already durable in history.jsonl (the
+        // upsert above), and load_queue resolves a torn queue/history
+        // pair in history's favour - the debounced rewrite only drops
+        // the queue row.
+        self.save_queue_soon();
+        self.note_queue_idle();
+    }
+
+    /// File a parked job into whatever store its verdict sends it to, and
+    /// let the directory deciders look again the moment it lands there.
+    ///
+    /// Split out of [`Self::park_gen`] under the size gate's 500-line
+    /// function ceiling (31 Aug 2026), body verbatim - the same code
+    /// motion [`Self::promote_held_alternative`] came out of, and for the
+    /// same reason. Nothing else calls it: every gate it runs behind (the
+    /// generation re-reads, the retain, the demote arm's early return)
+    /// stays in `park_gen`, where the facts they read live.
+    ///
+    /// `publish` is the `add_lock` guard `park_gen` took before that
+    /// retain, moved IN rather than re-taken here: the window it closes
+    /// runs from the retain to the moment the record is visible in a
+    /// store again, so the guard has to cross this seam. Each arm
+    /// releases it the instant it has filed, which taking it here would
+    /// make impossible to express.
+    fn park_file_terminal(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        id: &str,
+        filed_early: bool,
+        verdict: ParkVerdict,
+        mut publish: Option<std::sync::MutexGuard<'_, ()>>,
+    ) {
         // §96.3: feed the per-target give-up breaker. Here because this
         // is where a failure becomes FINAL - a tombstone owes nobody
         // anything and an armed auto-retry means the story continues.
-        if !tombstone {
-            self.giveup_note_outcome(&job, armed_auto_retry);
+        if !verdict.tombstone {
+            self.giveup_note_outcome(job, verdict.armed_auto_retry);
         }
-        if !tombstone {
+        if !verdict.tombstone {
             // C: hand the owed move over only once the record is IN
             // history - the mover looks the job up there, and it runs
             // on its own worker so this park (and the runner tail
@@ -1207,7 +1266,7 @@ impl Daemon {
             // released above, so a delete can land right here and a raw
             // append would write the record back after its tombstone
             // (H6). `filed_cost` has the rest.
-            self.history_publish(&job, || filed_cost(&job));
+            self.history_publish(job, || filed_cost(job));
             // §76: the record is in history, so the media prober's final
             // on-disk pass has something to read. Owed HERE, as an event,
             // rather than inferred by that task noticing the job stop
@@ -1221,10 +1280,10 @@ impl Daemon {
             // here would be that pair in the opposite order.
             let owed = job.lock_ok().nzo_id.clone();
             self.media_final_owed.lock_ok().push(owed);
-            self.life_emit_parked(&job);
+            self.life_emit_parked(job);
             self.history_enforce_retention();
             if owes_move {
-                self.mover_enqueue(&job);
+                self.mover_enqueue(job);
             }
         } else if !job.lock_ok().delete_status.is_empty() {
             // M5: the tombstone came from an NZBGet delete verb that
@@ -1275,7 +1334,7 @@ impl Daemon {
             // same record through this park.
             let already = {
                 let mut h = self.history.lock_ok();
-                let already = h.iter().any(|j| Arc::ptr_eq(j, &job));
+                let already = h.iter().any(|j| Arc::ptr_eq(j, job));
                 if !already {
                     h.push(job.clone());
                 }
@@ -1287,7 +1346,7 @@ impl Daemon {
             if !already {
                 // The delete's OWN row - `deleted_cost` carries what a
                 // dropped answer costs, which is more than one row.
-                self.history_publish(&job, || deleted_cost(&job));
+                self.history_publish(job, || deleted_cost(job));
                 self.history_enforce_retention();
             }
         } else if filed_early {
@@ -1305,7 +1364,11 @@ impl Daemon {
             // so the answer is reported rather than acted on: what
             // survives is a record naming files that have gone, which is
             // exactly what the log line has to say.
-            if !self.history_tombstone(std::slice::from_ref(&id)) {
+            // `&[id.to_owned()]` rather than the `from_ref` this was
+            // before the split: `id` is a `&str` parameter now, and one
+            // String on a path that is already rewriting history.jsonl
+            // costs nothing worth a `&String` parameter (`ptr_arg`).
+            if !self.history_tombstone(&[id.to_owned()]) {
                 error!(
                     target: "queue",
                     "{id}: the deleted job's history row could not be buried, so a \
@@ -1317,6 +1380,26 @@ impl Daemon {
         // nothing either; make the release explicit before the promotion
         // scan below.
         drop(publish);
+    }
+
+    /// Settle what the finished job's held spares are for, and ask the
+    /// hunt worker for a replacement when nothing was held.
+    ///
+    /// Split out of [`Self::park_gen`] under the size gate's 500-line
+    /// function ceiling (31 Aug 2026), body verbatim. It runs AFTER
+    /// [`Self::park_file_terminal`] has released `add_lock`, and the
+    /// ordering is the point: `still_filed` asks whether the failure
+    /// these two decisions are ABOUT is still in history, which is only a
+    /// meaningful question once the record has been filed and the
+    /// lifecycle event has gone out.
+    fn park_settle_spares(
+        &self,
+        job: &Arc<Mutex<Job>>,
+        id: &str,
+        key: Option<String>,
+        nzb_path: &Path,
+        verdict: ParkVerdict,
+    ) {
         // The original failed → promote its best held ALTERNATIVE (M14f).
         // Not while an automatic retry is armed: the original is coming
         // back through the queue in minutes, and starting the alternative
@@ -1349,16 +1432,16 @@ impl Daemon {
         // whichever committed second sees the other. Only ever
         // consulted under `failed && !tombstone`, which is the one road
         // that put the record there.
-        let still_filed = self.history.lock_ok().iter().any(|j| Arc::ptr_eq(j, &job));
+        let still_filed = self.history.lock_ok().iter().any(|j| Arc::ptr_eq(j, job));
         let mut spare_held = false;
-        if failed
-            && !tombstone
-            && !armed_auto_retry
+        if verdict.failed
+            && !verdict.tombstone
+            && !verdict.armed_auto_retry
             && let Some(key) = key
         {
             if still_filed {
-                spare_held = self.spare_held_for(&id, &key);
-                self.promote_held_alternative(&job, &id, &key, &nzb_path);
+                spare_held = self.spare_held_for(id, &key);
+                self.promote_held_alternative(job, id, &key, nzb_path);
             } else {
                 // Dropped rather than merely skipped, because "the
                 // owner is in neither store" is precisely the state
@@ -1375,7 +1458,7 @@ impl Daemon {
                      was being parked, so its held alternative is \
                      dropped rather than started"
                 );
-                self.drop_spares_for(&id);
+                self.drop_spares_for(id);
             }
         }
         // TODO 282 item 5's other half: a job that COMPLETED (or that
@@ -1384,8 +1467,8 @@ impl Daemon {
         // §4b's junk queue arriving by a new road. An armed auto-retry
         // is neither - the job is coming back through the queue in
         // minutes and its spares must be waiting when it does.
-        if (!failed || tombstone) && !armed_auto_retry {
-            self.drop_spares_for(&id);
+        if (!verdict.failed || verdict.tombstone) && !verdict.armed_auto_retry {
+            self.drop_spares_for(id);
         }
         // §282 item 8: the job is dead and NOTHING was held for it, so
         // ask the hunt worker whether a replacement can be found. It
@@ -1408,15 +1491,14 @@ impl Daemon {
         // from history puts a download in front of them for a job they
         // dismissed, which is the promotion's own bug reached by the
         // other road.
-        if failed && !tombstone && !armed_auto_retry && !spare_held && still_filed {
-            self.hunt_request(&job);
+        if verdict.failed
+            && !verdict.tombstone
+            && !verdict.armed_auto_retry
+            && !spare_held
+            && still_filed
+        {
+            self.hunt_request(job);
         }
-        // Coalesced: the record is already durable in history.jsonl (the
-        // upsert above), and load_queue resolves a torn queue/history
-        // pair in history's favour - the debounced rewrite only drops
-        // the queue row.
-        self.save_queue_soon();
-        self.note_queue_idle();
     }
 
     /// Is ANY spare still held against this job? §282 item 8's whole

@@ -257,7 +257,6 @@ async fn speedlimit_paces_and_lifts_live() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M14g3 smoke: with the governor on (localhost RTT ≈ base, so it only
@@ -338,5 +337,4 @@ async fn auto_speed_governor_smoke() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

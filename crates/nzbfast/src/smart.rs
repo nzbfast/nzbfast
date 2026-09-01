@@ -82,6 +82,35 @@ fn pat_match(pattern: &str, name: &str) -> bool {
 }
 
 impl Rule {
+    /// Does this rule claim the job?
+    ///
+    /// `size` IS TAKEN AS A FACT, and its one production caller
+    /// ([`first_match`], from `serve::daemon_enqueue::resolve_add_identity`)
+    /// hands it `Nzb::eager_bytes` - which is 0 when the manifest
+    /// declared no `bytes=` attributes at all. That shape is accepted on
+    /// purpose (see `Nzb::geometry_bytes` and the `<segment>` attribute
+    /// comment in `nzbkit::nzb`, both of which state the position
+    /// outright: "0 posted bytes means unknown, not zero"), so a rule
+    /// carrying `min_size` refuses such a job and one carrying only
+    /// `max_size` accepts it, in both cases by reading an unknown as a
+    /// measurement. [`size_gated`] counts the rules that question can
+    /// reach, and `resolve_add_identity` says so in the log rather than
+    /// routing in silence.
+    ///
+    /// F5 (the zero-declared-bytes handoff, claim
+    /// `nzb-zero-bytes-downstream`) is the open question of what the
+    /// answer SHOULD be - the private notes do not ship, so it is named
+    /// by its claim rather than by a path. The one
+    /// thing settled there is what it is NOT: `geometry_bytes` cannot
+    /// stand in here. That figure is a preallocation CEILING of
+    /// declared articles times 16 MiB, and a real article is 768000 or
+    /// 716800 bytes, so it runs 21.8x to 23.4x above the truth on an
+    /// ordinary post. Substituted here it would match a 190 MB job
+    /// against a 4 GB `min_size` and refuse a 24 MB job against a
+    /// 500 MB `max_size` - the same silence pointed the other way, and
+    /// misrouting where today's answer merely declines. The arithmetic
+    /// is driven rather than asserted, in
+    /// `smart::tests::geometry_bytes_cannot_stand_in_for_an_unknown_size`.
     pub fn matches(&self, name: &str, size: u64) -> bool {
         if !pat_match(&self.pattern, name) {
             return false;
@@ -102,6 +131,22 @@ impl Rule {
 /// First rule matching this job, or None. Rule order IS priority.
 pub fn first_match<'a>(rules: &'a [Rule], name: &str, size: u64) -> Option<&'a Rule> {
     rules.iter().find(|r| r.matches(name, size))
+}
+
+/// How many of these rules ask a question about SIZE.
+///
+/// Named rather than inlined at its one caller because it is the
+/// population of [`Rule::matches`]'s open question: a job whose
+/// declared bytes are unknown gets a decision out of every one of
+/// these, and that decision is made against a 0 the rule cannot tell
+/// from a measurement. Zero here means the unknown costs the routing
+/// nothing, which is the common case and the reason this stays a log
+/// line rather than a refusal.
+pub fn size_gated(rules: &[Rule]) -> usize {
+    rules
+        .iter()
+        .filter(|r| r.min_size > 0 || r.max_size > 0)
+        .count()
 }
 
 /// "par2, sfv, .srr" → ["par2", "sfv", "srr"] (lowercased, dots and
@@ -182,751 +227,15 @@ pub fn name_password(name: &str) -> Option<(String, String)> {
     None
 }
 
-/// TV filing target for a release stem, from wall.rs's parser:
-/// subdirectory ("The Bear/Season 03") plus, when a specific episode is
-/// known, the rename base ("The Bear - S03E05"). None = not confidently
-/// TV (movies, obfuscated names, unknown season) - the job stays where it
-/// landed rather than being mis-filed.
-///
-/// A daily show carries no season/episode numbers at all, only the air
-/// date ("The.Daily.Show.2026.07.21.1080p.WEB.x264-GRP"), and requiring a
-/// season left every one of them unfiled and unrenamed. Their identity IS
-/// the date, so they file under `Show/Season YYYY` as
-/// `Show - YYYY.MM.DD` - the convention Sonarr and every library reads
-/// back. Only a date that survives [`nzbkit::release::air_date_parts`]
-/// counts, and a title that reads as a hash is refused outright: the
-/// parser's `daily` flag fires on any 8-digit run, which is enough to
-/// say "not a movie" but not enough to write a name with.
-pub fn tv_path(stem: &str) -> Option<(String, Option<String>)> {
-    tv_path_as(stem, sanitize)
-}
-
-/// [`tv_path`] as the builds before the strong sanitiser computed it:
-/// the show's path-hostile glyphs blanked to a space and nothing else,
-/// so a colon left "Star Trek Discovery" where today it leaves
-/// "Star Trek - Discovery".
-///
-/// A library filed by one of those builds is still on disk under the old
-/// spelling, and both the delete and the play path RECOMPUTE the base
-/// from the stem at call time - so without this an episode filed last
-/// week stopped being recognised as its own job's file: delete-with-files
-/// removed nothing and Play reported no playable file. Filing consults it
-/// too, or the same show would start a second tree beside the first.
-fn legacy_tv_path(stem: &str) -> Option<(String, Option<String>)> {
-    tv_path_as(stem, legacy_sanitize)
-}
-
-fn tv_path_as(stem: &str, show_of: impl Fn(&str) -> String) -> Option<(String, Option<String>)> {
-    let p = crate::wall::parse_release(stem);
-    if p.kind != crate::wall::Kind::Tv {
-        return None;
-    }
-    let show = show_of(&p.title);
-    if show.is_empty() {
-        return None;
-    }
-    let Some(season) = p.season.filter(|&s| s > 0) else {
-        if title_is_unpresentable(&p.title) {
-            return None;
-        }
-        let (year, air) = nzbkit::release::air_date_parts(p.date.as_deref()?)?;
-        return Some((
-            format!("{show}/Season {year}"),
-            Some(format!("{show} - {air}")),
-        ));
-    };
-    let dir = format!("{show}/Season {season:02}");
-    // Multi-episode posts keep the whole range in the filed name
-    // ("Show - S01E01-E02") so the second episode isn't silently
-    // dropped from the library.
-    let base = p.episode.map(|e| match p.episode2 {
-        Some(e2) => format!("{show} - S{season:02}E{e:02}-E{e2:02}"),
-        None => format!("{show} - S{season:02}E{e:02}"),
-    });
-    Some((dir, base))
-}
-
-// ---------------------------------------------------------------------------
-// Episode titles in TV names (TODO 78) - the last *arr rename parity piece.
-// ---------------------------------------------------------------------------
-
-/// What TV filing wrote after the episode base, as the job recorded it at
-/// the moment it wrote it: the episode-title segment (`" - Children"`,
-/// empty unless the `rename_episode_titles` setting was on AND the cache
-/// knew the title) and the quality suffix (`" [1080p]"`).
-///
-/// The two travel together because ownership of a name inside a SHARED
-/// season folder is decided by the WHOLE tail - see
-/// [`is_filed_episode_file`]. A delete that knew only the suffix half
-/// matched nothing at all once a title was in the name, which silently
-/// turned "delete this episode" and "play this episode" into no-ops.
-///
-/// A struct rather than two more `&str` parameters for the reason
-/// [`crate::serve::FinalizeJob`] is one: they are the same type, and a
-/// caller that swapped them would have compiled.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FiledTail {
-    pub title: String,
-    pub suffix: String,
-}
-
-impl FiledTail {
-    /// The quality suffix alone - every filed job carried exactly this
-    /// before episode titles existed, and a record written back then
-    /// still means it.
-    ///
-    /// Tests only: production builds this from the job record, where the
-    /// title half comes from the same place and cannot be forgotten.
-    #[cfg(test)]
-    pub fn suffix(suffix: &str) -> Self {
-        Self {
-            title: String::new(),
-            suffix: suffix.to_string(),
-        }
-    }
-
-    pub(crate) fn lowered(&self) -> Self {
-        Self {
-            title: self.title.to_ascii_lowercase(),
-            suffix: self.suffix.to_ascii_lowercase(),
-        }
-    }
-}
-
-/// Bytes one path component gets on every filesystem this lands on -
-/// ext4, APFS, NTFS, and the SMB/NFS shares `move_completed` writes to.
-const COMPONENT_BYTES: usize = 255;
-
-/// Room held back from [`COMPONENT_BYTES`] for the extension chain, so
-/// the title's budget depends only on the episode base and the quality
-/// suffix.
-///
-/// It has to. The title is RECORDED ([`FiledTail`]) and later matched
-/// literally, while the extension differs between files of one episode -
-/// a `.mkv` feature beside its `.en.srt`. Budgeting against the real
-/// extension would truncate the two differently and the record could
-/// only hold one of the answers.
-const EXT_RESERVE: usize = 16;
-
-/// How many episodes one post may claim before we stop collecting titles
-/// for it. A double or triple is ordinary; a range in the dozens is a
-/// season pack wearing an episode's clothes, and joining 24 titles
-/// produces a name that is all truncation and no information.
-const MAX_EP_SPAN: u32 = 8;
-
-/// The separator between the episode base and its title, which is
-/// Sonarr's default and what Plex, Jellyfin and Emby read back.
-const TITLE_SEP: &str = " - ";
-
-/// Episode titles for ONE show, read out of the enrichment cache before
-/// any renaming starts.
-///
-/// Cache-only by construction: this owns its answers already, so no
-/// rename can reach the network however obscure the show is or however
-/// long the job runs. That is the house rule stated in `tasks.rs` -
-/// network lives on the enricher threads - and it is also why a cache
-/// miss simply produces the name we produced before this existed, rather
-/// than a deferred second rename. A rename that lands after an *arr has
-/// imported the file breaks the import (memory `nzbfast-auto-rename`).
-///
-/// Empty is the ordinary case, and means every name below is
-/// byte-identical to what it was.
-#[derive(Clone, Debug, Default)]
-pub struct EpisodeTitles {
-    by_num: std::collections::HashMap<(u32, u32), String>,
-}
-
-impl EpisodeTitles {
-    /// Build from `(season, episode, title)` triples - the shape
-    /// `wall::EpInfo` carries out of the `eplist:*` cache blob. Blank
-    /// titles are dropped here so no caller has to test for them.
-    pub fn new(eps: impl IntoIterator<Item = (u32, u32, String)>) -> Self {
-        Self {
-            by_num: eps
-                .into_iter()
-                .filter(|(_, _, name)| !name.trim().is_empty())
-                .map(|(s, e, name)| ((s, e), name))
-                .collect(),
-        }
-    }
-
-    /// The `" - Episode Title"` segment for a release stem, ready to sit
-    /// between `base` and `suffix`, or an empty string when there is no
-    /// title to write.
-    ///
-    /// `base` and `suffix` are passed only for their LENGTH: the finished
-    /// component has to fit a filesystem name, and the title is the part
-    /// that gives way (the base identifies the episode and the suffix
-    /// tells one release from another - neither can be shortened without
-    /// breaking something).
-    pub fn segment(&self, stem: &str, base: &str, suffix: &str) -> String {
-        if self.by_num.is_empty() {
-            return String::new();
-        }
-        let Some((season, ep, ep2)) = confident_episode(stem) else {
-            return String::new();
-        };
-        let Some(joined) = self.joined(season, ep, ep2) else {
-            return String::new();
-        };
-        // The same strong, colon-aware sanitiser the show name gets: a
-        // title arrives from a third party and can hold anything a
-        // human typed, including "/" and a trailing dot.
-        let title = nzbkit::release::sanitize_name(&joined);
-        if title.is_empty() {
-            return String::new();
-        }
-        let spent = base.len() + TITLE_SEP.len() + suffix.len() + EXT_RESERVE;
-        let title = fit_title(&title, COMPONENT_BYTES.saturating_sub(spent));
-        if title.is_empty() {
-            return String::new();
-        }
-        format!("{TITLE_SEP}{title}")
-    }
-
-    /// Every title this post covers, as one string.
-    ///
-    /// Sonarr's conventions, because the libraries downstream were built
-    /// against them: distinct titles join with `" + "`, and a post that
-    /// covers both halves of a two-parter collapses to the shared stem
-    /// ("The Ceremony (1)" + "The Ceremony (2)" -> "The Ceremony")
-    /// rather than repeating it. Episodes the cache doesn't know are
-    /// skipped, so a partly-known double still gets the title it has.
-    fn joined(&self, season: u32, ep: u32, ep2: Option<u32>) -> Option<String> {
-        let last = ep2
-            .filter(|&e2| e2 > ep)
-            .unwrap_or(ep)
-            .min(ep.saturating_add(MAX_EP_SPAN - 1));
-        let titles: Vec<&str> = (ep..=last)
-            .filter_map(|e| self.by_num.get(&(season, e)))
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty())
-            .collect();
-        let first = *titles.first()?;
-        // Part collapse. Judged on ALL of them, and only when what is
-        // left still says something: a two-parter titled bare "Part 1" /
-        // "Part 2" strips to nothing, and joining those is the honest
-        // answer.
-        if titles.len() > 1 {
-            let stem = strip_part_marker(first);
-            if !stem.is_empty()
-                && titles
-                    .iter()
-                    .all(|t| strip_part_marker(t).eq_ignore_ascii_case(stem))
-            {
-                return Some(stem.to_string());
-            }
-        }
-        let mut out: Vec<&str> = Vec::with_capacity(titles.len());
-        for t in titles {
-            if !out.iter().any(|seen| seen.eq_ignore_ascii_case(t)) {
-                out.push(t);
-            }
-        }
-        Some(out.join(" + "))
-    }
-}
-
-/// The episode-title segment filing wrote for a job's OWN episode, which
-/// is what [`FiledTail`] has to record so a later delete or play can find
-/// the file again.
-///
-/// Computed from the same inputs `tv_organize` computes it from, so for
-/// the single-episode jobs that ownership matching applies to at all it
-/// is the same string. (A season pack has no single episode base -
-/// [`filed_bases`] is empty for one - so it never reaches a matcher.)
-///
-/// One seam is deliberately not chased: a show still filed under a
-/// PRE-sanitiser folder name ([`legacy_tv_path`]) has a base of a
-/// different length, so a title long enough to be truncated could be
-/// truncated by one word more or less there. The consequence is a name
-/// this stops recognising, which leaves a file behind - the cheap
-/// mistake this whole matcher exists to prefer.
-pub fn filed_title_segment(stem: &str, suffix: &str, titles: &EpisodeTitles) -> String {
-    match tv_path(stem) {
-        Some((_, Some(base))) => titles.segment(stem, &base, suffix),
-        _ => String::new(),
-    }
-}
-
-/// The season and episode numbers behind a release stem, but only when
-/// [`tv_path`] would also have built a specific episode base from it.
-///
-/// Kept in step with `tv_path_as`'s confident arm on purpose: a title may
-/// only ever decorate a name that already names one episode. A dated
-/// show (no season, no number) is deliberately excluded - the cache is
-/// keyed by season and number, and matching one by airdate is the
-/// separate piece of work TODO 78 records as a follow-up.
-fn confident_episode(stem: &str) -> Option<(u32, u32, Option<u32>)> {
-    let p = crate::wall::parse_release(stem);
-    if p.kind != crate::wall::Kind::Tv {
-        return None;
-    }
-    let season = p.season.filter(|&s| s > 0)?;
-    Some((season, p.episode?, p.episode2))
-}
-
-/// A title with its trailing part marker removed: "The Ceremony (2)",
-/// "The Ceremony: Part 2", "The Ceremony, Part Two" all reduce to "The
-/// Ceremony". Returns the title unchanged when it carries no marker.
-///
-/// Only a marker at the END counts, and only a recognised NUMBER after
-/// the word: "Part of the Plan" and "Parting Shot" are titles, not
-/// halves of one.
-fn strip_part_marker(title: &str) -> &str {
-    let s = title.trim_end();
-    // "The Ceremony (2)"
-    if let Some(body) = s.strip_suffix(')')
-        && let Some(open) = body.rfind('(')
-        && is_part_number(&body[open + 1..])
-    {
-        return trim_marker_sep(&body[..open]);
-    }
-    // "The Ceremony: Part 2" and every separator it is written with.
-    // `to_ascii_lowercase` preserves byte length, so the offset it finds
-    // indexes the original.
-    let lower = s.to_ascii_lowercase();
-    if let Some(at) = lower.rfind("part ")
-        && is_part_number(&s[at + "part ".len()..])
-    {
-        return trim_marker_sep(&s[..at]);
-    }
-    s
-}
-
-fn trim_marker_sep(s: &str) -> &str {
-    s.trim_end().trim_end_matches([':', '-', ',']).trim_end()
-}
-
-/// Does this read as a part number - "2", "Two", "II"? Closed lists, not
-/// a parser: everything it accepts is a word we DELETE from the user's
-/// filename, so a false positive costs information that was in the title.
-fn is_part_number(tok: &str) -> bool {
-    let t = tok.trim();
-    if !t.is_empty() && t.len() <= 3 && t.bytes().all(|b| b.is_ascii_digit()) {
-        return true;
-    }
-    matches!(
-        t.to_ascii_lowercase().as_str(),
-        "one" | "two" | "three" | "four" | "five" | "six" | "i" | "ii" | "iii" | "iv" | "v" | "vi"
-    )
-}
-
-/// Cut a title down to `room` BYTES at a word boundary, or to nothing
-/// when no useful piece of it fits.
-///
-/// Bytes, not characters: the limit filesystems enforce is on the encoded
-/// name, and a Cyrillic or Japanese title spends two or three bytes per
-/// character. Never splits a UTF-8 sequence, and prefers a whole-word cut
-/// so the result reads as a shortened title rather than as damage.
-fn fit_title(title: &str, room: usize) -> String {
-    if title.len() <= room {
-        return title.to_string();
-    }
-    // Longest prefix inside the budget that is also a character boundary.
-    let mut end = room.min(title.len());
-    while end > 0 && !title.is_char_boundary(end) {
-        end -= 1;
-    }
-    let cut = &title[..end];
-    // Back off to the last word boundary, unless that would leave a
-    // fragment too short to say anything - a single word longer than the
-    // whole budget is better cut mid-word than dropped.
-    let at_word = cut.rfind(' ').unwrap_or(0);
-    let kept = if at_word * 2 >= end {
-        &cut[..at_word]
-    } else {
-        cut
-    };
-    // Truncation can expose a trailing separator or a dot, which is what
-    // `sanitize_name` had already removed from the end of the full title.
-    kept.trim_end()
-        .trim_end_matches([',', ':', ';', '-', '_', '.', '('])
-        .trim_end()
-        .to_string()
-}
-
-/// Delete the file(s) a completed job was TV-filed to, WITHOUT touching
-/// the shared `Show/Season NN` directory or any sibling episode.
-///
-/// After TV filing a job's `out_dir` is the shared season folder, so
-/// `remove_dir_all` on it wipes the whole season (bug sweep: an "upgrade"
-/// or a history "delete files" destroyed every episode). We instead match
-/// only files whose name begins with this release's episode-unique base
-/// (`Show - S03E05.`), which catches the renamed video and any sidecar
-/// sharing that stem (see [`is_rename_tail`] for the sidecars it can't
-/// reach) but never a sibling - E06's files begin `Show - S03E06.`.
-///
-/// The episode base alone is NOT release-specific: an upgrade files the
-/// better copy into the same season folder under the same
-/// `Show - S03E05` base, differing only in the quality suffix
-/// [`tv_organize`] appended. Matching on the base plus ANY rename tail is
-/// therefore quality-blind, and deleting the superseded copy took the
-/// freshly-downloaded replacement with it - the user ended up with
-/// neither. `suffix` is THIS release's [`nzbkit::release::quality_suffix`]
-/// (recomputed by the caller from the job's own stem and the live
-/// NameStyle, exactly as filing computed it), and the tail must begin with
-/// it before any of the checks below run. An empty `suffix` means
-/// auto-rename was off, so the base alone is all filing had - today's
-/// behaviour.
-///
-/// Returns how many files went, and the first refusal if any (see
-/// [`FiledDelete`]). Removes 0 (a deliberate no-op, never a broad delete)
-/// when the episode can't be identified confidently - a release that
-/// didn't parse as a specific episode, or a filed name that didn't follow
-/// the rename (season-pack / collision fallback / a suffix that no longer
-/// matches because the naming settings changed).
-pub fn delete_filed_episode(dir: &Path, stem: &str, tail: &FiledTail) -> FiledDelete {
-    let bases = filed_bases(stem);
-    if bases.is_empty() {
-        return FiledDelete::default();
-    }
-    // Read once, for the whole delete: see `remove_user_file`.
-    // Inline rather than parked with the sweeps' deferred worker ON
-    // PURPOSE: this deletes inside the user's LIBRARY, where a hidden
-    // staging folder is not ours to create - and it is one file, bounded
-    // by TRASH_DEADLINE plus the latch.
-    let recoverable = delete_to_trash();
-    let tail_lower = tail.lowered();
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return FiledDelete::default();
-    };
-    let mut out = FiledDelete::default();
-    // Optimistic until the first removal, then only as strong as the
-    // weakest one: a set of files where some reached a Trash and some
-    // did not is not recoverable, and saying so would send the user
-    // looking for a file that is not there.
-    let mut all_trashed = true;
-    let mut any_removed = false;
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        if is_filed_episode_file(&name, &bases, &tail_lower) {
-            match remove_user_file(&path, recoverable) {
-                Ok(how) => {
-                    out.removed += 1;
-                    any_removed = true;
-                    all_trashed &= how == Removed::Trashed;
-                }
-                Err(e) => {
-                    warn!(target: "smart", "delete filed {}: {e}", path.display());
-                    // First refusal only: they all carry the same reason
-                    // (one volume, one Trash), and the caller shows this
-                    // to a person rather than listing every file.
-                    out.kept.get_or_insert_with(|| e.to_string());
-                }
-            }
-        }
-    }
-    out.removed_as = if any_removed && all_trashed {
-        Removed::Trashed
-    } else {
-        Removed::Gone
-    };
-    out
-}
-
-/// What one [`delete_filed_episode`] managed to do.
-///
-/// The count alone was enough while a failed delete could only be a
-/// permanent-delete error nobody could act on. Now a recoverable delete
-/// the Trash refuses LEAVES the episode in the user's library (see
-/// [`remove_user_file`]) while its History row goes, so the reason has to
-/// travel back to whoever can put it in front of them.
-pub struct FiledDelete {
-    /// How many files were removed.
-    pub removed: usize,
-    /// Why at least one file is still in the library, when one is.
-    pub kept: Option<String>,
-    /// What the removals actually were. `Gone` unless EVERY one of them
-    /// was verified into a Trash: a mixed outcome must not be reported
-    /// as recoverable, because the half the user goes looking for may be
-    /// the half that is not there.
-    pub removed_as: Removed,
-}
-
-impl Default for FiledDelete {
-    fn default() -> Self {
-        FiledDelete {
-            removed: 0,
-            kept: None,
-            // Nothing was removed, so there is nothing to promise back.
-            removed_as: Removed::Gone,
-        }
-    }
-}
-
-/// Every spelling of this release's filed episode base, ASCII-lowercased:
-/// the one filing would write today, plus the one an older build wrote
-/// for the same release when the show name reshapes (see
-/// [`legacy_tv_path`]). Empty when the stem doesn't name one episode.
-// Moved here from `serve/job_dupe.rs` by TODO 276 item 3: reducing a
-// release name to its identity key is what this module is for, and the
-// duplicate check is only one of its two callers.
-/// Reduce a release name to its bare letter/digit sequence, lowercased,
-/// with every separator and decoration collapsed to a single space.
-///
-/// Unicode-aware, and that is the whole point: an ASCII-only filter
-/// erased every non-Latin letter, so `電影甲.2024.1080p.WEB-DL.x264-GRP`
-/// and `電影乙.2024.1080p.WEB-DL.x264-GRP` reduced to the SAME key and
-/// collided as duplicates, while an all-CJK name reduced to the empty
-/// string - an identity so unspecific that the exact-duplicate check
-/// has to refuse it, so a genuine re-send of that release was admitted
-/// as new (Codex sweep J, 13 Aug 2026). ASCII names flatten exactly as
-/// they always did; `to_lowercase` differs from `to_ascii_lowercase`
-/// only on characters the old filter was deleting anyway.
-pub(crate) fn flatten_name(name: &str) -> String {
-    name.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect()
-}
-
-pub(crate) fn filed_bases(stem: &str) -> Vec<String> {
-    let mut out = Vec::with_capacity(2);
-    for path in [tv_path(stem), legacy_tv_path(stem)] {
-        if let Some((_, Some(base))) = path {
-            let base = base.to_ascii_lowercase();
-            if !out.contains(&base) {
-                out.push(base);
-            }
-        }
-    }
-    out
-}
-
-/// Does `name` belong to the release filed under one of `bases` with
-/// `tail`?
-///
-/// The one rule that decides ownership inside a SHARED season folder, so
-/// both the delete ([`delete_filed_episode`]) and the play
-/// ([`find_filed_episode_media`]) paths ask it rather than each carrying
-/// their own idea of "this job's file": match "Show - S03E05", then the
-/// episode title THIS job wrote (when it wrote one), then THIS release's
-/// own quality suffix, then only a tail our own rename can produce -
-/// never another quality of the same episode, a sibling ("…E06"), a
-/// longer episode number ("…E050"), or the user's own Sonarr/Plex file.
-///
-/// The title is matched LITERALLY, from the job's own record of what it
-/// wrote ([`FiledTail`]), never recomputed: the cache behind it is
-/// refreshed every 12 hours and a provider that re-spells an episode
-/// would otherwise re-point this at a file that no longer exists - or,
-/// worse, at a neighbouring one. A record that carries no title (every
-/// job filed before this existed, and every job filed with the setting
-/// off) leaves this exactly as it was.
-///
-/// All arguments arrive ASCII-lowercased.
-pub(crate) fn is_filed_episode_file(name: &str, bases: &[String], tail_lower: &FiledTail) -> bool {
-    /// An empty part of the tail matches without consuming anything -
-    /// which is what makes "no title recorded" mean "as it was before".
-    fn strip<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-        if prefix.is_empty() {
-            Some(s)
-        } else {
-            s.strip_prefix(prefix)
-        }
-    }
-    bases.iter().any(|base_lower| {
-        name.strip_prefix(base_lower.as_str())
-            .and_then(|rest| strip(rest, &tail_lower.title))
-            .and_then(|rest| strip(rest, &tail_lower.suffix))
-            .is_some_and(is_rename_tail)
-    })
-}
-
-/// The video file a TV-filed job actually owns in its shared
-/// `Show/Season NN` folder, for playing back a completed history row.
-///
-/// "The biggest media file in `out_dir`" is the right answer for an
-/// unfiled job, whose directory is private, and the wrong one here: a
-/// filed job's `out_dir` is the whole season, so pressing Play on E01
-/// served whichever episode happened to be largest - usually E02. Ownership
-/// in a shared folder is exactly what [`is_filed_episode_file`] decides for
-/// the delete path, so this asks the same question and serves what it
-/// names.
-///
-/// Top level only, and videos only: filing renames the episode to
-/// `Show - S03E05 [1080p].mkv` in the season folder itself, while any
-/// subdirectory the job shipped (`Subs/`, `extras/`) moved in under its own
-/// name and is not ours to claim. Symlinks are never served (see
-/// [`is_real_file`]) - a RAR can carry one, and "the file matching this
-/// name" would otherwise resolve a planted link to anything the daemon can
-/// read.
-///
-/// Returns None when nothing matches - a season pack, a collision
-/// fallback, files moved away by hand, or naming settings that changed
-/// since filing. The caller reports "no playable file" rather than falling
-/// back to a guess, because every guess here is a sibling episode.
-pub fn find_filed_episode_media(dir: &Path, stem: &str, tail: &FiledTail) -> Option<PathBuf> {
-    let bases = filed_bases(stem);
-    if bases.is_empty() {
-        return None;
-    }
-    let tail_lower = tail.lowered();
-    let mut hits: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            is_real_file(p)
-                && VIDEO_EXTS.contains(&ext_of(p).as_str())
-                && p.file_name().is_some_and(|n| {
-                    is_filed_episode_file(
-                        &n.to_string_lossy().to_ascii_lowercase(),
-                        &bases,
-                        &tail_lower,
-                    )
-                })
-        })
-        .collect();
-    // Sorted, not largest-first: "the biggest match" is the quality-blind
-    // pick that [`delete_filed_episode`]'s doc comment describes going
-    // wrong, and the suffix has already narrowed this to one release. Sort
-    // only so a directory listing's arbitrary order cannot make two calls
-    // disagree.
-    hits.sort();
-    hits.into_iter().next()
-}
-
-/// Is `rest` - everything after the episode base in a filed file's name -
-/// a tail OUR rename produced, rather than part of a longer title?
-///
-/// The only shapes [`nzbkit::release::quality_suffix`] can emit are the
-/// empty string, `" [tokens]"`, `"-Group"`, and `" [tokens]-Group"`, always
-/// followed by `"."` and an extension. That tail belongs to the VIDEO file
-/// [`tv_organize`] renamed - and to any sidecar that happens to share the
-/// renamed stem, since `.srt`/`.nfo` are matched by the same base. Sidecars
-/// are NOT generally renamed, though: `tv_organize` rewrites only
-/// [`VIDEO_EXTS`], so a subtitle posted as `Show.S03E05.720p-GRP.en.srt`
-/// keeps that name in the shared season folder and never matches this tail.
-/// The limitation is [`delete_filed_episode`]'s: it leaves such a sidecar
-/// behind. Deliberate - an unmatched name cannot be proven to be ours, and
-/// a stray subtitle is a far cheaper mistake than a deleted episode.
-///
-/// Accepting a bare leading space instead matched the DEFAULT Sonarr/Plex
-/// layout - `The Bear - S03E05 - Children.mkv` leaves `" - Children.mkv"` -
-/// so deleting a job filed into the user's real library season folder
-/// deleted the user's own copy of the episode, which we never downloaded
-/// and cannot replace.
-///
-/// Whatever follows the base is refused when it reads as the second
-/// episode of a range, in EVERY separator the convention is written with:
-/// our own multi-episode name is `Show - S03E05-E06`, and the user's
-/// library may hold `-06`, `.06`, `.E06`, `.S03E06`, `x06` or `_06`. Each
-/// of those files carries E06's only copy as well, and we never downloaded
-/// E06. Only `-` and `.` can reach an accepting arm at all; the rest fall
-/// through to the final refusal, and are pinned by test.
-///
-/// `rest` arrives ASCII-lowercased from [`delete_filed_episode`]; the
-/// `e`-prefix checks assume that.
-fn is_rename_tail(rest: &str) -> bool {
-    // Optional " [1080p WEB h264]".
-    let rest = match rest.strip_prefix(" [") {
-        Some(r) => match r.split_once(']') {
-            Some((_, tail)) => tail,
-            None => return false,
-        },
-        None => rest,
-    };
-    if let Some(tail) = rest.strip_prefix('.') {
-        // Our own tail is nothing but the extension chain (".mkv",
-        // ".en.srt"), so only the FIRST segment could be a range's second
-        // episode - later ones are the extension. A dot-spelled range
-        // ("Show - S03E05.06.mkv") lands here rather than in the group
-        // arm below, so it needs the same refusal.
-        let first = tail.split('.').next().unwrap_or_default();
-        let token = first.split([' ', '[']).next().unwrap_or_default();
-        return !tail.is_empty() && !reads_as_episode_number(token);
-    }
-    // Optional "-GRP". A group token is one word, so a space anywhere in
-    // it means this is a title, not our suffix.
-    let Some(g) = rest.strip_prefix('-') else {
-        return false;
-    };
-    let Some((group, ext)) = g.split_once('.') else {
-        return false;
-    };
-    !group.is_empty()
-        && !ext.is_empty()
-        && !group.contains([' ', '[', ']'])
-        && !(group.starts_with('e') && group[1..].starts_with(|c: char| c.is_ascii_digit()))
-        // A group that reads as an episode number is the second episode of
-        // a range ("Show - S03E05-06"), never a release group. Groups that
-        // merely BEGIN with a digit ("3LT0N", "2HD") are real and stay ours.
-        && !reads_as_episode_number(group)
-}
-
-/// Does this lowercased token read as an episode number - the second half
-/// of a multi-episode range - rather than as part of our own suffix?
-///
-/// The three spellings a range's second episode takes once its separator
-/// has been consumed: bare `06`, `e06`, and the full `s03e06`. A token that
-/// merely CONTAINS digits is not one, which is what keeps real release
-/// groups (`3lt0n`, `2hd`) and quality tokens (`x264`, `1080p`) ours.
-fn reads_as_episode_number(tok: &str) -> bool {
-    fn digits(s: &str) -> bool {
-        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-    }
-    if digits(tok) {
-        return true;
-    }
-    if let Some(ep) = tok.strip_prefix('e') {
-        return digits(ep);
-    }
-    match tok.strip_prefix('s').and_then(|r| r.split_once('e')) {
-        Some((season, ep)) => digits(season) && digits(ep),
-        None => false,
-    }
-}
-
-/// Does this parsed title read as a hash rather than a show name?
-///
-/// [`nzbkit::release::looks_obfuscated`] judges a stem as posted, but a
-/// title reaches us AFTER the parser has title-cased a single-case stem
-/// ("nzqymzflnjiyztgyntcynzzytq" -> "Nzqymzflnjiyztgyntcynzzytq"), which
-/// is exactly the transformation its single-case rule can no longer see
-/// through. Judging the lowered form as well restores it; a real title
-/// carries separators and is refused by every anchored rule whatever its
-/// case.
-fn title_is_unpresentable(title: &str) -> bool {
-    nzbkit::release::looks_obfuscated(title)
-        || nzbkit::release::looks_obfuscated(&title.to_ascii_lowercase())
-}
-
-/// Strip path-hostile characters from a show title. The show directory
-/// and every episode name below are built on it, so it gets the same
-/// strong, colon-aware treatment as the movie path - see
-/// [`nzbkit::release::sanitize_name`]. Empty means nothing nameable
-/// survived, and [`tv_path`] declines.
-fn sanitize(t: &str) -> String {
-    nzbkit::release::sanitize_name(t)
-}
-
-/// What [`sanitize`] was before it grew colon expansion and the strong
-/// filename rules: path-hostile glyphs blanked, whitespace collapsed.
-/// Never used to write a new name - only to RECOGNISE the names older
-/// builds already wrote (see [`legacy_tv_path`]).
-fn legacy_sanitize(t: &str) -> String {
-    t.chars()
-        .map(|c| if "/\\:*?\"<>|".contains(c) { ' ' } else { c })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// Video payload. Disc images (`iso`/`img`) count: they ARE the feature for
 /// a disc rip, so they must be recognised as the largest video (the sample
-/// gate measures against it) as well as kept.
+/// gate measures against it) as well as kept. `mts` is AVCHD's stream file
+/// (a camcorder-rip cousin of `m2ts`) and `evo` is HD-DVD's multiplexed
+/// stream - both are the disc's actual playable video, the same role `vob`
+/// plays for DVD-Video, so they belong here and not in the companion list.
 const VIDEO_EXTS: &[&str] = &[
-    "mkv", "mp4", "avi", "m4v", "mov", "wmv", "mpg", "mpeg", "ts", "m2ts", "webm", "flv", "divx",
-    "vob", "iso", "img",
+    "mkv", "mp4", "avi", "m4v", "mov", "wmv", "mpg", "mpeg", "ts", "m2ts", "mts", "webm", "flv",
+    "divx", "vob", "evo", "iso", "img",
 ];
 
 /// Disc-structure and companion-track files that belong to a video payload
@@ -943,9 +252,20 @@ const VIDEO_EXTS: &[&str] = &[
 /// unrecoverable.
 const MEDIA_COMPANION_EXTS: &[&str] = &[
     "bdmv", "mpls", "clpi", "ifo", "bup", "sup", // disc structure and subs
+    "cpi", "mpl",  // AVCHD's shortened-name twins of clpi/mpls
+    "bdjo", // BD-Java disc object: a Blu-ray menu is unreachable without it
+    "jar",  // BD-Java package - see the doc comment below, this one is deliberate
+    "aob",  // DVD-Audio's AUDIO_TS payload: an audio object, not a video one
     "mka", "m4a", "ac3", "eac3", "ec3", "dts", "dtshd", "truehd", "thd", "flac", "aac", "opus",
     "mp3", "wav", // external audio tracks
 ];
+// `jar` above is a generic archive extension everywhere else in this repo -
+// `is_packed_archive` does not claim it (only `.zip`/`.zipx` match by name;
+// `jar` fails `is_container`'s extension check), so there is no
+// double-listing to worry about. Inside a job that already cleared
+// `keep_media_only`'s video guard, a `.jar` is only ever a BD-Java package
+// a Blu-ray menu needs to run - the doctrine above applies with nothing to
+// weigh against it: a stray one costs disk, a deleted one breaks disc menus.
 
 /// Subtitle sidecars - kept alongside the media by every cleanup mode.
 const SUBTITLE_EXTS: &[&str] = &["srt", "sub", "idx", "ass", "ssa", "vtt", "smi"];
@@ -1057,24 +377,54 @@ fn is_packed_archive(
 /// where there is no extension. A file that carries a name is judged on
 /// that name and is never opened here.
 fn looks_like_video_bytes(p: &Path) -> bool {
-    use std::io::Read;
     if p.extension().is_some() {
         return false;
     }
-    let mut b = [0u8; 12];
-    if std::fs::File::open(p)
-        .and_then(|mut f| f.read_exact(&mut b))
-        .is_err()
-    {
+    // Four MPEG-TS packets, which is what the sync test below needs; the
+    // magics above it live in the first twelve bytes and a short file
+    // simply reads short.
+    let mut buf = [0u8; 4 * 188];
+    let Ok(mut f) = std::fs::File::open(p) else {
         return false;
-    }
-    // Matroska/WebM (EBML), MP4/MOV family (....ftyp), AVI (RIFF....AVI ),
-    // MPEG program stream, and the MPEG-TS 0x47 sync byte.
-    b[..4] == [0x1A, 0x45, 0xDF, 0xA3]
-        || &b[4..8] == b"ftyp"
-        || (&b[..4] == b"RIFF" && &b[8..12] == b"AVI ")
-        || b[..4] == [0x00, 0x00, 0x01, 0xBA]
-        || b[0] == 0x47
+    };
+    let Some(n) = videoext::read_head(&mut f, &mut buf) else {
+        return false;
+    };
+    let b = &buf[..n];
+    // Matroska/WebM (EBML), the MP4/MOV family and AVI are
+    // `mediaprobe::container_ext`'s question, and the NAMING door has
+    // always asked it that way. This door hand-wrote the same three
+    // magics instead, and the copy was NARROWER: `container_ext` takes
+    // an ISO-BMFF whose first box is any of ftyp/moov/mdat/free/skip/
+    // wide/styp/sidx with a plausible length, where the copy took
+    // `ftyp` at offset 4 and nothing else. So an extensionless
+    // fragmented segment (styp-first) or a moov-first MP4 was DELETED
+    // here and would have been NAMED `.mp4` there - measured on
+    // origin/main at e6195232a, `PROBEASYM removed=2 styp_kept=false
+    // moov_kept=false`. A third spelling of one rule is how this class
+    // keeps recurring (the TS and ISO9660 drifts below are the same
+    // shape twice over), so this asks rather than widens.
+    let head = b
+        .get(..12)
+        .is_some_and(|h| nzbkit::mediaprobe::container_ext(h).is_some())
+        // The MPEG program stream is NOT in `container_ext` and stays
+        // inline in both doors: its callers ask "can the remuxer walk
+        // this", which for the MPEG family is still no, and `video_ext`
+        // special-cases it for that reason - see the comment there.
+        || (b.len() >= 4 && b[..4] == [0x00, 0x00, 0x01, 0xBA]);
+    // MPEG-TS was `b[0] == 0x47` here, which is ONE byte of evidence:
+    // GIF87a/GIF89a open with 0x47, and so does every text file starting
+    // with a capital G - so a hash-named scene .nfo or SFV leftover was
+    // kept as a video payload, forever, by this pass (M4-89). The sync
+    // repeating on the 188-byte stride is what identifies the format,
+    // and `videoext` has held that rule since the NAMING door hit the
+    // same defect; borrowing it rather than writing the test out a
+    // second time is the point, since the two were only ever wrong
+    // together. ISO9660 is the inverse case: `iso`/`img` are in
+    // VIDEO_EXTS because a disc rip IS the feature, but the standard
+    // identifier sits 32 KB in where no head buffer reaches, so a
+    // hash-named disc image was deleted as unrecognised clutter.
+    head || videoext::is_transport_stream(b) || videoext::is_iso9660(&mut f)
 }
 
 /// Every file in `dir` that belongs to a zip container, asked as SETS.
@@ -1131,9 +481,10 @@ pub(crate) fn is_real_file(path: &Path) -> bool {
 }
 
 /// Deepest directory nesting [`prune_empty_dirs`] will walk. Our own
-/// extraction cannot nest at all (`sanitize_filename` maps the path
-/// separators out of archive entry names), so this only ever bounds a tree
-/// something else built, and bounds the recursion with it.
+/// extraction preserves provably safe member paths since the
+/// relpath-preserve ruling (`sanitize_out_name`, capped at 16
+/// components), so this bounds those trees as well as ones something
+/// else built, and bounds the recursion with it.
 const PRUNE_MAX_DEPTH: u32 = 8;
 
 /// Finder metadata macOS drops into any folder it has looked at: the
@@ -1147,17 +498,40 @@ const PRUNE_MAX_DEPTH: u32 = 8;
 /// can reach it and `prune_empty_dirs` then finds the directory non-empty.
 /// A real file, a subdirectory and a symlink all still count as content.
 ///
-/// `.DS_Store` is decided on the name alone - that name is Finder's, and
-/// nothing else writes it. `._name` is NOT: the prefix is a convention, not
-/// a reservation, and a mis-packed archive or a poster-named extra can
-/// carry a real payload called `._something.mkv`. Since the caller deletes
-/// what this classifies, and deletes it permanently
-/// ([`drop_finder_droppings`]), an AppleDouble must also LOOK like one.
-/// Size is the check that costs nothing and cannot be spoofed by a name: a
-/// genuine AppleDouble holds a resource fork plus xattrs, which is a few
-/// KB in the ordinary case and a few hundred KB in the worst one, so
-/// [`APPLEDOUBLE_MAX`] sits an order of magnitude above anything real
-/// while still excluding every payload worth losing.
+/// NEITHER is decided on the name alone, and `.DS_Store` stopped being so
+/// at matrix row M4-79. `._name` never was: the prefix is a convention,
+/// not a reservation, and a mis-packed archive or a poster-named extra can
+/// carry a real payload called `._something.mkv`. `.DS_Store` reads like
+/// the safer of the two - that name is Finder's, and in practice nothing
+/// else writes it - but "in practice" is not what was holding it. What was
+/// holding it is [`nzbkit::disk::sanitize_filename_for`]'s leading-dot
+/// MAPPING (M4-66, 7dcadf0a1), which is why no name we publish can be a
+/// `.DS_Store` at all; that rule was landed for an unrelated reason, its
+/// own message records that PRESERVING the dot was the other candidate,
+/// and nothing joined the two facts. Since the caller deletes what this
+/// classifies, and deletes it permanently ([`drop_finder_droppings`]),
+/// both must also LOOK like what they claim to be - see
+/// [`setclaim::looks_like_ds_store`], which carries the measurement and
+/// the reason the set claim cannot stand in for it.
+///
+/// SIZE ALONE WAS NOT THAT LOOK, and matrix row M4-68 is where it stops
+/// being one. [`APPLEDOUBLE_MAX`] excludes "every payload worth losing"
+/// only at the ROOT, where a `._movie.mkv` is `largest_video` and spared
+/// by name anyway. One directory down there is no feature to be, so a
+/// FileDesc naming `Docs/._manual.pdf` at 200 KiB is under the ceiling,
+/// carries the prefix, and is the only file left in its directory - which
+/// is precisely the husk [`prune_empty_dirs`] clears, with a plain
+/// `remove_file` and no Trash to undo it from. A size ceiling cannot be
+/// spoofed by a name, but it is not evidence ABOUT the bytes: the whole
+/// class of payloads it admits is the small one.
+///
+/// So the ceiling stays as the cheap pre-filter that keeps a 30 GB
+/// `._movie.mkv` from ever being opened, and the answer is now the
+/// content's: [`setclaim::looks_like_appledouble`] reads the four-byte
+/// AppleDouble magic. A NAME may nominate, only CONTENT may finalize
+/// (the `wave4-fix-exact-name-authority` rule, 2b7f5495e) - and here the
+/// content half costs one four-byte read of a file already established
+/// to be under a megabyte.
 fn is_finder_dropping(p: &Path) -> bool {
     let Some(name) = p.file_name().map(|n| n.to_string_lossy().into_owned()) else {
         return false;
@@ -1166,9 +540,11 @@ fn is_finder_dropping(p: &Path) -> bool {
         return false;
     }
     if name == ".DS_Store" {
-        return true;
+        return setclaim::looks_like_ds_store(p);
     }
-    name.starts_with("._") && p.metadata().is_ok_and(|m| m.len() <= APPLEDOUBLE_MAX)
+    name.starts_with("._")
+        && p.metadata().is_ok_and(|m| m.len() <= APPLEDOUBLE_MAX)
+        && setclaim::looks_like_appledouble(p)
 }
 
 /// Largest `._name` file still treated as an AppleDouble sidecar rather
@@ -1251,10 +627,6 @@ fn prune_empty_dirs(dir: &Path, depth: u32) -> usize {
     removed
 }
 
-/// The largest video file in `dir` (top level + one subdir deep), or None.
-/// The main feature - protected from the junk sweep regardless of its name,
-/// so a film or season titled "Proof"/"Sample" is still recognised as the
-/// feature and never deleted.
 /// The resolution the payload's own container reports, when the job has
 /// a Matroska main video. The subject line's claim is the poster's; the
 /// header is the file's, and where the two disagree the header wins
@@ -1272,38 +644,68 @@ pub fn measured_res(dir: &Path) -> Option<&'static str> {
 /// The job's feature: the biggest video in the finished directory, with
 /// the sample clip ruled out. What every "ask the payload itself"
 /// question is asked of, so they all agree on which file they mean.
+///
+/// A teaser OF something here, not merely a marker-named file, since
+/// matrix row M4-91. `is_sample_clip` alone is a name test with no
+/// second opinion of any kind - no size, no duration, no sibling - and
+/// it is the strictest of the three sample rules in that respect, which
+/// is backwards: this one is the only one that never deletes anything.
+/// Measured 30 Aug 2026 on origin/main, this returned `None` for a
+/// directory holding `Proof.S01E01.mkv` beside `Proof.S01E00.Special.mkv`
+/// (both stems carry the word, so whichever is largest is rejected) and
+/// for one holding nothing but `Bulletproof.S01E01.mkv`. `measured_res`
+/// and `identity::container_title` then have no video to ask, so the
+/// resolution and title the payload itself reports go unread and the
+/// poster's subject line stands unchallenged - for a title whose only
+/// offence was spelling.
+///
+/// [`sample::is_teaser_beside`] keeps the protective half: a mislabelled
+/// post whose biggest video really is named after a smaller sibling is
+/// still ruled out, and a job whose ONLY video is marker-named is the
+/// release the user asked for and is now answered rather than skipped.
 pub fn main_video(dir: &Path) -> Option<PathBuf> {
-    largest_video(dir).filter(|v| !is_sample_clip(v))
+    let v = largest_video(dir)?;
+    let siblings = files_in_reach(dir);
+    (!sample::is_teaser_beside(&v, &siblings)).then_some(v)
 }
 
-fn largest_video(dir: &Path) -> Option<PathBuf> {
-    let mut best: Option<(u64, PathBuf)> = None;
-    let mut consider = |path: PathBuf| {
-        if !is_real_file(&path) || !VIDEO_EXTS.contains(&ext_of(&path).as_str()) {
-            return;
-        }
-        let len = path.metadata().map(|m| m.len()).unwrap_or(0);
-        if best.as_ref().is_none_or(|(b, _)| len > *b) {
-            best = Some((len, path));
-        }
+/// Every real file the one-level sweeps can see: this directory plus one
+/// subdirectory down, the same reach as [`sweep_junk`] and
+/// [`keep_media_only`]. Symlinks and directories are not files and never
+/// appear (see [`is_real_file`]).
+///
+/// It is every file and not only the videos, because a teaser is named
+/// after the RELEASE and what is left carrying that name in a finished
+/// directory is as often the `.nfo`, the `.srt` or the `.sfv` as another
+/// video.
+///
+/// DELIBERATELY NOT `feature::largest_video`'s reach, which the M4-81
+/// lane widened to a bounded depth-8 walk while leaving the sweeps at
+/// one level on the ground that they DELETE what they reach. This is a
+/// naming question rather than a deletion one, so it could follow either
+/// - and it follows the sweeps, because the names it compares against
+/// are the ones a release actually spreads across its own directory. The
+/// cost is stated: a feature that lives two or more deep (a Blu-ray
+/// tree) has no siblings HERE, [`sample::is_teaser_of_any`] therefore
+/// answers false, and [`main_video`] keeps it. That is the direction
+/// this whole family is required to err in - it keeps a feature rather
+/// than discarding one - and it is exactly what the row M4-81 fixed
+/// wanted from the other end.
+fn files_in_reach(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
     };
-    let tops: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    for path in tops {
+    for path in rd.flatten().map(|e| e.path()) {
         if is_real_dir(&path) {
-            if let Ok(rd) = std::fs::read_dir(&path) {
-                for e in rd.flatten() {
-                    consider(e.path());
-                }
+            if let Ok(sub) = std::fs::read_dir(&path) {
+                out.extend(sub.flatten().map(|e| e.path()).filter(|p| is_real_file(p)));
             }
-        } else {
-            consider(path);
+        } else if is_real_file(&path) {
+            out.push(path);
         }
     }
-    best.map(|(_, p)| p)
+    out
 }
 
 /// Does this cleanup-list entry select this file?
@@ -1475,7 +877,6 @@ pub fn remove_user_dir(path: &Path, recoverable: bool) -> std::io::Result<Remove
     }
 }
 
-/// What one recoverable-delete attempt settled on.
 /// What a removal actually DID, as opposed to what the setting asked
 /// for.
 ///
@@ -1497,19 +898,6 @@ pub enum Removed {
     Gone,
 }
 
-/// Did `path` actually land somewhere it can be restored from?
-///
-/// Asked AFTER a Trash route reports success, because that success means
-/// only "a backend returned Ok". macOS has two routes and both can
-/// answer Ok while the bytes are gone: on a volume whose per-user Trash
-/// is not usable - an external disk mounted `noowners` is the ordinary
-/// way to get one - Finder's scripted `delete` performs the delete
-/// -immediately behaviour its GUI would warn about, and says it worked.
-///
-/// Deliberately biased towards claiming recoverable: only a positive
-/// look in the expected place, coming back empty, downgrades the answer.
-/// Anything we cannot determine stays `Trashed`, because crying wolf on
-/// a delete that WAS recoverable is its own harm.
 /// What the Trash roots held that could be mistaken for this delete,
 /// taken BEFORE it happens.
 ///
@@ -1578,6 +966,19 @@ fn trash_roots(path: &Path) -> Vec<std::path::PathBuf> {
     roots
 }
 
+/// Did `path` actually land somewhere it can be restored from?
+///
+/// Asked AFTER a Trash route reports success, because that success means
+/// only "a backend returned Ok". macOS has two routes and both can
+/// answer Ok while the bytes are gone: on a volume whose per-user Trash
+/// is not usable - an external disk mounted `noowners` is the ordinary
+/// way to get one - Finder's scripted `delete` performs the delete
+/// -immediately behaviour its GUI would warn about, and says it worked.
+///
+/// Deliberately biased towards claiming recoverable: only a positive
+/// look in the expected place, coming back empty, downgrades the answer.
+/// Anything we cannot determine stays `Trashed`, because crying wolf on
+/// a delete that WAS recoverable is its own harm.
 #[cfg(target_os = "macos")]
 fn landed_in_a_trash(path: &Path, before: &TrashBefore) -> bool {
     let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
@@ -1635,6 +1036,7 @@ fn landed_in_a_trash(_path: &Path, _before: &TrashBefore) -> bool {
     true
 }
 
+/// What one recoverable-delete attempt settled on.
 enum TrashVerdict {
     /// A Trash route took `path` and it was found afterwards in a Trash
     /// it can be restored from.
@@ -2147,7 +1549,7 @@ pub fn trash_unresponsive() -> bool {
 /// returns - a parked file must stay put while that happens, or the queued
 /// path goes stale and the junk rides along into the library.
 /// pub(crate): the engine-side sweeps (spent obfuscated volumes in
-/// unpack/obfuscated.rs, consumed adoption sources in get/settle.rs and
+/// unpack/obfuscated.rs, consumed adoption sources in get/settle/noset.rs and
 /// get/tail.rs) park the same way the finalize sweeps do, for the same
 /// §64 reason - their deletes run in a job's tail, and an inline Trash
 /// call is a Finder wait the job pays.
@@ -2186,6 +1588,27 @@ pub(crate) fn remove_swept_file(
     remove_user_file(path, recoverable)
 }
 
+// What a filed TV episode is CALLED, and how to recognise one on disk -
+// the TV filing target, the episode-title/quality tail, and the
+// which-files-are-this-episode questions Play and delete-with-files ask
+// of a shared season folder - is a child module (TODO 106 size-gate
+// split). Every public and crate-visible door is re-exported, so
+// `smart::tv_path` and friends are spelled exactly as they always were.
+mod episode;
+pub use episode::{
+    EpisodeTitles, FiledDelete, FiledTail, delete_filed_episode, filed_title_segment,
+    find_filed_episode_media, tv_path,
+};
+pub(crate) use episode::{filed_bases, flatten_name, is_filed_episode_file};
+// Not re-exported: `legacy_tv_path` is filing.rs's alone and is spelled
+// `super::episode::legacy_tv_path` there, and the four below are reached
+// only by the child test modules through `use super::*`. A private
+// `use` keeps them out of `smart`'s surface while leaving every spelling
+// in those modules unchanged - and it is `#[cfg(test)]` because that is
+// the only build in which anything reads them.
+#[cfg(test)]
+use episode::{COMPONENT_BYTES, TITLE_SEP, is_rename_tail, reads_as_episode_number};
+
 // Naming and filing a finished job's output - TV organize/rename and the
 // three doors that give a name to a payload that arrived without one -
 // is a child module (TODO 106 size-gate split). The six public doors are
@@ -2202,7 +1625,7 @@ pub use filing::{
 // doors are re-exported, so `smart::move_tree` and friends are spelled
 // exactly as they always were.
 mod movetree;
-pub use movetree::{PaceFn, copy_tree, move_tree, move_tree_paced, sync_dir};
+pub use movetree::{PaceFn, copy_tree, dst_is_src_or_inside, move_tree, move_tree_paced, sync_dir};
 
 /// One background worker owns every conversation with the Trash, so no
 /// job's finalize ever waits on Finder. See the module for the whole
@@ -2419,6 +1842,38 @@ pub fn sweep_junk(dir: &Path) -> usize {
     let recoverable = cleanup_recoverable();
     let staging = trash_staging_dir(dir);
     let keep = largest_video(dir);
+    // What the SET says, before anything is classified by what the NAME
+    // says (matrix row M4-54). After a set succeeds, FileDesc can publish
+    // the feature under any name the poster chose, `Great.Movie.nfo`
+    // included - and `nfo`/`txt`/`md5` are all on `JUNK_EXTS`. The
+    // all-junk guard below cannot save it: one real `trailer.mp4` beside
+    // it is `largest_video`, survivors is non-zero, and the sweep deletes
+    // the payload the recovery set itself declares.
+    //
+    // A FileDesc is the strongest statement anyone posted about whether a
+    // file belongs to this release, and an extension is the weakest
+    // evidence in the tree. Deletion being the strongest action here, the
+    // set outranks the extension - the same ordering
+    // `wave4-fix-exact-name-authority` (2b7f5495e) settled one layer up.
+    //
+    // WHAT THIS DOES NOT DO, said rather than left to be found: it does
+    // not spare a file for being small, or for being an `.nfo` beside a
+    // set. `release.nfo` in the ordinary scene post is not in anyone's
+    // recovery set and still goes; the sweep's behaviour on every release
+    // whose PAR2 covers only its archive volumes is unchanged, because
+    // after extraction those volumes no longer exist and the set declares
+    // no surviving path. A poster who DID cover their `.nfo` keeps it,
+    // which is the trade: an extra info file the user can delete, against
+    // a payload they cannot get back.
+    //
+    // Read once, ahead of the walk, so the classifier below asks a
+    // HashSet rather than re-reading a recovery set per candidate.
+    let declared = setclaim::set_declared_paths(dir);
+    // The sweep's whole footprint, read ONCE before anything is deleted,
+    // so `is_deletable_sample`'s sibling test sees the release as it
+    // stands rather than as this pass has already left it - and cannot
+    // depend on `read_dir` order. See that function for what it costs.
+    let siblings = files_in_reach(dir);
     let keep_len = keep
         .as_ref()
         .and_then(|p| p.metadata().ok())
@@ -2438,6 +1893,15 @@ pub fn sweep_junk(dir: &Path) -> usize {
                 *survivors += 1;
                 continue;
             }
+            // The set's own members are payload by declaration - see the
+            // note at `declared` above. Checked BEFORE the extension,
+            // the sample rule and the scrap rule alike, because every
+            // one of them is an inference from the name or the size and
+            // this is the poster's statement about the file itself.
+            if declared.contains(&path) {
+                *survivors += 1;
+                continue;
+            }
             let ext = ext_of(&path);
             // Magic sniff only where the name has already failed to
             // identify the file: never open a video or a subtitle, so a
@@ -2446,7 +1910,7 @@ pub fn sweep_junk(dir: &Path) -> usize {
                 !VIDEO_EXTS.contains(&ext.as_str()) && !SUBTITLE_EXTS.contains(&ext.as_str());
             let junk = JUNK_EXTS.contains(&ext.as_str())
                 || (sniffable && par2_magic(&path))
-                || is_deletable_sample(&path, keep_len)
+                || is_deletable_sample(&path, keep_len, &siblings)
                 || is_nameless_scrap(&path, &ext, keep_len, recoverable);
             if junk {
                 doomed.push(path);
@@ -2540,12 +2004,24 @@ pub fn keep_media_only(dir: &Path) -> usize {
         return 0;
     };
     let feature_len = feature.metadata().map(|m| m.len()).unwrap_or(0);
+    // Once for the whole sweep, before the first delete: see `sweep_junk`.
+    // This pass removes as it walks, so a per-directory list would give a
+    // teaser judged late fewer relatives than one judged early.
+    let siblings = files_in_reach(dir);
+    // M4-54, the rule `sweep_junk` reads and this one did not (sweep
+    // finding 7, 31 Aug 2026): a declared sidecar HAS an extension, so
+    // `looks_like_video_bytes` never opens it and this delete took the
+    // payload of a poster who named the feature `Great.Movie.nfo`.
+    let declared = setclaim::set_declared_paths(dir);
     let mut sweep = |d: &Path| {
         // Once per directory, not once per file: split sets are only
         // recognisable as sets.
         let zip_parts = zip_part_set(d);
         let mut split_parts = crate::container_part_set(d);
         split_parts.extend(crate::split_part_set(d)); // both readings, see `is_packed_archive`
+        // A cue sheet names its own track data, so read the sheets once
+        // and let them speak for their siblings: see `discimage`.
+        let cue_named = discimage::cue_named_files(d);
         let Ok(rd) = std::fs::read_dir(d) else { return };
         for entry in rd.flatten() {
             let path = entry.path();
@@ -2567,14 +2043,25 @@ pub fn keep_media_only(dir: &Path) -> usize {
             {
                 continue;
             }
+            // The poster's own statement about this file, and the
+            // strongest one anyone made - see `declared` above.
+            if declared.contains(&path) {
+                continue;
+            }
             let ext = ext_of(&path);
-            let is_media =
-                VIDEO_EXTS.contains(&ext.as_str()) && !is_deletable_sample(&path, feature_len);
+            let is_media = VIDEO_EXTS.contains(&ext.as_str())
+                && !is_deletable_sample(&path, feature_len, &siblings);
             // Subtitles plus the disc-structure / companion-track files a
             // video payload is incomplete without - see MEDIA_COMPANION_EXTS.
+            // An optical-disc image is payload the same way a video
+            // file is, and `.cue` sat in PAYLOAD_EXTS while `.bin` sat
+            // in no list at all - so a CD image posted as the pair it
+            // is ALWAYS posted as kept its index and lost its disc,
+            // over a Completed job, with no copy anywhere (M4-88).
             let is_companion = SUBTITLE_EXTS.contains(&ext.as_str())
                 || MEDIA_COMPANION_EXTS.contains(&ext.as_str())
-                || PAYLOAD_EXTS.contains(&ext.as_str());
+                || PAYLOAD_EXTS.contains(&ext.as_str())
+                || discimage::is_disc_payload(&path, &ext, &cue_named);
             // An archive still sitting here is payload we could not
             // unpack, not clutter - see `is_packed_archive`. An
             // extensionless file that opens like a video is payload too,
@@ -2648,6 +2135,13 @@ pub use unlockpw::{encrypted_archive, operator_passwords, set_operator_password_
 mod pwassoc;
 pub use pwassoc::{dominant_poster, nzb_poster, order_passwords, record_password_assoc};
 
+// M4-81: the walk that answers "which file is the movie". Its own
+// file for `sample`'s reason below - smart.rs sits under a size-gate
+// baseline (TODO 106) - and because the depth it reaches, and why it
+// is not the depth the sweeps that call it reach, is the whole
+// subject rather than a detail of one.
+mod feature;
+use feature::largest_video;
 // Child module files, not inline: the cases below were most of this
 // file's length and smart.rs sits under a size-gate baseline (TODO
 // 106), same pattern as cleanup_mode_tests.rs. Two of them because one
@@ -2656,11 +2150,18 @@ pub use pwassoc::{dominant_poster, nzb_poster, order_passwords, record_password_
 // `sweep_rename_tests`, with what both need in `testkit`.
 mod sample;
 pub(crate) use sample::skippable_samples;
-use sample::{is_deletable_sample, is_sample_clip, is_sample_named};
+use sample::{is_deletable_sample, is_sample_named};
 mod audioname;
 pub use audioname::rename_obfuscated_audio;
 mod videoext;
 use videoext::video_ext;
+// M4-88: optical-disc images and the cue sheet that names one. Its own
+// file because smart.rs sits under a size-gate baseline (TODO 106).
+mod discimage;
+// M4-54 / M4-68: what the SET says against what the NAME says. Its own
+// file because smart.rs sits under a size-gate baseline (TODO 106), and
+// because the two rules it holds are one idea - see its module note.
+mod setclaim;
 
 #[cfg(test)]
 mod sweep_rename_tests;

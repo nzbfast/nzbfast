@@ -232,7 +232,6 @@ async fn shutdown_fires_once_when_the_last_download_finishes() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A paused download left in the queue holds the action - and does NOT
@@ -296,7 +295,6 @@ async fn a_paused_download_left_in_the_queue_holds_the_shutdown() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The countdown is stoppable, and stopping it switches the arm off.
@@ -368,7 +366,6 @@ async fn the_countdown_can_be_stopped_from_the_dashboard() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The default install is inert. A daemon that has never been told to do
@@ -407,5 +404,4 @@ async fn an_unarmed_daemon_does_nothing_at_the_end_of_a_queue() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

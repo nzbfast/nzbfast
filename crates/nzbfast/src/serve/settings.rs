@@ -304,6 +304,13 @@ pub(super) const PATHS: &[Setting] = &[
     rw("move_completed_cats", |c| {
         json!(fmt_cat_dests(&c.d.move_completed_cats.read_ok()))
     }),
+    // TODO 317 (GitHub #67).
+    rw("write_through", |c| {
+        json!(c.d.write_through.load(Ordering::Relaxed))
+    }),
+    rw("write_through_cats", |c| {
+        json!(c.d.write_through_cats.lock_ok().join(", "))
+    }),
     rw("categories", |c| json!(c.d.cat_list())),
     rw("watch", |c| json!(path_str(&c.d.watch_dir.lock_ok()))),
     rw("watch_interval_secs", |c| {
@@ -1583,6 +1590,15 @@ pub(super) fn apply_setting(
             d.early_file_publish.store(on, Ordering::Relaxed);
             (true, json!(on))
         }
+        // TODO 317. Off by default and it must stay a deliberate act
+        // to turn on: write-through onto a network share pays per-write
+        // latency for the whole download instead of one bulk copy at
+        // the end, and that has never been measured.
+        "write_through" => {
+            let on = flag();
+            d.write_through.store(on, Ordering::Relaxed);
+            (true, json!(on))
+        }
         "write_manifest" => {
             let on = flag();
             d.write_manifest.store(on, Ordering::Relaxed);
@@ -1679,6 +1695,48 @@ pub(super) fn apply_setting(
     })
 }
 
+/// The transaction mutex for one setting NAME - see [`apply_and_save`].
+///
+/// Interned rather than a field on `Daemon` so the guarantee holds for
+/// every caller of that function without threading a handle, and so a
+/// name nothing has touched yet costs nothing. The map is held only long
+/// enough to clone the `Arc`; the settings surface is a few dozen names
+/// over the life of a process, so it never needs pruning.
+///
+/// THE KEY IS THE TABLE'S OWN `&'static str`, and that is what makes the
+/// sentence above true rather than merely intended (30 Aug 2026 sweep).
+/// Keyed on `name.to_string()`, the map was grown by the CALLER: every
+/// unrecognised name handed to `mode=config` interned a `String` and an
+/// `Arc<Mutex<()>>` that nothing ever removes, and the request was then
+/// refused - so an authenticated caller (or any LAN host at all on a
+/// keyless install) could retain unbounded memory in a daemon built
+/// around a memory floor, one 1 MiB JSON body at a time. Resolving
+/// through [`setting`] first makes the key set exactly the settings
+/// surface, which is finite by construction and cannot be grown from
+/// outside.
+///
+/// A name that is NOT in the table still takes a transaction - one
+/// shared with every other such name - rather than none. It costs
+/// nothing (the key is a constant), it keeps the ordering guarantee
+/// unconditional rather than resting on a reading of which arms
+/// `apply_setting` has, and every such name is refused a few lines later
+/// anyway.
+fn setting_tx(name: &str) -> Arc<Mutex<()>> {
+    static TX: std::sync::OnceLock<Mutex<std::collections::HashMap<&'static str, Arc<Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    /// Not a settable name (it carries a NUL), so it can never collide
+    /// with a real one.
+    const UNKNOWN: &str = "\0unknown";
+    let key: &'static str = setting(name).map_or(UNKNOWN, |s| s.name);
+    // A poisoned lock here would mean a panic mid-apply; what it guards
+    // is the ordering, not an invariant a panic can corrupt.
+    TX.get_or_init(Default::default)
+        .lock_ok()
+        .entry(key)
+        .or_default()
+        .clone()
+}
+
 /// [`apply_setting`] and its persistence as ONE transaction.
 ///
 /// An API key lives in three places - the live mutex, the sibling `apikey`
@@ -1692,19 +1750,38 @@ pub(super) fn apply_setting(
 ///
 /// with both answering success. The live key is B, `settings.json` says A, and
 /// settings wins at load - so the key the user just pasted into Sonarr stops
-/// working at the next restart, with nothing in the logs. Credential changes
-/// take the transaction lock so the three stores can never disagree; every
-/// other setting is a single value and needs no ordering.
+/// working at the next restart, with nothing in the logs.
+///
+/// THE CLAUSE THAT USED TO END THIS PARAGRAPH WAS WRONG, and it is worth
+/// saying so rather than quietly deleting it: "every other setting is a
+/// single value and needs no ordering" (29 Aug 2026 sweep, M5). The
+/// ordering the credential case needs has nothing to do with there being
+/// three stores - two are enough, and every setting has two. Request A
+/// applies X, request B applies X', B saves X', A saves X: both answer
+/// success, the live value is X' and `settings.json` says X, and the
+/// later successful change silently reverts at the next restart. Eight
+/// HTTP workers make concurrent handlers ordinary, and
+/// `bootstrap::save_settings`' own I/O lock serializes the WRITES
+/// without serializing them against the live mutation they belong to.
+///
+/// PER NAME and not one global lock, which is the one design decision
+/// here. Two requests for the same setting are the race; two for
+/// different settings are not, and a single mutex would put every
+/// settings edit behind whichever one is currently probing a NAS that is
+/// down (`set_move_completed` does `create_dir_all` plus a real write
+/// probe, and a dead SMB mount takes its time). The credential pair
+/// keeps exactly the guarantee it had - the interleave written out above
+/// is two clients on ONE name.
 pub(super) fn apply_and_save(
     d: &Arc<Daemon>,
     name: &str,
     v: &str,
 ) -> std::result::Result<(bool, bool), String> {
-    static CREDENTIAL_TX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _tx = matches!(name, "apikey" | "nzbkey")
-        // A poisoned lock here would mean a panic mid-rotation; the data it
-        // guards is the ordering, not an invariant a panic can corrupt.
-        .then(|| CREDENTIAL_TX.lock_ok());
+    // Two bindings, not one expression: a temporary `Arc` would be
+    // dropped at the end of the statement and the guard would outlive
+    // the mutex it borrows.
+    let tx = setting_tx(name);
+    let _held = tx.lock_ok();
     let (live, persist) = apply_setting(d, name, v)?;
     // Same rule as `save_queue` and `persist_pause`: the dashboard's
     // revisioned poll only resends the queue payload when this handle

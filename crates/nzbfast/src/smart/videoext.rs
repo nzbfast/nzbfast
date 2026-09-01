@@ -1,7 +1,8 @@
 //! What extension a finished job's feature file should CARRY.
 //!
-//! Split out of smart.rs rather than added to it: that file sits at its
-//! TODO 106 size ceiling, and the rule is that the numbers only go down.
+//! Split out of smart.rs rather than added to it: `smart.rs` was at
+//! 4,030 lines against its TODO 106 baseline on 18 Aug 2026, and the
+//! rule is that the numbers only go down.
 
 use super::{VIDEO_EXTS, ext_of};
 use std::path::Path;
@@ -40,7 +41,7 @@ const TS_SYNCS: usize = 4;
 /// Fill as much of `buf` as the file has, returning how many bytes
 /// landed. `read_exact` cannot be used: the buffer is now larger than
 /// plenty of legitimate short headers.
-fn read_head(f: &mut std::fs::File, buf: &mut [u8]) -> Option<usize> {
+pub(super) fn read_head(f: &mut std::fs::File, buf: &mut [u8]) -> Option<usize> {
     use std::io::Read;
     let mut n = 0;
     while n < buf.len() {
@@ -71,8 +72,79 @@ fn read_head(f: &mut std::fs::File, buf: &mut [u8]) -> Option<usize> {
 ///
 /// BDAV/m2ts, whose sync sits at offset 4 behind a timecode, is still
 /// unrecognised here - a coverage gap, and the safe side of one.
-fn is_transport_stream(head: &[u8]) -> bool {
+///
+/// `smart::looks_like_video_bytes` is the SECOND caller and is why this
+/// is `pub(super)` rather than private. That door carried its own copy
+/// of the one-byte rule for as long as this one did, and fixing this
+/// one did not fix that one: the two were written together, the sweep
+/// note above already named the cleanup door in passing, and only the
+/// naming door was ever repaired (M4-89). There is exactly one sync
+/// test in this crate now, so the next widening reaches both.
+pub(super) fn is_transport_stream(head: &[u8]) -> bool {
     head.len() >= TS_SYNCS * TS_PACKET && (0..TS_SYNCS).all(|i| head[i * TS_PACKET] == 0x47)
+}
+
+/// Where ISO9660 puts its first volume descriptor: logical sector 16 of
+/// a 2048-byte-sector image, and the standard identifier sits one type
+/// byte into it. This is the only magic the format has, and it is why
+/// an ISO cannot be recognised from a file head the way every container
+/// above can.
+const ISO9660_ID_AT: u64 = 16 * 2048 + 1;
+
+/// Does this file open as an ISO9660 optical-disc image?
+///
+/// Takes the FILE rather than a head buffer, unlike every other sniff
+/// in this module, because the evidence is 32 KB in: buffering to reach
+/// it would mean carrying a 32 KB head around for the sake of one
+/// five-byte comparison, on every extensionless file in a job.
+///
+/// `iso` and `img` are in `VIDEO_EXTS` on purpose - a disc rip IS the
+/// feature - but keep-media-only's sniff only ever asked the first 12
+/// bytes, where an ISO says nothing at all, so a hash-named disc image
+/// was deleted as unrecognised clutter (M4-89). A UDF-only image with
+/// no ISO9660 bridge is still unrecognised here; that is a coverage
+/// gap, and the safe side of one, the same trade `is_transport_stream`
+/// makes for BDAV.
+///
+/// Deliberately NOT wired into `video_ext` above: that answers "what
+/// should this file be RENAMED to", and a disc image is not something
+/// this pass has ever named. Sparing a payload from deletion and
+/// choosing a name for it are different decisions.
+///
+/// So an extensionless disc image is now KEPT and never NAMED - the
+/// same "rescued from deletion and then skipped by every rename path"
+/// shape L4 fixed for the MPEG family above, and it is deliberate
+/// rather than residue. MEASURED 31 Aug 2026 with the one-line change
+/// applied (`None if is_iso9660(&mut f) => Some("iso")`), an
+/// extensionless ISO fixture and an extensionless EBML feature:
+///
+///     lone iso  : nameless_video = Some(iso)      <- the gap closes
+///     iso + feat: nameless_video = None           <- and this breaks
+///
+/// against `Some(feature)` for that second row today. `nameless_video`
+/// fires only on the LONE non-sample video, so naming the ISO makes it
+/// a second one and the FEATURE beside it stops being renamed at all,
+/// through identify and synthesised naming both - which is N1/N6's
+/// defect exactly, the one the `a_gif_is_not_a_transport_stream` pin
+/// in sweep_rename_tests.rs exists for. The change trades a kept-but-
+/// unnamed disc image for an unnamed feature, which is worse.
+///
+/// Deciding which of the two IS the feature is M4-92 (`.iso`/`.img`
+/// against a remux), held live elsewhere. Note the constraint is
+/// `nameless_video` and NOT `largest_video`, which is where that row
+/// and this module's own reader both expected it: `largest_video` goes
+/// by `ext_of` + `VIDEO_EXTS`, so it never sees an extensionless image,
+/// and the rename that would give it one declines first. Wire this in
+/// AFTER M4-92 answers the ranking question, not before.
+pub(super) fn is_iso9660(f: &mut std::fs::File) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    if f.seek(SeekFrom::Start(ISO9660_ID_AT)).is_err() {
+        return false;
+    }
+    let mut id = [0u8; 5];
+    let ok = f.read_exact(&mut id).is_ok() && &id == b"CD001";
+    let _ = f.rewind();
+    ok
 }
 
 pub(super) fn video_ext(path: &Path) -> Option<String> {

@@ -32,6 +32,13 @@ pub(super) fn person_photo_url(art_dir: &std::path::Path, id: i64) -> String {
 #[cfg(feature = "indexer")]
 pub(super) fn art_name_ok(n: &str) -> bool {
     !n.is_empty()
+        // A component the filesystem cannot hold is a name no art file
+        // can be under, so the join below is a syscall that can only
+        // fail. `crate::wall::art_name` holds room back well inside this
+        // (it reserves for the `thumb_` prefix this route composes and
+        // for the upload staging name), so nothing we produce is refused
+        // here - see `art_names_leave_room_for_every_decoration`.
+        && n.len() <= 255
         && !n.contains("..")
         && n.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
@@ -62,6 +69,24 @@ pub(super) fn make_thumb(src: &[u8]) -> Option<Vec<u8>> {
     })
 }
 
+/// SAB's own `clean_comma_separated_list`: split on comma, trim, drop
+/// empties. `None` if the param is absent or every entry was blank -
+/// callers treat both as "no filter", same as SAB's `if statuses:` /
+/// `if not id_list`.
+pub(super) fn comma_separated_set(
+    params: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Option<std::collections::HashSet<String>> {
+    let raw = params.get(key)?;
+    let set: std::collections::HashSet<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!set.is_empty()).then_some(set)
+}
+
 /// SAB's `nzo_ids` selector: a client naming specific ids gets exactly
 /// those rows, with no start/limit window applied. Sonarr reconciles a
 /// download weeks after the grab; an id hidden behind `limit=60` reads
@@ -70,14 +95,7 @@ pub(super) fn make_thumb(src: &[u8]) -> Option<Vec<u8>> {
 pub(super) fn nzo_ids_param(
     params: &std::collections::HashMap<String, String>,
 ) -> Option<std::collections::HashSet<String>> {
-    let raw = params.get("nzo_ids")?;
-    let set: std::collections::HashSet<String> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-    (!set.is_empty()).then_some(set)
+    comma_separated_set(params, "nzo_ids")
 }
 
 /// The caller's start/limit window, SAB semantics: both optional,

@@ -672,12 +672,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Entry names with directory components land FLAT (the established
-    /// one-pass semantic - 7z and RAR inners do the same), directory
-    /// entries produce nothing, and a zero-byte entry still lands as an
-    /// empty file (the disk path lands one, so the stream must too).
+    /// Entry names with a provably safe directory component keep their
+    /// TREE (7z and RAR inners do the same since the relpath-preserve
+    /// ruling), directory entries produce nothing, and a zero-byte entry
+    /// still lands as an empty file (the disk path lands one, so the
+    /// stream must too).
     #[test]
-    fn zip_entries_land_flat_and_empty_files_land() {
+    fn zip_entries_keep_their_tree_and_empty_files_land() {
         let a = payload(50_000, 132);
         let arch = crate::zip::fixtures::zip_of(&[
             crate::zip::fixtures::Spec::stored("Pack/", b""),
@@ -690,11 +691,11 @@ mod tests {
         feed(&ex, 0, "release.zip", &arch, 7000, 56);
         let rep = ex.finish().unwrap();
         assert!(rep.fallbacks.is_empty(), "{:?}", rep.fallbacks);
-        assert_eq!(std::fs::read(dir.join("Pack_a.bin")).unwrap(), a);
+        assert_eq!(std::fs::read(dir.join("Pack").join("a.bin")).unwrap(), a);
         assert_eq!(std::fs::read(dir.join("empty.txt")).unwrap(), b"");
         assert_eq!(
             dir_files(&dir),
-            vec!["Pack_a.bin".to_string(), "empty.txt".to_string()]
+            vec!["Pack".to_string(), "empty.txt".to_string()]
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

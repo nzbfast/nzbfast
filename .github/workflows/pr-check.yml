@@ -170,7 +170,7 @@ jobs:
       # are declared under `profile.default.overrides`), so none of the
       # speed above depends on the profile.
       #
-      # The heavy-tests features (TODO 116b): the seven heavy targets
+      # The heavy-tests features (TODO 116b): the eight heavy targets
       # carry required-features in their Cargo.toml so the private
       # repo's per-push CI stops LINKING what it never runs there. This
       # job DOES run them - it always has, it is a public-PR gate where

@@ -73,12 +73,42 @@ pub(in crate::serve) struct CatMeta {
 
 /// The categories every install offers before anyone configures one.
 ///
-/// These are the *arr family's own out-of-the-box values - Sonarr `tv`,
-/// Radarr `movies`, Lidarr `music`, Readarr `books` - so a default
-/// install of any of them passes its connection test against a default
+/// These are the *arr family's own out-of-the-box values, so a default
+/// install of one of them passes its connection test against a default
 /// install of ours. `*` is SABnzbd's "no category" entry and must stay
 /// first. Categories cost nothing until a job uses one: the directory is
 /// created at download time, not here.
+///
+/// THE LIST DOES NOT COVER THE WHOLE FAMILY, and until 31 Aug 2026 this
+/// comment said it did - it named Readarr's default as `books`, which
+/// Readarr has never used. Every default below was then read off the
+/// client's OWN `downloadclient/schema`, which is what its Add dialog
+/// pre-fills, rather than off a convention:
+///
+/// | Client                  | its default SAB category | here |
+/// |-------------------------|--------------------------|------|
+/// | Sonarr 4.0.19           | `tv`                     | yes  |
+/// | Radarr 6.3.0            | `movies`                 | yes  |
+/// | Lidarr 3.1.0            | `music`                  | yes  |
+/// | Whisparr 2.2.0 (v2)     | `tv`                     | yes  |
+/// | Whisparr 3.4.0 (eros)   | `whisparr`               | NO   |
+/// | Readarr 0.4.18          | `Readarr`                | NO   |
+///
+/// The two `NO` rows FAIL their connection test against a default
+/// install, with "Category does not exist" - the very failure this list
+/// exists to prevent - and both are fixed by the user naming the
+/// category once, at either end. That is a real gap and it is left open
+/// deliberately: what every install offers in its category dropdown is a
+/// product judgement, not a lane's, and one of the two clients is EOL
+/// upstream. `books` stays because it is the category a Readarr user is
+/// told to switch to, not because Readarr ships it.
+///
+/// Whisparr v2 passing on `tv` is a fork artifact and not a decision: it
+/// is a Sonarr v3 fork that kept the `tvCategory` field and its default,
+/// so a user running both has them sharing one folder unless one of them
+/// is changed. Measured in
+/// `research/ARR-CERTIFICATION-LIDARR-READARR-WHISPARR-2026-08-31.md`,
+/// which also records what the two `NO` rows cost and how to clear them.
 pub(in crate::serve) const DEFAULT_CATS: &[&str] = &["*", "tv", "movies", "music", "books"];
 
 impl Daemon {
@@ -200,7 +230,7 @@ impl Daemon {
             .split(['/', '\\'])
             .filter(|c| !c.is_empty() && *c != "." && *c != "..")
         {
-            p = p.join(nzbkit::disk::sanitize_filename(c));
+            p = p.join(nzbkit::disk::sanitize_filename_capped(c));
         }
         p
     }
@@ -208,5 +238,56 @@ impl Daemon {
     /// The canonical (pre-collision) output directory for a name+category.
     pub(in crate::serve) fn base_out_dir(&self, category: &str, dir_stem: &str) -> PathBuf {
         self.cat_dir(category).join(dir_stem)
+    }
+}
+
+#[cfg(test)]
+mod default_cats_tests {
+    use super::DEFAULT_CATS;
+
+    /// Every category here is the out-of-the-box SABnzbd category of a
+    /// client we have certified against, so trimming one breaks that
+    /// client's connection test on a fresh install with "Category does
+    /// not exist" - and nothing else in the tree would say so, because
+    /// the failure is entirely on the client's side of the wire.
+    ///
+    /// The pairs are the measurement, not a convention: each was read
+    /// off that client's own `downloadclient/schema`, which is what its
+    /// Add dialog pre-fills. Whisparr v2 is on the list because it is a
+    /// Sonarr v3 fork that kept `tvCategory` and its default, which is
+    /// why it names `tv` rather than anything of its own.
+    ///
+    /// Two clients are deliberately NOT here, and this test passes if a
+    /// later lane adds them, because adding them can only help: Whisparr
+    /// 3.4.0 (eros) defaults to `whisparr` and Readarr 0.4.18 to
+    /// `Readarr`, and both fail their test against a default install
+    /// until the user names the category at one end or the other. The
+    /// reasoning for leaving that open is on `DEFAULT_CATS` itself.
+    #[test]
+    fn the_builtin_list_covers_every_certified_client_default() {
+        for (client, cat) in [
+            ("Sonarr 4.0.19", "tv"),
+            ("Radarr 6.3.0", "movies"),
+            ("Lidarr 3.1.0", "music"),
+            ("Whisparr 2.2.0 (v2)", "tv"),
+        ] {
+            assert!(
+                DEFAULT_CATS.contains(&cat),
+                "{client} ships category {cat:?} out of the box and it is no \
+                 longer a built-in, so a fresh install of it now fails its \
+                 connection test with \"Category does not exist\""
+            );
+        }
+    }
+
+    /// `*` is SABnzbd's "no category" entry and callers index past it.
+    #[test]
+    fn the_wildcard_stays_first_and_the_list_is_a_clean_set() {
+        assert_eq!(DEFAULT_CATS.first(), Some(&"*"));
+        let mut seen = std::collections::BTreeSet::new();
+        for c in DEFAULT_CATS {
+            assert!(!c.is_empty(), "an empty category would name the root");
+            assert!(seen.insert(*c), "{c} is listed twice");
+        }
     }
 }

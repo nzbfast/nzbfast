@@ -153,8 +153,27 @@ fn base_row(r: &crate::streamhub::JobFileRow) -> serde_json::Map<String, Value> 
     o.insert("nzf_id".into(), json!(r.id));
     o.insert("id".into(), json!(r.id));
     o.insert("filename".into(), json!(r.name));
-    o.insert("bytes".into(), json!(r.bytes));
+    // A STRING, because that is what SAB puts under this name:
+    // `build_file_list` writes `"bytes": "%.2f" % nzf.bytes`, identical
+    // in 4.5.0, 5.1.2 and develop (read 30 Aug 2026). It emitted a JSON
+    // number here until 31 Aug 2026, which is GH #69's defect one mode
+    // over - a statically-typed client deserializing `String` (or
+    // Dart's `tryParse`, which takes one) throws at parse time, and the
+    // `fullstatus` arm in `serve/api/system.rs` already carries the
+    // note about LunaSea doing exactly that. The numeric reading keeps
+    // a key of its own beside it, the same way `bytes_left` sits beside
+    // SAB's `mbleft`: SAB spellings carry SAB's types, ours carry ours.
+    o.insert("bytes".into(), json!(format!("{:.2}", r.bytes as f64)));
+    o.insert("bytes_total".into(), json!(r.bytes));
     o.insert("mb".into(), json!(mb(r.bytes)));
+    // SAB emits `age` on every file row and we emitted none, which is
+    // the other half of the same class - an absent key a client with a
+    // non-nullable field dies on. The NZB carries the date; nothing
+    // read it.
+    o.insert(
+        "age".into(),
+        json!(crate::serve::sabcompat::sab_age(r.date)),
+    );
     o.insert("segments".into(), json!(r.segments));
     o
 }
@@ -302,8 +321,11 @@ pub(super) fn m_get_files(
     Some(match listing(d, &id) {
         Some(files) => json!({"files": files}),
         // `files` is present and empty either way, so a client that
-        // reads only that key never has to special-case the error.
-        None => json!({"files": [], "error": "unknown nzo_id"}),
+        // reads only that key never has to special-case the error - and
+        // `status: false` beside it is SAB's own error shape
+        // (`report(_MSG_NO_VALUE)`), so a client that switches on that
+        // key instead is not left reading a null.
+        None => json!({"status": false, "files": [], "error": "unknown nzo_id"}),
     })
 }
 

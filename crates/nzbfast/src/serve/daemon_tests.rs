@@ -46,6 +46,12 @@ mod park_gen_tests;
 #[path = "daemon_tests/unpack_progress_tests.rs"]
 mod unpack_progress_tests;
 
+// The idle-server early start's banked bytes on the queue row and its
+// rate in the header, out for the ceiling and carrying the same #[path]
+// requirement.
+#[path = "daemon_tests/prefetch_progress_tests.rs"]
+mod prefetch_progress_tests;
+
 // B5's queue window, out for the ceiling and carrying the same
 // #[path] requirement.
 #[path = "daemon_tests/queue_window_tests.rs"]
@@ -96,6 +102,12 @@ mod spare_tests;
 #[cfg(test)]
 #[path = "daemon_tests/durability_tests.rs"]
 mod durability_tests;
+
+// F5: what a size-gated Smart Folder rule does with a job whose declared
+// bytes are unknown, end to end. Out for the ceiling and carrying the
+// same #[path] requirement as its siblings above.
+#[path = "daemon_tests/smart_size_tests.rs"]
+mod smart_size_tests;
 
 fn with_daemon(name: &str, f: impl FnOnce(&Arc<Daemon>)) {
     let dir = std::env::temp_dir().join(format!("nzbfast-dmn-{name}-{}", std::process::id()));
@@ -596,6 +608,8 @@ fn pick_job_deferred_runs_only_when_nothing_else_can() {
 /// did put job.started on the ring first (seq 1, 54 ms early).
 #[test]
 fn an_add_is_on_the_event_ring_before_the_job_can_be_picked() {
+    use crate::serve::testutil::NO_PROGRESS;
+
     with_daemon("addbeforepick", |d| {
         let picker = {
             let d = d.clone();
@@ -603,7 +617,30 @@ fn an_add_is_on_the_event_ring_before_the_job_can_be_picked() {
                 // Stands in for the runner's pick arm: spin on pick_job
                 // and emit job.started the moment one appears, the same
                 // order tasks.rs uses (claim the job, then emit).
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                //
+                // The spin stays a HOT one - `yield_now`, not a sleep -
+                // because it is the ADVERSARY here: the claim is that a
+                // picker going as fast as it can still lands behind
+                // `job.added`. Only the BUDGET moved.
+                //
+                // WHY IT IS ON THE SHARED BUDGET, and this is the
+                // weakest of the four sites that take it. `enqueue`
+                // does call `save_queue`, but only AFTER it has
+                // published under the queue lock - which is the very
+                // ordering the doc comment above this test is about -
+                // so the moment this spin waits for lands ahead of the
+                // process-global queue-write queue rather than behind
+                // it. What it IS exposed to is `enqueue`'s own
+                // `write_spool_copy` - a disk write, on the far side of
+                // which the job becomes visible to this thread - plus
+                // the scheduler, and a hot spinner that at high load is
+                // competing with the very thread it waits for.
+                // Measured 31 Aug 2026, that enqueue costs 52-126 ms
+                // alone and inside the full 2,768-test run, so 10 s was
+                // a 79x margin and the 127x disk tail [`NO_PROGRESS`]
+                // records puts the worst reading at 16.0 s - OVER the
+                // old budget. 60 s is 476x, and the fix is one line.
+                let deadline = std::time::Instant::now() + NO_PROGRESS;
                 while std::time::Instant::now() < deadline {
                     if let Some(j) = d.pick_job(false) {
                         let mut g = j.lock_ok();
@@ -633,7 +670,15 @@ fn an_add_is_on_the_event_ring_before_the_job_can_be_picked() {
         )
         .map(|e| e.nzo_id)
         .expect("enqueue");
-        assert!(picker.join().expect("picker thread"), "nothing was picked");
+        // A STALL and never an ordering verdict: the picker gave up
+        // without ever seeing a job, so it has nothing to say about
+        // what order the ring is in.
+        assert!(
+            picker.join().expect("picker thread"),
+            "the picker spun for {NO_PROGRESS:?} and never saw the job at all - the \
+             add never became visible, so this says nothing about ring order. Check \
+             `uptime`: this budget cannot cover a disk-starved box."
+        );
 
         let ring: Vec<(String, u64)> = d
             .life_events
@@ -1217,6 +1262,60 @@ fn reliability_ledger_accumulates_and_answers_none_untried() {
 
         d.add_reliability(&[("s1.example".into(), 5, 1)]);
         assert_eq!(d.reliability("s1.example"), Some((15, 3)));
+    });
+}
+
+/// GH #69 / TODO 320: the same call also has to write the DAY-dimensioned
+/// half, because SAB's `mode=server_stats` publishes the article counters
+/// as `{"YYYY-MM-DD": n}` maps and the lifetime pair above cannot answer
+/// that. Both buckets move on one call, or the payload and the provider
+/// card disagree about the same download.
+#[test]
+fn reliability_also_accumulates_a_per_day_article_row() {
+    with_daemon("reldays", |d| {
+        let today = {
+            let days = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|t| (t.as_secs() / 86_400) as i64)
+                .unwrap_or(0);
+            let (y, m, dd) = crate::serve::civil_from_days(days);
+            format!("{y:04}-{m:02}-{dd:02}")
+        };
+        let row = |d: &crate::serve::Daemon| -> Option<(u64, u64)> {
+            let u = d.usage.lock_ok();
+            let v = u.get("article_days")?.get("s1.example")?.get(&today)?;
+            let g = |k| v.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
+            Some((g("tried"), g("missing")))
+        };
+
+        // All-zero report: skipped wholesale, neither bucket created.
+        d.add_reliability(&[("s1.example".into(), 0, 0)]);
+        assert_eq!(row(d), None);
+
+        d.add_reliability(&[("s1.example".into(), 10, 2), ("s2.example".into(), 0, 0)]);
+        assert_eq!(row(d), Some((10, 2)));
+        d.add_reliability(&[("s1.example".into(), 5, 1)]);
+        assert_eq!(row(d), Some((15, 3)), "same day accumulates");
+        assert_eq!(
+            d.reliability("s1.example"),
+            Some((15, 3)),
+            "the lifetime half is unmoved"
+        );
+        assert!(
+            d.usage
+                .lock_ok()
+                .get("article_days")
+                .and_then(|v| v.get("s2.example"))
+                .is_none(),
+            "tried == 0 is skipped here too"
+        );
+
+        // The day bucket is not a byte bucket: `add_usage`'s prune only
+        // reaches keys starting with '2', and this one must survive it.
+        for _ in 0..70 {
+            d.add_usage(&[("s1.example".into(), 1)]);
+        }
+        assert_eq!(row(d), Some((15, 3)), "survives the 60-day byte prune");
     });
 }
 

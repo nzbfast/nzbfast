@@ -17,6 +17,12 @@ use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// X5-03: what a SIGKILL between journal retirement and the terminal
+// commit costs. A child rather than lines here because that row needs
+// the `run_get_spawn` harness and a product barrier, and neither is
+// this file's subject.
+mod crashtx;
+
 /// Run 1 of a kill+resume leg: start `nzbfast get`, wait until the mock
 /// server has served `frac` of `total_articles` AND the journal carries a
 /// line starting with `rec` (so run 2 has real placements to restore
@@ -28,6 +34,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// server on a busy box can finish the whole set before the poll loop
 /// ever sees the threshold, and a kill after completion leaves nothing to
 /// resume.
+///
+/// `extra_args` land after the `get` subcommand's own flags
+/// (`run_get_spawn_sub`, not `run_get_spawn`): the one caller that needs
+/// one passes `--password`, which clap does not mark `global`.
 async fn kill9_run1(
     cfg: &Path,
     nzb: &Path,
@@ -46,22 +56,8 @@ async fn kill9_run1(
     );
     let extra: Vec<String> = extra_args.iter().map(|s| s.to_string()).collect();
     tokio::task::spawn_blocking(move || {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
-        cmd.env("NZBFAST_OPEN", "1")
-            .arg("--config")
-            .arg(&cfg)
-            .arg("get")
-            .arg(&nzb)
-            .arg("--out")
-            .arg(&out)
-            .arg("--connections")
-            .arg("2")
-            .arg("--window")
-            .arg("2");
-        for a in &extra {
-            cmd.arg(a);
-        }
-        let mut child = cmd.spawn().unwrap();
+        let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+        let run = run_get_spawn_sub(&cfg, &nzb, &out, &[], &extra, 2, 2);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let journal = out.join(".nzbfast.journal");
         while served2.load(Ordering::Relaxed) < total_articles * frac.0 / frac.1
@@ -75,8 +71,7 @@ async fn kill9_run1(
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        child.kill().unwrap(); // SIGKILL
-        let _ = child.wait();
+        run.kill9();
     })
     .await
     .unwrap();
@@ -413,8 +408,11 @@ async fn kill9_resume_map_encrypted_store_set_resumes_into_one_pass() {
                 .output()
                 .unwrap();
             (
+                // stdout/stderr are separate pipes with no shared clock -
+                // label the seam so a bare join can't be misread as one
+                // chronology. Copy the comment along with the string.
                 format!(
-                    "{}{}",
+                    "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
                     String::from_utf8_lossy(&o.stdout),
                     String::from_utf8_lossy(&o.stderr)
                 ),
@@ -599,6 +597,30 @@ async fn a_resumed_run_places_its_replay_instead_of_holding_it() {
         assert!(fx.add_par2(20, &names, 25_000), "par2 create failed");
     }
     let total_articles = fx.articles.len() as u64;
+    // `delay_ms` IS LOAD-BEARING FOR THE ASSERTION BELOW, not only for
+    // making run 1 killable (which is what `kill9_run1`'s own comment
+    // covers). What holds is whatever arrives off the wire while an
+    // earlier volume's head is still outstanding - `try_drain` runs on
+    // each offset-0 write and a volume's base needs the volumes AHEAD
+    // parsed - so the peak is set by a RACE between wire delivery and
+    // head parsing. That is a RATIO, which is why box load does not
+    // move it (load slows both sides together) and why pipelining width
+    // does not either, but why the server's own pacing moves it hard.
+    //
+    // Measured 31 Aug 2026 (`research/RESUME-HOLDS-SOAK-2026-08-31.md`),
+    // run 1 paced at 10 ms throughout so every arm replays the same
+    // 5.5 MB and only the RESUME leg's server is re-paced:
+    //
+    //    0 ms -> 29 of 30 legs BREACH (holds peak 1-4 MB)
+    //    2 ms ->  1 of 20
+    //    5 ms ->  0 of 20
+    //   10 ms ->  0 of 20   <- here, and 150 of 150 on the plain soak
+    //   40 ms ->  0 of 20
+    //
+    // So this fixture sits two steps clear of a knee, and lowering or
+    // dropping this number - or a MockServer that simply gets faster -
+    // turns this pin into a 29-in-30 failure. Move it only with that
+    // ladder re-run.
     let srv = MockServer::start(
         fx.articles.clone(),
         Chaos {
@@ -650,10 +672,27 @@ async fn a_resumed_run_places_its_replay_instead_of_holding_it() {
         .unwrap_or_else(|| panic!("no holds peak in the mem line:\n{log}"));
     // Generous on purpose: the claim is "it places rather than holds",
     // not a byte-exact ceiling. Unsorted, this ran to ~100%.
+    //
+    // SOAKED 31 Aug 2026, 150 consecutive legs at this dial over a box
+    // load range of 14.6 to 52.1: every one at 0 MB held. It does not
+    // flake, and the threshold is not the fragile part - the fixture's
+    // `delay_ms` above is. Read that comment before touching either.
+    //
+    // `holds peak` is the extractor's TOTAL holds high-water and takes
+    // in pre-sniff WIRE holds as well as anything the replay parked, so
+    // the message names both causes: measured that day, one leg replayed
+    // 1.4 MB and peaked at 5.0 MB held, which the replay alone cannot
+    // do. The threshold still guards the right quantity - total held
+    // bytes is what the held-span cap is judged against - but a breach
+    // is not by itself evidence against `replay_order`.
     assert!(
         holds_mb < replayed_mb / 4.0,
-        "the replay HELD {holds_mb} MB of the {replayed_mb} MB it replayed - \
-         volume ordering is not reaching the replay:\n{log}"
+        "holds peaked at {holds_mb} MB against {replayed_mb} MB replayed. That peak is \
+         the extractor's TOTAL holds high-water, so either the replay is being fed \
+         before its slots can place (volume ordering not reaching the replay) or wire \
+         bytes are arriving for volumes whose predecessors' heads have not parsed - \
+         check whether the fixture's server pacing changed before suspecting the sort, \
+         see research/RESUME-HOLDS-SOAK-2026-08-31.md:\n{log}"
     );
     assert_eq!(std::fs::read(fx.dir.join("out/movie.mkv")).unwrap(), inner);
     for v in &vol_names {
@@ -1463,8 +1502,12 @@ async fn a_resumed_run_rejournals_the_plaintext_once_articles_it_replays() {
                     .output()
                     .unwrap();
                 (
+                    // stdout/stderr are separate pipes with no shared
+                    // clock - label the seam so a bare join can't be
+                    // misread as one chronology. Copy the comment along
+                    // with the string.
                     format!(
-                        "{}{}",
+                        "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
                         String::from_utf8_lossy(&o.stdout),
                         String::from_utf8_lossy(&o.stderr)
                     ),
@@ -1622,4 +1665,355 @@ async fn a_shortened_partial_output_says_its_articles_are_fetched_again() {
         "a resume over a shortened output did not rebuild the payload"
     );
     assert!(!out.join(".nzbfast.journal").exists());
+}
+
+/// A volume the SET rebuilt under its own name must not leave the
+/// download's copy of it behind.
+///
+/// The shape, which is issue #9's with one article missing. The post is
+/// obfuscated: the volumes are on the wire as `<hash>.NN` and the PAR2
+/// set knows them as `r.partN.rar`, so a volume claims its FileDesc only
+/// by CONTENT. Starve one volume of its head and it cannot - `head_want`
+/// is min(16 KiB, length), so losing any article covering the first 16k
+/// leaves the md5-16k tier nothing to hash. Parity then rebuilds that
+/// member whole under the set's name, adopting blocks from the very file
+/// that could not claim it, `reconcile_obfuscated_aliases` pairs the two
+/// so the job passes - and the donor stays on disk forever.
+///
+/// Nothing downstream can see it. `smart::cleanup` is extension-driven
+/// and the default list is `par2`; `sweep_junk`'s `is_nameless_scrap`
+/// wants an EMPTY extension and at most 4 KB; and
+/// `sweep_spent_obfuscated`, which is built for exactly this `<hash>.NN`
+/// shape, only runs on the disk unpack ladder.
+///
+/// Closed at the pairing by the superseded-partial delete in
+/// `settle::repair::reconcile_obfuscated_aliases`. This test comes at
+/// it from the far end - it asserts the OUTPUT DIRECTORY is clean
+/// rather than that the delete ran, so it holds whatever that
+/// reconciliation does next.
+///
+/// Measured on a live daemon, 30 Aug 2026: a Completed 52.8 GB job sat
+/// beside a 370 MB `e3a71dc01c012541063a60e0066c219f.53`, which is where
+/// this fixture's posted names come from.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_volume_the_set_rebuilt_leaves_no_donor_behind() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("obf-donor");
+    let inner = payload(3_000_000, 91);
+    let n_vols = 4;
+    let per = inner.len() / n_vols;
+    // The volume that loses its head, and so the one the set has to
+    // rebuild under its own name.
+    const STARVED: usize = 2;
+    let mut posted_names: Vec<String> = Vec::new();
+    let mut real_names: Vec<String> = Vec::new();
+    let mut starved: Vec<String> = Vec::new();
+    let mut pos = 0usize;
+    for i in 0..n_vols {
+        let len = if i == 0 {
+            per + 1
+        } else if i < n_vols - 1 {
+            per
+        } else {
+            inner.len() - pos
+        };
+        let part = &inner[pos..pos + len];
+        pos += len;
+        let vol = fixtures::rar5_volume_n(
+            &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
+            i as u64,
+        );
+        let real = format!("r.part{}.rar", i + 1);
+        let posted = format!("e3a71dc01c012541063a60e0066c219f.{}", 10 + i);
+        fx.add_file_renamed_by_par2(&real, &posted, &vol, 25_000);
+        if i == STARVED {
+            let segs = &fx.nzb_files.last().unwrap().1;
+            starved.extend(segs.iter().take(4).map(|(id, _, _)| format!("<{id}>")));
+        }
+        posted_names.push(posted);
+        real_names.push(real);
+    }
+    {
+        let names: Vec<&str> = real_names.iter().map(String::as_str).collect();
+        assert!(fx.add_par2(20, &names, 25_000), "par2 create failed");
+    }
+    assert!(!starved.is_empty(), "the starved volume posted no articles");
+
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            missing: starved.iter().cloned().collect(),
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    let (log, ok) = {
+        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
+        tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+            .await
+            .unwrap()
+    };
+    assert!(ok, "{log}");
+    assert_eq!(
+        std::fs::read(out.join("movie.mkv")).unwrap(),
+        inner,
+        "the payload is not what was posted"
+    );
+    // The fixture has to have built the shape, or the assertion below
+    // passes for the wrong reason: the pairing is what says a donor
+    // exists at all.
+    assert!(
+        log.contains("never arrived whole under its posted name"),
+        "no alias was reconciled, so this run never had a donor to \
+         leave behind - the fixture stopped reproducing the shape:\n{log}"
+    );
+    // The regression: the donor, and no volume of the set under either
+    // name, survives the finish.
+    let left: Vec<String> = std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| posted_names.contains(n) || real_names.contains(n))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "volume file(s) left behind after a fully-good finish: {left:?}\n{log}"
+    );
+}
+
+/// A volume file an earlier attempt left at its posted name must not
+/// outlive the run that finishes.
+///
+/// The reported shape (a live daemon, 30 Aug 2026). A 52.8 GB post
+/// ran four times. Run 1 took `[repair] materializing volumes for
+/// repair`, so all 144 volumes landed on disk under their posted hash
+/// names; 143 then matched a PAR2 FileDesc and were renamed, and the
+/// 144th could not be, because the articles carrying its head were
+/// among the missing. Run 3 built the payload. Run 4 resumed off `the
+/// previous run's OUTPUT FILES` rather than off volumes - so by then
+/// the other 143 were gone and that one file was referenced by nothing,
+/// not even the crash journal `drop_replayed_sources` walks. Run 4
+/// mapped every volume in-stream, extracted, finished Completed, and
+/// left it: 370 MB under `e3a71dc01c012541063a60e0066c219f.53`.
+///
+/// THE ORPHAN IS PLANTED HERE rather than produced, and that is a
+/// deliberate limit of this test rather than a shortcut. Reaching it the
+/// way the live job did needs four runs, a repair that materializes, a
+/// rename pass that skips one volume and a later run that resumes off
+/// the output - and the state all of that arrives at is exactly this:
+/// bytes at a volume's posted name that no slot owns. What the test
+/// pins is that the finishing run sweeps such a file, which is the half
+/// that was broken.
+///
+/// Nothing downstream could see it: `smart::cleanup` is extension-driven
+/// with `par2` as its default list, `sweep_junk`'s `is_nameless_scrap`
+/// wants an EMPTY extension and at most 4 KB, and
+/// `sweep_spent_obfuscated` - built for exactly this `<hash>.NN` shape -
+/// only runs on the disk unpack ladder, which a one-pass finish never
+/// takes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_volume_left_at_its_posted_name_does_not_outlive_the_finish() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let mut fx = Fixture::new("orphan-vols");
+    let inner = payload(3_000_000, 47);
+    let n_vols = 4;
+    let per = inner.len() / n_vols;
+    let mut posted_names: Vec<String> = Vec::new();
+    let mut vols: Vec<Vec<u8>> = Vec::new();
+    let mut pos = 0usize;
+    for i in 0..n_vols {
+        let len = if i == 0 {
+            per + 1
+        } else if i < n_vols - 1 {
+            per
+        } else {
+            inner.len() - pos
+        };
+        let part = &inner[pos..pos + len];
+        pos += len;
+        let vol = fixtures::rar5_volume_n(
+            &[("movie.mkv", inner.len() as u64, part, i > 0, i < n_vols - 1)],
+            i as u64,
+        );
+        let name = format!("e3a71dc01c012541063a60e0066c219f.{}", 10 + i);
+        fx.add_file(&name, &vol, 25_000);
+        posted_names.push(name);
+        vols.push(vol);
+    }
+    {
+        let names: Vec<&str> = posted_names.iter().map(String::as_str).collect();
+        assert!(fx.add_par2(20, &names, 25_000), "par2 create failed");
+    }
+    let srv = MockServer::start(fx.articles.clone(), Chaos::default()).await;
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    // The earlier attempt's leavings: volume 3 materialized under its
+    // posted name and never renamed, with the hole at offset 0 that
+    // stopped it being renamed in the first place. Sparse and short of
+    // its declared length, like the live one.
+    std::fs::create_dir_all(&out).unwrap();
+    let orphan = out.join(&posted_names[2]);
+    let mut stale = vols[2].clone();
+    stale[..16_384].fill(0);
+    stale.truncate(stale.len() - 4096);
+    std::fs::write(&orphan, &stale).unwrap();
+
+    let (log, ok) = {
+        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
+        tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+            .await
+            .unwrap()
+    };
+    assert!(ok, "{log}");
+    assert_eq!(
+        std::fs::read(out.join("movie.mkv")).unwrap(),
+        inner,
+        "the payload is not what was posted"
+    );
+    // The run has to have MAPPED, or the orphan was never an orphan -
+    // a run that materialized volume 3 would own that path, and owning
+    // it is precisely what the sweep declines to touch.
+    assert!(
+        log.contains("one-pass"),
+        "the run did not map in-stream, so nothing here was orphaned:\n{log}"
+    );
+    assert!(
+        !orphan.exists(),
+        "a volume file at a posted name outlived the finish: {}\n{log}",
+        orphan.display()
+    );
+    // ...and the payload is still the only thing standing.
+    let left: Vec<String> = posted_names
+        .iter()
+        .filter(|n| out.join(n).exists())
+        .cloned()
+        .collect();
+    assert!(
+        left.is_empty(),
+        "volume file(s) left behind: {left:?}\n{log}"
+    );
+}
+
+/// M4-70 ACROSS A CRASH: the majority that decides a contested file's
+/// name has to survive one, or a resume publishes the decoy.
+///
+/// A post carries a filename per ARTICLE and nothing makes them agree.
+/// M4-70 answers that at settle, off what the whole post declared
+/// (`nzbfast::get::yencname`), and `e2e_norar::namelatch` pins it for a
+/// job that runs to the end in one go. This is the same post with a
+/// SIGKILL in the middle of it, and it used to come out the other way:
+/// the tally lived only in process memory, `get::plan` rebuilt every
+/// resumed slot with an empty one, `contested_yenc_name` read "every
+/// article agreed" because run 2's own articles all agree with each
+/// other, and the decoy name run 1's first article latched was still
+/// there when the job finished green. Smart filing and every *arr then
+/// see `x.dat`.
+///
+/// ORDER IS CONTROLLED, not hoped for, which is `namelatch`'s own rule
+/// and its own measurement: an arrival-order row that runs the post and
+/// hopes passes on a fast box and flakes on a loaded one, and nextest
+/// retries it green either way. Stalling every article but the decoy is
+/// what makes run 1 latch `x.dat` deterministically.
+///
+/// THE KILL WAITS FOR A `V ` LINE as well as for a served fraction: the
+/// row is about a tally that CROSSED the crash, so run 1 must have
+/// recorded a disagreement before it dies. Without that wait the leg
+/// could kill after one article, seed nothing, and pass or fail on
+/// which name happened to latch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kill_nine_does_not_leave_a_contested_file_under_the_decoy_name() {
+    let mut fx = Fixture::new("resume-namevote");
+    let data = payload(1_500_000, 91);
+    // Part 1 declares a short single-token name `looks_obfuscated` does
+    // NOT reject; every later part declares the real one. The subject is
+    // obfuscated, so the slot's hint cannot decide this either.
+    crate::e2e_norar::add_file_yenc_names(
+        &mut fx,
+        "Movie.2024.mkv",
+        "Hs9kLm42TpQ",
+        &data,
+        25_000,
+        |p| {
+            if p == 1 {
+                "x.dat".to_string()
+            } else {
+                "Movie.2024.mkv".to_string()
+            }
+        },
+    );
+    let total_articles = fx.articles.len() as u64;
+    // The builder ids parts `<{subject}-{index}-{part}@mock>`.
+    let decoy_id = "<Hs9kLm42TpQ-0-1@mock>";
+    assert!(
+        fx.articles.contains_key(decoy_id),
+        "the decoy article id moved - the stall would be a no-op"
+    );
+    let slow: std::collections::HashMap<String, u64> = fx
+        .articles
+        .keys()
+        .filter(|k| *k != decoy_id)
+        .map(|k| (k.clone(), 200))
+        .collect();
+    let srv = MockServer::start(
+        fx.articles.clone(),
+        Chaos {
+            slow_ttfb: slow,
+            ..Chaos::default()
+        },
+    )
+    .await;
+    let served = srv.served.clone();
+    let cfg = fx.write_config(&[&srv]);
+    let nzb = fx.write_nzb();
+    let out = fx.dir.join("out");
+
+    kill9_run1(
+        &cfg,
+        &nzb,
+        &out,
+        &served,
+        total_articles,
+        (1, 3),
+        Some("V "),
+        &[],
+    )
+    .await;
+    // Run 1 latched the decoy - if it had not, the resume below would
+    // have nothing to correct and would pass for the wrong reason.
+    assert!(
+        out.join("x.dat").exists(),
+        "run 1 did not latch the decoy name, so this leg proves nothing: {:?}",
+        std::fs::read_dir(&out)
+            .map(|r| r.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+
+    let (log, ok) = {
+        let (cfg, nzb, out) = (cfg.clone(), nzb.clone(), out.clone());
+        tokio::task::spawn_blocking(move || run_get(&cfg, &nzb, &out, &[]))
+            .await
+            .unwrap()
+    };
+    assert!(ok, "the resumed decoy-name post failed outright:\n{log}");
+    assert_eq!(
+        std::fs::read(out.join("Movie.2024.mkv")).unwrap_or_default(),
+        data,
+        "the post's own majority did not decide the resumed file's name:\n{log}"
+    );
+    assert!(
+        !out.join("x.dat").exists(),
+        "the decoy name outlived the resume:\n{log}"
+    );
 }

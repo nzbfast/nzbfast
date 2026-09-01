@@ -177,9 +177,38 @@ pub(super) fn stage(path: &Path, root: &Path) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("no file name"))?;
     open_staging_root(root)?;
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let mut staged_name = std::ffi::OsString::from(format!("{}-{n}-", std::process::id()));
-    staged_name.push(name);
-    let dest = root.join(staged_name);
+    // The prefix is held back at the STEM. `name` is a swept payload
+    // file, so it is a `sanitize_out_name` result and is routinely AT
+    // the 255-byte component cap - capping is what produced it - and
+    // `<pid>-<seq>-` on the front is a name `rename` refuses with
+    // `ENAMETOOLONG`. That is not a loss: `stage`'s contract is that any
+    // Err means "park unavailable" and `remove_swept_file` deletes
+    // inline, which is what this module replaced. It is a latency cost,
+    // and the longest-named payloads are the ones that used to pay it -
+    // the §64 first-Trash-call stall this module exists to keep off
+    // `finalize_completed`.
+    //
+    // The STEM and not the composed name, because `is_staged_entry`
+    // recognises what this module wrote by the `<digits>-<digits>-`
+    // PREFIX: capping the composed name puts a hash tag at the tail,
+    // which the recogniser is blind to, but it would also be free to
+    // rewrite the front, and the front is the whole recogniser.
+    //
+    // ONE closure spells the decoration and the reserve is that same
+    // closure over an empty name, so the two cannot drift.
+    // The leaf goes through `to_string_lossy`, where the old spelling
+    // pushed the `OsString` whole. Stated rather than left to be found:
+    // a name that is not valid UTF-8 is parked under a name carrying
+    // U+FFFD. It costs nothing here - what is parked is only ever
+    // disposed of, by the path this line computes, and such a name was
+    // INVISIBLE to `is_staged_entry` before (it asks `to_str`), so the
+    // first-touch drain skipped it and left it stranded. Every leaf this
+    // module actually sees is one we wrote, through a sanitiser that
+    // takes `&str`.
+    let decorate = |leaf: &str| format!("{}-{n}-{leaf}", std::process::id());
+    let leaf = name.to_string_lossy();
+    let leaf = nzbkit::disk::cap_shared_stem(&leaf, [decorate("").as_str()]);
+    let dest = root.join(decorate(&leaf));
     std::fs::rename(path, &dest)?;
     // First touch of a root this process: sweep up leftovers a
     // crashed predecessor parked and never got to. The listing

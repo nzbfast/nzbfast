@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file subject="&quot;outer.rar&quot; yEnc (1/1)" poster="p@news.example" date="1">
+    <segments>
+      <segment bytes="10" number="1">outer@news.example
+        <segment bytes="20" number="2">inner@news.example</segment>
+      </segment>
+    </segments>
+    <file subject="&quot;nested.rar&quot; yEnc (1/1)" poster="p@news.example" date="2">
+      <segments><segment bytes="30" number="1">nested@news.example</segment></segments>
+    </file>
+  </file>
+</nzb>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file subject="&quot;second-root.rar&quot; yEnc (1/1)" poster="p@news.example" date="3">
+    <segments><segment bytes="40" number="1">second@news.example</segment></segments>
+  </file>
+</nzb>
+<wrapper><file subject="&quot;outside-any-nzb.rar&quot; yEnc" poster="p@news.example" date="4"><segments><segment bytes="1" number="1">loose@news.example</segment></segments></file></wrapper>

@@ -99,7 +99,10 @@ pub struct EarlyFile {
     ///
     /// Not the name, deliberately, even though the name is right here. A
     /// row's `filename` is the poster's subject hint while this record's
-    /// `name` is the ON-DISK one (`sanitize_filename` of the yEnc name),
+    /// `name` is the ON-DISK one (`sanitize_out_name` of the yEnc name;
+    /// always a bare file name here - the candidate walk skips any slot
+    /// whose file is not directly under the job dir, so a tree-preserved
+    /// member is never published early and rides the whole-job move),
     /// and on an obfuscated post those are different strings - so a name
     /// join would stop marking rows for exactly the posts whose drawer is
     /// most worth reading. The handle is a digest of (index, first
@@ -177,6 +180,16 @@ fn stamp(p: &Path) -> Option<(u64, u64)> {
 /// Reads `unpack::is_extractable_archive` rather than teaching it
 /// anything: that predicate is the disk ladder's, and widening it
 /// changes what gets unpacked.
+///
+/// It DID widen on 31 Aug 2026 (matrix row M4-90's disk half), and the
+/// consequence here is deliberate rather than incidental: a file the
+/// poster named as content - `Movie.mkv`, `disc.iso` - is now plain
+/// payload even when its first bytes read `Rar!`, so it publishes early
+/// like any other. That is the right answer at this door for the same
+/// reason it is the right answer at that one. Nothing will unpack the
+/// file, so the destination gets those bytes whatever this says; the
+/// only question left is whether the user waits for the whole job to
+/// finish before an *arr can see a file that is already complete.
 fn plain_payload(path: &Path) -> bool {
     if crate::unpack::is_extractable_archive(path) {
         return false;
@@ -215,11 +228,28 @@ fn plain_payload(path: &Path) -> bool {
 /// name is exactly the thing an import would take and a user would then
 /// have to find by watching it.
 fn staging_name(to: &Path) -> PathBuf {
-    to.with_file_name(format!(
-        ".nzbfast-early-{}-{}",
-        std::process::id(),
-        to.file_name().unwrap_or_default().to_string_lossy()
-    ))
+    // The leaf is a `sanitize_out_name` result - it is a slot's own file
+    // directly under the job folder - so it is routinely AT the 255-byte
+    // component cap, capping being what produced it. Decorating it raw
+    // gives a staging name no filesystem creates, so `stage_copy` fails
+    // ENAMETOOLONG, this file never publishes early, and the poll loop
+    // logs the same failure again every `POLL` until the job settles.
+    // What §296 buys - a usable episode in 0.88 s instead of 6.81 - is
+    // then exactly what the longest-named posts do not get.
+    //
+    // Held back at the STEM rather than capped on the composed name.
+    // This name is nobody's identity key (it is created, renamed away,
+    // and removed on every failure arm), so what matters is that it
+    // stays RECOGNISABLE as an early-publish temp - and the prefix is
+    // what recognises it, so the cap has to fall at the TAIL.
+    //
+    // ONE closure spells the decoration and the reserve is that same
+    // closure over an empty leaf, so the two cannot drift. The pid is
+    // inside it, because its width is what the reserve has to cover.
+    let decorate = |leaf: &str| format!(".nzbfast-early-{}-{leaf}", std::process::id());
+    let leaf = to.file_name().unwrap_or_default().to_string_lossy();
+    let leaf = nzbkit::disk::cap_shared_stem(&leaf, [decorate("").as_str()]);
+    to.with_file_name(decorate(&leaf))
 }
 
 /// Copy `from` to `staging`, paced by `pace`. The caller owns the
@@ -363,11 +393,15 @@ impl Daemon {
         // Nothing to publish EARLY when the destination is where the job
         // already is: `relocate_completed` calls that "already inside the
         // completed folder" and moves nothing.
-        let same = dest == out_dir
-            || match (dest.canonicalize(), out_dir.canonicalize()) {
-                (Ok(a), Ok(b)) => a == b,
-                _ => false,
-            };
+        // ...and nothing to publish early when the destination is
+        // INSIDE the job, which is the same refusal the whole-job move
+        // makes and has to be made here too: this pass stages its own
+        // copies rather than going through `move_tree`, so without it
+        // files land in a folder the move then refuses to visit - a
+        // payload split across two directories with nothing to say so.
+        // One predicate, shared, for the reason `move_dest_for` was
+        // lifted in the first place.
+        let same = crate::smart::dst_is_src_or_inside(out_dir, &dest);
         (!same).then_some(dest)
     }
 
@@ -376,6 +410,27 @@ impl Daemon {
         let (nzo, out_dir, cat, tv_sort, done) = {
             let g = job.lock_ok();
             if g.state != JobState::Downloading || g.tombstone {
+                return;
+            }
+            // TODO 317: a write-through job's `out_dir` IS the
+            // destination, so there is nothing to publish EARLY to -
+            // every file lands there the moment it is decoded, which is
+            // strictly better than a copy taken part way through.
+            //
+            // Refused HERE, off the job's own record, rather than left
+            // to `early_publish_dest`'s existing same-directory test.
+            // That test asks `dst_is_src_or_inside(out_dir, dest)`, and
+            // `dest` comes from `move_dest_for`, whose relative path is
+            // `strip_prefix(out_dir())` - which a write-through
+            // `out_dir` does not match. It falls back to
+            // `category/<folder>`, and for a category carrying a
+            // `cat_meta.dir` override that fallback computes a
+            // DIFFERENT directory beside the real one. This pass would
+            // then stage copies into a folder holding nothing else: a
+            // payload split across two directories with nothing to say
+            // so, which is the exact failure that test exists to
+            // prevent.
+            if g.write_through {
                 return;
             }
             (
@@ -445,7 +500,33 @@ impl Daemon {
         // a "(2)" name - the baseline behaviour - instead of silently
         // destroying the finished one. Remembered per name so the poll
         // loop does not re-copy gigabytes, or re-log, every second.
-        if dst.exists() {
+        //
+        // `symlink_metadata` and not `exists()`: "already there" has to
+        // mean an ENTRY, because `rename(2)` at the commit below removes
+        // whatever entry sits at the destination and never resolves it,
+        // while `Path::exists` FOLLOWS symlinks and answers false on any
+        // error. `dest` is the user's completed folder - a link there,
+        // into a library or onto a share that is not mounted, is
+        // ordinary - so this read as free and the commit deleted it.
+        // Argued in full at `tv_rename` in `smart/filing.rs`; the
+        // in-tree precedent for the spelling is `publish_over_previous`
+        // in `serve/job_publish.rs`, which already asks it this way.
+        // Declining is what this guard is for and costs nothing: the
+        // whole-job move still carries the file, under a "(2)" name.
+        //
+        // AND IT STAYS A LOOK, deliberately, where the at-commit guard
+        // below took a `create_new` claim on 31 Aug 2026 under
+        // `occupancy-claim-the-rest-of-the-class`. This one is an
+        // EARLY-OUT and not the decision: what it buys is keeping a
+        // 9 MiB copy off the disk when the name is plainly taken, and
+        // a claim here would have to be held across that whole copy -
+        // so a run that died mid-copy would leave a zero-byte file
+        // wearing a release name in the user's completed folder, and
+        // the adjacent-name import this module exists to avoid would
+        // find it. The name is claimed where the outcome is settled,
+        // inside the custody fence, and an arrival that beats THIS test
+        // simply makes the door decline early and correctly.
+        if std::fs::symlink_metadata(&dst).is_ok() {
             if job.lock_ok().early_refused.insert(c.name.clone()) {
                 warn!(
                     target: "move",
@@ -505,10 +586,77 @@ impl Daemon {
                 return Publish::Stop;
             }
         }
-        if dst.exists() {
+        // THE DECIDING GUARD, and since 31 Aug 2026 a CLAIM rather than
+        // a look, under `occupancy-claim-the-rest-of-the-class`. The
+        // `lstat` here was a check before a use: MEASURED on the
+        // sibling guard in `unpack/published_names.rs`, one `lstat` is
+        // 968 ns against ~112 us of rename behind it, so it covered
+        // about 1% of its own interval and 96.8% of concurrent arrivals
+        // that got the name landed inside the gap. `create_new` answers
+        // `AlreadyExists` over a regular file, a dangling link, a link
+        // out of the directory and a directory - the same four answers
+        // the `lstat` gave - so the claim IS this guard, taken
+        // atomically instead of in two steps.
+        //
+        // AND THE CONCURRENT CREATOR IS NAMED IN THIS FUNCTION'S OWN
+        // WORDS - "another job's move landing the same release name" -
+        // which is why of the nine doors on that census this is the one
+        // whose window was never hypothetical. `dest` is the user's
+        // completed folder, so the loser is a finished file.
+        //
+        // The `symlink_metadata` before the copy STAYS and is not this
+        // decision: it is an early-out that keeps a 9 MiB copy off the
+        // disk when the name is plainly taken, and a name found free by
+        // looking is not a name held. This is where the outcome is
+        // settled, inside the custody fence taken just above.
+        //
+        // Plain `create_new` and not `disk::open_out_leaf_under`, per
+        // `tv_rename` in `smart/filing.rs`: the rename below resolves
+        // its destination by path, and a completed folder reached
+        // through a symlink - a category folder on another volume - is
+        // ordinary, so a bound claim would refuse those jobs outright.
+        //
+        // WHAT THE CLAIM COSTS HERE, AND IT IS A REAL TRADE AGAINST THIS
+        // MODULE'S OWN ATOMICITY PROMISE, so it is stated rather than
+        // buried. `a_published_file_appears_whole_or_not_at_all` says
+        // the destination name must not exist until the copy is whole,
+        // because "an *arr scanning the completed folder would import
+        // it" - and a placeholder is a zero-byte file wearing exactly
+        // that name. The window is ONE `rename(2)`, measured at ~102 us
+        // on APFS, against the whole copy the staging file already keeps
+        // it out of; the staging name is a dotfile, so nothing scanning
+        // ever saw a partial and nothing does now.
+        //
+        // Taken deliberately, because the harms are not the same size.
+        // Without the claim a concurrent arrival DESTROYS a finished
+        // file - 96.8% of arrivals that got the name landed inside the
+        // old guard's gap - and that is permanent. With it, an external
+        // scan has to land inside ~100 us AND import a zero-byte file,
+        // which Sonarr and Radarr both refuse on size, and the next scan
+        // finds the whole one. The counter-attempt for the next lane
+        // that wants this at zero is `hard_link(staging, dst)`: it is
+        // exclusive (EEXIST) and lands the FULL bytes atomically, but it
+        // needs a fallback on a volume with no link support, and that
+        // fallback is untestable on this fleet - APFS has links, so the
+        // arm would never run here. Not built for that reason.
+        if let Err(e) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dst)
+        {
+            let _ = std::fs::remove_file(&staging);
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                // The folder is unusable rather than taken - a
+                // read-only mount, no write right on the share. That is
+                // what the rename below would have reported, so it
+                // still is, and it is not remembered in `early_refused`:
+                // that set exists to stop a per-second re-copy of a name
+                // somebody else owns, and this name is owned by nobody.
+                warn!(target: "move", "early publish of {} failed: {e}", c.name);
+                return Publish::Skipped;
+            }
             // Appeared during the copy - another job's move landing the
             // same release name. Same refusal as above, same reason.
-            let _ = std::fs::remove_file(&staging);
             if job.lock_ok().early_refused.insert(c.name.clone()) {
                 warn!(
                     target: "move",
@@ -521,6 +669,12 @@ impl Daemon {
         }
         if let Err(e) = std::fs::rename(&staging, &dst) {
             let _ = std::fs::remove_file(&staging);
+            // Our own placeholder, and here it would be the worst
+            // residue of the nine: a zero-byte file wearing a release
+            // name in the user's completed folder, which the whole-job
+            // move then steps around with a "(2)" name and every
+            // library scan picks up.
+            let _ = std::fs::remove_file(&dst);
             warn!(target: "move", "early publish of {} failed: {e}", c.name);
             return Publish::Skipped;
         }

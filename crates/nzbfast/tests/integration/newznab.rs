@@ -112,6 +112,116 @@ fn over_dated(number: u64, subject: &str, msgid: &str, bytes: u64, date: i64) ->
     }
 }
 
+/// How long [`settle_index`] will wait for the daemon's startup index
+/// open to finish. See `integration/nzblnk.rs`'s copy of this constant
+/// for the measurement it is based on (60 s is an 11x margin over the
+/// longest settle seen under 8x concurrent load).
+const SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Block until the daemon's index will answer a read.
+///
+/// `searches_that_miss_reach_the_d3_readout` pre-seeds its database with
+/// `Index::open` before the daemon starts, then reads it back over
+/// `t=tvsearch` and `mode=index_search` moments after the daemon's own
+/// port is ready. Both go through `Daemon::index_read_checked`, which
+/// before the daemon's first read-write open falls back to the write
+/// mutex on a BOUNDED 2 s wait and reports
+/// `{"busy":true,"error":"the index is busy - try again in a moment"}`
+/// rather than parking an HTTP worker on it (TODO 143's second half,
+/// TODO 166) - the classic `t=` newznab facade wraps the same refusal as
+/// an `<error>` element instead, but it is the identical seam and the
+/// identical race. Under box load that open is still running when this
+/// file's first read arrives, and the assertions below admit only the
+/// content the seeded rows actually carry.
+///
+/// Mirrors `integration/nzblnk.rs::settle_index` in seam, probe mode and
+/// budget, and is duplicated rather than shared because `http_get`
+/// itself is already duplicated per test module in this crate. `key`
+/// is the `&apikey=...` this daemon needs, or empty where it has none.
+/// An auth refusal PANICS rather than returning: a probe the
+/// daemon answers "API Key Incorrect" carries no `busy` flag, so it
+/// would exit the loop at once and disable the settle in silence.
+///
+/// UNLIKE nzblnk.rs's copy, the probe's `q` is left EMPTY rather than a
+/// distinctive placeholder string: `m_index_search` calls
+/// `d.note_search(..)` on every non-busy answer, and this file's own
+/// test asserts on the exact d3 search-miss readout - a non-empty probe
+/// query showed up in it as a third, unwanted miss the first time this
+/// was tried. `note_search` returns immediately on an empty query
+/// (`crates/nzbfast/src/serve/searchlog.rs`'s own early-out), so this
+/// settles the seam without writing anything the readout would see.
+fn settle_index(port: u16, key: &str) {
+    let started = std::time::Instant::now();
+    loop {
+        let last = http_get(port, &format!("/api?mode=index_search&q={key}&output=json")).1;
+        assert!(
+            !last.contains("API Key"),
+            "the settle probe was refused, so it was never settling anything:\n{last}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_default();
+        if v["busy"] != true {
+            return;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the index never settled in {SETTLE_BUDGET:?}:\n{last}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Block until the search-miss readout accounts for `want` searches,
+/// and hand back the body that said so.
+///
+/// `Daemon::search_log_tick` drains the in-memory search buffer into
+/// the table on its own timer (`crates/nzbfast/src/serve/tasks.rs`, one
+/// second here through the documented debug seam), at a phase no caller
+/// controls, and `m_search_misses`
+/// (`crates/nzbfast/src/serve/api/index.rs`) serves the TABLE and never
+/// the buffer. So a tick landing between two of this file's requests
+/// publishes a readout that is real, current and PARTIAL.
+///
+/// That is what made `searches_that_miss_reach_the_d3_readout` flaky:
+/// it waited for one miss to appear BY NAME and then asserted exact
+/// aggregate counts, so a tick between the last tvsearch and the
+/// index_search after it let the test read a half-flushed table and
+/// fail on the wall miss still sitting in memory. Reproduced 31 Aug
+/// 2026 at 1 failure in 192 runs at 64-way concurrency, with the
+/// readout naming its own cause - `"searches":4` and no
+/// `"dune part three"` row. Nothing is wrong with the daemon: the
+/// merge is additive, so the very next tick completed it. The test
+/// stopped waiting for a state it was about to assert.
+///
+/// `searches` is the predicate because it is the one total this test
+/// controls exactly. Flushes merge additively, and nothing else on
+/// these ports records a search - the settle probe above sends an
+/// empty query, which `note_search` drops - so it rises to the number
+/// of recorded searches and stops there. Waiting on the value the
+/// assertions need is a bound that holds by construction, rather than
+/// a guess at how long a starved box takes to get there.
+///
+/// `key` is the `&apikey=...` this daemon needs, matching
+/// [`settle_index`] above; the budget is shared with it too.
+fn settle_searches(port: u16, key: &str, want: u64) -> String {
+    let started = std::time::Instant::now();
+    loop {
+        let (code, last) = http_get(
+            port,
+            &format!("/api?mode=search_misses{key}&output=json&limit=20"),
+        );
+        assert_eq!(code, 200, "{last}");
+        let v: serde_json::Value = serde_json::from_str(&last).unwrap_or_default();
+        if v["searches"].as_u64() == Some(want) {
+            return last;
+        }
+        assert!(
+            started.elapsed() < SETTLE_BUDGET,
+            "the readout never reached {want} searches in {SETTLE_BUDGET:?}:\n{last}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn newznab_caps_search_and_getnzb() {
     let dir = std::env::temp_dir().join(format!("nzbfast-nn-{}", std::process::id()));
@@ -223,7 +333,6 @@ async fn newznab_caps_search_and_getnzb() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -310,7 +419,6 @@ async fn scan_loop_populates_index_live() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Number of `<item>` elements in a feed.
@@ -534,7 +642,6 @@ async fn newznab_categories_follow_the_standard_tree() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The pubDate of the feed item whose title contains `needle`.
@@ -680,7 +787,6 @@ async fn feed_items_are_dated_by_upload_not_by_index_time() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The search-shaping parameters the *arrs actually send.
@@ -877,7 +983,6 @@ async fn newznab_honours_the_arr_search_parameters() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The built-in indexer's master switch, end to end against the binary.
@@ -983,7 +1088,6 @@ async fn the_indexer_switch_defaults_off_and_closes_the_facade() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The upgrade case: an install that was already indexing keeps indexing.
@@ -1033,7 +1137,6 @@ async fn an_install_that_was_already_indexing_stays_on() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 131 workstream D item D3: what people searched for and could
@@ -1108,6 +1211,12 @@ async fn searches_that_miss_reach_the_d3_readout() {
     let port = d.port;
 
     tokio::task::spawn_blocking(move || {
+        // Before anything is asserted: rung 1 of the index reads below
+        // is refused as busy (or, over t=tvsearch, wrapped as an
+        // <error>) while the daemon's own startup index open still
+        // holds the write mutex, and this test demands the real content.
+        settle_index(port, "&apikey=sekrit");
+
         // An *arr asking for something we have, and for something we
         // do not. Both are recorded; only the second is a miss.
         let (_, body) = http_get(port, "/api?t=tvsearch&q=cat+show&apikey=sekrit");
@@ -1116,6 +1225,19 @@ async fn searches_that_miss_reach_the_d3_readout() {
             let (_, body) = http_get(port, "/api?t=tvsearch&q=dog+show&apikey=sekrit");
             assert!(!body.contains("<item>"), "{body}");
         }
+        // FORCE THE SPLIT, which is the pin as well as the setup: wait
+        // for the newznab half to reach the table BEFORE the wall miss
+        // is issued at all, so that miss is provably still in memory
+        // when the first readout below is served. That is exactly the
+        // state this test used to reach by accident and read as final,
+        // and it is now the state every run goes through - a 1-in-192
+        // race turned into an ordinary step. See `settle_searches`.
+        let split = settle_searches(port, "&apikey=sekrit", 4);
+        assert!(
+            !split.contains("\"q\":\"dune part three\""),
+            "the wall miss was already flushed, so this run never split: {split}"
+        );
+
         // And the dashboard's own search card, over a different miss.
         let (_, body) = http_get(
             port,
@@ -1124,19 +1246,11 @@ async fn searches_that_miss_reach_the_d3_readout() {
         assert!(body.contains("\"results\":[]"), "{body}");
 
         // Wait for a flush - the query path only ever touched memory.
-        let mut readout = String::new();
-        for _ in 0..40 {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            let (code, body) = http_get(
-                port,
-                "/api?mode=search_misses&apikey=sekrit&output=json&limit=20",
-            );
-            assert_eq!(code, 200, "{body}");
-            if body.contains("dog show") {
-                readout = body;
-                break;
-            }
-        }
+        // The predicate is the COMPLETE readout and never the first
+        // sighting of one miss, because the assertions below are about
+        // all five searches; breaking early on `dog show` is the defect
+        // [`settle_searches`] documents.
+        let readout = settle_searches(port, "&apikey=sekrit", 5);
         assert!(
             readout.contains("\"q\":\"dog show\""),
             "the *arr's miss never reached the readout: {readout}"
@@ -1156,6 +1270,16 @@ async fn searches_that_miss_reach_the_d3_readout() {
         assert!(readout.contains("\"missing\":2"), "{readout}");
 
         // The privacy clear leaves nothing behind.
+        //
+        // Worth knowing about the LAST two assertions here:
+        // `m_search_misses` answers a read it could not make with
+        // `unwrap_or_default()`, so a refused read serves an empty list and
+        // a zeroed summary - byte for byte what a cleared table serves.
+        // Those two can therefore pass for the wrong reason, and nothing in
+        // the payload tells the cases apart. The `"status":true` check
+        // below is the one carrying the weight: `clear_search_log` reports
+        // `IndexBusy` rather than a clear it did not do, so a busy index
+        // fails there instead of passing quietly.
         let (_, body) = http_get(port, "/api?mode=search_log_clear&apikey=sekrit&output=json");
         assert!(body.contains("\"status\":true"), "{body}");
         let (_, body) = http_get(
@@ -1167,7 +1291,6 @@ async fn searches_that_miss_reach_the_d3_readout() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A read the index could not ANSWER must reach an *arr as an `<error>`,
@@ -1280,7 +1403,6 @@ async fn a_read_the_index_could_not_answer_is_an_error_not_an_empty_feed() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 187: a TV id parameter is either HONOURED or REFUSED - never
@@ -1498,7 +1620,6 @@ async fn newznab_tv_id_params_are_honoured_or_refused() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 187, the other side of the caps gate: once the index actually
@@ -1634,7 +1755,6 @@ async fn newznab_advertises_tvdbid_once_the_index_holds_them() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 187's second measurement: `q + season + ep` answering ZERO.
@@ -1729,7 +1849,6 @@ async fn newznab_episode_narrowing_is_exact() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// POST a JSON body and return (status, body). The id plumbing is only
@@ -1985,7 +2104,6 @@ async fn newznab_ids_respect_their_namespace_and_reach_every_key() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Codex sweep 7, M1: the `tvdbid` promise follows COVERAGE, not the
@@ -2055,7 +2173,6 @@ async fn newznab_promises_tvdbid_only_once_the_backfill_has_drained() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Codex sweep 7, M3: correcting a card's identity drops the TVDB id
@@ -2141,7 +2258,6 @@ async fn a_wall_identity_correction_drops_the_superseded_tvdb_id() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Deep paging (newznab-deep-paging-test, TODO ARR-CERTIFICATION-2026-08-28
@@ -2270,5 +2386,4 @@ async fn newznab_deep_paging_has_no_overlap_and_no_gaps() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

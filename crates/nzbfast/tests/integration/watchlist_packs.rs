@@ -279,7 +279,6 @@ async fn a_season_pack_fills_the_season_and_its_episodes_stand_down() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A daily show gets one slot per night, so every night is grabbed.
@@ -307,5 +306,4 @@ async fn a_daily_show_grabs_every_night() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

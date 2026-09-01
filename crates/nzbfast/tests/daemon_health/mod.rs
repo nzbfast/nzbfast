@@ -255,7 +255,6 @@ async fn health_giveup_needs_every_server_to_confirm() {
     .unwrap();
     // Close the daemon, keeping its log for whatever fails below.
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO §282 items 1 and 2: the incident, as a daemon test. The payload
@@ -471,7 +470,6 @@ async fn preflight_scores_a_dead_recovery_set_apart_from_a_live_payload() {
         data,
         "the payload differs"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// §294 in vivo: the corpus test proves the ARITHMETIC; this proves the
@@ -594,7 +592,6 @@ async fn the_prober_escalates_and_lands_the_joint_verdict_in_vivo() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Release-eve sweep S4: the SAME total loss on a post uploaded minutes
@@ -720,5 +717,4 @@ async fn a_young_post_with_a_no_verdict_is_badged_but_never_offered() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

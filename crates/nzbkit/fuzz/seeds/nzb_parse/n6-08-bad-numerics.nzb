@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nzb PUBLIC "-//newzBin//DTD NZB 1.1//EN" "http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd">
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file subject="&quot;geometry.bin&quot; yEnc (1/6)" poster="p@news.example" date="1">
+    <groups><group>alt.binaries.test</group></groups>
+    <segments>
+      <segment bytes="768000">no-number@news.example</segment>
+      <segment bytes="768000" number="0">zero@news.example</segment>
+      <segment bytes="768000" number="0">zero-again@news.example</segment>
+      <segment bytes="768000" number="-1">negative@news.example</segment>
+      <segment bytes="768000" number="abc">notanumber@news.example</segment>
+      <segment bytes="18446744073709551616" number="4294967296">overflow@news.example</segment>
+      <segment bytes="0" number="7">zerobytes@news.example</segment>
+      <segment bytes=" 8 " number=" 8 ">padded@news.example</segment>
+    </segments>
+  </file>
+</nzb>

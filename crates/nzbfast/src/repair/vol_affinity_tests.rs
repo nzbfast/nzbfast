@@ -2,15 +2,18 @@
 //! multi-set post [`super::recovery_candidates`] will let the knapsack
 //! buy for ONE set.
 //!
-//! Its own file rather than a block in `repair_tests.rs`, which sits at
-//! 2,939 of the size gate's 3,000-line ceiling - the same reason
-//! `ladder_tests`, `side_fetch_tests` and `unpackprog_tests` are each
-//! out here.
+//! Its own file rather than a block in `repair_tests.rs`, which sat at
+//! 2,939 of the size gate's 3,000-line ceiling when this subject came
+//! out - the same reason `ladder_tests`, `side_fetch_tests` and
+//! `unpackprog_tests` are each out here.
 //!
-//! Every case is a NAMING question, so nothing here needs a network, a
-//! disk or a real PAR2 index: the set is built field by field (the same
-//! way `repair_tests` builds its own) and the NZB is parsed from a few
-//! lines of XML.
+//! Every case is a NAMING question, so nothing here needs a network:
+//! the set is built field by field (the same way `repair_tests` builds
+//! its own) and the NZB is parsed from a few lines of XML. The INDEX
+//! cases below need a disk, because the whole point of the index rule
+//! is that it reads bytes that are already there - so they write a
+//! synthetic PAR2 index into a temp dir and are the only cases here
+//! that touch one.
 
 use super::*;
 use nzbkit::par2::{Par2File, Par2Set};
@@ -31,6 +34,7 @@ fn pset(names: &[&str]) -> Par2Set {
         recovery_set_id: [0u8; 16],
         block_size: 4096,
         files: names.iter().copied().map(pfile).collect(),
+        nonrecovery: Vec::new(),
         recovery_blocks_seen: 0,
     }
 }
@@ -55,9 +59,24 @@ fn nzb(names: &[&str]) -> Nzb {
 
 /// The names `recovery_candidates` hands back, resolved to filenames so
 /// a failure names the volume rather than a file index.
+///
+/// The output directory is a path that does NOT exist, which is the
+/// no-index-on-disk case and is what every naming case below wants: the
+/// index scan finds nothing and the stems arm is the only thing
+/// deciding. `picked_in` is the same call over a real directory.
 fn picked(set: &Par2Set, names: &[&str], sniffed: &[usize]) -> Vec<String> {
+    picked_in(
+        &std::env::temp_dir().join("nzbfast-vol-affinity-no-such-dir"),
+        set,
+        names,
+        sniffed,
+    )
+}
+
+/// [`picked`] against a real output directory, for the index-base cases.
+fn picked_in(out_dir: &Path, set: &Par2Set, names: &[&str], sniffed: &[usize]) -> Vec<String> {
     let n = nzb(names);
-    recovery_candidates(&n, set, &[], sniffed)
+    recovery_candidates(&n, out_dir, set, &[], sniffed)
         .into_iter()
         .map(|(fi, _, _)| {
             n.files[fi]
@@ -66,6 +85,33 @@ fn picked(set: &Par2Set, names: &[&str], sniffed: &[usize]) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+/// A scratch output directory, cleared on entry - `repair_tests::tdir`,
+/// which is one file over and not visible from here.
+fn tdir(tag: &str) -> crate::testscratch::ScratchDir {
+    crate::testscratch::ScratchDir::attach(
+        &std::env::temp_dir().join(format!("nzbfast-volaff-{tag}-{}", std::process::id())),
+    )
+}
+
+/// Write a minimal PAR2 INDEX at `dir/name` carrying `set_id`.
+///
+/// One Main-type packet, which is all the index rule reads: the set id
+/// lives at bytes 32..48 of a packet HEADER, and `packet_spans` walks
+/// the framing without hashing, so a real recovery set is not needed to
+/// pin which set a file announces. Packet length must be at least the
+/// 64-byte header and a multiple of four.
+fn write_index(dir: &Path, name: &str, set_id: [u8; 16]) {
+    let body = [0u8; 32];
+    let mut p = Vec::new();
+    p.extend_from_slice(b"PAR2\0PKT");
+    p.extend_from_slice(&((64 + body.len()) as u64).to_le_bytes());
+    p.extend_from_slice(&[0u8; 16]); // packet MD5 - never read by the scan
+    p.extend_from_slice(&set_id);
+    p.extend_from_slice(b"PAR 2.0\0Main\0\0\0\0");
+    p.extend_from_slice(&body);
+    std::fs::write(dir.join(name), &p).unwrap();
 }
 
 /// THE DEFECT: the affinity test was `starts_with` over the whole
@@ -189,6 +235,39 @@ fn a_sniffed_volume_stays_affine_to_every_set() {
     );
 }
 
+/// Read-only sweep finding 8 (31 Aug 2026): a sniffed volume is KEPT
+/// and does not ARM the filter.
+///
+/// The pin above pairs its sniffed volume with a stem-MATCHING named
+/// one, so the filter arms on the name and the sniffed volume rides
+/// along; it cannot see this. Here nothing is affine BY NAME - the
+/// release-named multi-set shape, `cd1.vol...` volumes against a
+/// FileDesc of `track01.bin`, which is `e2e_multiset`'s own fixture -
+/// so the none-affine fallback is the correct behaviour and hands the
+/// set every candidate there is. Counting the sniffed volume as affine
+/// took the FILTER branch instead and dropped both named volumes, so a
+/// repairable set was priced with nothing left to repair from.
+#[test]
+fn a_sniffed_volume_does_not_arm_the_filter_against_off_stem_named_volumes() {
+    let set = pset(&["track01.bin"]);
+    // File index 2 is the obfuscated slot the in-stream sniff caught.
+    let got = picked(
+        &set,
+        &["cd1.vol00+01.par2", "cd1.vol01+02.par2", "Zz9kQr4tXm7pLw2"],
+        &[2],
+    );
+    assert_eq!(
+        got,
+        vec![
+            "cd1.vol00+01.par2".to_string(),
+            "cd1.vol01+02.par2".to_string(),
+            "Zz9kQr4tXm7pLw2".to_string()
+        ],
+        "a sniffed volume must be ADDED to the list, never used to arm a \
+         decision that is about names"
+    );
+}
+
 /// The none-affine FALLBACK is untouched: where no name identifies
 /// anything the whole list comes back, which is what keeps an
 /// obfuscated post behaving exactly as it did, escalation included.
@@ -255,4 +334,170 @@ fn a_stem_too_short_to_identify_a_release_makes_nothing_affine() {
         ],
         "a too-short stem must fall back, not match every volume"
     );
+}
+
+/// THE INDEX-NAME RULE, and the shape it exists for: a per-file-set post
+/// whose sets are named after the RELEASE and whose FileDesc names are
+/// the PAYLOAD (`par2 create cd1.par2 track01.bin`, the ordinary way to
+/// post a multi-disc release).
+///
+/// Every stem here is `track01.bin`; every volume base is `cd1`, `cd2`
+/// or `cd3`. No stem matches any base, so the stems arm makes nothing
+/// affine, the none-affine fallback fires by design, and this set is
+/// offered all three sets' parity - measured on origin/main 31 Aug
+/// 2026 through this very function: six candidates in, all six back.
+///
+/// `cd1.par2` is on disk and carries this set's id, so `cd1` is affine
+/// by PROOF and the other two sets' volumes are not bought. Zero round
+/// trips and zero extra bytes: the index was downloaded long before any
+/// repair asked this question.
+#[test]
+fn this_sets_own_index_scopes_a_release_named_multi_set_post() {
+    let dir = tdir("relnamed");
+    let mut set = pset(&["track01.bin"]);
+    set.recovery_set_id = [7u8; 16];
+    write_index(&dir, "cd1.par2", [7u8; 16]);
+    write_index(&dir, "cd2.par2", [8u8; 16]);
+    write_index(&dir, "cd3.par2", [9u8; 16]);
+    let got = picked_in(
+        &dir,
+        &set,
+        &[
+            "cd1.vol00+01.par2",
+            "cd1.vol01+02.par2",
+            "cd2.vol00+01.par2",
+            "cd2.vol01+02.par2",
+            "cd3.vol00+01.par2",
+            "cd3.vol01+02.par2",
+        ],
+        &[],
+    );
+    assert_eq!(
+        got,
+        vec![
+            "cd1.vol00+01.par2".to_string(),
+            "cd1.vol01+02.par2".to_string()
+        ],
+        "the index rule did not scope the list - this set is still \
+         being offered another set's parity"
+    );
+}
+
+/// The rule is by CONTENT, not by an index being PRESENT: `cd2.par2`
+/// is on disk and carries another set's id, so it contributes no base,
+/// nothing is affine, and the fallback hands back the whole list.
+///
+/// `cd1.vol00+01.par2` is in the list and is what makes this bite. Drop
+/// the set-id test and `cd2` becomes affine, the filter arms, and this
+/// set is left holding the volumes of the one set it is provably not
+/// about while its own - unidentifiable here, since its index never
+/// reached disk - are dropped. A two-volume list of `cd2`'s alone
+/// cannot tell the two behaviours apart: both return both.
+#[test]
+fn another_sets_index_on_disk_makes_nothing_affine() {
+    let dir = tdir("foreign-index");
+    let mut set = pset(&["track01.bin"]);
+    set.recovery_set_id = [7u8; 16];
+    write_index(&dir, "cd2.par2", [8u8; 16]);
+    let got = picked_in(&dir, &set, &["cd1.vol00+01.par2", "cd2.vol00+01.par2"], &[]);
+    assert_eq!(
+        got,
+        vec![
+            "cd1.vol00+01.par2".to_string(),
+            "cd2.vol00+01.par2".to_string()
+        ],
+        "a foreign index armed the filter, so this set lost the \
+         fallback it is entitled to"
+    );
+}
+
+/// The two arms are a UNION, not a replacement: a post whose index is on
+/// disk AND whose volumes carry the payload-stem naming keeps both, so
+/// nothing the stems arm reached yesterday becomes unreachable today.
+#[test]
+fn the_index_base_and_the_payload_stem_are_both_affine() {
+    let dir = tdir("union");
+    let mut set = pset(&["track01.bin"]);
+    set.recovery_set_id = [7u8; 16];
+    write_index(&dir, "cd1.par2", [7u8; 16]);
+    let got = picked_in(
+        &dir,
+        &set,
+        &[
+            "cd1.vol00+01.par2",
+            "track01.bin.vol00+01.par2",
+            "cd2.vol00+01.par2",
+        ],
+        &[],
+    );
+    assert_eq!(
+        got,
+        vec![
+            "cd1.vol00+01.par2".to_string(),
+            "track01.bin.vol00+01.par2".to_string()
+        ]
+    );
+}
+
+/// A SNIFFED volume stays affine to every set with the index rule armed
+/// too. It is recovery data identified by packet magic and has no name
+/// to be judged by, so a decision made about names must never narrow
+/// it - and the index rule is a decision about names.
+#[test]
+fn a_sniffed_volume_survives_an_armed_index_filter() {
+    let dir = tdir("sniffed-armed");
+    let mut set = pset(&["track01.bin"]);
+    set.recovery_set_id = [7u8; 16];
+    write_index(&dir, "cd1.par2", [7u8; 16]);
+    let got = picked_in(
+        &dir,
+        &set,
+        &["cd1.vol00+01.par2", "cd2.vol00+01.par2", "Zz9kQr4tXm7pLw2"],
+        &[2],
+    );
+    assert_eq!(
+        got,
+        vec![
+            "cd1.vol00+01.par2".to_string(),
+            "Zz9kQr4tXm7pLw2".to_string()
+        ]
+    );
+}
+
+/// A file named `.par2` that carries no PAR2 packet at all contributes
+/// nothing: the rule is the SET ID in the bytes, so an empty or
+/// truncated index costs the none-affine fallback and never a wrong
+/// attribution.
+#[test]
+fn an_index_with_no_readable_packet_contributes_no_base() {
+    let dir = tdir("empty-index");
+    let mut set = pset(&["track01.bin"]);
+    set.recovery_set_id = [7u8; 16];
+    std::fs::write(dir.join("cd1.par2"), b"not a par2 file at all").unwrap();
+    let got = picked_in(&dir, &set, &["cd1.vol00+01.par2", "cd2.vol00+01.par2"], &[]);
+    assert_eq!(
+        got,
+        vec![
+            "cd1.vol00+01.par2".to_string(),
+            "cd2.vol00+01.par2".to_string()
+        ]
+    );
+}
+
+/// The index rule resolves a volume's base with `par2_vol_suffix`, the
+/// same function the stems arm uses, so the bare-ordinal `.vol-NN`
+/// shape and an UPPERCASE index name both land on the same base.
+#[test]
+fn the_index_rule_matches_case_blind_and_across_volume_shapes() {
+    let dir = tdir("case-shape");
+    let mut set = pset(&["track01.bin"]);
+    set.recovery_set_id = [7u8; 16];
+    write_index(&dir, "Some.Release.PAR2", [7u8; 16]);
+    let got = picked_in(
+        &dir,
+        &set,
+        &["Some.Release.vol-01.par2", "Other.Release.vol-01.par2"],
+        &[],
+    );
+    assert_eq!(got, vec!["Some.Release.vol-01.par2".to_string()]);
 }

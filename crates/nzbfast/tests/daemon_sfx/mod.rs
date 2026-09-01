@@ -35,11 +35,17 @@ async fn a_deep_stub_sfx_reports_the_shape_it_unpacked() {
 
     let inner = payload(400_000, 21);
     let vol = fixtures::rar5_volume(&[("movie.mkv", 400_000, &inner, false, false)]);
-    // An `MZ` launcher stub, then the archive - which is all a real
-    // self-extractor is. 400 KB of it against 100 KB articles, so the
-    // signature sits four articles deep and the sniff never meets it.
-    let mut sfx = vec![0x4du8, 0x5a];
-    sfx.extend(std::iter::repeat_n(0x90u8, 400_000));
+    // A launcher stub - a PROGRAM - and then the archive, which is what
+    // a real self-extractor is. 400 KB of it against 100 KB articles, so
+    // the signature sits four articles deep and the sniff never meets
+    // it. The three PE fields are the ones `nzbkit::sfx::is_launcher_
+    // stub` reads: this fixture carried a bare `MZ` until M4-101, and a
+    // structural rule reads that as a data file that happens to start
+    // with two coincidental bytes.
+    let mut sfx = vec![0u8; 400_002];
+    sfx[0..2].copy_from_slice(b"MZ");
+    sfx[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    sfx[0x40..0x44].copy_from_slice(b"PE\0\0");
     sfx.extend(&vol);
 
     let mut articles = HashMap::new();
@@ -132,7 +138,6 @@ async fn a_deep_stub_sfx_reports_the_shape_it_unpacked() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Every file under `dir`, one level of release folder deep - the output

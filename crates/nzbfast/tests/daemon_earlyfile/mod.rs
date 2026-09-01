@@ -449,7 +449,6 @@ async fn episode_one_lands_at_the_destination_while_episode_three_downloads() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Every `.mkv` under `root`, by leaf name.

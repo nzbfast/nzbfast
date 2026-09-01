@@ -49,6 +49,7 @@ fn set_of(files: Vec<Par2File>, block_size: u64) -> Par2Set {
         recovery_set_id: [0u8; 16],
         block_size,
         files,
+        nonrecovery: Vec::new(),
         recovery_blocks_seen: 0,
     }
 }
@@ -133,6 +134,113 @@ fn a_donor_file_is_claimed_at_most_once() {
     let m = match_by_content(&target, &donor);
     assert_eq!(m.len(), 1, "one donor file cannot serve two targets");
     assert_eq!(m[0].target, 0);
+}
+
+// ---- match_by_content_multi ----
+
+#[test]
+fn a_donor_that_ships_one_set_per_file_serves_every_target_file() {
+    // GH #63's shape from the DONOR side: three files, three
+    // independent recovery sets, and nothing shared between them.
+    let (_, a) = synth_file("f1.bin", 4096, 512, 21);
+    let (_, b) = synth_file("f2.bin", 4096, 512, 23);
+    let (_, c) = synth_file("f3.bin", 4096, 512, 29);
+    let target = set_of(vec![a.clone(), b.clone(), c.clone()], 512);
+    let donors = vec![
+        set_of(vec![a], 1024),
+        set_of(vec![b], 1024),
+        set_of(vec![c], 1024),
+    ];
+    let m = match_by_content_multi(&target, &donors);
+    assert_eq!(
+        m,
+        vec![
+            SetMatch {
+                set: 0,
+                target: 0,
+                donor: 0,
+                length: 4096
+            },
+            SetMatch {
+                set: 1,
+                target: 1,
+                donor: 0,
+                length: 4096
+            },
+            SetMatch {
+                set: 2,
+                target: 2,
+                donor: 0,
+                length: 4096
+            },
+        ],
+        "a per-file donor served {} of three target files",
+        m.len()
+    );
+}
+
+#[test]
+fn a_target_file_two_donor_sets_can_both_serve_is_claimed_by_exactly_one() {
+    // THE INVARIANT the largest-set-only rule used to hold: pairing per
+    // set would put this file in two asks and fetch its holes twice.
+    let (_, f) = synth_file("shared.bin", 2048, 256, 31);
+    let target = set_of(vec![f.clone()], 256);
+    let donors = vec![set_of(vec![f.clone()], 512), set_of(vec![f], 512)];
+    let m = match_by_content_multi(&target, &donors);
+    assert_eq!(m.len(), 1, "one target file was paired {} times", m.len());
+    assert_eq!(m[0].set, 0, "the FIRST set that can serve it wins it");
+}
+
+#[test]
+fn a_donor_file_is_still_claimed_at_most_once_inside_its_own_set() {
+    // The per-set claim survives the widening: two identical target
+    // files get one donor member each, and the second target falls
+    // through to the NEXT set rather than re-taking the first's member.
+    let (_, f) = synth_file("dup", 1024, 256, 37);
+    let target = set_of(vec![f.clone(), f.clone()], 256);
+    let donors = vec![set_of(vec![f.clone()], 256), set_of(vec![f], 256)];
+    let m = match_by_content_multi(&target, &donors);
+    assert_eq!(m.len(), 2);
+    assert_eq!((m[0].set, m[0].target), (0, 0));
+    assert_eq!((m[1].set, m[1].target), (1, 1));
+}
+
+#[test]
+fn a_multi_set_donor_that_shares_no_digest_pairs_nothing() {
+    let (_, t) = synth_file("a.bin", 4096, 512, 41);
+    let (_, d0) = synth_file("b.bin", 4096, 512, 43);
+    let (_, d1) = synth_file("c.bin", 2048, 512, 47);
+    let m = match_by_content_multi(
+        &set_of(vec![t], 512),
+        &[set_of(vec![d0], 512), set_of(vec![d1], 512)],
+    );
+    assert!(m.is_empty());
+}
+
+#[test]
+fn no_donor_sets_at_all_pairs_nothing_rather_than_panicking() {
+    let (_, t) = synth_file("a.bin", 4096, 512, 53);
+    assert!(match_by_content_multi(&set_of(vec![t], 512), &[]).is_empty());
+}
+
+#[test]
+fn the_one_set_door_is_the_multi_door_and_agrees_with_it() {
+    // `match_by_content` delegates, so this pins that the two cannot
+    // drift apart into two spellings of one rule.
+    let (_, a) = synth_file("f1.bin", 4096, 512, 59);
+    let (_, b) = synth_file("f2.bin", 2048, 512, 61);
+    let target = set_of(vec![a.clone(), b.clone()], 512);
+    let donor = set_of(vec![b, a], 512);
+    let one = match_by_content(&target, &donor);
+    let multi = match_by_content_multi(&target, std::slice::from_ref(&donor));
+    assert_eq!(one.len(), 2);
+    assert!(multi.iter().all(|m| m.set == 0));
+    assert!(
+        one.iter()
+            .zip(&multi)
+            .all(|(o, m)| o.target == m.target && o.donor == m.donor && o.length == m.length),
+        "the one-set door disagrees with the rule it delegates to"
+    );
 }
 
 #[test]

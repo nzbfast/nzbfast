@@ -170,13 +170,24 @@ fn run_nested_trim_chase(dir: &Path) -> Arc<Extractor> {
         ex.write(0, "v.rar", outer.len() as u64, s as u64, &outer[s..e])
             .unwrap();
         let arrived = cum.iter().take_while(|&&c| c <= e).count();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while arrived >= lead
-            && ex.chase_consumed_volumes() + lead <= arrived
-            && ex.chase_retained_bytes() > 0
-            && std::time::Instant::now() < deadline
-        {
+        let lagging = || {
+            arrived >= lead
+                && ex.chase_consumed_volumes() + lead <= arrived
+                && ex.chase_retained_bytes() > 0
+        };
+        let deadline = std::time::Instant::now() + NO_PROGRESS;
+        while lagging() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if lagging() {
+            eprintln!(
+                "PACED FEED DEADLINE EXPIRED: chunk {i} fed but engine consumed only {} volumes \
+                 (lead {lead}, retained {} bytes) after {}s - the rest of this case measures a \
+                 runaway feed, not the paced shape it was written for",
+                ex.chase_consumed_volumes(),
+                ex.chase_retained_bytes(),
+                NO_PROGRESS.as_secs()
+            );
         }
     }
     ex

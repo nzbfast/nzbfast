@@ -256,9 +256,31 @@ async fn b3_duplicate_promotion_prefers_best_held_alternative() {
         upload(&good_xml, "Show.Name.S01E05.720p.WEB.nzb"); // held FIRST (worse)
         upload(&good_xml, "Show.Name.S01E05.2160p.WEB.nzb"); // held SECOND (best)
 
-        // Both alternatives are held as Duplicate before anything runs.
+        // Both alternatives are held before anything runs.
+        //
+        // The hold is read off SAB's `labels` and not off `priority`.
+        // It used to count the string "Duplicate" in the raw body,
+        // which worked only because the facade published a held row's
+        // state IN that field - a word SAB's own INTERFACE_PRIORITIES
+        // does not have, and which moved to `labels` on 31 Aug 2026
+        // (see `sab_priority_name`). A held ALTERNATIVE is what these
+        // two are, precisely: a copy parked behind a named job and
+        // promoted if that job fails, which is what this test is about.
+        let is_held = |s: &serde_json::Value| -> bool {
+            s["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|l| matches!(l.as_str(), Some("DUPLICATE" | "ALTERNATIVE")))
+        };
         let q = http(port, "/api?mode=queue&output=json", None);
-        let held = q.matches("\"Duplicate\"").count();
+        let v: serde_json::Value = serde_json::from_str(&q).unwrap_or_default();
+        let held = v["queue"]["slots"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|s| is_held(s))
+            .count();
         assert_eq!(held, 2, "expected both alternatives held: {q}");
 
         // Resume: the original fails; with auto-retry off, its park runs
@@ -271,10 +293,11 @@ async fn b3_duplicate_promotion_prefers_best_held_alternative() {
         // already completed into history.
         let promoted = |res: &str, q: &str, h: &str| -> bool {
             let v: serde_json::Value = serde_json::from_str(q).unwrap_or_default();
-            let in_queue = v["queue"]["slots"].as_array().into_iter().flatten().any(|s| {
-                s["filename"].as_str().unwrap_or("").contains(res)
-                    && s["priority"].as_str() != Some("Duplicate")
-            });
+            let in_queue = v["queue"]["slots"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|s| s["filename"].as_str().unwrap_or("").contains(res) && !is_held(s));
             let done = h.contains("\"Completed\"") && h.contains(res);
             in_queue || done
         };
@@ -304,7 +327,6 @@ async fn b3_duplicate_promotion_prefers_best_held_alternative() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------

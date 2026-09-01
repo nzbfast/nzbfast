@@ -122,6 +122,41 @@ pub(crate) enum DirClaim {
 /// directory only once it has verified. A FAILED job's leftovers are junk
 /// and are still reused in place, so retrying a flaky post does not climb
 /// .2, .3, .4.
+///
+/// # The climb is CAPPED, and on the COMPOSED name
+///
+/// `dir_stem` reaches here already capped at 255 bytes -
+/// `Daemon::enqueue` and [`refile_out_dir`] both spell it through
+/// `disk::sanitize_filename_capped`, and `history`'s arm takes an
+/// existing directory's own leaf - so for a long job name it is AT the
+/// 255-byte cap exactly, capping being what produced it. `.2` on top of
+/// that is 257 bytes and every `mkdir` under it is `ENAMETOOLONG`
+/// (measured on APFS 31 Aug 2026: 255 creates, 256 does not), so the
+/// FIRST collision handed a job a directory it could not have. The base
+/// itself was already covered - that is
+/// `an_overlong_job_name_still_gets_a_writable_directory` - and the
+/// climb was not, because that pin's claim never collides.
+///
+/// The COMPOSED name and not a stem reserve, which is
+/// `disk::sanitize_filename_capped_for`'s own division: this string is an
+/// IDENTITY KEY as much as a path. `Daemon::dir_claim` answers by
+/// comparing it against every job's `out_dir`, `reserved` holds it while
+/// a recategorize moves into it, and the job record stores it - so a name
+/// shortened at the write and not at the key would leave two spellings of
+/// one directory, which is how two live jobs come to share a folder.
+/// Applying the SAME transform the callers apply to the stem is what
+/// keeps the two ends together.
+///
+/// Termination is unchanged, and it rests on the capping function's HASH
+/// TAG rather than on front-preservation the way
+/// `disk::disambiguated_out_name`'s does - the front here is `dir_stem`,
+/// which every rung shares, and it is the `.{n}` at the TAIL that
+/// truncation removes. That is what the tag is for, and it is the same
+/// argument `par2repair`'s `.dup-` suffix already rests on. In practice
+/// the rungs differ twice over, because `cap_component` carries a short
+/// alphanumeric extension across its shortening and `.2` is one. And for
+/// a composed name inside the cap this is the plain `format!` byte for
+/// byte, so no directory that works today moves.
 pub(crate) fn choose_out_dir(
     base: &std::path::Path,
     dir_stem: &str,
@@ -139,7 +174,9 @@ pub(crate) fn choose_out_dir(
             _ => {}
         }
         n += 1;
-        candidate = base.with_file_name(format!("{dir_stem}.{n}"));
+        candidate = base.with_file_name(nzbkit::disk::sanitize_filename_capped(&format!(
+            "{dir_stem}.{n}"
+        )));
     }
 }
 
@@ -151,18 +188,30 @@ pub(crate) fn choose_out_dir(
 /// season. This picks the ordinary private directory the job would get on
 /// a fresh add - collision rules and all, so it cannot land on another
 /// job's folder either.
+/// Both names it builds are CAPPED, and the cap has to match the one
+/// `Daemon::enqueue` applies to the same stem - a stem the two spell
+/// differently refiles onto a directory nobody owns, or onto somebody
+/// else's. That is the relpath module header's rule about member names
+/// (every site must use the ONE function, or a site left behind
+/// computes a different name and stops finding the file) applied to a
+/// job directory. `disk::sanitize_filename_capped_for` carries why CAP
+/// rather than refuse: the name arrives from a .nzb filename or an
+/// *arr's `nzbname=`, nothing bounds either, and a 300-byte component
+/// is `ENAMETOOLONG` for every `mkdir` under it (measured on APFS
+/// 31 Aug 2026 - 255 creates, 300 does not). Pinned by
+/// `an_overlong_job_name_still_gets_a_writable_directory`.
 pub(crate) fn refile_out_dir(
     out_root: &std::path::Path,
     category: &str,
     name: &str,
     claim: &dyn Fn(&std::path::Path) -> DirClaim,
 ) -> (PathBuf, Option<PathBuf>) {
-    let dir_stem = nzbkit::disk::sanitize_filename(name.trim_end_matches(".nzb"));
+    let dir_stem = nzbkit::disk::sanitize_filename_capped(name.trim_end_matches(".nzb"));
     let base = if category.is_empty() {
         out_root.join(&dir_stem)
     } else {
         out_root
-            .join(nzbkit::disk::sanitize_filename(category))
+            .join(nzbkit::disk::sanitize_filename_capped(category))
             .join(&dir_stem)
     };
     choose_out_dir(&base, &dir_stem, claim)

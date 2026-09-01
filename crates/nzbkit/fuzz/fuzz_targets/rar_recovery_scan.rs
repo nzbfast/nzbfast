@@ -69,8 +69,8 @@ fuzz_target!(|data: &[u8]| {
                     .any(|sub| sub.kind == rars::rar15_40::NewSubKind::RecoveryRecord);
             if has_record {
                 // One fixed temp name per process: libFuzzer execs are serial.
-                let dest =
-                    std::env::temp_dir().join(format!("rars-fuzz-protect-{}", std::process::id()));
+                let dest = std::env::temp_dir()
+                    .join(format!("nzbkit-rars-fuzz-protect-{}", std::process::id()));
                 if let Ok(rebuilt) = legacy.repair_protect_to_path(&dest, 1 << 20) {
                     let repaired = std::fs::read(&dest).expect("read repaired temp");
                     // A repair is a copy patched in place - never a resize.

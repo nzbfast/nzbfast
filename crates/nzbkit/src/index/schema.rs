@@ -283,7 +283,23 @@ fn create_base_schema(db: &Connection, cache_mib: i64) -> rusqlite::Result<()> {
             -- The wall's identity for it, when the name parsed to
             -- one ('' when it did not).
             title_key TEXT NOT NULL DEFAULT '',
-            at INTEGER NOT NULL);
+            at INTEGER NOT NULL,
+            -- How well the stored name was PROVED against these
+            -- bytes - an `index::claims::NameEvidence` tag. This
+            -- table used to be first-writer-wins forever: whatever
+            -- named a fingerprint first owned it, and a later job
+            -- that named the same bytes correctly, with a byte-level
+            -- proof, could not displace it. The tier is what gives
+            -- the correction path a rule (strictly stronger evidence
+            -- replaces) instead of a race.
+            tier TEXT NOT NULL DEFAULT 'hash16k-len',
+            -- Two equally-evidenced jobs called this fingerprint
+            -- different things, so it is not an answer. hash16k is
+            -- the identical-head twin family every in-job tier
+            -- DECLINES (the rule stated in live.rs, sfvname.rs and
+            -- emptydesc.rs alike); the row is kept, and the lookup
+            -- refuses it, rather than the guess being served forever.
+            contested INTEGER NOT NULL DEFAULT 0);
          -- §131 identity substrate: every naming lane's proof about a
          -- release, kept as COMPETING claims with provenance rather
          -- than a first-writer-wins name. `tier` is the evidence
@@ -727,6 +743,16 @@ fn additive_migrations(db: &Connection) {
         // already scanning, and building an index at open is the
         // whole-table write lock the B1 picker indexes exist to avoid.
         "ALTER TABLE releases ADD COLUMN stem_fold TEXT NOT NULL DEFAULT ''",
+        // W7-01..03: the repost table's evidence tier and its
+        // ambiguity marker. Rows written before these columns existed
+        // default to the weakest tier and uncontested, which is the
+        // honest reading of them - nothing recorded what proved them,
+        // and any of them may be a twin-family guess - and it is also
+        // the safe one: a later PROVEN naming outranks them and
+        // corrects the row, where the old table would have kept the
+        // first writer's answer forever.
+        "ALTER TABLE par_hashes ADD COLUMN tier TEXT NOT NULL DEFAULT 'hash16k-len'",
+        "ALTER TABLE par_hashes ADD COLUMN contested INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = db.execute(ddl, []);
     }
@@ -2240,9 +2266,9 @@ mod tests {
     /// write lock.
     #[test]
     fn read_only_connection_sees_fresh_commits_and_refuses_writes() {
-        let dir = std::env::temp_dir().join(format!("nzbfast-index-ro-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testscratch::ScratchDir::attach(
+            &std::env::temp_dir().join(format!("nzbfast-index-ro-{}", std::process::id())),
+        );
         let db = dir.join("index.db");
         let mut rw = Index::open(&db).unwrap();
         rw.ingest(

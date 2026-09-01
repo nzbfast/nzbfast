@@ -171,7 +171,6 @@ async fn stream_while_downloading() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -315,7 +314,6 @@ async fn stream_encrypted_while_downloading() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M11 ordering e2e: the mock server records BODY request order, so this
@@ -530,7 +528,6 @@ async fn stream_seek_promotes_and_tail_bursts() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M11 deep-window preemption e2e: same 3-volume fixture as
@@ -823,7 +820,6 @@ async fn stream_promote_preempts_deep_windows() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// "Stream an NZB" front door: `addfile&stream=1` enqueues at Force
@@ -957,7 +953,6 @@ async fn stream_add_returns_player_links() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -1119,7 +1114,6 @@ async fn a_settled_job_answers_stream_without_waiting() {
         took < std::time::Duration::from_secs(5),
         "the settled 404 took {took:?} - the admit wait is still being sat out"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 16m, the other side: a QUEUED job still waits the full 30 s.
@@ -1165,7 +1159,6 @@ async fn a_queued_job_still_waits_out_the_admit_deadline() {
         took >= std::time::Duration::from_secs(25),
         "a queued job answered in {took:?} - the 30 s wait for its writers is gone"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 16m, the trap in the middle: a job whose settle has NOT
@@ -1206,7 +1199,6 @@ async fn a_job_still_settling_still_waits() {
         answered.is_none(),
         "a torn park was answered {answered:?} - a job mid-settle must sit out the wait"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The finished-job branch's two answers that a seeded spool CAN reach:
@@ -1312,7 +1304,6 @@ async fn a_finished_job_serves_its_file_and_says_so_honestly_when_it_is_gone() {
     assert!(media.starts_with("HTTP/1.1 404"), "{media}");
     assert!(media.contains("no playable file on disk"), "{media}");
     assert!(!media.contains("moved"), "{media}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 16m's SECOND half: a job that finishes WHILE a player is
@@ -1441,7 +1432,6 @@ async fn a_job_that_finishes_mid_request_is_answered_from_disk() {
         "answered in {took:?} - the wait loop is still sitting out the \
          full admit deadline for a job that finished under it"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 16m, the shape a stale .strm is likeliest to point at: a Failed
@@ -1506,7 +1496,6 @@ async fn a_failed_job_with_a_far_off_retry_answers_stream_without_waiting() {
         "a retry armed 20 minutes out took {took:?} - it is still being \
          read as a prospect of writers inside a 30 s wait"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 16m's THIRD shape, and the last one that still paid the full 30
@@ -1594,7 +1583,6 @@ async fn a_job_deleted_under_the_admit_wait_is_answered_at_once() {
         "answered in {took:?} - the wait is still sitting out its full \
          deadline for a record that has been deleted from both stores"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// TODO 16m residue, the auth half: a run that has FINISHED no longer
@@ -1779,7 +1767,6 @@ async fn a_finished_run_stops_serving_the_bare_stream_route_keyless() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The same gate through `/stream/<id>`, on the history row shape the
@@ -1925,5 +1912,4 @@ async fn a_failed_run_takes_the_finished_gate_too() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

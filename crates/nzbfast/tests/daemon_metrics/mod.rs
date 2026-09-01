@@ -306,7 +306,6 @@ async fn the_metrics_endpoint_answers_prometheus_text_that_parses() {
     }
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The eleven per-provider families, scraped MID-FLIGHT.
@@ -546,7 +545,6 @@ async fn a_mid_flight_scrape_reports_every_provider_family() {
     .unwrap();
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The credential rule, both ways round.
@@ -663,5 +661,4 @@ async fn metrics_needs_the_api_key_until_the_switch_opens_it() {
     .unwrap();
 
     let _log = d.stop();
-    let _ = std::fs::remove_dir_all(&dir);
 }

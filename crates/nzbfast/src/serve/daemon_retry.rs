@@ -337,10 +337,37 @@ impl Daemon {
         // as a subfolder; a cat_meta `dir` rename is not re-applied here, the
         // same as the filed/taken paths above - a pre-existing gap, not this
         // fix's concern.)
-        let stale = !cur.starts_with(self.out_dir());
+        // TODO 317: a write-through job's out_dir is DELIBERATELY
+        // outside the download root - it is under its category's
+        // destination - so the root test alone calls every one of them
+        // stale and refiles it back into the download folder, throwing
+        // away its journal and its progress on an ordinary retry. A
+        // path under the destination this category currently resolves
+        // to is not stale. Asked of `move_dest_root` rather than of the
+        // write-through setting, so turning the setting off does not
+        // strand a job that is already down there: what makes the path
+        // valid is that a destination for the category still exists.
+        let wt_root = self.write_through_root(&category);
+        let stale = !cur.starts_with(self.out_dir())
+            && !self
+                .move_dest_root(&category)
+                .is_some_and(|(root, _)| cur.starts_with(&root));
         if filed || taken || stale {
-            let (dir, replaces) =
-                refile_out_dir(&self.out_dir(), &category, &name, &|p| self.dir_claim(p));
+            let (dir, replaces) = match &wt_root {
+                // The destination root already IS this category's
+                // folder, so `refile_out_dir`'s category component must
+                // not be repeated under it. Same stem spelling either
+                // way - `refile_out_dir`'s own note about the two sites
+                // having to agree applies to this arm too.
+                Some(root) => {
+                    let stem =
+                        nzbkit::disk::sanitize_filename_capped(name.trim_end_matches(".nzb"));
+                    crate::serve::job::choose_out_dir(&root.join(&stem), &stem, &|p| {
+                        self.dir_claim(p)
+                    })
+                }
+                None => refile_out_dir(&self.out_dir(), &category, &name, &|p| self.dir_claim(p)),
+            };
             let mut j = job.lock_ok();
             info!(
                 target: "retry",
@@ -358,6 +385,12 @@ impl Daemon {
             );
             j.out_dir = dir;
             j.replaces = replaces;
+            // TODO 317: the refile just decided which root this job
+            // downloads under, so the record that says whether it owes
+            // a move at completion has to follow it. A job refiled OUT
+            // of a destination (write-through since turned off) now
+            // owes the mover a visit; one refiled INTO one does not.
+            j.write_through = wt_root.is_some();
             j.filed = false;
             // The journal that backed those bytes is in the OLD folder,
             // so nothing is on disk at the new one: this retry really

@@ -3,9 +3,11 @@
 //!
 //! One subject read as one thing: bytes billed per server per UTC day
 //! (`add_usage`/`save_usage`), the delivered/missing tally behind the
-//! reliability figure, and the §96.5 block-account arithmetic on top of
-//! both - lifetime bytes, what this block has spent, the refill, and the
-//! 30-second flush that makes a mid-run cutoff land on disk.
+//! reliability figure - lifetime in `"reliability"` and per day in
+//! `"article_days"`, both written by `add_reliability` - and the §96.5
+//! block-account arithmetic on top of both: lifetime bytes, what this
+//! block has spent, the refill, and the 30-second flush that makes a
+//! mid-run cutoff land on disk.
 //!
 //! A second `impl Daemon` in a child module of `daemon`, on the
 //! daemon_index shape, so `Daemon`'s private fields and daemon.rs's
@@ -38,9 +40,11 @@ impl Daemon {
                 }
             }
         }
-        // Keep ~60 date buckets ("YYYY-…" sorts before "lifetime", which
-        // is never pruned - block accounts span years; "reliability"
-        // survives the prune the same way).
+        // Keep ~60 date buckets. The filter is what a key STARTS with,
+        // so "lifetime" is never pruned - block accounts span years -
+        // and "reliability", "block_base" and "article_days" survive it
+        // the same way. The last of those is bounded per host inside
+        // `add_reliability` instead, being a day map one level deeper.
         while u.keys().filter(|k| k.starts_with('2')).count() > 60 {
             let oldest = u.keys().find(|k| k.starts_with('2')).cloned();
             if let Some(k) = oldest {
@@ -60,10 +64,39 @@ impl Daemon {
     /// Reliability ledger: accumulate a finished job's per-server article
     /// tries/430s under the never-pruned "reliability" usage bucket -
     /// completion% over lifetime is the keep-subscribing signal.
+    ///
+    /// TWO buckets, written together, because they answer two different
+    /// questions and neither can be derived from the other.
+    /// `"reliability"` is the LIFETIME pair `{host: {tried, missing}}`
+    /// that `reliability()` and the provider-quality card read, and it
+    /// is never pruned - a completion% is only worth reading over a
+    /// long run. `"article_days"` is the same tally with a DAY
+    /// dimension, `{host: {"YYYY-MM-DD": {tried, missing}}}`, and it
+    /// exists because SABnzbd's `mode=server_stats` publishes
+    /// `articles_tried`/`articles_success` as date-keyed MAPS
+    /// (`bpsmeter.py`'s `article_stats_tried`/`article_stats_failed`,
+    /// declared `dict[str, dict[str, int]]`) and we published a scalar.
+    /// A statically-typed client deserializing `Map<String,Int>` from
+    /// `0` throws at parse time, which is GitHub #69 / TODO 320.
+    ///
+    /// A NEW bucket rather than a day dimension bolted into
+    /// `"reliability"`: an existing `usage.json` simply lacks it and
+    /// starts filling from the next finished job, so there is no
+    /// migration read and nothing that reads the lifetime pair moves.
+    /// The cost is that the per-day maps are EMPTY on an install that
+    /// upgrades into this, until the next download - stated rather than
+    /// papered over by inventing a day key for lifetime data, which
+    /// would attribute years of articles to today.
     pub(in crate::serve) fn add_reliability(&self, per_server: &[(String, u64, u64)]) {
         if per_server.iter().all(|(_, t, _)| *t == 0) {
             return;
         }
+        let days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs() / 86_400) as i64)
+            .unwrap_or(0);
+        let (y, m, d) = civil_from_days(days);
+        let today = format!("{y:04}-{m:02}-{d:02}");
         let mut u = self.usage.lock_ok();
         let rel = u
             .entry("reliability".to_string())
@@ -84,6 +117,48 @@ impl Daemon {
                     host.clone(),
                     json!({"tried": ct + tried, "missing": cm + missing}),
                 );
+            }
+        }
+        let byday = u
+            .entry("article_days".to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(hosts) = byday.as_object_mut() {
+            for (host, tried, missing) in per_server {
+                if *tried == 0 {
+                    continue;
+                }
+                let Some(dm) = hosts
+                    .entry(host.clone())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                else {
+                    continue;
+                };
+                let (ct, cm) = dm
+                    .get(&today)
+                    .map(|v| {
+                        let g = |k| v.get(k).and_then(Value::as_u64).unwrap_or(0);
+                        (g("tried"), g("missing"))
+                    })
+                    .unwrap_or((0, 0));
+                dm.insert(
+                    today.clone(),
+                    json!({"tried": ct + tried, "missing": cm + missing}),
+                );
+                // Bounded the same way `add_usage` bounds its date
+                // buckets, and PER HOST because this map is nested one
+                // level deeper. By `min()` rather than by first key:
+                // "YYYY-MM-DD" sorts oldest-first lexicographically
+                // either way, but a `serde_json::Map` is an insertion-
+                // ordered IndexMap under the `preserve_order` feature,
+                // where "the first key" is the oldest INSERT and not the
+                // oldest DAY.
+                while dm.len() > 60 {
+                    let Some(oldest) = dm.keys().min().cloned() else {
+                        break;
+                    };
+                    dm.remove(&oldest);
+                }
             }
         }
         self.save_usage(&u);

@@ -459,16 +459,30 @@ fn a_young_completable_no_verdict_offers_nothing() {
 /// it and a button that can only ever refuse is worse than no button. So
 /// a test that wants the offer has to put a file there.
 ///
-/// ONE path per process, shared by every test here and rewritten by
-/// each: `parked_replaceable` asks only whether it EXISTS, so the
-/// content never matters and two threads writing the same eleven bytes
-/// cannot race into a wrong answer. Per-process because `cargo test`
-/// puts these in one process and nextest puts each in its own, and
-/// neither may collide with the other's file.
-fn spooled() -> std::path::PathBuf {
-    let p = std::env::temp_dir().join(format!("nzbfast-284-spool-{}.nzb", std::process::id()));
+/// The file lives inside a `ScratchDir` and the caller has to hold that
+/// guard, or the fixture is one more `$TMPDIR` entry per run forever:
+/// this one wrote a bare path and nothing removed it, which is 1,731 of
+/// the 66,095 leaked entries measured on the dev Mac on 31 Aug 2026 -
+/// the single largest family. See `crates/nzbfast/tests/scratch/mod.rs`.
+///
+/// PER THREAD as well as per process, and that is what the guard costs.
+/// This used to be ONE path shared by every test here and rewritten by
+/// each, which is safe while nothing ever DELETES it - the content never
+/// mattered, `parked_replaceable` asks only whether it exists. A guard
+/// clears its tree on attach and removes it on drop, so under `cargo
+/// test` - one process, these tests side by side - a shared path is one
+/// test pulling the fixture out from under another. libtest gives each
+/// test its own thread, so the thread id is the discriminator; nextest
+/// gives each its own process, where the pid already was.
+fn spooled() -> (crate::testscratch::ScratchDir, std::path::PathBuf) {
+    let d = crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join(format!(
+        "nzbfast-284-spool-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    )));
+    let p = d.join("spool.nzb");
     std::fs::write(&p, b"<nzb></nzb>").expect("write spool fixture");
-    p
+    (d, p)
 }
 
 /// The verdict a parked row carries: the failure LEAD `fail_kind` reads
@@ -502,7 +516,7 @@ fn parked(
 #[test]
 fn a_failed_row_offers_the_spare_still_held_for_it() {
     with_daemon("altcand-parked-offer", |d| {
-        let spool = spooled();
+        let (_spooldir, spool) = spooled();
         let dead = parked(
             "dead",
             "Show.S01E01.2160p-A",
@@ -541,7 +555,7 @@ fn a_failed_row_offers_the_spare_still_held_for_it() {
 #[test]
 fn the_parked_offer_is_drawn_only_where_another_copy_is_the_move() {
     with_daemon("altcand-parked-gate", |_d| {
-        let spool = spooled();
+        let (_spooldir, spool) = spooled();
         let held: Vec<altcand::HeldSpare> = Vec::new();
         let open = |j: &Arc<Mutex<Job>>| {
             let g = j.lock_ok();
@@ -640,7 +654,7 @@ fn the_parked_offer_is_drawn_only_where_another_copy_is_the_move() {
 #[test]
 fn switching_a_parked_row_promotes_the_spare_and_leaves_the_record_alone() {
     with_daemon("altcand-parked-switch", |d| {
-        let spool = spooled();
+        let (_spooldir, spool) = spooled();
         let dead = parked(
             "dead",
             "Show.S01E01.2160p-A",
@@ -715,7 +729,7 @@ fn switching_a_parked_row_promotes_the_spare_and_leaves_the_record_alone() {
 #[test]
 fn a_switched_away_record_does_not_come_back_on_a_stamp_that_never_fired() {
     with_daemon("altcand-switch-disarms", |d| {
-        let spool = spooled();
+        let (_spooldir, spool) = spooled();
         // A stamp in the PAST, which is the state the offer is drawn in:
         // `parked_replaceable` admits a lapsed one deliberately, and a
         // busy or held daemon is exactly what leaves it unconsumed.
@@ -769,7 +783,7 @@ fn a_switched_away_record_does_not_come_back_on_a_stamp_that_never_fired() {
 #[test]
 fn a_parked_switch_is_refused_on_every_record_it_would_be_wrong_for() {
     with_daemon("altcand-parked-refuse", |d| {
-        let spool = spooled();
+        let (_spooldir, spool) = spooled();
         {
             let mut h = d.history.lock_ok();
             h.push(parked(
@@ -889,7 +903,7 @@ fn a_clicked_switch_repoints_the_spares_it_did_not_pick() {
 #[test]
 fn a_clicked_switch_on_a_failed_row_repoints_the_spares_it_did_not_pick() {
     with_daemon("altcand-parked-repoint", |d| {
-        let spool = spooled();
+        let (_spooldir, spool) = spooled();
         d.history.lock_ok().push(parked(
             "dead",
             "Show.S01E01.2160p-A",

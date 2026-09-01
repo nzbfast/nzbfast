@@ -248,8 +248,8 @@ impl Daemon {
 
     /// Restore the script knobs from settings.json: the post-processing
     /// deadline and the two pre-queue settings. Split out of
-    /// `restore_runtime_state`, which is at the size gate's function
-    /// ceiling.
+    /// `restore_runtime_state`, which was 514 lines on 10 Aug 2026, past
+    /// the size gate's 500-line function ceiling.
     pub(in crate::serve) fn restore_script_knobs(&self, saved: &serde_json::Map<String, Value>) {
         if let Some(v) = saved.get("script_timeout_secs").and_then(Value::as_u64) {
             self.script_timeout.store(v, Ordering::Relaxed);

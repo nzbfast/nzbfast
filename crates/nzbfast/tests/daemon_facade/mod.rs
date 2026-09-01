@@ -197,7 +197,6 @@ async fn sab_facade_priorities_and_retry() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Issue #34: the SAB facade's queue and history bodies carry the whole
@@ -273,6 +272,10 @@ async fn sab_facade_carries_sabnzbds_own_queue_and_history_shape() {
     })
     .await;
     let port = d.port;
+    // The one configured server's host, so the `servers` census below
+    // asserts against what was WRITTEN into the config rather than a
+    // literal that a differently-bound mock would falsify.
+    let srv_host = srv.addr.ip().to_string();
 
     tokio::task::spawn_blocking(move || {
         use serde_json::Value;
@@ -406,6 +409,232 @@ async fn sab_facade_carries_sabnzbds_own_queue_and_history_shape() {
         // slot field is present and empty rather than absent.
         assert_eq!(slots[0]["password"], "", "{q}");
 
+        // --- and the VALUES, which a key-and-type census cannot see ---
+        //
+        // Everything above this line is names and types, and that half
+        // was complete: measured 31 Aug 2026 against SAB 5.1.2, neither
+        // body nor either slot has a key SAB sends and we do not. Every
+        // defect the audit that day found was a WRONG STRING in a key
+        // that was present and correctly typed - `"2089.6 G"` for a 2 TB
+        // disk, `"5"` for a five-minute pause, `Duplicate` in a field
+        // whose vocabulary is five words and does not include it. So
+        // these arms check what the strings SAY.
+        //
+        // The exact formats live in `serve/sabcompat/units.rs`, pinned
+        // against a transliteration of SAB's own `to_units`; what is
+        // asserted HERE is the part that needs a live payload - that
+        // the wire really carries those shapes, on a real row, through
+        // the real handler.
+
+        // SAB's INTERFACE_PRIORITIES, and nothing outside it. SAB keeps
+        // a STATE out of this field by construction (`set_priority`
+        // applies the state, then `set_stateless_priority`), which is
+        // why five words is the whole set a client can be written
+        // against.
+        const SAB_PRIORITIES: [&str; 5] = ["Force", "Repair", "High", "Normal", "Low"];
+        let prio = slots[0]["priority"].as_str().unwrap_or_default();
+        assert!(
+            SAB_PRIORITIES.contains(&prio),
+            "queue slot priority {prio:?} is not one of SAB's \
+             INTERFACE_PRIORITIES words {SAB_PRIORITIES:?}: {q}"
+        );
+
+        // SAB's `to_units(x, "B")`: a number, a space, an optional tier
+        // letter, then B. The tier letter must be one SAB has - the
+        // ladder stopped at G here until 31 Aug 2026, so a terabyte
+        // queue published "1024.0 GB" against SAB's "1.0 TB".
+        for (where_, v) in [
+            ("queue size", &queue["size"]),
+            ("queue sizeleft", &queue["sizeleft"]),
+            ("slot size", &slots[0]["size"]),
+            ("slot sizeleft", &slots[0]["sizeleft"]),
+            ("quota", &queue["quota"]),
+            ("left_quota", &queue["left_quota"]),
+            ("cache_size", &queue["cache_size"]),
+        ] {
+            let s = v.as_str().unwrap_or_default();
+            let tail = s.rsplit_once(' ').map(|(_, t)| t).unwrap_or("");
+            assert!(
+                ["B", "KB", "MB", "GB", "TB", "PB"].contains(&tail),
+                "{where_} {s:?} does not end in a SAB unit: {q}"
+            );
+        }
+
+        // ...and the BARE form carries no unit at all below 1024, which
+        // is SAB's `if n == 0 and postfix == ""` arm. This sent a
+        // trailing space, so an idle daemon's `speed` was `"0 "` where
+        // SAB says `"0"` - and a client handing that to a strict
+        // numeric parse (Kotlin's `String.toInt()` refuses trailing
+        // whitespace) sees the difference.
+        for (where_, v) in [
+            ("speed", &queue["speed"]),
+            ("diskspace1_norm", &queue["diskspace1_norm"]),
+        ] {
+            let s = v.as_str().unwrap_or_default();
+            assert_eq!(s, s.trim_end(), "{where_} {s:?} has a trailing space: {q}");
+        }
+
+        // SAB's `pause_int` is "minutes:seconds", or a bare "0" when
+        // nothing is scheduled. Unpaused here, so it is the "0".
+        assert_eq!(queue["pause_int"], "0", "{q}");
+        // SAB's `"%.2f" % (bps / KIBI)` - two decimals, always.
+        let kb = queue["kbpersec"].as_str().unwrap_or_default();
+        assert!(
+            kb.rsplit_once('.').is_some_and(|(_, d)| d.len() == 2),
+            "kbpersec {kb:?} should carry SAB's two decimals: {q}"
+        );
+
+        // --- mode=status and mode=fullstatus --------------------------
+        //
+        // SAB's `_api_table` reaches `_api_fullstatus` under BOTH names,
+        // so the two bodies are one object there and a client is
+        // entitled to read either. Here they were two arms with two
+        // different key sets - `fullstatus` had no `warnings`,
+        // `have_warnings`, `pause_int`, `cache_art`, `cache_size`,
+        // `finishaction`, `servers` or `diskspace1_norm`, and `status`
+        // had no `diskspace2` or `speedlimit` - so which absent-key
+        // crash a statically-typed client met depended only on which
+        // spelling it happened to send. NZB Donkey sends `status` and
+        // NZB Unity sends `fullstatus` (`serve/http.rs`), so both have
+        // real callers. Held to the same table as the queue body above,
+        // because both come from SAB's `build_header`.
+        let want_status: &[(&str, Ty)] = &[
+            ("version", Ty::Str),
+            ("uptime", Ty::Str),
+            ("color_scheme", Ty::Str),
+            ("paused", Ty::Bool),
+            ("paused_all", Ty::Bool),
+            ("pause_int", Ty::Str),
+            ("diskspace1", Ty::Str),
+            ("diskspace2", Ty::Str),
+            ("diskspace1_norm", Ty::Str),
+            ("diskspace2_norm", Ty::Str),
+            ("diskspacetotal1", Ty::Str),
+            ("diskspacetotal2", Ty::Str),
+            ("speedlimit", Ty::Str),
+            ("speedlimit_abs", Ty::Str),
+            ("have_warnings", Ty::Str),
+            ("warnings", Ty::Arr),
+            ("finishaction", Ty::Null),
+            ("quota", Ty::Str),
+            ("have_quota", Ty::Bool),
+            ("left_quota", Ty::Str),
+            ("cache_art", Ty::Str),
+            ("cache_size", Ty::Str),
+            ("servers", Ty::Arr),
+            ("complete_dir", Ty::Str),
+            ("completedir", Ty::Str),
+        ];
+        let st = get("mode=status&output=json");
+        let fs = get("mode=fullstatus&output=json");
+        check(&st["status"], "status", want_status);
+        check(&fs["status"], "fullstatus", want_status);
+        // ONE DAEMON, ONE DISK, ONE STRING. Read-only sweep finding 12
+        // (31 Aug 2026): the queue header runs the raw byte count through
+        // `sab_units` - GH #69's own fix - while both status arms still
+        // wrote `format!("{free:.1} G")` over a GIGABYTE figure. The two
+        // disagree for every non-zero disk and by a whole unit tier past
+        // a terabyte, so a client that reads `mode=status` rather than
+        // the queue header saw a different number for the same
+        // filesystem. Held as an equality rather than to a literal
+        // because the runner's free space is not ours to choose; the
+        // shape census above already pins the unit vocabulary.
+        for (name, body) in [("status", &st), ("fullstatus", &fs)] {
+            for key in ["diskspace1_norm", "diskspace2_norm"] {
+                assert_eq!(
+                    body["status"][key], queue[key],
+                    "{name}.{key} and the queue header describe the same disk \
+                     and must render it the same way: {body}"
+                );
+            }
+        }
+        // Every CONFIGURED server, one object per row, fifteen fields
+        // (`build_status`, identical in 4.5.0, 5.1.2 and develop - only
+        // the internal `connected`/`ready` predicate moved). Ours was a
+        // literal `[]` until 31 Aug 2026 on an install with servers
+        // configured and downloading, so a remote app's Servers pane was
+        // permanently blank: GH #69 finding 3's defect (a configured
+        // server missing from a payload about servers) one mode over.
+        //
+        // ASSERTED WITH NO RUN IN FLIGHT, which is the point of putting
+        // it here rather than after the resume below: the daemon is
+        // PAUSED with one job queued, so `hub.pool_live` - the live
+        // fleet the counters come from - does not exist. A list built
+        // from that handle answers `[]` again the moment nothing is
+        // downloading, which is finding 3's mistake made a second time,
+        // and no shape census would ever catch it. The row below has to
+        // be here, with its live half zeroed, off the CONFIG.
+        let servers = st["status"]["servers"]
+            .as_array()
+            .expect("status.servers is an array");
+        assert_eq!(
+            servers.len(),
+            1,
+            "one server is configured and it must be listed even with nothing downloading: {st}"
+        );
+        check(
+            &servers[0],
+            "status.servers[0]",
+            &[
+                ("servername", Ty::Str),
+                ("serveractive", Ty::Bool),
+                ("serveractiveconn", Ty::Num),
+                ("servertotalconn", Ty::Num),
+                ("serverconnections", Ty::Arr),
+                ("serverssl", Ty::Bool),
+                ("serversslinfo", Ty::Str),
+                // Null in SAB too until a connection exists and the
+                // address is resolved, so a client already handles it;
+                // an invented address would be worse than the null.
+                ("serveripaddress", Ty::Null),
+                ("servercanonname", Ty::Null),
+                ("serverwarning", Ty::Str),
+                ("servererror", Ty::Str),
+                ("serverpriority", Ty::Num),
+                ("serveroptional", Ty::Bool),
+                // A STRING through SAB's `to_units`, not a number -
+                // the same mistake `get_files.bytes` was crashing
+                // clients with.
+                ("serverbps", Ty::Str),
+            ],
+        );
+        assert_eq!(
+            servers[0]["servername"], srv_host,
+            "the row must name the CONFIGURED server: {st}"
+        );
+        assert_eq!(
+            servers[0]["serveractiveconn"], 0,
+            "nothing is on the wire, so the live half reads zero rather than being absent: {st}"
+        );
+        // `fullstatus` is the same body, so it carries the same rows -
+        // the key-set assertion below cannot see inside the array.
+        assert_eq!(
+            fs["status"]["servers"], st["status"]["servers"],
+            "SAB answers both mode names from one function\nstatus: {st}\nfullstatus: {fs}"
+        );
+
+        // And the two carry the SAME key set, not merely both supersets
+        // of the table above - a table is a floor and this is the
+        // property that was actually broken. `speedlimit_abs` is the one
+        // field whose VALUE the two still spell differently, and that is
+        // a deliberate deviation with a named client behind it (see the
+        // `fullstatus` arm); the KEY is present in both.
+        let keys = |v: &Value| {
+            let mut k: Vec<String> = v["status"]
+                .as_object()
+                .expect("status object")
+                .keys()
+                .cloned()
+                .collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&st),
+            keys(&fs),
+            "SAB answers both mode names from one function; these must not drift apart\nstatus: {st}\nfullstatus: {fs}"
+        );
+
         // --- the history body -----------------------------------------
         http(port, "/api?mode=resume&output=json", None);
         let h = (0..150)
@@ -483,12 +712,59 @@ async fn sab_facade_carries_sabnzbds_own_queue_and_history_shape() {
         // A Completed job cannot be retried, which is what SAB's boolean
         // says here.
         assert_eq!(hist["slots"][0]["retry"], false, "{h}");
-        // SAB's own suffix convention (to_units + "B"), not a bare MB.
+        // SAB's own suffix convention (to_units + "B"), not a bare MB,
+        // and a tier letter from SAB's own ladder rather than a prefix
+        // of it.
         let size = hist["slots"][0]["size"].as_str().unwrap_or_default();
+        let tail = size.rsplit_once(' ').map(|(_, t)| t).unwrap_or("");
         assert!(
-            size.ends_with('B') && size.contains(' '),
+            ["B", "KB", "MB", "GB", "TB", "PB"].contains(&tail),
             "history size should be SAB-shaped: {size}"
         );
+        // The four history totals take the BARE form, which carries no
+        // unit at all below 1024 - so no trailing space. They read
+        // `"0 "` until 31 Aug 2026.
+        for k in ["total_size", "month_size", "week_size", "day_size"] {
+            let v = hist[k].as_str().unwrap_or_default();
+            assert_eq!(v, v.trim_end(), "history {k} {v:?} has a trailing space: {h}");
+        }
+
+        // --- SAB's `cat` spelling, on both modes ----------------------
+        //
+        // SAB reads `kwargs.get("cat") or kwargs.get("category")` in
+        // `_api_queue_default` AND `_api_history_default`, in 4.5.0 and
+        // 5.1.2 alike, so a client may send either. Only `category` was
+        // read here until 31 Aug 2026 - and an unread filter does not
+        // fail, it returns EVERYTHING, so a client asking for one
+        // category was quietly handed the whole list. Both spellings,
+        // and a category that matches nothing, so a filter that has
+        // stopped filtering fails here rather than reading as a
+        // generous match.
+        //
+        // The job added above carries `cat=tv`; it has completed by
+        // now, so the queue arm is exercised against the history one's
+        // sibling parameter on an empty queue - the assertion that
+        // matters for it is the NEGATIVE, which an ignored filter
+        // cannot satisfy.
+        for k in ["cat", "category"] {
+            let h = get(&format!("mode=history&output=json&{k}=tv"));
+            assert_eq!(
+                h["history"]["slots"].as_array().map(Vec::len),
+                Some(1),
+                "history {k}=tv should match the one tv job: {h}"
+            );
+            let h = get(&format!("mode=history&output=json&{k}=nosuchcategory"));
+            assert_eq!(
+                h["history"]["slots"].as_array().map(Vec::len),
+                Some(0),
+                "history {k}= a category nothing carries must match nothing: {h}"
+            );
+            let q = get(&format!("mode=queue&output=json&{k}=nosuchcategory"));
+            assert_eq!(
+                q["queue"]["noofslots"], 0,
+                "queue {k}= a category nothing carries must match nothing: {q}"
+            );
+        }
 
         // --- NZB360's literal traffic ---------------------------------
         // From the SAB debug log in sabnzbd/sabnzbd#872: `output` arrives
@@ -531,7 +807,6 @@ async fn sab_facade_carries_sabnzbds_own_queue_and_history_shape() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// M21: the NZBGet JSON-RPC facade - a remote-control app's whole
@@ -607,7 +882,6 @@ async fn nzbget_jsonrpc_facade_cycle() {
         out
     }
 
-    let dir2 = dir.clone();
     tokio::task::spawn_blocking(move || {
         let rpc = |method: &str, params: String| -> String {
             let body = format!("{{\"method\":\"{method}\",\"params\":{params},\"id\":7}}");
@@ -679,7 +953,6 @@ async fn nzbget_jsonrpc_facade_cycle() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir2);
 }
 
 /// The NZBGet JSON-RPC facade announces the idle edge (Codex sweep
@@ -743,7 +1016,6 @@ async fn jsonrpc_pause_and_delete_announce_the_idle_edge() {
     .await;
     let port = d.port;
 
-    let dir2 = dir.clone();
     tokio::task::spawn_blocking(move || {
         fn b64(data: &[u8]) -> String {
             const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -855,7 +1127,6 @@ async fn jsonrpc_pause_and_delete_announce_the_idle_edge() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir2);
 }
 
 /// The NZBGet facade answers with NZBGet's own vocabulary.
@@ -942,7 +1213,6 @@ async fn nzbget_facade_reports_real_statuses_and_real_errors() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The SAB surface a remote app and an *arr actually poll.
@@ -1001,6 +1271,35 @@ async fn sab_facade_status_warnings_and_change_cat() {
         let r = http(port, "/api?mode=get_scripts&apikey=sekrit&output=json", None);
         assert!(r.contains("\"None\""), "{r}");
 
+        // Every category SAB serializes carries SEVEN keys
+        // (`ConfigCat.get_dict`, identical in 4.5.0, 5.1.2 and develop,
+        // read 30 Aug 2026) and we sent five: `order` and `newzbin` were
+        // absent outright. That is GH #69's absent-key half in the
+        // payload the *arrs and every remote app read to fill a category
+        // dropdown - a client with a non-nullable field for either dies
+        // before it sees a category name.
+        let r = http(port, "/api?mode=get_config&apikey=sekrit&output=json", None);
+        let cfg_body: serde_json::Value = serde_json::from_str(&r).expect("get_config is JSON");
+        let cats = cfg_body["config"]["categories"]
+            .as_array()
+            .expect("a categories array");
+        assert!(!cats.is_empty(), "the built-in categories must be listed: {r}");
+        for (i, c) in cats.iter().enumerate() {
+            for key in ["name", "order", "pp", "script", "dir", "newzbin", "priority"] {
+                assert!(
+                    c.get(key).is_some(),
+                    "SAB sends `{key}` on every category and we do not: {c}"
+                );
+            }
+            assert_eq!(
+                c["order"].as_u64(),
+                Some(i as u64),
+                "`order` is the position in the list we just sent: {c}"
+            );
+            assert!(c["newzbin"].is_string(), "{c}");
+            assert!(c["priority"].is_number(), "{c}");
+        }
+
         // Pause before queueing, and it has to be before: "no server, so
         // it never starts" is not true. With an empty server list the job
         // IS picked up, fails "config has no servers" inside half a
@@ -1050,5 +1349,544 @@ async fn sab_facade_status_warnings_and_change_cat() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `mode=status.servers` is FULL-KEY, and the add-only tier keeps the
+/// empty array it has always had.
+///
+/// Not a shape question and not settled by anything that shipped. SAB's
+/// `status` is on the add-only NZB key's allowlist here (`serve/http.rs`)
+/// so a push extension's "test connection" button works, and that tier's
+/// stated promise is a version string, paused/warning/disk numbers and
+/// the category names, with queue contents and the filesystem layout
+/// full-key. A list of the user's configured provider HOSTNAMES is none
+/// of those.
+///
+/// Our own tree answers the wider question both ways - `out_dir_for`
+/// blanks the download path for this tier, while `sab_warnings`
+/// deliberately DOES name an exhausted provider's host to it with a
+/// stated reason - so there is no house rule to appeal to, and picking
+/// one is J4 of `research/SAB-MODE-SHAPE-AUDIT-2026-08-31.md` - a
+/// product decision, deliberately left open. Filling the array for
+/// full-key callers changes nothing the add-only key can already see,
+/// which is why it did not have to wait for that answer. This test is what makes the decision VISIBLE: whichever way
+/// J4 lands, the line moves in a diff instead of by accident.
+#[tokio::test(flavor = "multi_thread")]
+async fn sab_status_servers_are_full_key_only() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-sabsrvtier-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+    // Two rows on ONE hostname, which is the shape that makes a
+    // host-keyed lookup wrong (a flat-rate account plus a small block
+    // fill at the same provider is ordinary), plus a switched-off third.
+    // Never dialled: nothing here downloads.
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        r#"{"servers":[
+             {"host":"news.invalid","port":563,"tls":true,"connections":8,"level":0},
+             {"host":"news.invalid","port":119,"tls":false,"connections":2,"level":1},
+             {"host":"off.invalid","port":563,"tls":true,"connections":4,"level":2,"enabled":false}
+           ]}"#,
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        let body = |q: &str| -> serde_json::Value {
+            let r = http(port, &format!("/api?{q}"), None);
+            serde_json::from_str(&r).unwrap_or_else(|e| panic!("not JSON ({e}): {r}"))
+        };
+        let rows = |v: &serde_json::Value| -> Vec<serde_json::Value> {
+            v["status"]["servers"]
+                .as_array()
+                .unwrap_or_else(|| panic!("status.servers is an array: {v}"))
+                .clone()
+        };
+
+        // Full key: every CONFIGURED row, including the switched-off
+        // one, which SAB reports as inactive rather than dropping.
+        let full = body("mode=status&apikey=sekrit&output=json");
+        let r = rows(&full);
+        assert_eq!(r.len(), 3, "one row per configured server: {full}");
+        assert_eq!(r[0]["servername"], "news.invalid");
+        assert_eq!(
+            r[0]["servertotalconn"], 8,
+            "SAB's threads is the CONFIGURED count"
+        );
+        assert_eq!(r[0]["serverpriority"], 0);
+        assert_eq!(r[0]["serverssl"], true);
+        // The second row on the same hostname keeps its OWN numbers: a
+        // lookup keyed by host would hand it the first row's.
+        assert_eq!(r[1]["servername"], "news.invalid");
+        assert_eq!(r[1]["servertotalconn"], 2);
+        assert_eq!(r[1]["serverssl"], false);
+        assert_eq!(
+            r[2]["serveractive"], false,
+            "a switched-off server never joins a pool, which is SAB's inactive: {full}"
+        );
+        assert_eq!(r[0]["serveractive"], true);
+        // Nothing is downloading, so the live half is zeroed rather than
+        // absent - and the rows are here at all, which is the defect.
+        for row in &r {
+            assert_eq!(row["serveractiveconn"], 0, "{row}");
+            assert_eq!(row["serverbps"], "0", "{row}");
+            assert_eq!(row["serverconnections"], serde_json::json!([]), "{row}");
+        }
+        // Both spellings, since SAB answers them from one function.
+        assert_eq!(
+            rows(&body("mode=fullstatus&apikey=sekrit&output=json")),
+            r,
+            "fullstatus must carry the same rows: {full}"
+        );
+
+        // Now the add-only key. Minted through the API so the tier is
+        // reached exactly as a push extension reaches it.
+        let mk = http(
+            port,
+            "/api?mode=config&name=nzbkey&value=addonly&apikey=sekrit&output=json",
+            None,
+        );
+        assert!(
+            mk.contains("\"status\":true"),
+            "could not set an nzbkey: {mk}"
+        );
+        for mode in ["status", "fullstatus"] {
+            let v = body(&format!("mode={mode}&apikey=addonly&output=json"));
+            assert!(
+                v["status"]["version"].is_string(),
+                "the add-only key must still reach {mode} at all: {v}"
+            );
+            assert_eq!(
+                rows(&v),
+                Vec::<serde_json::Value>::new(),
+                "the add-only tier must not be handed the provider list ({mode}): {v}"
+            );
+        }
+        // And the key that is allowed to see them still does, so the
+        // assertion above is about the TIER and not about the daemon
+        // having forgotten its servers.
+        assert_eq!(
+            rows(&body("mode=status&apikey=sekrit&output=json")).len(),
+            3,
+            "the full key still sees every configured server"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// The WRITE arms of `mode=queue` and `mode=history`, against the shapes
+/// SAB answers with - the half `sab_facade_carries_sabnzbds_own_queue_and_history_shape`
+/// above deliberately did not cover, and the one where getting it wrong
+/// DESTROYS something.
+///
+/// Read off `sabnzbd/api.py`'s `_api_queue_table` / `_api_history_table`
+/// at tag 5.1.2, cross-checked at 4.5.0 (the version `SAB_VERSION`
+/// advertises: the two are identical on every queue arm but for typing
+/// syntax). Every arm answers `report(keyword="", data={...})`, and
+/// `report` puts a dict with a falsy keyword out as the WHOLE body, so
+/// `{"status": ..., "nzo_ids": [...]}` is the top-level object.
+///
+/// Five things it pins, each of which was live on origin/main on 31 Aug
+/// 2026 and every one of which the key-and-type census above was blind
+/// to, because a verb with no arm and a verb with a wrong value both
+/// answer valid JSON:
+///
+/// 1. `nzo_ids` on delete / purge / pause / resume. SAB's own answer;
+///    absent here, so a client batching a write and reconciling by the
+///    returned list got `null` and could not tell WHICH ids were acted
+///    on. Same absent-key class as GH #69's `server_stats`.
+/// 2. `search=` narrowing the SWEEPS. Ignored on both delete arms, and
+///    an unread filter on a DELETE does not fail - it deletes
+///    everything. `value=all&search=Alpha` swept a whole queue and a
+///    whole history.
+/// 3. `purge`, `delete_nzf` and `mark_as_completed` had NO arm and fell
+///    through to the payload default, so a destructive verb answered
+///    with the queue LISTING - an object with no `status` key anywhere
+///    in it, which is exactly the shape that crashed #69's client - and
+///    swept nothing.
+/// 4. `rename` with no `value2` renamed the job to the empty string and
+///    answered `{"status": true}`. The name is the only handle anyone
+///    has on the row.
+/// 5. `priority` answered a hardcoded `position: -1`, which is the value
+///    SAB reserves for "incorrect job-id", so a client checking
+///    `position >= 0` read every success as a failure.
+///
+/// A paused queue throughout: `pick_job` never runs, so the rows stay
+/// Queued for as long as the assertions need them - the reason the
+/// `change_cat` leg above pauses first, in its own words.
+#[tokio::test(flavor = "multi_thread")]
+async fn sab_facade_write_arms_answer_sabnzbds_own_shapes() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-sabwrite-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    // Seeded BEFORE the daemon starts, the way `daemon_delete` does it:
+    // the history sweep half needs rows in four (name, state) shapes and
+    // waiting for four real downloads would buy nothing this asks about.
+    let spool = dir.join("complete/.spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    let mut seeded = String::new();
+    for (id, name, state) in [
+        ("SABnzbd_nzo_wr1", "Alpha.Done", "Completed"),
+        ("SABnzbd_nzo_wr2", "Beta.Done", "Completed"),
+        ("SABnzbd_nzo_wr3", "Alpha.Bad", "Failed"),
+        ("SABnzbd_nzo_wr4", "Gamma.Bad", "Failed"),
+    ] {
+        let out = dir.join("complete").join(name);
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("p.mkv"), b"x").unwrap();
+        let row = serde_json::json!({
+            "nzo_id": id, "name": name, "state": state,
+            "nzb_path": dir.join(format!("{name}.nzb")).to_string_lossy(),
+            "out_dir": out.to_string_lossy(),
+            "category": "", "total_bytes": 1u64,
+            "finished_unix": 1_722_000_000i64, "fail_message": "",
+        });
+        seeded.push_str(&serde_json::to_string(&row).unwrap());
+        seeded.push('\n');
+    }
+    std::fs::write(spool.join("history.jsonl"), seeded).unwrap();
+
+    let srv = MockServer::start(HashMap::new(), Chaos::default()).await;
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        use serde_json::Value;
+
+        let call = |q: &str| -> Value {
+            let r = http(port, &format!("/api?apikey=sekrit&output=json&{q}"), None);
+            serde_json::from_str(&r).unwrap_or_else(|e| panic!("{q} answered non-JSON ({e}): {r}"))
+        };
+        // Names in queue order, so an assertion can say WHICH rows a
+        // sweep left rather than how many.
+        let names = || -> Vec<String> {
+            call("mode=queue")["queue"]["slots"]
+                .as_array()
+                .expect("slots")
+                .iter()
+                .map(|s| s["filename"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let ids_of = |v: &Value| -> Vec<String> {
+            v["nzo_ids"]
+                .as_array()
+                .unwrap_or_else(|| panic!("SAB answers this write with `nzo_ids`: {v}"))
+                .iter()
+                .map(|s| s.as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let add = |name: &str| -> String {
+            let nzb = "<?xml version=\"1.0\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n  <file poster=\"x\" date=\"0\" subject=\"&quot;w.bin&quot; yEnc (1/1)\">\n    <groups><group>g</group></groups>\n    <segments><segment bytes=\"100\" number=\"1\">&lt;a@x&gt;</segment></segments>\n  </file>\n</nzb>\n";
+            let body = format!(
+                "--BB\r\nContent-Disposition: form-data; name=\"nzbfile\"; filename=\"{name}.nzb\"\r\nContent-Type: application/xml\r\n\r\n{nzb}\r\n--BB--\r\n"
+            );
+            let r = http(
+                port,
+                "/api?mode=addfile&apikey=sekrit&output=json",
+                Some(("multipart/form-data; boundary=BB", body.as_bytes())),
+            );
+            r.split("\"nzo_ids\":[\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .unwrap_or_else(|| panic!("no nzo_id from addfile: {r}"))
+                .to_string()
+        };
+
+        assert_eq!(call("mode=pause")["status"], Value::Bool(true));
+        let a = add("Alpha.One");
+        let b = add("Beta.Two");
+        let c = add("Alpha.Three");
+        assert_eq!(names(), ["Alpha.One", "Beta.Two", "Alpha.Three"]);
+
+        // (1) pause / resume carry the ids they acted on. Ours reports
+        // the rows that TOOK the write; SAB's own arm echoes back every
+        // id it was handed, because `pause_multiple_nzo` appends
+        // unconditionally - an upstream slip, written up in
+        // research/SAB-WRITE-ARM-SHAPES-2026-08-31.md and deliberately
+        // not copied. Either way the KEY is there and is an array.
+        let r = call(&format!("mode=queue&name=pause&value={a}"));
+        assert_eq!(r["status"], Value::Bool(true), "{r}");
+        assert_eq!(ids_of(&r), *std::slice::from_ref(&a), "{r}");
+        // A miss is an empty array, never a missing key: a client that
+        // declared `List<String>` must be able to read the failure too.
+        let r = call("mode=queue&name=pause&value=nzo_not_here");
+        assert_eq!(r["status"], Value::Bool(false), "{r}");
+        assert!(ids_of(&r).is_empty(), "{r}");
+        let r = call(&format!("mode=queue&name=resume&value={a}"));
+        assert_eq!(ids_of(&r), *std::slice::from_ref(&a), "{r}");
+
+        // (5) `position` is the row's index after the write, not a
+        // constant. -1 is SAB's "incorrect job-id" and must mean only
+        // that.
+        let r = call(&format!("mode=queue&name=priority&value={a}&value2=1"));
+        assert_eq!(r["status"], Value::Bool(true), "{r}");
+        assert_eq!(
+            r["position"].as_i64(),
+            Some(0),
+            "the High job runs first, so it is at index 0: {r}"
+        );
+        let r = call("mode=queue&name=priority&value=nzo_not_here&value2=1");
+        assert_eq!(r["status"], Value::Bool(false), "{r}");
+        assert_eq!(r["position"].as_i64(), Some(-1), "{r}");
+
+        // ...and a priority that is missing, or present and unreadable,
+        // is refused rather than silently read as Normal. Both demoted a
+        // Force job under a `"status": true` until 31 Aug 2026.
+        for q in [
+            format!("mode=queue&name=priority&value={a}"),
+            format!("mode=queue&name=priority&value={a}&value2=notaprio"),
+        ] {
+            let r = call(&q);
+            assert_eq!(r["status"], Value::Bool(false), "{q}: {r}");
+            assert!(r["error"].is_string(), "{q} must say why: {r}");
+        }
+        let still_high = call("mode=queue")["queue"]["slots"][0]["priority"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(still_high, "High", "a refused priority write changed it");
+
+        // (4) a rename with no new name is a refusal, and it must leave
+        // the label alone - the whole defect was that it did not.
+        for q in [
+            format!("mode=queue&name=rename&value={b}"),
+            format!("mode=queue&name=rename&value={b}&value2="),
+            format!("mode=queue&name=rename&value={b}&value2=%20"),
+        ] {
+            let r = call(&q);
+            assert_eq!(r["status"], Value::Bool(false), "{q}: {r}");
+            assert!(
+                names().iter().any(|n| n == "Beta.Two"),
+                "{q} renamed the job anyway: {:?}",
+                names()
+            );
+        }
+        let r = call(&format!("mode=queue&name=rename&value={b}&value2=Beta.Renamed"));
+        assert_eq!(r["status"], Value::Bool(true), "a real rename: {r}");
+        assert!(names().iter().any(|n| n == "Beta.Renamed"), "{:?}", names());
+
+        // (3) a verb we do not implement answers in SAB's SHAPE, never
+        // with the payload the mode's default arm builds. `status` is
+        // the key that has to be there; `queue` / `history` is the key
+        // that must not.
+        let r = call(&format!("mode=queue&name=delete_nzf&value={a}&value2=nzf_1"));
+        assert!(r["status"].is_boolean(), "{r}");
+        assert!(r["nzf_ids"].is_array(), "SAB answers delete_nzf with nzf_ids: {r}");
+        assert!(r.get("queue").is_none(), "answered with the queue listing: {r}");
+        let r = call("mode=history&name=mark_as_completed&value=SABnzbd_nzo_wr3");
+        assert!(r["status"].is_boolean(), "{r}");
+        assert!(r.get("history").is_none(), "answered with the history listing: {r}");
+
+        // (2) `search` narrows a SWEEP. Ignoring it deleted everything.
+        let r = call("mode=queue&name=delete&value=all&search=Alpha");
+        assert_eq!(r["status"], Value::Bool(true), "{r}");
+        let mut got = ids_of(&r);
+        got.sort();
+        let mut want = vec![a.clone(), c.clone()];
+        want.sort();
+        assert_eq!(got, want, "only the two Alpha rows: {r}");
+        assert_eq!(names(), ["Beta.Renamed"], "the sweep took an unmatched row");
+
+        // ...and never an explicit id list, which SAB threads it into
+        // neither: `remove_all` takes `search`, `remove_multiple` does
+        // not.
+        let d1 = add("Delta.Keep");
+        let r = call(&format!("mode=queue&name=delete&value={d1}&search=nothing-matches-this"));
+        assert_eq!(ids_of(&r), *std::slice::from_ref(&d1), "a named id is not search-filtered: {r}");
+
+        // (3) `purge` is SAB's delete-everything, and it takes `search`
+        // too. It had no arm at all, so it answered with the listing and
+        // swept nothing.
+        let e1 = add("Echo.Purge");
+        let f1 = add("Foxtrot.Purge");
+        let r = call("mode=queue&name=purge&search=Echo");
+        assert!(r.get("queue").is_none(), "purge answered with the listing: {r}");
+        assert_eq!(ids_of(&r), *std::slice::from_ref(&e1), "{r}");
+        let r = call("mode=queue&name=purge");
+        assert_eq!(r["status"], Value::Bool(true), "{r}");
+        assert!(ids_of(&r).contains(&f1), "a bare purge takes the rest: {r}");
+        assert!(names().is_empty(), "purge left rows behind: {:?}", names());
+
+        // The history half of (1) and (2), on the store seeded above.
+        // `removed` and `nzo_ids` are both additive here - SAB answers a
+        // bare `report()` - but the sweep narrowing is not: it destroys.
+        let before: Vec<String> = call("mode=history")["history"]["slots"]
+            .as_array()
+            .expect("slots")
+            .iter()
+            .map(|s| s["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(before.len(), 4, "seeded history did not load: {before:?}");
+        let r = call("mode=history&name=delete&value=all&search=Alpha");
+        assert_eq!(r["status"], Value::Bool(true), "{r}");
+        let mut got = ids_of(&r);
+        got.sort();
+        assert_eq!(got, ["SABnzbd_nzo_wr1", "SABnzbd_nzo_wr3"], "{r}");
+        let left: Vec<String> = call("mode=history")["history"]["slots"]
+            .as_array()
+            .expect("slots")
+            .iter()
+            .map(|s| s["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(left.len(), 2, "the sweep took an unmatched row: {left:?}");
+        assert!(!left.iter().any(|n| n.starts_with("Alpha")), "{left:?}");
+    })
+    .await
+    .unwrap();
+}
+
+/// The dashboard's "Clear failed" one-click - `mode=history&name=delete
+/// &value=failed` - end to end. It takes the plain failure and leaves a
+/// Completed row alone, and it must ALSO leave a password-locked row
+/// alone whether that row's state is Completed or Failed:
+/// `settle_locked_failure` sets `password_required` on a job whose
+/// unpack failed for want of a password, and that history row is the
+/// only thing carrying the 🔑 to unlock it. Same guarantee
+/// `plan_history_delete`'s unit coverage pins in
+/// `clear_completed_and_clear_failed_spare_password_locked_records`,
+/// checked here against the real facade response rather than the
+/// planner's own return value.
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_failed_sweeps_failures_and_spares_locked_rows() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-histclearfail-{}", std::process::id()));
+    let _scratch = scratch::ScratchDir::attach(&dir);
+
+    let spool = dir.join("complete/.spool");
+    std::fs::create_dir_all(&spool).unwrap();
+    let mut seeded = String::new();
+    for (id, name, state, locked) in [
+        ("SABnzbd_nzo_cf1", "Alpha.Done", "Completed", false),
+        ("SABnzbd_nzo_cf2", "Beta.Bad", "Failed", false),
+        ("SABnzbd_nzo_cf3", "Gamma.Locked", "Completed", true),
+        ("SABnzbd_nzo_cf4", "Delta.Locked.Bad", "Failed", true),
+    ] {
+        let out = dir.join("complete").join(name);
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("p.mkv"), b"x").unwrap();
+        let row = serde_json::json!({
+            "nzo_id": id, "name": name, "state": state,
+            "nzb_path": dir.join(format!("{name}.nzb")).to_string_lossy(),
+            "out_dir": out.to_string_lossy(),
+            "category": "", "total_bytes": 1u64,
+            "finished_unix": 1_722_000_000i64, "fail_message": "",
+            "password_required": locked,
+        });
+        seeded.push_str(&serde_json::to_string(&row).unwrap());
+        seeded.push('\n');
+    }
+    std::fs::write(spool.join("history.jsonl"), seeded).unwrap();
+
+    let srv = MockServer::start(HashMap::new(), Chaos::default()).await;
+    let cfg = dir.join("config.json");
+    std::fs::write(
+        &cfg,
+        format!(
+            "{{\"servers\":[{{\"host\":\"{}\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.ip(),
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let d = serve(&dir, |port| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_nzbfast"));
+        c.env("NZBFAST_NO_ENRICH", "1")
+            .arg("--config")
+            .arg(&cfg)
+            .arg("serve")
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--apikey")
+            .arg("sekrit")
+            .arg("--out")
+            .arg(dir.join("complete"));
+        c
+    })
+    .await;
+    let port = d.port;
+
+    tokio::task::spawn_blocking(move || {
+        let hist = http(port, "/api?apikey=sekrit&output=json&mode=history", None);
+        for id in [
+            "SABnzbd_nzo_cf1",
+            "SABnzbd_nzo_cf2",
+            "SABnzbd_nzo_cf3",
+            "SABnzbd_nzo_cf4",
+        ] {
+            assert!(history_has(&hist, id), "seed did not load {id}: {hist}");
+        }
+        // The button's own visibility question: only the one plain
+        // failure is clearable - both locked rows carry the 🔑 and must
+        // not be counted as available for the bulk sweep.
+        let v: serde_json::Value = serde_json::from_str(&hist).unwrap();
+        assert_eq!(v["history"]["counts"]["clearable_failed"], 1, "{hist}");
+
+        let r = http(
+            port,
+            "/api?apikey=sekrit&output=json&mode=history&name=delete&value=failed",
+            None,
+        );
+        let rv: serde_json::Value =
+            serde_json::from_str(&r).unwrap_or_else(|e| panic!("bad delete response ({e}): {r}"));
+        assert_eq!(rv["status"], serde_json::Value::Bool(true), "{r}");
+
+        let hist2 = http(port, "/api?apikey=sekrit&output=json&mode=history", None);
+        assert!(
+            !history_has(&hist2, "SABnzbd_nzo_cf2"),
+            "the plain failure must be gone: {hist2}"
+        );
+        for id in ["SABnzbd_nzo_cf1", "SABnzbd_nzo_cf3", "SABnzbd_nzo_cf4"] {
+            assert!(
+                history_has(&hist2, id),
+                "{id} must survive value=failed: {hist2}"
+            );
+        }
+    })
+    .await
+    .unwrap();
 }

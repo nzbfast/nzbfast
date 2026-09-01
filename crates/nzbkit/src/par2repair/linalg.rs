@@ -306,7 +306,13 @@ pub(super) fn physical_cores() -> Option<usize> {
     }
 }
 
-pub(super) fn fold_parallel(
+/// `pub(crate)` for `par2gen`: building a RECOVERY slice is the same
+/// linear algebra as building a syndrome - `R_e = Σ_i g_i^e · D_i`
+/// against `S_j = Σ_i g_i^{e_j} · D_i` - so the creator folds through
+/// this routine rather than growing a second spelling of it beside
+/// `par2gen::recovery_slices`. Two implementations of one fold is how a
+/// creator and a repairer part company over a coefficient.
+pub(crate) fn fold_parallel(
     dsts: &mut [Vec<u16>],
     srcs: &[&[u8]],
     coeff: &(dyn Fn(usize, usize) -> u16 + Sync),

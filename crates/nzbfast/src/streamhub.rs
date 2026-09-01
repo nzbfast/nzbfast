@@ -459,6 +459,11 @@ pub(crate) struct JobFileRow {
     /// Encoded bytes as the NZB declares them - the unit the queue's own
     /// denominator is quoted in.
     pub(crate) bytes: u64,
+    /// The NZB's own `date` attribute, unix seconds, 0 when absent or
+    /// unparseable. Carried so `mode=get_files` can answer SAB's `age`
+    /// field, which SAB has emitted on every file row since at least
+    /// 4.5.0 and which we had no value for at all.
+    pub(crate) date: i64,
     pub(crate) segments: usize,
     /// Index into `slots`, or None for an NZB-classified recovery volume
     /// that was never given one.
@@ -551,6 +556,7 @@ pub(crate) fn freeze_rows(
                 id: r.id.clone(),
                 name: r.name.clone(),
                 bytes: r.bytes,
+                date: r.date,
                 segments: r.segments,
                 slot: r.slot,
             })
@@ -695,6 +701,7 @@ pub(crate) fn job_file_row(idx: usize, f: &nzbkit::nzb::NzbFile) -> JobFileRow {
         id: job_file_id(idx, f),
         name: f.filename_hint().unwrap_or(f.subject.as_str()).to_string(),
         bytes: f.bytes(),
+        date: f.date,
         segments: f.segments.len() + f.dropped_segments,
         slot: None,
     }
@@ -941,7 +948,7 @@ pub(crate) struct SeekCtl {
     /// zero-knowledge fallback, which scales the span across the
     /// concatenation of EVERY volume and lands in the wrong file for any
     /// multi-slot set. Hint-keyed; the promote's name is the yEnc one
-    /// (`sanitize_filename(slot.name)`), so an obfuscated post whose
+    /// (`sanitize_out_name(slot.name)`), so an obfuscated post whose
     /// yEnc names differ from its subject hints misses here and resolves
     /// through `observed_by_name` instead.
     pub(crate) slot_by_name: std::collections::HashMap<String, usize>,
@@ -1108,7 +1115,7 @@ impl SeekCtl {
     /// Register the yEnc-declared name observed for `slot`'s articles.
     /// The decode consumers call this once per article BEFORE the
     /// `write_verified` that can fire the slot's offset-0 probe (the
-    /// probe promotes by `sanitize_filename(slot.name)`, i.e. exactly
+    /// probe promotes by `sanitize_out_name(slot.name)`, i.e. exactly
     /// this name); the latch makes the steady-state cost one atomic
     /// load. Without it, an obfuscated multi-volume set's probe missed
     /// the hint-keyed map and scaled its span across EVERY volume -
@@ -1121,7 +1128,7 @@ impl SeekCtl {
         if flag.load(Ordering::Acquire) {
             return;
         }
-        let key = nzbkit::disk::sanitize_filename(name);
+        let key = nzbkit::disk::sanitize_out_name(name);
         // Skip the overlay when the hint map already resolves this name
         // to this slot (honest posts - the overlay stays empty). First
         // insertion wins on a cross-slot duplicate, like the hint map.
@@ -1143,12 +1150,18 @@ impl SeekCtl {
         end: u64,
         ids: &mut Vec<Arc<str>>,
     ) {
+        // N6-11: saturating, not `sum()`. Every one of these totals is
+        // a running sum of poster-declared `<segment bytes>`, each of
+        // which may legally be `u64::MAX`; a plain `sum()` panics in
+        // debug and wraps in release, and a wrapped total near zero
+        // takes the `total_enc == 0` early return below - so the whole
+        // volume-set byte mapping silently stops answering.
         let total_enc: u64 = self
             .vol_slots
             .iter()
             .filter_map(|&s| self.slot_articles.get(s))
-            .map(|(_, t)| t)
-            .sum();
+            .map(|(_, t)| *t)
+            .fold(0u64, u64::saturating_add);
         if file_size == 0 || total_enc == 0 {
             return;
         }
@@ -1162,8 +1175,13 @@ impl SeekCtl {
             if *enc_total == 0 || arts.is_empty() {
                 continue;
             }
-            let (slot_lo, slot_hi) = (base, base + enc_total);
-            base += enc_total;
+            // N6-11: saturating for the same reason as `total_enc`
+            // above. A wrapped `base` puts a later volume's window
+            // BELOW an earlier one's, so the `ge <= slot_lo` test
+            // skips the slot the range actually lands in and the
+            // request is served from the wrong volume's articles.
+            let (slot_lo, slot_hi) = (base, base.saturating_add(*enc_total));
+            base = base.saturating_add(*enc_total);
             if ge <= slot_lo || gs >= slot_hi {
                 continue;
             }
@@ -1180,6 +1198,97 @@ impl SeekCtl {
 #[cfg(test)]
 #[path = "streamhub_tailfiles_tests.rs"]
 mod streamhub_tailfiles_tests;
+
+/// N6-11, the parser/front-door addendum's arithmetic row.
+/// The zero-knowledge span mapping concatenates every volume slot's
+/// encoded ladder, and each of those totals is a saturating running sum
+/// of poster-declared `<segment bytes>` - so a two-volume post
+/// declaring `bytes="18446744073709551615"` legally hands this function
+/// two `u64::MAX` totals.
+///
+/// RED on origin/main at 8fbe1c3bd, in three places on one path: the
+/// `total_enc` `sum()`, `base + enc_total` and `base += enc_total`. In
+/// this profile each is an `attempt to add with overflow` panic on an
+/// ordinary range request - a wedged `/stream` read, not a wrong
+/// number. Built optimized they wrap instead, and a wrapped `total_enc`
+/// near zero takes the `total_enc == 0` early return, so the mapping
+/// silently stops answering and every range falls through to whatever
+/// the caller does with an empty id list.
+#[cfg(test)]
+mod extreme_ladder_tests {
+    use super::*;
+
+    fn arts(n: usize, each: u64) -> (Vec<(u64, Arc<str>)>, u64) {
+        let mut off = 0u64;
+        let mut v = Vec::new();
+        for i in 0..n {
+            v.push((off, Arc::from(format!("<a{i}@t>").as_str())));
+            off = off.saturating_add(each);
+        }
+        (v, off)
+    }
+
+    /// The guard comes back with the ctl because the `Extractor` inside
+    /// it holds `dir`: drop it here and the tree goes while the ctl is
+    /// still live. Returning a bare `SeekCtl` and letting the directory
+    /// leak is what this used to do, and it is one `$TMPDIR` entry per
+    /// run per arity forever - see `crates/nzbfast/tests/scratch/mod.rs`.
+    fn seek(slots: Vec<(Vec<(u64, Arc<str>)>, u64)>) -> (crate::testscratch::ScratchDir, SeekCtl) {
+        let dir = crate::testscratch::ScratchDir::attach(&std::env::temp_dir().join(format!(
+            "nzbfast-ladder-{}-{}",
+            std::process::id(),
+            slots.len()
+        )));
+        let n = slots.len();
+        let ctl = SeekCtl {
+            vol_slots: (0..n).collect(),
+            observed: (0..n)
+                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .collect(),
+            slot_articles: slots,
+            ctl: Arc::new(nzbkit::pool::QueueControl::default()),
+            extractor: Arc::new(nzbkit::extract::Extractor::new(&dir, n, false)),
+            slot_by_name: Default::default(),
+            observed_by_name: std::sync::RwLock::new(Default::default()),
+        };
+        (dir, ctl)
+    }
+
+    #[test]
+    fn extreme_declared_bytes_do_not_overflow_the_volume_ladder() {
+        let (_ladder, s) = seek(vec![arts(3, u64::MAX), arts(3, u64::MAX)]);
+        // Both slot totals saturate, so the concatenation does too -
+        // that is the premise, and it is what the plain `sum()` could
+        // not survive.
+        assert_eq!(s.slot_articles[0].1, u64::MAX);
+
+        // An ordinary range request over an ordinary file size. The
+        // assertion is that it ANSWERS: a wrapped `total_enc` takes the
+        // zero early-return and leaves this empty, and the plain adds
+        // panic before reaching it.
+        let mut ids = Vec::new();
+        s.ladder_fallback(1 << 30, 0, 1 << 20, &mut ids);
+        assert!(
+            !ids.is_empty(),
+            "a saturated ladder must still map a span, not fall silent"
+        );
+
+        // A span at the far end of the file resolves too - the arm
+        // where a wrapped `base` would have put the second volume's
+        // window BELOW the first's and skipped the slot the range
+        // actually lands in.
+        let mut tail = Vec::new();
+        s.ladder_fallback(1 << 30, (1 << 30) - (1 << 20), 1 << 30, &mut tail);
+        assert!(!tail.is_empty(), "the tail of the file must map too");
+
+        // And the degenerate claim is still bounded rather than
+        // panicking: one volume alone at the ceiling.
+        let (_ladder, solo) = seek(vec![arts(2, u64::MAX)]);
+        let mut one = Vec::new();
+        solo.ladder_fallback(1 << 20, 0, 1 << 20, &mut one);
+        assert!(!one.is_empty());
+    }
+}
 
 /// TODO 309: the resume route's owner tag, which is the only thing
 /// standing between a job transition and one download's report carrying

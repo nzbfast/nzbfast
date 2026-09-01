@@ -220,7 +220,6 @@ async fn preview_beats_the_blind_grab_and_enqueues_nothing() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The not-hinder half, §77's rule at add time: while a download is
@@ -345,5 +344,4 @@ async fn preview_stands_down_while_a_download_runs() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }

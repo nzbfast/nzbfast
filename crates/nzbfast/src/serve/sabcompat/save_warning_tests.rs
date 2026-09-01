@@ -8,8 +8,9 @@
 //! restart then came back to whatever the last save that landed held -
 //! jobs the user had added simply gone, with no warning before or after.
 //!
-//! Its own file rather than `sabcompat.rs`'s, for the size gate: the
-//! parent is at its 3,000-line ceiling.
+//! Its own file rather than `sabcompat.rs`'s, for the size gate
+//! (TODO 106): test code moves out of `sabcompat.rs`, the baseline does
+//! not move up.
 
 use super::*;
 

@@ -11,15 +11,20 @@ use super::*;
 /// start with the Rar! magic (obfuscated usenet posts strip extensions and
 /// rename volumes to hex). Only consulted when no normally-named set was
 /// found, so this never shadows the fast name-based path. A named payload
-/// file (`.cbr`) is excluded: its bytes are a RAR, but the file IS the
-/// deliverable, and this collector's caller deletes what it spends.
+/// file is excluded - `.cbr`, whose bytes are a RAR, and since 31 Aug
+/// 2026 also `Movie.mkv`/`disc.iso`/`Subs.srt`, names that say the file
+/// is not an archive at all ([`nzbkit::extract::archive_sniff_eligible`]).
+/// The exclusion matters more here than almost anywhere: this collector's
+/// caller DELETES what it spends. Measured 31 Aug 2026 before the fix, a
+/// directory holding `Movie.mkv` and `Subs.srt` with RAR5 heads returned
+/// both as obfuscated volumes.
 pub(crate) fn collect_obfuscated_rar_volumes(dir: &std::path::Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir)?.flatten() {
         let path = e.path();
         if e.file_type().is_ok_and(|t| t.is_file())
             && (!looks_like_named_rar(&path) || rar_name_carries_no_set(&path))
-            && !nzbkit::extract::is_final_file(&path)
+            && nzbkit::extract::archive_sniff_eligible(&path)
             && rar_magic(&path)
         {
             out.push(path);

@@ -67,6 +67,45 @@ pub struct PostOpts {
     pub title: Option<String>,
     /// Concurrent posting connections.
     pub connections: usize,
+    /// Post under names that say nothing. Must match the [`PlanOpts`]
+    /// the plan was built with: the plan mints the wire names, and this
+    /// decides what the yEnc header does with them.
+    pub obfuscate: Option<Obfuscation>,
+}
+
+/// What the yEnc `name=` line carries in an obfuscated post.
+///
+/// Both shapes are real and both are swept by the no-RAR matrix
+/// (`research/NORAR-DEOBF-MATRIX-2026-08-29.md`), so both are
+/// producible: the choice belongs to the operator, not to us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum YencName {
+    /// The same random token the subject carries. The commoner shape in
+    /// the wild, and the friendlier one: a client with no NZB and no
+    /// recovery set still has SOMETHING to call the file.
+    #[default]
+    Random,
+    /// `name=` with nothing after it. Strictly less linkage, and the
+    /// shape that catches a client which trusts the yEnc header
+    /// blindly.
+    Empty,
+}
+
+/// No-RAR posting: bare files on the wire under names that say nothing,
+/// with the real names carried out of band - in the NZB, and in the
+/// PAR2 FileDesc packets a `--par2` run posts beside them.
+///
+/// This is the near-term shape of the Reddit thread's proposal
+/// (`research/REDDIT-NORAR-FOLLOWUP-2026-08-31.md`): drop the store-RAR
+/// container, which encrypts nothing and only costs a write-unpack-delete
+/// pass, and break HEADER LINKAGE instead so a scraper that never saw the
+/// NZB cannot tie a subject to a release. It is deliberately NOT a
+/// confidentiality claim: yEnc is +42, so the BYTES are as readable as
+/// they ever were, and a `<meta type="password">` RAR is still the only
+/// thing that hides content today.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Obfuscation {
+    pub yenc_name: YencName,
 }
 
 /// One posted article, as the NZB will describe it.
@@ -83,6 +122,11 @@ pub struct PostedSegment {
 /// One posted file with its article set.
 #[derive(Debug, Clone)]
 pub struct PostedFile {
+    /// The name the WIRE carries, which is what the NZB subject quotes
+    /// and therefore what a downloader's filename hint resolves to.
+    /// Under obfuscation this is the random token, NOT the real name -
+    /// so this is never the field to reach for when you want the file's
+    /// own name back. `PlanFile::rel` is.
     pub(crate) name: String,
     pub(crate) subject: String,
     /// Unix time stamped into the articles' Date headers.
@@ -104,9 +148,31 @@ pub struct PostedSet {
 #[derive(Debug, Clone)]
 pub struct PlanFile {
     pub path: PathBuf,
-    /// Name as posted (file name only - local directory layout never
-    /// reaches the wire).
+    /// The file's own name (basename). What the NZB and the wire carry
+    /// in an ordinary post.
     pub name: String,
+    /// The name a recovery set should DESCRIBE this file under: the
+    /// path relative to the posted root, forward-slashed, so a posted
+    /// directory tree survives in the PAR2 FileDesc packets. Equal to
+    /// [`PlanFile::name`] for a file posted on its own.
+    ///
+    /// Never on the wire: the tree is out-of-band by construction, which
+    /// is exactly what makes it survive obfuscation.
+    pub rel: String,
+    /// The name the SUBJECT quotes, and therefore what a downloader's
+    /// filename hint resolves to. Equal to [`PlanFile::name`] in an
+    /// ordinary post; a random token under [`Obfuscation`].
+    pub posted: String,
+    /// The yEnc `name=` value. Usually [`PlanFile::posted`]; EMPTY under
+    /// [`YencName::Empty`].
+    ///
+    /// A per-file field rather than a mode read off `PostOpts` because
+    /// one post legitimately mixes the two: `nzbfast post --obfuscate
+    /// --par2` obfuscates the PAYLOAD and announces the recovery set
+    /// beside it under its own name, which is the shape the no-RAR
+    /// matrix sweeps - the set has to be findable, or the names it
+    /// carries help nobody.
+    pub yenc: String,
     pub size: u64,
     pub parts: u32,
 }
@@ -114,29 +180,82 @@ pub struct PlanFile {
 /// Expand `paths` (files and/or directories, directories walked
 /// recursively) into a deterministic posting plan. Hidden files (dot
 /// prefix) are skipped; empty files and duplicate posted names are
-/// errors - both would produce NZBs that cannot round-trip.
+/// errors - an empty file is nearly always a staging mistake, and a
+/// duplicate name would produce an NZB that cannot round-trip.
 pub fn plan(paths: &[PathBuf], article_size: usize) -> Result<Vec<PlanFile>, PostError> {
+    plan_with(paths, article_size, &PlanOpts::default())
+}
+
+/// [`plan`] with 0-byte files ADMITTED (each posts as one empty yEnc
+/// article - a lone `=ybegin size=0` part). This is the capability
+/// corpus's door, taken deliberately via `nzbfast post --allow-empty`:
+/// the VIDEO_TS-placeholder fixture posts an empty file on purpose.
+/// The refusing [`plan`] stays the default for everything else.
+pub fn plan_allowing_empty(
+    paths: &[PathBuf],
+    article_size: usize,
+) -> Result<Vec<PlanFile>, PostError> {
+    plan_with(
+        paths,
+        article_size,
+        &PlanOpts {
+            allow_empty: true,
+            obfuscate: None,
+        },
+    )
+}
+
+/// What a plan admits and what it puts on the wire.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlanOpts {
+    /// Admit 0-byte files (see [`plan_allowing_empty`]).
+    pub allow_empty: bool,
+    /// Post under names that say nothing. See [`Obfuscation`].
+    pub obfuscate: Option<Obfuscation>,
+}
+
+/// [`plan`] with both knobs. The one entry point that actually builds a
+/// plan; the two named wrappers above are its historical shapes.
+pub fn plan_with(
+    paths: &[PathBuf],
+    article_size: usize,
+    opts: &PlanOpts,
+) -> Result<Vec<PlanFile>, PostError> {
     if article_size == 0 || article_size > ARTICLE_SIZE_CAP {
         return Err(PostError::Other(format!(
             "article size must be between 1 and {ARTICLE_SIZE_CAP} bytes"
         )));
     }
-    let mut files: Vec<PathBuf> = Vec::new();
+    let mut files: Vec<(PathBuf, String)> = Vec::new();
     for p in paths {
-        collect(p, &mut files)?;
+        collect(p, String::new(), &mut files)?;
     }
     files.sort();
     if files.is_empty() {
         return Err(PostError::Other("nothing to post".into()));
     }
+    // Two identity rules, because the plan has two names to keep apart.
+    //
+    // The REL path must be unique whatever the mode: it is what the
+    // recovery set describes each member under, and a PAR2 set that
+    // names one slot twice gives a reader two equally good answers.
+    //
+    // The BASENAME must also be unique in an ordinary post, because
+    // there it IS the wire name - two files posting under one yEnc
+    // `name=` produce an NZB that cannot round-trip. Under obfuscation
+    // the wire names are random tokens minted per file, so a basename
+    // collision between two directories is no longer a collision at
+    // all, and refusing it would refuse exactly the tree posts this
+    // mode exists to carry.
+    let mut seen_rel = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();
     let mut plan = Vec::new();
-    for path in files {
+    for (path, rel) in files {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        if name.is_empty() || !seen.insert(name.clone()) {
+        if name.is_empty() || (opts.obfuscate.is_none() && !seen.insert(name.clone())) {
             return Err(PostError::Other(format!(
                 "duplicate or unusable posted name {name:?} ({})",
                 path.display()
@@ -156,10 +275,31 @@ pub fn plan(paths: &[PathBuf], article_size: usize) -> Result<Vec<PlanFile>, Pos
                 path.display()
             )));
         }
-        let size = std::fs::metadata(&path)?.len();
-        if size == 0 {
+        let rel = if rel.is_empty() { name.clone() } else { rel };
+        if !seen_rel.insert(rel.clone()) {
             return Err(PostError::Other(format!(
-                "{} is empty - refusing to post a zero-byte file",
+                "two files would be described as {rel:?} ({})",
+                path.display()
+            )));
+        }
+        // A recovery set stores this name verbatim, and a reader that
+        // trusts it would write outside the output directory. We refuse
+        // to CREATE what our own settle path refuses to obey (the
+        // hostile-FileDesc matrix rows), rather than relying on every
+        // other client to be as careful.
+        if rel.starts_with('/')
+            || rel.split('/').any(|c| c == ".." || c.is_empty())
+            || rel.chars().any(|c| c.is_control() || c == '"')
+        {
+            return Err(PostError::Other(format!(
+                "relative name {rel:?} is not safe to describe a file under ({})",
+                path.display()
+            )));
+        }
+        let size = std::fs::metadata(&path)?.len();
+        if size == 0 && !opts.allow_empty {
+            return Err(PostError::Other(format!(
+                "{} is empty - refusing to post a zero-byte file (--allow-empty admits it deliberately)",
                 path.display()
             )));
         }
@@ -176,24 +316,54 @@ pub fn plan(paths: &[PathBuf], article_size: usize) -> Result<Vec<PlanFile>, Pos
                 u32::MAX
             )));
         }
+        // Minted per FILE, not per part: every article of one file must
+        // agree on its yEnc `name=` or a reassembler sees several files.
+        // Uniqueness comes from the same neutral entropy the
+        // Message-IDs use.
+        let posted = match opts.obfuscate {
+            None => name.clone(),
+            Some(_) => random_token(),
+        };
+        let yenc = match opts.obfuscate.map(|o| o.yenc_name) {
+            Some(YencName::Empty) => String::new(),
+            _ => posted.clone(),
+        };
         plan.push(PlanFile {
             parts: parts as u32,
             path,
             name,
+            rel,
+            posted,
+            yenc,
             size,
         });
     }
     Ok(plan)
 }
 
-fn collect(p: &Path, out: &mut Vec<PathBuf>) -> Result<(), PostError> {
+/// Walk `p`, collecting (path, relative name) pairs. `prefix` is the
+/// forward-slashed directory this walk sits under, so a directory
+/// argument keeps its OWN name at the head of every member's relative
+/// path - `post VIDEO_TS/` describes `VIDEO_TS/VTS_01_1.VOB`, which is
+/// what par2cmdline records for the same arguments and what a client
+/// has to see to rebuild the tree.
+fn collect(p: &Path, prefix: String, out: &mut Vec<(PathBuf, String)>) -> Result<(), PostError> {
     // symlink_metadata + explicit skip: following links would post bytes
     // from outside the corpus, and a cyclic link tree would recurse
-    // forever. A skipped-everything plan fails loudly in `plan`.
+    // forever. A skipped-everything plan fails loudly in `plan_with`.
     let meta = std::fs::symlink_metadata(p)?;
     if meta.file_type().is_symlink() {
         return Ok(());
     }
+    let leaf = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let here = if prefix.is_empty() {
+        leaf.clone()
+    } else {
+        format!("{prefix}/{leaf}")
+    };
     if meta.is_dir() {
         for entry in std::fs::read_dir(p)? {
             let entry = entry?;
@@ -201,12 +371,23 @@ fn collect(p: &Path, out: &mut Vec<PathBuf>) -> Result<(), PostError> {
             if name.to_string_lossy().starts_with('.') {
                 continue;
             }
-            collect(&entry.path(), out)?;
+            collect(&entry.path(), here.clone(), out)?;
         }
     } else if meta.is_file() {
-        out.push(p.to_path_buf());
+        out.push((p.to_path_buf(), here));
     }
     Ok(())
+}
+
+/// A random name with no structure worth fingerprinting - the wire name
+/// of an obfuscated post, and the default base of the recovery set
+/// beside it. Same entropy path as [`message_id`]: nanosecond clock,
+/// pid and a process counter through SHA-256, of which the first 12
+/// bytes are kept. Deliberately not derived from the file's own bytes
+/// or name: a content-derived token is a fingerprint by another route.
+pub fn random_token() -> String {
+    let id = message_id("x");
+    id.split('@').next().unwrap_or(&id)[..24].to_string()
 }
 
 /// Header values ride one CRLF-terminated line each; strip anything that
@@ -579,6 +760,17 @@ pub async fn post_files(
             "post title {t:?} contains a control or double-quote character"
         )));
     }
+    // A title is the release name spelled into every subject, which is
+    // the exact header linkage obfuscation exists to remove - the two
+    // options cancel each other out, so taking both would silently
+    // deliver neither. Refuse rather than pick one.
+    if opts.obfuscate.is_some() && opts.title.is_some() {
+        return Err(PostError::Other(
+            "a post title names the release in every subject, which is the linkage \
+             an obfuscated post removes - choose one"
+                .into(),
+        ));
+    }
     let date = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -599,14 +791,14 @@ pub async fn post_files(
     for (fi, f) in plan.iter().enumerate() {
         let subject = subject_for(
             opts.title.as_deref(),
-            &f.name,
+            &f.posted,
             fi as u32 + 1,
             plan.len() as u32,
             1,
             f.parts,
         );
         files_out.push(PostedFile {
-            name: f.name.clone(),
+            name: f.posted.clone(),
             // The NZB subject is the file's part-1 subject (the standard
             // indexer convention).
             subject,
@@ -624,7 +816,7 @@ pub async fn post_files(
                 len,
                 subject: subject_for(
                     opts.title.as_deref(),
-                    &f.name,
+                    &f.posted,
                     fi as u32 + 1,
                     plan.len() as u32,
                     part,
@@ -682,8 +874,11 @@ pub async fn post_files(
                         break;
                     }
                 };
+                // The yEnc `name=` is the plan's, not the mode's: an
+                // obfuscated post announces its recovery set under its
+                // own name while every payload article says nothing.
                 let body = crate::yenc::encode(
-                    &f.name,
+                    &f.yenc,
                     f.size,
                     Some((task.part, f.parts)),
                     task.offset + 1,
@@ -1157,11 +1352,12 @@ mod tests {
         let plan_files = plan(std::slice::from_ref(&dir), 1000).unwrap();
         let opts = PostOpts {
             group: "alt.binaries.test".into(),
-            from: "corpus@nzbfast.com".into(),
+            from: "corpus@nzbfast.invalid".into(),
             msgid_domain: "corpus.example".into(),
             article_size: 1000,
             title: Some("e2e set".into()),
             connections: 3,
+            obfuscate: None,
         };
         let set = post_files(&srv.server_config(), &plan_files, &opts, None)
             .await
@@ -1200,6 +1396,70 @@ mod tests {
         round_trip(crate::mock::Chaos::default(), false).await;
     }
 
+    /// A 0-byte file is refused by the default plan and admitted by the
+    /// explicit gate, posting as ONE empty yEnc article that decodes
+    /// back to nothing - the capability corpus's VIDEO_TS-placeholder
+    /// shape (`nzbfast post --allow-empty`).
+    #[tokio::test]
+    async fn an_empty_file_posts_only_through_the_explicit_gate() {
+        use std::collections::HashMap;
+        let srv =
+            crate::mock::MockServer::start(HashMap::new(), crate::mock::Chaos::default()).await;
+        let dir = std::env::temp_dir().join(format!("nzbfast-post-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload.bin"), test_data(1500)).unwrap();
+        std::fs::write(dir.join("placeholder.bin"), b"").unwrap();
+
+        let err = plan(std::slice::from_ref(&dir), 1000).unwrap_err();
+        assert!(err.to_string().contains("zero-byte"), "{err}");
+
+        let plan_files = plan_allowing_empty(std::slice::from_ref(&dir), 1000).unwrap();
+        let empty = plan_files
+            .iter()
+            .find(|f| f.name == "placeholder.bin")
+            .expect("planned");
+        assert_eq!((empty.size, empty.parts), (0, 1));
+
+        let opts = PostOpts {
+            group: "alt.binaries.test".into(),
+            from: "corpus@nzbfast.invalid".into(),
+            msgid_domain: "corpus.example".into(),
+            article_size: 1000,
+            title: None,
+            connections: 1,
+            obfuscate: None,
+        };
+        let set = post_files(&srv.server_config(), &plan_files, &opts, None)
+            .await
+            .expect("post");
+        let posted = set
+            .files
+            .iter()
+            .find(|f| f.name == "placeholder.bin")
+            .expect("posted");
+        assert_eq!((posted.size, posted.segments.len()), (0, 1));
+        let nzb = Nzb::parse(emit_nzb(&set).as_bytes()).expect("emitted NZB parses");
+        let seg = &nzb
+            .files
+            .iter()
+            .find(|f| f.filename_hint() == Some("placeholder.bin"))
+            .expect("in the NZB")
+            .segments[0];
+        let (mut conn, _) = Connection::connect(&srv.server_config())
+            .await
+            .expect("connect");
+        let raw = conn
+            .body(&format!("<{}>", seg.message_id))
+            .await
+            .expect("BODY")
+            .expect("empty article must exist");
+        let dec = crate::yenc::decode(&raw).expect("decode");
+        assert_eq!((dec.file_size, dec.data.len()), (0, 0));
+        conn.quit().await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[tokio::test]
     async fn e2e_ihave_fallback_when_posting_rejected() {
         round_trip(
@@ -1223,11 +1483,12 @@ mod tests {
         let plan_files = plan(std::slice::from_ref(&dir), art).unwrap();
         let opts = PostOpts {
             group: "alt.binaries.test".into(),
-            from: "corpus@nzbfast.com".into(),
+            from: "corpus@nzbfast.invalid".into(),
             msgid_domain: "corpus.example".into(),
             article_size: art,
             title: None,
             connections: 1,
+            obfuscate: None,
         };
         (dir, plan_files, opts)
     }
@@ -1566,7 +1827,7 @@ mod tests {
     fn emitted_nzb_parses_back_with_escaping() {
         let set = PostedSet {
             group: "alt.binaries.test".into(),
-            from: "corpus@nzbfast.com".into(),
+            from: "corpus@nzbfast.invalid".into(),
             files: vec![PostedFile {
                 name: "a&b <c>.bin".into(),
                 subject: "\"a&b <c>.bin\" yEnc (1/2)".into(),
@@ -1591,7 +1852,7 @@ mod tests {
         assert_eq!(nzb.files.len(), 1);
         let f = &nzb.files[0];
         assert_eq!(f.subject, "\"a&b <c>.bin\" yEnc (1/2)");
-        assert_eq!(f.poster, "corpus@nzbfast.com");
+        assert_eq!(f.poster, "corpus@nzbfast.invalid");
         assert_eq!(f.date, 1_753_358_400);
         assert_eq!(f.groups, vec!["alt.binaries.test"]);
         assert_eq!(f.segments.len(), 2);

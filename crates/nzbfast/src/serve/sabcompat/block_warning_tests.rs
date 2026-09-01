@@ -127,3 +127,46 @@ fn a_disabled_server_and_a_zero_block_raise_nothing() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// SAB's warning entry carries FOUR keys and we sent three.
+///
+/// `origin` is written unconditionally by SAB's `GUIHandler.emit`
+/// (`SABnzbd.py`, identical in 4.5.0, 5.1.2 and develop, read 30 Aug
+/// 2026), so a client with a non-nullable field for it dies on our
+/// reply - the absent-key half of GH #69, in the payload every remote
+/// app's warnings pane reads. SAB's value is the emitting source file
+/// and line; ours names the daemon, because these entries are COMPUTED
+/// conditions rather than captured log records and there is no one line
+/// to point at.
+#[test]
+fn every_warning_carries_sabs_four_keys() {
+    let dir = std::env::temp_dir().join(format!("nzbfast-warnkeys-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let d = crate::serve::testutil::test_daemon(&dir);
+    // No server configured is the first-run condition, so it is the one
+    // warning that needs no other setup to provoke - but the EMPTY LIST
+    // still has to be written down. A path this test never wrote is
+    // `Config::load`'s missing-file fallback, which goes and finds a
+    // SABnzbd install's `sabnzbd.ini` under $HOME: this box has one from
+    // the competitive benchmarking, so the daemon read its servers and
+    // the condition never fired. See `write_cfg`'s own note above, which
+    // says exactly this and which writing a bare `dir.join(..)` walked
+    // straight past.
+    let cfg = write_cfg(&dir, "[]");
+    let ws = sab_warnings(&d, &cfg, false, None);
+    assert!(!ws.is_empty(), "the no-server condition must be reported");
+    for w in &ws {
+        for key in ["type", "text", "time", "origin"] {
+            assert!(
+                w.get(key).is_some(),
+                "SAB sends `{key}` on every warning and we do not: {w}"
+            );
+        }
+        assert!(w["type"].is_string(), "{w}");
+        assert!(w["text"].is_string(), "{w}");
+        assert!(w["time"].is_number(), "{w}");
+        assert!(w["origin"].is_string(), "{w}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

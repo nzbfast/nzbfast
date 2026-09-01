@@ -2252,6 +2252,149 @@ fn a_two_set_nzb_does_not_cap_one_sets_volumes_by_anothers_name() {
     );
 }
 
+/// T2: the stem comes off the CLASSIFICATION, never off a second,
+/// looser reading of the same name.
+///
+/// `multiple_par2_sets` gated on `kind()` and then called the public
+/// `nzbkit::nzb::par2_vol_suffix` - the RAW-subject rule, whatever rule
+/// produced that kind. The two answer differently about a quoted name
+/// carrying `.par2` twice with whitespace between: `kind()` applies the
+/// isolated rule (N6-05), finds the tail after the ordinal is
+/// `.par2 x.par2` and answers `Par2Main`, so the file's set stem is
+/// `a.vol-10.par2 x` - while `par2_vol_suffix` answers `Some(1)` and
+/// hands back the stem `a`, which is the name of a DIFFERENT set that
+/// is also in this NZB.
+///
+/// MEASURED on origin/main at ed6857955: `multiple_par2_sets` answered
+/// FALSE on this NZB, so the two sets read as one and the declared
+/// count of `a.par2`'s own volume stayed live as a cap over a set the
+/// block-size probe never sized - which is exactly the false-Impossible
+/// this detector exists to prevent, arriving through the detector.
+/// `nzb_tests::a_subject_class_carries_the_rule_that_produced_the_kind`
+/// pins the rule itself one crate down.
+///
+/// Pathological rather than hostile-only, and cheap to hold: the two
+/// rules agree on every name a real post carries, which is why this
+/// went unreported.
+#[test]
+fn a_quoted_par2_with_a_trailing_par2_is_its_own_set() {
+    let seg =
+        |id: &str, bytes: u64| format!("<segment bytes=\"{bytes}\" number=\"1\">{id}</segment>");
+    let file = |name: &str, bytes: u64, id: &str| {
+        format!(
+            "<file subject=\"Rel - &quot;{name}&quot; yEnc (1/1)\"><groups><group>a.b.test\
+             </group></groups><segments>{}</segments></file>",
+            seg(id, bytes)
+        )
+    };
+    let nzb = nzbkit::nzb::Nzb::parse(
+        format!(
+            "<?xml version=\"1.0\"?><nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">{}{}{}</nzb>",
+            file("a.mkv", 5_000_000, "p1@x"),
+            file("a.par2", 100_000, "m1@x"),
+            // A Main whose name merely CONTAINS `.vol-10.par2 `.
+            file("a.vol-10.par2 x.par2", 100_000, "m2@x"),
+        )
+        .as_bytes(),
+    )
+    .expect("nzb parses");
+
+    let par2: Vec<_> = nzb
+        .files
+        .iter()
+        .filter(|f| f.kind() != nzbkit::nzb::FileKind::Data)
+        .map(|f| (f.kind(), f.classify().par2_stem()))
+        .collect();
+    assert_eq!(
+        par2,
+        vec![
+            (nzbkit::nzb::FileKind::Par2Main, Some("a")),
+            (nzbkit::nzb::FileKind::Par2Main, Some("a.vol-10.par2 x")),
+        ],
+        "the second Main's stem is its own, not the raw rule's `a`"
+    );
+    assert!(
+        multiple_par2_sets(&nzb),
+        "two stems are two sets; the raw-rule re-derivation read one"
+    );
+}
+
+/// U2: the declared count comes off the CLASSIFICATION's name, never
+/// off `filename_hint().unwrap_or(&f.subject)`'s second, looser read of
+/// the same subject.
+///
+/// `filename_hint` applies the OUTPUT-NAME policy (N6-10, 255 bytes a
+/// component) and the classifier's `quoted_runs` does not, so a subject
+/// whose only quoted run is over-length answers `None` at
+/// `filename_hint()` - and the six `vol_count_from_name` callers this
+/// pins used to fall back to the RAW SUBJECT for a name the classifier
+/// had already judged isolated and Par2Volume.
+///
+/// MEASURED before landing: on the pre-fix read, that fallback is not
+/// merely a wider name, it is a WORSE one. The raw subject wraps the
+/// quoted run in `"..."` and a trailing ` yEnc (1/1)`, so the `.par2`
+/// this name ends on is immediately followed by a closing quote - and
+/// `vol_suffix`'s tail rule accepts a whitespace tail after `.par2` but
+/// not a quote character, so parsing the raw subject answers `None`
+/// where the isolated name answers `Some(2)`. That is `recovery_unknown
+/// = true` over a real declared count, never a wrong number - which is
+/// why this is a P3 and not a live divergence like T2's.
+#[test]
+fn an_overlong_quoted_par2_volume_name_reads_its_count_off_the_classification() {
+    let long_stem = "a".repeat(250);
+    let quoted = format!("{long_stem}.vol01+02.par2");
+    assert!(
+        quoted.len() > 255,
+        "the fixture must actually exceed the per-component limit"
+    );
+    let nzb = nzbkit::nzb::Nzb::parse(
+        format!(
+            "<?xml version=\"1.0\"?><nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\
+             <file subject=\"Rel - &quot;{quoted}&quot; yEnc (1/1)\"><groups><group>a.b.test\
+             </group></groups><segments><segment bytes=\"50000\" number=\"1\">v1@x</segment>\
+             </segments></file></nzb>"
+        )
+        .as_bytes(),
+    )
+    .expect("nzb parses");
+    let f = &nzb.files[0];
+
+    // The seam this closes: the output-name policy rejects the only
+    // quoted candidate, so the pre-classification hint is gone...
+    assert_eq!(
+        f.filename_hint(),
+        None,
+        "an over-255-byte single component fails name_within_limits"
+    );
+    // ...while the classifier, which never applies that policy, still
+    // reads the name straight off the quoted run and calls it a volume.
+    let class = f.classify();
+    assert_eq!(class.kind(), nzbkit::nzb::FileKind::Par2Volume);
+    assert_eq!(class.name(), quoted);
+
+    // The pre-fix formula: what the OLD `filename_hint().unwrap_or(&f.subject)`
+    // caller handed to `vol_count_from_name`. Kept inline, not by
+    // reverting the six call sites, so the divergence stays pinned
+    // even after nobody reads that expression from a call site again.
+    let pre_fix_name = f.filename_hint().unwrap_or(&f.subject);
+    assert_eq!(
+        vol_count_from_name(pre_fix_name),
+        None,
+        "the raw subject's closing quote right after .par2 breaks the \
+         whitespace-tail allowance; this is the failure this test would \
+         have shown before the fix"
+    );
+
+    // The fix: `live_volumes` (and the five siblings) now read the count
+    // off `f.classify().name()`, which has no such quote in the way.
+    assert_eq!(
+        live_volumes(&nzb, &[]),
+        vec![(50_000u64, Some(2usize))],
+        "the declared count is read off the classification, not a raw-\
+         subject re-derivation that a quoted name can defeat"
+    );
+}
+
 /// M2 again, one layer down: the cap is withdrawn at BOTH ceilings or
 /// the abort can stand down on a budget the verdict then reads larger.
 /// `measured_verdict` is deliberately untouched by the fix - it takes
@@ -2279,4 +2422,83 @@ fn withdrawing_the_cap_restores_the_pre_cap_verdict() {
         None,
         "with the cap withdrawn the bytes credit 50 blocks and 9 fits"
     );
+}
+
+/// Row M4-33's payload arm, from the pre-flight side: a TEXT RELEASE has
+/// nothing droppable in it, because the `.txt` IS the deliverable.
+///
+/// `is_droppable_metadata` answers a question about one NAME, and the
+/// census's spare rule asks a second, per-POST one that no such
+/// predicate can carry: furniture is only furniture where the post
+/// carries payload beside it. Its counterpart lives at the `furniture`
+/// vector in `check`, and this is what holds the two in step.
+///
+/// The mispredict without it is precise and is the one thing this whole
+/// function exists to prevent - a book post short an article reads
+/// "one droppable `.txt`, deficit 0, Complete", and then the download
+/// fails, because `census::SpareRule` correctly refuses to empty the
+/// release. Pre-flight must predict what the downloader will do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preflight_does_not_drop_a_text_release_as_furniture() {
+    use nzbkit::mock::{Chaos, MockServer};
+
+    // Nothing is posted, so the sweep proves every article absent. No
+    // PAR2 anywhere: with a real deficit and no budget the verdict can
+    // only be Impossible - unless the deliverable was shrugged off as
+    // furniture first, which turns the same post Complete.
+    let srv = MockServer::start(std::collections::HashMap::new(), Chaos::default()).await;
+    let dir = std::env::temp_dir().join(format!("nzbfast-preflight-txt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config_path = dir.join("config.json");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{{\"servers\":[{{\"host\":\"127.0.0.1\",\"port\":{},\"tls\":false}}]}}",
+            srv.addr.port()
+        ),
+    )
+    .unwrap();
+    let file = |name: &str, n: u32| {
+        let segs: String = (1..=n)
+            .map(|p| format!("<segment bytes=\"8192\" number=\"{p}\">{name}-{p}@mock</segment>"))
+            .collect();
+        format!(
+            "<file subject=\"Rel - &quot;{name}&quot; yEnc (1/1)\"><groups><group>a.b.test\
+             </group></groups><segments>{segs}</segments></file>"
+        )
+    };
+    let nzb_path = dir.join("book.nzb");
+    std::fs::write(
+        &nzb_path,
+        format!(
+            "<?xml version=\"1.0\"?><nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">{}{}\
+             </nzb>",
+            // The deliverable, wearing a furniture extension...
+            file("Novel.Chapter.txt", 8),
+            // ...and real furniture beside it, so the post is ALL
+            // furniture by name. Both must be judged payload here.
+            file("release.nfo", 1),
+        ),
+    )
+    .unwrap();
+
+    let verdict = check(&config_path, &nzb_path, 100, 4, 16, false)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    match verdict {
+        Verdict::Impossible { dropped, .. } => assert!(
+            dropped.is_empty(),
+            "a post that is nothing BUT furniture had files shrugged off as \
+             droppable - there is no payload here for them to be furniture \
+             TO, so dropping them empties the release: {dropped:?}"
+        ),
+        other => panic!(
+            "a text release with every article absent and no PAR2 must be \
+             Impossible; the `.txt` was dropped as furniture, so the deficit \
+             came out zero: {other:?}"
+        ),
+    }
 }

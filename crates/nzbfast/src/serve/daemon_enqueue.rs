@@ -48,6 +48,48 @@ struct HookVerdict {
     reject: Option<String>,
 }
 
+/// What `enqueue_as` has settled about an add that its own body no longer
+/// owns by the time the row is built - the stem, the spool path, the
+/// out dir and the dupe key have all moved onto the [`Job`] - but that
+/// [`Daemon::publish_or_refuse`] still needs.
+///
+/// A struct rather than twelve more parameters, and that is a
+/// correctness argument rather than a tidiness one: positionally these
+/// are three adjacent `String`s (`nzo_id`, `pairing_name`, `category`),
+/// two adjacent `Option`s of borrowed text and a `bool` next to two
+/// integers, so any two of several pairs would swap and still compile.
+/// Named fields at the call site cannot.
+struct AddPending<'a> {
+    /// The id the add was accepted under. Logged, announced, returned.
+    nzo_id: String,
+    /// `job.name`, taken before the row took ownership of the stem -
+    /// the C4-4 identity pairing is recorded under it after the publish.
+    pairing_name: String,
+    category: String,
+    origin: &'a str,
+    /// The priority the CALLER asked for, NOT the row's: the duplicate
+    /// ladder derives the row's from it with [`enqueue_priority`], and
+    /// re-derives it under the queue lock if the collision has gone.
+    priority: i32,
+    total_bytes: u64,
+    /// Whether the row was BUILT as a held ALTERNATIVE. Not final on the
+    /// way in - the queue critical section can still clear it, which is
+    /// why the destructure below rebinds it `mut`.
+    duplicate: bool,
+    /// TODO 282 item 5: the job this add is a spare OF, when it is one.
+    hold_for: Option<&'a str>,
+    /// The spare's spool copy, cloned before `spool_path` moved onto the
+    /// row, because the arms that refuse a spare have to unlink it.
+    spare_spool: Option<PathBuf>,
+    /// The original this add collided with, as chosen before the queue
+    /// lock. Re-checked there and nowhere else.
+    collision: Option<DupeCollision>,
+    /// §129 4a: the pre-queue script's refusal, if it gave one.
+    hook_reject: Option<String>,
+    /// §129 2d: what the user's duplicates setting says to do.
+    dupe_action: String,
+}
+
 impl Daemon {
     /// `pp` is the post-processing mode the CALLER requested (0-3, None
     /// = none named). The pre-queue hook receives it - SAB's contract
@@ -182,8 +224,26 @@ impl Daemon {
         {
             priority = p;
         }
-        let dir_stem = nzbkit::disk::sanitize_filename(&stem);
-        let base_out_dir = self.base_out_dir(&category, &dir_stem);
+        // CAPPED, and `refile_out_dir` must spell it the SAME way.
+        let dir_stem = nzbkit::disk::sanitize_filename_capped(&stem);
+        // TODO 317 (GitHub #67): when this category writes through, the
+        // job downloads INTO its destination rather than being moved
+        // there once it finishes - so there is no copy-then-delete
+        // across filesystems at the end and no window in which the
+        // payload has to exist on two drives at once.
+        //
+        // The destination is decided HERE and recorded on the job
+        // (`write_through` below), which is TODO 317's own rule: fixed
+        // at job start, a later settings or category change applies
+        // from the next job. Recomputing it at completion instead
+        // would mean a job that started under the setting and finished
+        // without it owes a move from a directory the mover cannot
+        // derive a relative path for.
+        let write_through_root = self.write_through_root(&category);
+        let base_out_dir = match &write_through_root {
+            Some(root) => root.join(&dir_stem),
+            None => self.base_out_dir(&category, &dir_stem),
+        };
         // Two DIFFERENT NZBs whose names sanitize to the same stem and carry
         // no dupe_key (no SxxEyy/year marker - e.g. software or music posts)
         // are not caught by the M14f duplicate hold below, so they would
@@ -201,11 +261,13 @@ impl Daemon {
         // published by `publish_over_previous`). A FAILED job's leftovers are
         // junk and are still reused in place, so retrying a flaky post does
         // not climb .2, .3, .4.
-        // From here to the queue push is one transaction. Choosing a
-        // directory and deciding "not a duplicate" are both reads of
-        // state this job is about to change, and neither is published
-        // until the push, so without the lock two concurrent adds of one
-        // release agree on everything and then collide.
+        // From here to the queue push - which is in `publish_or_refuse`,
+        // the guard being MOVED there rather than dropped here - is one
+        // transaction. Choosing a directory and deciding "not a
+        // duplicate" are both reads of state this job is about to
+        // change, and neither is published until the push, so without
+        // the lock two concurrent adds of one release agree on
+        // everything and then collide.
         let publish = self.add_lock.lock_ok();
         // dir_claim stats the output volume (`p.exists()`), which can be
         // a network share, and enqueue is reachable from tokio tasks
@@ -250,10 +312,11 @@ impl Daemon {
             }
         }
         // Not final: the original can be deleted between here and the
-        // publish, and the queue critical section below re-asks. An
-        // explicit `hold_for` is a duplicate by instruction, and the same
-        // critical section re-asks whether its target is still there.
-        let mut duplicate = collision.is_some() || hold_for.is_some();
+        // publish, and the queue critical section in
+        // `publish_or_refuse` re-asks. An explicit `hold_for` is a
+        // duplicate by instruction, and the same critical section
+        // re-asks whether its target is still there.
+        let duplicate = collision.is_some() || hold_for.is_some();
         // §129 2d: what a duplicate add becomes is the user's call now.
         // "pause" is the M14f hold; "discard" refuses the add outright;
         // "fail" files it straight to history as Failed (the *arr
@@ -324,6 +387,8 @@ impl Daemon {
             state: JobState::Queued,
             total_bytes,
             out_dir,
+            // TODO 317: recorded, never re-derived. See `Job::write_through`.
+            write_through: write_through_root.is_some(),
             fail_message: String::new(),
             fail_code: None,
             fail_detail: String::new(),
@@ -420,6 +485,80 @@ impl Daemon {
             cleaned_par2: 0,
             cleaned_trash: false,
         }));
+        // The row exists; the only question left is its fate, and the
+        // transaction guard goes with it. Every arm from here either
+        // hands `publish` to `file_never_queued` or drops it after the
+        // queue push, so `enqueue_as` cannot hold it past this call.
+        self.publish_or_refuse(
+            job,
+            publish,
+            nzb,
+            AddPending {
+                nzo_id,
+                pairing_name,
+                category,
+                origin,
+                priority,
+                total_bytes,
+                duplicate,
+                hold_for,
+                spare_spool,
+                collision,
+                hook_reject,
+                dupe_action,
+            },
+        )
+    }
+
+    /// The fate of a row that has been BUILT but not yet published: file
+    /// it to history as Failed, refuse it outright, or push it onto the
+    /// queue. Lifted out of `enqueue_as` under the size gate (TODO 106),
+    /// and the seam is where it is because the `add_lock` guard changes
+    /// hands there: every arm below either hands `publish` to
+    /// `file_never_queued` or drops it after the queue push, so the
+    /// guard can be MOVED into this method and the borrow checker holds
+    /// the "one transaction, one owner" rule that used to be a comment.
+    ///
+    /// What may cross the seam, in both directions:
+    ///
+    /// * Nothing above it may depend on the outcome - `enqueue_as` has
+    ///   settled the identity, the directory, the duplicate question and
+    ///   the row itself, and its last statement is this call.
+    /// * Nothing here may RE-DECIDE any of that. The one thing it does
+    ///   re-ask is whether the chosen collision (and a spare's target)
+    ///   still exists, and that is deliberate: those are the two reads
+    ///   `add_lock` does not serialize against, so they are re-asked
+    ///   under the queue lock and nowhere else.
+    /// * The two refusal arms must stay ABOVE the queue critical
+    ///   section. Both are "this row never queues", and a row that has
+    ///   been pushed cannot be filed to history without going through
+    ///   the delete path instead.
+    ///
+    /// Takes the parsed NZB by value: this is its last reader
+    /// (`record_nzb_pairing`, after the add is durable), so ownership
+    /// here says so rather than leaving a live binding behind in the
+    /// caller.
+    fn publish_or_refuse(
+        &self,
+        job: Arc<Mutex<Job>>,
+        publish: std::sync::MutexGuard<'_, ()>,
+        nzb: nzbkit::nzb::Nzb,
+        pending: AddPending<'_>,
+    ) -> Result<Enqueued> {
+        let AddPending {
+            nzo_id,
+            pairing_name,
+            category,
+            origin,
+            priority,
+            total_bytes,
+            mut duplicate,
+            hold_for,
+            spare_spool,
+            collision,
+            hook_reject,
+            dupe_action,
+        } = pending;
         // §129 4a: a pre-queue REJECT files to history as Failed with
         // the reason - the dupe_action="fail" shape verbatim, so the
         // *arr contract (a failed grab means "search for another
@@ -822,23 +961,52 @@ impl Daemon {
         // category (= out_root subfolder) and request TV filing.
         let mut tv_sort = false;
         let mut smart_rule = String::new();
-        if let Some(r) =
-            crate::smart::first_match(&self.smart_folders.lock_ok(), &stem, total_bytes)
+        // Scoped so the rule-list lock is dropped the moment the two
+        // reads below are done with it, as it was before the F5 note
+        // joined them under one guard.
         {
-            if !r.category.is_empty() {
-                category = r.category.clone();
+            let rules = self.smart_folders.lock_ok();
+            // F5: `total_bytes` is `Nzb::eager_bytes`, which is 0 when the
+            // manifest declared no `bytes=` at all - a shape this repo
+            // accepts on purpose, and whose own parser comment says "0
+            // posted bytes means unknown, not zero". `Rule::matches` cannot
+            // tell that 0 from a measurement, so every `min_size` rule
+            // declines the job and every `max_size` rule waves it through,
+            // and the row then files under whatever is left with nothing
+            // anywhere saying why. Say it here. NOT a refusal and not a
+            // substituted figure: which answer a size-gated rule SHOULD
+            // give when the size is unknown is the open product question
+            // written up in the zero-declared-bytes handoff (claim
+            // `nzb-zero-bytes-downstream`), and guessing it in passing is
+            // how a routing rule starts lying.
+            // Conditional on there BEING such a rule, because on the common
+            // list (no size bounds anywhere) the unknown costs the routing
+            // nothing and a line per add would be noise.
+            let gated = crate::smart::size_gated(&rules);
+            if total_bytes == 0 && gated > 0 {
+                warn!(
+                    target: "smart",
+                    "{stem:?} declares no byte counts, so its size is unknown rather \
+                     than zero - the {gated} Smart Folder rule(s) with a size bound \
+                     are judged against that 0 and will not do what you meant"
+                );
             }
-            tv_sort = r.tv_sort;
-            // Kept on the job: "why is this in Films?" is answerable only
-            // by the rule that decided it, and the rule list is editable.
-            smart_rule = r.name.clone();
-            info!(
-                target: "smart",
-                "rule {:?} matched {stem:?} → category {:?}{}",
-                r.name,
-                category,
-                if tv_sort { " + TV filing" } else { "" }
-            );
+            if let Some(r) = crate::smart::first_match(&rules, &stem, total_bytes) {
+                if !r.category.is_empty() {
+                    category = r.category.clone();
+                }
+                tv_sort = r.tv_sort;
+                // Kept on the job: "why is this in Films?" is answerable only
+                // by the rule that decided it, and the rule list is editable.
+                smart_rule = r.name.clone();
+                info!(
+                    target: "smart",
+                    "rule {:?} matched {stem:?} → category {:?}{}",
+                    r.name,
+                    category,
+                    if tv_sort { " + TV filing" } else { "" }
+                );
+            }
         }
         // `category` (the `cat=` request param) and `stem` (from the NZB
         // name / `nzbname`) are untrusted and must never escape out_root:
@@ -937,9 +1105,9 @@ impl Daemon {
 
 /// WHICH row a new job is an alternative OF - see `Job::held_for`.
 ///
-/// A free function only because `enqueue_as` sits on the size gate's
-/// ceiling and this is the one part of its Job literal with a body
-/// rather than a value. The collision the dupe check just found wins;
+/// A free function only because `enqueue_as` was at 496 of the size
+/// gate's 500-line ceiling on 26 Aug 2026, and this is the one part of
+/// its Job literal with a body rather than a value. The collision the dupe check just found wins;
 /// an explicit `hold_for=` on the add is the fallback.
 fn held_for_of(collision: Option<&DupeCollision>, hold_for: Option<&str>) -> String {
     collision

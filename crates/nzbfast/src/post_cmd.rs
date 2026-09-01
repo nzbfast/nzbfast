@@ -25,6 +25,23 @@ pub struct PostArgs {
     pub title: Option<String>,
     pub connections: usize,
     pub verify: bool,
+    pub allow_empty: bool,
+    /// No-RAR mode: random subject and yEnc `name=` per file, so a
+    /// scraper without the NZB cannot tie an article to a release.
+    pub obfuscate: bool,
+    /// With `obfuscate`, leave the yEnc `name=` empty rather than
+    /// carrying the same random token the subject does.
+    pub obfuscate_empty_name: bool,
+    /// Build and post a PAR2 set beside the payload, carrying the REAL
+    /// names and directory tree in its FileDesc packets. `Some(0)` is a
+    /// verify-only set (no recovery slices); higher is a percentage of
+    /// the input slice count.
+    pub par2: Option<u32>,
+    /// PAR2 slice size in bytes; `None` derives one from the payload.
+    pub par2_block_size: Option<u64>,
+    /// Base name of the emitted `.par2` files; `None` mints a random
+    /// one under `obfuscate` and uses the NZB's stem otherwise.
+    pub par2_base: Option<String>,
 }
 
 /// Resolve `--post-server` against the config: exact host match
@@ -131,6 +148,20 @@ fn write_rescue(claim: &std::path::Path, xml: &str) -> std::io::Result<PathBuf> 
     Err(last)
 }
 
+/// A directory this run created and owns for the length of the run: the
+/// generated `.par2` files live there between being built and being
+/// posted. It is removed on EVERY exit path, including the aborts,
+/// because the set is deterministic - identical members under identical
+/// names produce identical bytes - so keeping it would preserve nothing
+/// a rerun could not rebuild.
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Give back the exclusive claim this run took, so a rerun is not blocked by
 /// a file that holds nothing. Best effort, and ONLY while the claim is still
 /// the empty file we created: bytes at that path are a retrieval index (ours,
@@ -149,10 +180,40 @@ pub async fn run(config: &Path, args: PostArgs) -> Result<()> {
     let cfg = Config::load(config)?;
     let server = select_server(&cfg, &args.post_server)?;
 
-    let plan = post::plan(&args.paths, args.article_size)
-        .map_err(|e| anyhow::anyhow!("planning post: {e}"))?;
-    let total_bytes: u64 = plan.iter().map(|f| f.size).sum();
-    let total_articles: u64 = plan.iter().map(|f| f.parts as u64).sum();
+    let obfuscate = args.obfuscate.then_some(post::Obfuscation {
+        yenc_name: if args.obfuscate_empty_name {
+            post::YencName::Empty
+        } else {
+            post::YencName::Random
+        },
+    });
+    anyhow::ensure!(
+        args.obfuscate || !args.obfuscate_empty_name,
+        "--obfuscate-empty-name only means anything with --obfuscate"
+    );
+    // An obfuscated post puts NO real name anywhere on the wire, so
+    // something has to carry them out of band or they are simply gone -
+    // and the post would look perfectly healthy while landing a
+    // directory of random tokens. The PAR2 FileDesc packets are the one
+    // carrier this tool can emit and other clients already read, so a
+    // post that has neither is refused rather than published. `--par2 0`
+    // is the cheapest way to satisfy it: names and block checksums, no
+    // parity bytes at all.
+    anyhow::ensure!(
+        !args.obfuscate || args.par2.is_some(),
+        "--obfuscate leaves no real name on the wire, so the names need a carrier: \
+         add --par2 <percent> (or --par2 0 for a verify-only set that names every \
+         file and builds no parity)"
+    );
+    let mut plan = post::plan_with(
+        &args.paths,
+        args.article_size,
+        &post::PlanOpts {
+            allow_empty: args.allow_empty,
+            obfuscate,
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("planning post: {e}"))?;
 
     // Validate the NZB destination BEFORE posting. Every article is uploaded
     // with a fresh RANDOM Message-ID whose only retrieval index is this NZB,
@@ -224,6 +285,33 @@ pub async fn run(config: &Path, args: PostArgs) -> Result<()> {
         }
     }
 
+    // The recovery set is built from the payload plan and posted BESIDE
+    // it, under its own name. It has to be findable - a set nobody can
+    // locate carries its names to nobody - so it is announced even when
+    // the payload says nothing. The generated files live in a scratch
+    // directory beside the NZB and are removed on the way out; they are
+    // an artefact of the post, not something the operator asked to keep.
+    let par2_scratch = args.nzb.with_extension("par2.tmp");
+    // Every failure past the claim has to GIVE IT BACK, or the next run
+    // meets "another post is probably writing" over an empty file this
+    // one abandoned - the same reasoning `release_empty_claim` carries
+    // for the post itself, applied to the step that now sits in front
+    // of it. Nothing has been uploaded at this point, so the claim is
+    // still the empty file we made and protects no Message-IDs.
+    let built = build_par2_set(&args, &mut plan, &par2_scratch);
+    let _par2_guard = match built {
+        Ok(g) => g,
+        Err(e) => {
+            release_empty_claim(&nzb_tmp);
+            return Err(e);
+        }
+    };
+
+    // Counted AFTER the recovery set joined the plan, so the summary
+    // line the operator reads before any byte moves is the whole post.
+    let total_bytes: u64 = plan.iter().map(|f| f.size).sum();
+    let total_articles: u64 = plan.iter().map(|f| f.parts as u64).sum();
+
     // The confirmation block: exactly which server, and what will happen.
     info!(
         target: "post",
@@ -261,6 +349,7 @@ pub async fn run(config: &Path, args: PostArgs) -> Result<()> {
         article_size: args.article_size,
         title: args.title.clone(),
         connections: args.connections,
+        obfuscate,
     };
     let t0 = std::time::Instant::now();
     let progress: post::Progress = Arc::new(move |done, total, sent| {
@@ -383,6 +472,95 @@ pub async fn run(config: &Path, args: PostArgs) -> Result<()> {
     Ok(())
 }
 
+/// Build the recovery set for `plan`'s payload into `par2_scratch` and
+/// APPEND its files to the plan, so they post beside the payload in the
+/// same run. `Ok(None)` when `--par2` was not asked for.
+///
+/// Its own function so the caller can give the NZB claim back on every
+/// failure path in one place: this step sits between taking the claim
+/// and the first byte moving, and a bare `?` here would leave an empty
+/// claim behind for the next run to trip over.
+fn build_par2_set(
+    args: &PostArgs,
+    plan: &mut Vec<nzbkit::post::PlanFile>,
+    par2_scratch: &Path,
+) -> Result<Option<ScratchDir>> {
+    Ok(if let Some(pct) = args.par2 {
+        let members: Vec<nzbkit::par2gen::Member> = plan
+            .iter()
+            .map(|f| nzbkit::par2gen::Member {
+                name: f.rel.clone(),
+                path: f.path.clone(),
+            })
+            .collect();
+        // Exclusive, for `verify`'s reason one function down: this path
+        // is derived from a user-supplied NZB name and the whole
+        // directory is removed at the end, so a directory that already
+        // exists is someone else's and nothing here proves otherwise.
+        std::fs::create_dir(par2_scratch).map_err(|e| {
+            anyhow::anyhow!(
+                "PAR2 scratch directory {} already exists or cannot be created \
+                 ({e}) - remove it and re-run",
+                par2_scratch.display()
+            )
+        })?;
+        let guard = ScratchDir(par2_scratch.to_path_buf());
+        let base = match args.par2_base.clone() {
+            Some(b) => b,
+            // A base name is a subject and a filename both, so under
+            // obfuscation it must say as little as the payload does.
+            None if args.obfuscate => post::random_token(),
+            None => args
+                .nzb
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "posted".into()),
+        };
+        let names = nzbkit::par2gen::create_into(
+            par2_scratch,
+            &members,
+            &base,
+            &nzbkit::par2gen::Par2Spec {
+                redundancy_pct: pct,
+                block_size: args.par2_block_size,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("building the PAR2 set: {e}"))?;
+        info!(
+            target: "post",
+            "recovery set: {} file(s) at {pct}% redundancy, naming {} member(s)",
+            names.len(),
+            members.len()
+        );
+        let paths: Vec<PathBuf> = names.iter().map(|n| par2_scratch.join(n)).collect();
+        // Planned separately and with NO obfuscation, so the set keeps
+        // its real name on the wire.
+        let par2_plan = post::plan_with(&paths, args.article_size, &post::PlanOpts::default())
+            .map_err(|e| anyhow::anyhow!("planning the PAR2 set: {e}"))?;
+        plan.extend(par2_plan);
+        // The payload and the recovery set are planned SEPARATELY - one
+        // obfuscated, one announced - so neither plan's own uniqueness
+        // rule can see the other. Two files sharing a wire name produce
+        // an NZB that cannot round-trip, and the reachable case is a
+        // plain post whose payload happens to hold a `.par2` named like
+        // the set we just built (the base defaults to the NZB's stem).
+        // Cheap to check, and the alternative is a silently unusable
+        // index over articles that are already public.
+        let mut wire = std::collections::HashSet::new();
+        for f in plan.iter() {
+            anyhow::ensure!(
+                wire.insert(f.posted.as_str()),
+                "the recovery set and the payload would both post under the name \
+                 {:?} - give the set a different --par2-base",
+                f.posted
+            );
+        }
+        Some(guard)
+    } else {
+        None
+    })
+}
+
 /// Round-trip proof: parse the NZB we just wrote, download every segment
 /// back through the engine's connection pool from the SAME server, decode
 /// and reassemble to temp files, then compare SHA-256 against the sources.
@@ -401,8 +579,13 @@ async fn verify(
     let xml = std::fs::read(&args.nzb)?;
     let nzb = nzbkit::nzb::Nzb::parse(&xml).context("parsing the emitted NZB")?;
 
+    // Keyed on the POSTED name, which is what a subject quotes and
+    // therefore what `filename_hint` gives back. Under obfuscation that
+    // is the random token and the real name is nowhere on the wire -
+    // which is the property being verified, so keying on the real name
+    // would fail every obfuscated run by construction.
     let by_name: std::collections::HashMap<&str, &nzbkit::post::PlanFile> =
-        plan.iter().map(|f| (f.name.as_str(), f)).collect();
+        plan.iter().map(|f| (f.posted.as_str(), f)).collect();
 
     // message-id → (per-file temp handle). Preallocate one temp file per
     // posted file, next to the NZB so cleanup is obvious on failure.
@@ -421,7 +604,8 @@ async fn verify(
             tmp_dir.display()
         )
     })?;
-    let mut files: Vec<(String, PathBuf, std::fs::File, u64)> = Vec::new(); // (name, src, tmp, size)
+    // (posted name, real name, source path, temp handle, size)
+    let mut files: Vec<(String, String, PathBuf, std::fs::File, u64)> = Vec::new();
     let mut id_to_file: std::collections::HashMap<String, usize> = Default::default();
     let mut reqs: Vec<ArticleReq> = Vec::new();
     for f in &nzb.files {
@@ -435,7 +619,15 @@ async fn verify(
         let tmp = std::fs::File::create(&tmp_path)?;
         tmp.set_len(src.size)?;
         let idx = files.len();
-        files.push((name.to_string(), src.path.clone(), tmp, src.size));
+        // The REAL name in the report line: a column of random tokens
+        // tells the operator nothing about which file failed.
+        files.push((
+            name.to_string(),
+            src.rel.clone(),
+            src.path.clone(),
+            tmp,
+            src.size,
+        ));
         for seg in &f.segments {
             let bracketed = format!("<{}>", seg.message_id);
             id_to_file.insert(bracketed.clone(), idx);
@@ -463,7 +655,7 @@ async fn verify(
                 };
                 match nzbkit::yenc::decode(&raw) {
                     Ok(dec) => {
-                        nzbkit::disk::write_all_at(&files[idx].2, &dec.data, dec.offset())?;
+                        nzbkit::disk::write_all_at(&files[idx].3, &dec.data, dec.offset())?;
                         got += 1;
                     }
                     Err(e) => problems.push(format!("{id}: decode: {e}")),
@@ -484,15 +676,15 @@ async fn verify(
     for p in &problems {
         info!(target: "verify", "problem: {p}");
     }
-    for (name, src, tmp, _) in files {
+    for (posted, real, src, tmp, _) in files {
         drop(tmp); // close the write handle before hashing
         let want = nzbkit::post::sha256_file(&src)?;
-        let have = nzbkit::post::sha256_file(&tmp_dir.join(&name))?;
+        let have = nzbkit::post::sha256_file(&tmp_dir.join(&posted))?;
         let ok = want == have;
         failed |= !ok;
         info!(
             target: "verify",
-            "{name}: {}",
+            "{real}: {}",
             if ok {
                 format!("OK sha256={want}")
             } else {
@@ -609,12 +801,18 @@ mod tests {
             post_server: "127.0.0.1:1".into(),
             nzb: nzb_path.clone(),
             group: "alt.binaries.test".into(),
-            from: "corpus@nzbfast.com".into(),
-            msgid_domain: "corpus.nzbfast.com".into(),
+            from: "corpus@nzbfast.invalid".into(),
+            msgid_domain: "nzbfast.invalid".into(),
             article_size: 1_000,
             title: None,
             connections: 1,
             verify: false,
+            allow_empty: false,
+            obfuscate: false,
+            obfuscate_empty_name: false,
+            par2: None,
+            par2_block_size: None,
+            par2_base: None,
         };
 
         // An EMPTY temp is another run's claim - refuse (this used to proceed
@@ -723,12 +921,18 @@ mod tests {
             post_server: format!("127.0.0.1:{}", srv.addr.port()),
             nzb: nzb_path.clone(),
             group: "alt.binaries.test".into(),
-            from: "corpus@nzbfast.com".into(),
-            msgid_domain: "corpus.nzbfast.com".into(),
+            from: "corpus@nzbfast.invalid".into(),
+            msgid_domain: "nzbfast.invalid".into(),
             article_size: 1_000,
             title: None,
             connections: 1,
             verify: false,
+            allow_empty: false,
+            obfuscate: false,
+            obfuscate_empty_name: false,
+            par2: None,
+            par2_block_size: None,
+            par2_base: None,
         };
         let tmp = PathBuf::from(format!("{}.nzbtmp", nzb_path.display()));
 
@@ -781,12 +985,18 @@ mod tests {
                 post_server: format!("127.0.0.1:{}", srv.addr.port()),
                 nzb: nzb_path.clone(),
                 group: "alt.binaries.test".into(),
-                from: "corpus@nzbfast.com".into(),
-                msgid_domain: "corpus.nzbfast.com".into(),
+                from: "corpus@nzbfast.invalid".into(),
+                msgid_domain: "nzbfast.invalid".into(),
                 article_size: 100_000,
                 title: Some("post cmd e2e".into()),
                 connections: 3,
                 verify: true,
+                allow_empty: false,
+                obfuscate: false,
+                obfuscate_empty_name: false,
+                par2: None,
+                par2_block_size: None,
+                par2_base: None,
             },
         )
         .await
@@ -797,6 +1007,96 @@ mod tests {
         assert_eq!(nzb.files.iter().map(|f| f.segments.len()).sum::<usize>(), 4);
         // Verify's temp dir is cleaned up on success.
         assert!(!nzb_path.with_extension("verify.tmp").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The no-RAR CLI path: `--obfuscate --par2` posts a payload whose
+    /// wire names say nothing, builds and posts the recovery set that
+    /// carries the real ones, and still passes `--verify` - which is the
+    /// non-obvious half, because verify has to match a downloaded file
+    /// back to its source through the RANDOM posted name and would
+    /// otherwise fail every obfuscated run by construction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_posts_an_obfuscated_set_with_its_par2_and_verifies_it() {
+        let srv =
+            nzbkit::mock::MockServer::start(Default::default(), nzbkit::mock::Chaos::default())
+                .await;
+        let dir = std::env::temp_dir().join(format!("nzbfast-postcmd-obf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("release/Sub")).unwrap();
+        let data: Vec<u8> = (0..180_000).map(|i| (i * 17 + i / 251) as u8).collect();
+        std::fs::write(dir.join("release/Feature.2024.mkv"), &data).unwrap();
+        std::fs::write(dir.join("release/Sub/Feature.2024.srt"), &data[..4_000]).unwrap();
+        let config_path = dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            format!(
+                "{{\"servers\":[{{\"host\":\"127.0.0.1\",\"port\":{},\"tls\":false}}]}}",
+                srv.addr.port()
+            ),
+        )
+        .unwrap();
+
+        let nzb_path = dir.join("obf.nzb");
+        let args = || PostArgs {
+            paths: vec![dir.join("release")],
+            post_server: format!("127.0.0.1:{}", srv.addr.port()),
+            nzb: nzb_path.clone(),
+            group: "alt.binaries.test".into(),
+            from: "corpus@nzbfast.invalid".into(),
+            msgid_domain: "nzbfast.invalid".into(),
+            article_size: 60_000,
+            title: None,
+            connections: 2,
+            verify: true,
+            allow_empty: false,
+            obfuscate: true,
+            obfuscate_empty_name: false,
+            par2: Some(10),
+            par2_block_size: Some(4096),
+            par2_base: None,
+        };
+        run(&config_path, args()).await.expect("obfuscated post");
+
+        let xml = std::fs::read_to_string(&nzb_path).unwrap();
+        assert!(
+            !xml.contains("Feature.2024"),
+            "the NZB spells a real name:\n{xml}"
+        );
+        // The recovery set IS on the wire and IS findable - it is the
+        // only thing carrying the names.
+        assert!(xml.contains(".par2"), "no recovery set in the NZB:\n{xml}");
+        // Both scratch directories are gone on success.
+        assert!(!nzb_path.with_extension("par2.tmp").exists());
+        assert!(!nzb_path.with_extension("verify.tmp").exists());
+
+        // And the safety rule: obfuscation with no carrier is refused
+        // before a byte moves, rather than publishing nameless articles.
+        let mut naked = args();
+        naked.par2 = None;
+        naked.nzb = dir.join("naked.nzb");
+        let err = format!("{:#}", run(&config_path, naked).await.unwrap_err());
+        assert!(err.contains("need a carrier"), "wrong refusal: {err}");
+        assert!(!dir.join("naked.nzb").exists(), "it published anyway");
+
+        // A PAR2 build that fails sits BETWEEN the NZB claim and the
+        // first byte, so it has to give the claim back - otherwise the
+        // rerun meets "another post is probably writing" over an empty
+        // file this run abandoned, and no rerun can ever get past it.
+        let mut bad = args();
+        bad.nzb = dir.join("badspec.nzb");
+        bad.par2_block_size = Some(6); // not a multiple of 4
+        let err = format!("{:#}", run(&config_path, bad).await.unwrap_err());
+        assert!(err.contains("multiple of 4"), "wrong refusal: {err}");
+        assert!(
+            !dir.join("badspec.nzb.nzbtmp").exists(),
+            "the NZB claim was abandoned - the rerun is now blocked forever"
+        );
+        assert!(
+            !dir.join("badspec.par2.tmp").exists(),
+            "scratch left behind"
+        );
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -837,12 +1137,18 @@ mod tests {
             post_server: format!("127.0.0.1:{}", srv.addr.port()),
             nzb: nzb_path.clone(),
             group: "alt.binaries.test".into(),
-            from: "corpus@nzbfast.com".into(),
-            msgid_domain: "corpus.nzbfast.com".into(),
+            from: "corpus@nzbfast.invalid".into(),
+            msgid_domain: "nzbfast.invalid".into(),
             article_size: 1_000,
             title: None,
             connections: 1,
             verify: false,
+            allow_empty: false,
+            obfuscate: false,
+            obfuscate_empty_name: false,
+            par2: None,
+            par2_block_size: None,
+            par2_base: None,
         };
 
         let err = run(&config_path, args()).await.unwrap_err();

@@ -38,6 +38,16 @@ pub(super) fn spawn_spec_prefetch(
     // articles on an idle wire, and covering them is the same certain-
     // damage bet one rung earlier.
     tail_demand: &Arc<std::sync::atomic::AtomicUsize>,
+    // Set TRUE the moment this ladder can never deliver another slice -
+    // every declared volume fetched, or the fetch machinery gave up -
+    // so the give-up loop knows "walking the ladder instead" has
+    // stopped being a plan. Without it the give-up waited on parity
+    // that could never arrive: on the 30 Aug 2026 live incident a post
+    // carrying 301 recovery blocks had a 67,602-block 2x ceiling, the
+    // prefetch task returned quietly, and the job walked 33,757
+    // refusal walkers for hours with the queue row reading as a
+    // download (see `spawn_tail_giveup`'s starvation arm).
+    ladder_over: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let target = (allowed && has_main)
         .then(|| {
@@ -101,6 +111,7 @@ pub(super) fn spawn_spec_prefetch(
         let pre = prefetched.clone();
         let stop = prefetch_stop.clone();
         let demand = tail_demand.clone();
+        let over = ladder_over.clone();
         tokio::spawn(async move {
             // Codex 5 Aug M3: a rung used to run with no cancellation
             // handle, so a blackholed side provider held drain_network's
@@ -128,7 +139,13 @@ pub(super) fn spawn_spec_prefetch(
                 if want > covered {
                     let deficit = want - covered;
                     if ladder.is_empty() {
-                        return; // every volume already prefetched
+                        // Every volume already prefetched - and the
+                        // demand is still unmet, so no later tick can
+                        // ever meet it. Say so to the give-up loop, or
+                        // it waits for this ladder for the rest of the
+                        // run (the 30 Aug 2026 wedge).
+                        over.store(true, Ordering::Release);
+                        return;
                     }
                     let at = pick_rung(&ladder, deficit);
                     let (fi, count, bytes) = ladder.remove(at);
@@ -244,6 +261,9 @@ pub(super) fn spawn_spec_prefetch(
                                 target: "repair",
                                 "speculative prefetch failed ({e}) - the post-settle fetch covers it"
                             );
+                            // This ladder delivers nothing more either
+                            // way; the give-up must not wait on it.
+                            over.store(true, Ordering::Release);
                             return;
                         }
                     }
@@ -268,11 +288,14 @@ pub(in crate::get) fn spec_ladder(nzb: &Nzb) -> Vec<(usize, usize, u64)> {
         .enumerate()
         .filter(|(_, f)| f.kind() == FileKind::Par2Volume)
         .map(|(fi, f)| {
-            let name = f.filename_hint().unwrap_or(&f.subject);
             // Conservative when the name doesn't declare a count:
             // claim 1 so escalation keeps going rather than stopping
             // on an inflated estimate.
-            (fi, vol_count_from_name(name).unwrap_or(1), f.bytes())
+            (
+                fi,
+                vol_count_from_name(f.classify().name()).unwrap_or(1),
+                f.bytes(),
+            )
         })
         .collect();
     ladder.sort_by_key(|&(_, _, bytes)| bytes);
@@ -295,10 +318,7 @@ pub(in crate::get) fn declared_volumes(nzb: &Nzb) -> Vec<(Option<usize>, u64)> {
     nzb.files
         .iter()
         .filter(|f| f.kind() == FileKind::Par2Volume)
-        .map(|f| {
-            let name = f.filename_hint().unwrap_or(&f.subject);
-            (vol_count_from_name(name), f.bytes())
-        })
+        .map(|f| (vol_count_from_name(f.classify().name()), f.bytes()))
         .collect()
 }
 
@@ -360,7 +380,7 @@ pub(super) fn par_race_estimate(
         }
         // Same name normalization settle itself uses; an obfuscated
         // alias not yet reconciled simply stays out of the race.
-        if !set_names.contains(&nzbkit::disk::sanitize_filename(&s.hint).to_lowercase()) {
+        if !set_names.contains(&nzbkit::disk::sanitize_out_name(&s.hint).to_lowercase()) {
             continue;
         }
         // TODO 311 follow-on B. The name just tested is the NZB
@@ -382,14 +402,22 @@ pub(super) fn par_race_estimate(
         }
         let f = &nzb.files[slot_file[sidx]];
         let per = (f.bytes() / f.segments.len().max(1) as u64).max(1);
-        est.out_bytes += rem as u64 * per;
+        // N6-11: `f.bytes()` is a SATURATING sum of poster-declared
+        // `<segment bytes>`, so `per` reaches `u64::MAX` on an NZB that
+        // declares one - and `rem as u64 * per` then panicked in debug
+        // and wrapped in release, pricing a repair at near zero bytes.
+        est.out_bytes = est
+            .out_bytes
+            .saturating_add((rem as u64).saturating_mul(per));
         let mut sizes: Vec<u64> = f.segments.iter().map(|seg| seg.bytes).collect();
         sizes.sort_unstable_by(|a, b| b.cmp(a));
-        est.out_blocks += sizes
-            .iter()
-            .take(rem)
-            .map(|b| (*b as usize).div_ceil(block) + 1)
-            .sum::<usize>();
+        est.out_blocks = est.out_blocks.saturating_add(
+            sizes
+                .iter()
+                .take(rem)
+                .map(|b| blocks_for(*b, block))
+                .fold(0usize, usize::saturating_add),
+        );
         for seg in &f.segments {
             // R9: interned here rather than looked up in `id_to_slot`.
             // This census only runs in the tail-stall state (every
@@ -432,27 +460,50 @@ pub(super) fn par_race_missing_blocks(
                 .iter()
                 .map(|seg| seg.bytes)
                 .max()
-                .unwrap_or(0) as usize;
-            m * (max_per.div_ceil(block) + 1)
+                .unwrap_or(0);
+            // N6-11: see `blocks_for` - the declared bytes are narrowed
+            // AFTER the division, and the charge saturates.
+            m.saturating_mul(blocks_for(max_per, block))
         })
-        .sum()
+        .fold(0usize, usize::saturating_add)
 }
 
 /// [`par_race_missing_blocks`] charged PER SET (TODO 311 follow-on B):
 /// each slot's worst case priced in the block size of the set that
 /// claims it, indexed the way `LiveVerifier::sets` is.
 ///
-/// A slot NO set claims is priced to nobody, and that is the point
-/// rather than an omission: its blocks sit outside every adopted set,
-/// so no parity on hand rebuilds them and charging them to a set makes
-/// that set's margin answer a question about damage its volumes cannot
-/// heal. The job-wide sum the singular takes is right for the damage
-/// projection, which states one figure for the whole post; it is wrong
-/// for a margin, because on a per-file-set post it inflates every set's
-/// ceiling by its seventeen siblings' damage and nothing ever clears.
+/// A slot no set claims AND no set NAMES is priced to nobody, and that
+/// is the point rather than an omission: its blocks sit outside every
+/// adopted set, so no parity on hand rebuilds them and charging them to
+/// a set makes that set's margin answer a question about damage its
+/// volumes cannot heal. The job-wide sum the singular takes is right for
+/// the damage projection, which states one figure for the whole post; it
+/// is wrong for a margin, because on a per-file-set post it inflates
+/// every set's ceiling by its seventeen siblings' damage and nothing
+/// ever clears.
+///
+/// THE `NAMES` HALF IS NEW (30 Aug 2026 sweep) and closes an asymmetry
+/// with [`par_race_estimate`], which prices the SAME slots. A file the
+/// set names but that never landed one byte - every article 430, a
+/// wholly-taken-down member - has no claim, because the verifier only
+/// claims a slot once some of it arrives. `par_race_estimate` accepts it
+/// as a candidate anyway (its own comment: "a slot it has not matched
+/// yet ... has no answer to give, and the name still speaks for it
+/// exactly as before"), so its walkers ARE abandonable by that set;
+/// keyed on the claim alone, this function charged its damage to nobody.
+/// The margin then read a handful of blocks where the real ceiling was
+/// hundreds, and the 2x gate cleared on parity nowhere near enough to
+/// rebuild what was being abandoned - which is the one permanent loss
+/// this whole trade is written to never take.
+///
+/// Charged to EVERY set that names it, deliberately. That can only ever
+/// RAISE a ceiling, so the give-up gets more conservative and never less;
+/// the alternative (pick one) would need a rule for choosing, and a wrong
+/// choice there loses payload where a double charge only costs a trade.
 pub(super) fn par_race_missing_blocks_by_set(
     blocks: &[usize],
     claimed: &[Option<usize>],
+    set_names: &[std::collections::HashSet<String>],
     slots: &[Arc<FileSlot>],
     slot_file: &[usize],
     nzb: &Nzb,
@@ -466,19 +517,34 @@ pub(super) fn par_race_missing_blocks_by_set(
         if m == 0 {
             continue;
         }
-        let Some(si) = claimed.get(sidx).copied().flatten() else {
-            continue;
-        };
-        let Some(&block) = blocks.get(si) else {
-            continue;
-        };
         let max_per = nzb.files[slot_file[sidx]]
             .segments
             .iter()
             .map(|seg| seg.bytes)
             .max()
-            .unwrap_or(0) as usize;
-        out[si] += m * (max_per.div_ceil(block.max(1)) + 1);
+            .unwrap_or(0);
+        let mut charge = |si: usize| {
+            if let Some(&block) = blocks.get(si) {
+                // N6-11: see `blocks_for`.
+                out[si] = out[si].saturating_add(m.saturating_mul(blocks_for(max_per, block)));
+            }
+        };
+        match claimed.get(sidx).copied().flatten() {
+            // The verifier has matched this slot to a set: that answer
+            // wins outright, exactly as it vetoes in `par_race_estimate`.
+            Some(si) => charge(si),
+            // Nothing of it has landed, so there is no claim to have.
+            // The NAME still speaks for it - the same normalization
+            // settle and `par_race_estimate` both use.
+            None => {
+                let hint = nzbkit::disk::sanitize_out_name(&s.hint).to_lowercase();
+                for (si, names) in set_names.iter().enumerate() {
+                    if names.contains(&hint) {
+                        charge(si);
+                    }
+                }
+            }
+        }
     }
     out
 }
@@ -524,7 +590,7 @@ pub(super) fn spawn_par_race(
             let slot_file2 = slot_file.to_vec();
             let nzb2 = nzb.clone();
             tokio::spawn(async move {
-                use std::collections::{HashSet, VecDeque};
+                use std::collections::VecDeque;
                 let mut win: VecDeque<(std::time::Instant, u64)> = VecDeque::new();
                 let mut cache = CensusCache::new();
                 loop {
@@ -570,59 +636,15 @@ pub(super) fn spawn_par_race(
                         None,
                         &mut cache,
                     );
-                    if tails.is_empty() {
-                        continue;
-                    }
                     // The line must be slow enough that repair clearly
-                    // wins; a healthy line finishes the remainder before
-                    // any repair could start its verify pass. The
-                    // remainder is the JOB's, summed over every set,
-                    // because that is what the run is actually waiting
-                    // on - cancelling one set's stragglers shortens a
-                    // job only while some other set is still the thing
-                    // holding it open.
-                    let out_bytes: u64 = tails.iter().map(|t| t.est.out_bytes).sum();
-                    if tails.iter().all(|t| t.est.want.is_empty()) {
-                        continue;
-                    }
-                    let eta = if rate > 0.0 {
-                        out_bytes as f64 / rate
-                    } else {
-                        f64::INFINITY
-                    };
-                    if eta < 30.0 {
-                        continue;
-                    }
-                    // Damage ceiling per set if every unresolved article
-                    // of that set is lost: the queued ones we would
-                    // cancel plus that set's own bad or terminally
-                    // missing blocks.
-                    let eligible: Vec<usize> = (0..tails.len())
-                        .filter(|&si| {
-                            !tails[si].est.want.is_empty()
-                                && tails[si].covers(tails[si].race_ceiling())
-                        })
-                        .collect();
-                    if eligible.is_empty() {
-                        continue;
-                    }
-                    // Through `sole_set`, so an article TWO sets both
-                    // name reaches NEITHER cancel list. It cannot be
-                    // dropped from `want` later instead: `cancel`
-                    // answers one id list, and an id cancelled that no
-                    // set then owns is one nothing decrements
-                    // `remaining` for - a run that never finishes. The
-                    // ambiguity is the verifier not having adjudicated
-                    // the slot yet, and the ladder finishing its
-                    // articles is the right answer to that.
-                    let mut want: HashSet<std::sync::Arc<str>> = HashSet::new();
-                    for &si in &eligible {
-                        for id in &tails[si].est.want {
-                            if sole_set(&tails, id) == Some(si) {
-                                want.insert(id.clone());
-                            }
-                        }
-                    }
+                    // wins, and every set must have bought its own 2x
+                    // margin: `par_race_verdict` is that whole decision,
+                    // out here where a test can drive it.
+                    let RaceVerdict {
+                        eta,
+                        eligible,
+                        want,
+                    } = par_race_verdict(&tails, rate);
                     if want.is_empty() {
                         continue;
                     }
@@ -652,63 +674,32 @@ pub(super) fn spawn_par_race(
                     // outgrowing its estimate must not cost a sibling
                     // set the race its own parity has already paid for.
                     let live_bad_now = verifier2.live_bad_by_set();
-                    let mut keep: Vec<std::sync::Arc<str>> = Vec::new();
-                    for &si in &eligible {
-                        let t = &tails[si];
-                        let mine: Vec<std::sync::Arc<str>> = removed
-                            .iter()
-                            .filter(|id| sole_set(&tails, id) == Some(si))
-                            .cloned()
-                            .collect();
-                        if mine.is_empty() {
-                            continue;
+                    let mut r = par_race_recheck(&tails, &eligible, &removed, &live_bad_now);
+                    for (si, mine, _ceiling) in r.rollback {
+                        if queue_ctl2.requeue(&mine) > 0 {
+                            continue; // rolled this set back whole - no race for it
                         }
-                        let exact: usize = mine
-                            .iter()
-                            .filter_map(|id| t.est.bytes_of.get(&**id))
-                            .map(|&(_, b)| (b as usize).div_ceil(t.block) + 1)
-                            .sum();
-                        let ceiling = exact
-                            + live_bad_now.get(si).copied().unwrap_or(0) as usize
-                            + t.missing_blocks;
-                        if !t.covers(ceiling) {
-                            if queue_ctl2.requeue(&mine) > 0 {
-                                continue; // rolled this set back whole - no race for it
-                            }
-                            // requeue's all-or-nothing rollback found the
-                            // run already winding down, so the cancel is
-                            // now irreversible. Fall through to the
-                            // abandonment accounting so the bar stays
-                            // truthful - settle prices the damage
-                            // honestly either way.
-                            warn!(
-                                target: "repair",
-                                "par-race: set {si}'s exact damage outgrew the estimate and \
-                                 the rollback found the run winding down - proceeding with \
-                                 {} abandoned article(s)",
-                                mine.len()
-                            );
-                        }
-                        keep.extend(mine);
+                        // requeue's all-or-nothing rollback found the
+                        // run already winding down, so the cancel is
+                        // now irreversible. Fall through to the
+                        // abandonment accounting so the bar stays
+                        // truthful - settle prices the damage
+                        // honestly either way.
+                        warn!(
+                            target: "repair",
+                            "par-race: set {si}'s exact damage outgrew the estimate and \
+                             the rollback found the run winding down - proceeding with \
+                             {} abandoned article(s)",
+                            mine.len()
+                        );
+                        r.keep.extend(mine);
                     }
-                    if keep.is_empty() {
+                    if r.keep.is_empty() {
                         continue; // every set rolled back - no race this tick
-                    }
-                    let mut freed = 0u64;
-                    for id in &keep {
-                        // The id belongs to exactly one set - `sole_set`
-                        // is what let it into `want` - so the first map
-                        // that knows it is the one that priced it.
-                        if let Some(&(sidx, b)) =
-                            tails.iter().find_map(|t| t.est.bytes_of.get(&**id))
-                        {
-                            slots2[sidx].remaining.fetch_sub(1, Ordering::AcqRel);
-                            slots2[sidx].abandoned.fetch_add(1, Ordering::Relaxed);
-                            freed += b;
-                        }
                     }
                     // No outcome will ever arrive for these - settle the
                     // bar here, exactly like a sniff deferral.
+                    let freed = par_race_charge(&tails, &r.keep, &slots2);
                     fetch_done2.fetch_add(freed, Ordering::Relaxed);
                     let on_hand: usize = eligible.iter().map(|&si| tails[si].on_hand).sum();
                     let ceiling: usize = eligible.iter().map(|&si| tails[si].race_ceiling()).sum();
@@ -718,7 +709,7 @@ pub(super) fn spawn_par_race(
                          {} recovery set(s) - {on_hand} recovery blocks on hand cover the \
                          {ceiling}-block worst case at 2x, and repair beats the ~{eta:.0}s \
                          fetch remainder",
-                        keep.len(),
+                        r.keep.len(),
                         freed as f64 / 1e6,
                         eligible.len(),
                     );
@@ -741,6 +732,31 @@ pub(super) fn spawn_par_race(
 /// its `bytes_of`, which read as "repair cannot rebuild this" and
 /// vetoed the whole trade. On GH #63's eighteen one-file sets that is
 /// seventeen tracks out of eighteen, at any amount of parity on hand.
+/// PAR2 blocks an article of `bytes` costs to rebuild, plus the one
+/// block of slack every caller here adds for the partial at its end.
+///
+/// N6-11, and it is two defects in one line rather than one. `bytes` is
+/// a poster-declared `<segment bytes>` value straight off the NZB, up
+/// to `u64::MAX`:
+///
+///  * `(b as usize)` NARROWS BEFORE IT BOUNDS - the class
+///    `tools/chunk-narrow-gate.py` exists for. It is a no-op on the
+///    64-bit boxes this fleet builds on and TRUNCATES on the shipped
+///    32-bit `armv7-unknown-linux-musleabihf` target, where `u64::MAX`
+///    becomes `u32::MAX` and a 16 EB claim prices as a 4 GB one. The
+///    division happens in `u64` here and only the ANSWER is narrowed.
+///  * the sums these feed then overflowed `usize` - a panic in debug,
+///    and in release a wrapped ceiling near zero, which is a give-up
+///    trade taken on the belief that repair can rebuild everything.
+///
+/// Saturating rather than refusing: this is a repair COST estimate, and
+/// a saturated one is the conservative answer at both call sites (a
+/// larger ceiling means the trade is not taken).
+fn blocks_for(bytes: u64, block: usize) -> usize {
+    let n = bytes.div_ceil(block.max(1) as u64);
+    usize::try_from(n).unwrap_or(usize::MAX).saturating_add(1)
+}
+
 pub(super) struct SetTail {
     pub(super) est: RaceEstimate,
     pub(super) block: usize,
@@ -755,9 +771,11 @@ impl SetTail {
     pub(super) fn ceiling<'a>(&self, ids: impl Iterator<Item = &'a str>) -> usize {
         let exact: usize = ids
             .filter_map(|id| self.est.bytes_of.get(id))
-            .map(|&(_, b)| (b as usize).div_ceil(self.block.max(1)) + 1)
-            .sum();
-        exact + self.live_bad + self.missing_blocks
+            .map(|&(_, b)| blocks_for(b, self.block))
+            .fold(0usize, usize::saturating_add);
+        exact
+            .saturating_add(self.live_bad)
+            .saturating_add(self.missing_blocks)
     }
 
     /// The par-race's ceiling: EVERY unresolved candidate article of
@@ -858,6 +876,222 @@ pub(super) fn tail_giveup_verdict(
     v
 }
 
+/// The §146 starvation arm's claim: every walker belonging to a SHORT
+/// set, cloned for `give_up_covered`.
+///
+/// Fired only when the loop has established that the short sets can
+/// never clear - the spec-prefetch ladder is OVER (every declared
+/// recovery volume fetched, unfetchable, or the fetch died) and
+/// `on_hand` has been still for the whole grace window - so "the
+/// ladder must finish" has stopped being a plan and the only remaining
+/// outcomes are an honest verdict now or the same verdict after hours
+/// of refusal-walking. Measured 30 Aug 2026 on the live daemon: a post
+/// with 301 declared recovery blocks against a 67,602-block 2x
+/// ceiling held 33,757 walkers on the refusal ladder for over three
+/// hours at zero throughput, with the give-up's veto printing once and
+/// nothing else ever moving. Abandoning loses nothing the wait would
+/// have won: settle's own repair ladder re-fetches any declared volume
+/// it still wants, the journal keeps every byte for a retry, and
+/// `finish_job` states the shortfall the way §305 asks
+/// ("N recovery block(s) needed ... carries only M").
+///
+/// UNCOVERED walkers are deliberately not in this claim - no parity
+/// speaks for them, but each one's own refusal ladder is bounded per
+/// article (live-group unanimity ends it as Missing), so they drain on
+/// their own and the per-article veto stays exactly what TODO 311
+/// follow-on B made it.
+pub(super) fn starved_walkers(
+    walkers: &[nzbkit::pool::Walker],
+    sets: &[SetTail],
+    short: &[(usize, usize, usize)],
+) -> Vec<nzbkit::pool::Walker> {
+    let short_sets: std::collections::HashSet<usize> = short.iter().map(|&(si, _, _)| si).collect();
+    walkers
+        .iter()
+        .filter(|w| sole_set(sets, &w.id).is_some_and(|si| short_sets.contains(&si)))
+        .cloned()
+        .collect()
+}
+
+/// The par-race declines while the fetch remainder is closer than this:
+/// a healthy line finishes the stragglers before any repair could even
+/// start its verify pass, so the trade would spend parity to lose time.
+///
+/// Named here rather than left a literal in the loop so the gate is one
+/// thing a test can drive - `par_race_verdict` is a decision about a
+/// RATE, and the seconds are the only part of it that is a policy.
+const PAR_RACE_MIN_ETA_SECS: f64 = 30.0;
+
+/// What one PRE-CANCEL tick of the par-race arm decided.
+///
+/// The sibling of [`TailVerdict`], and the shapes differ because the
+/// arms do: the tail give-up prices a NAMED walker list that the pool
+/// handed it, while the race prices every unresolved candidate of a set
+/// and then asks the queue to take them away.
+pub(super) struct RaceVerdict {
+    /// Seconds of fetch remainder the decision was taken against -
+    /// summed over EVERY set and not only the eligible ones, because
+    /// that is what the run is actually waiting on. Reported in the
+    /// race's own log line.
+    pub(super) eta: f64,
+    /// Sets whose own recovery slices cover their own worst case at 2x
+    /// and that still have candidates to cancel. Empty when the arm
+    /// declines, whatever the reason.
+    pub(super) eligible: Vec<usize>,
+    /// The ids to ask the queue to cancel: the union, over `eligible`,
+    /// of the articles exactly ONE adopted set speaks for. Empty
+    /// whenever `eligible` is.
+    pub(super) want: std::collections::HashSet<Arc<str>>,
+}
+
+/// The par-race's decision half - held still where a test can reach it,
+/// the way [`tail_giveup_verdict`] already is for the other arm.
+///
+/// TWO functions rather than one taking both halves, and the reason is
+/// the `cancel` that sits BETWEEN them. This one decides whether a
+/// cancel happens at all; the exact straggler list it produces is not
+/// knowable until the queue has answered (an article already in flight
+/// or already done is not removed), and the re-check additionally reads
+/// a FRESH `live_bad_by_set` taken after that answer. A single function
+/// would have to take `removed` and both damage vectors and could no
+/// longer be driven at the moment where the gates below actually
+/// decide - which is the whole point of extracting it.
+/// [`par_race_recheck`] is the other half.
+///
+/// THE `sole_set` SCOPING IS THE LOAD-BEARING JUDGEMENT here. An
+/// article TWO sets both name reaches NEITHER cancel list, and it
+/// cannot be dropped from `want` later instead: `cancel` answers one id
+/// list, and an id cancelled that no set then owns is one nothing
+/// decrements `remaining` for - a run that never finishes. The
+/// ambiguity is the verifier not having adjudicated the slot yet, and
+/// the ladder finishing its articles is the right answer to that.
+pub(super) fn par_race_verdict(sets: &[SetTail], rate: f64) -> RaceVerdict {
+    let out_bytes: u64 = sets.iter().map(|t| t.est.out_bytes).sum();
+    let eta = if rate > 0.0 {
+        out_bytes as f64 / rate
+    } else {
+        f64::INFINITY
+    };
+    let mut v = RaceVerdict {
+        eta,
+        eligible: Vec::new(),
+        want: std::collections::HashSet::new(),
+    };
+    if sets.iter().all(|t| t.est.want.is_empty()) || eta < PAR_RACE_MIN_ETA_SECS {
+        return v;
+    }
+    // Damage ceiling per set if every unresolved article of that set is
+    // lost: the queued ones we would cancel plus that set's own bad or
+    // terminally missing blocks.
+    v.eligible = (0..sets.len())
+        .filter(|&si| !sets[si].est.want.is_empty() && sets[si].covers(sets[si].race_ceiling()))
+        .collect();
+    for &si in &v.eligible {
+        for id in &sets[si].est.want {
+            if sole_set(sets, id) == Some(si) {
+                v.want.insert(id.clone());
+            }
+        }
+    }
+    v
+}
+
+/// What the POST-CANCEL re-check decided, per set.
+pub(super) struct RaceRecheck {
+    /// Cancelled ids whose set cleared the exact re-check - abandon
+    /// these.
+    pub(super) keep: Vec<Arc<str>>,
+    /// `(set index, its cancelled ids, its exact ceiling in blocks)` for
+    /// every set whose damage outgrew its estimate. Ask the queue to
+    /// requeue each one WHOLE; where that rollback fails the cancel is
+    /// already irreversible, so those ids join `keep` rather than
+    /// vanishing from the accounting.
+    pub(super) rollback: Vec<(usize, Vec<Arc<str>>, usize)>,
+}
+
+/// The par-race's re-check half: the cancel is the first moment the
+/// EXACT straggler set is known, so the 2x guard runs again on it with
+/// the ids' declared bytes and a fresh `live_bad_by_set` (damage can
+/// grow in the second between the estimate and the cancel). The
+/// worst-case estimate [`par_race_verdict`] took makes a failure here
+/// rare, not impossible.
+///
+/// PER SET, AND THE ROLLBACK IS PER SET WITH IT: one set's damage
+/// outgrowing its estimate must not cost a sibling set the race its own
+/// parity has already paid for. That is why this returns a `rollback`
+/// LIST rather than a verdict about the tick - each entry is one set's
+/// ids, requeued whole or not at all, and the sets that cleared keep
+/// their race either way.
+///
+/// A cancelled id no eligible set speaks for is in neither list, which
+/// cannot happen through [`par_race_verdict`] - `sole_set` is what let
+/// it into `want` - and is the safe answer if it ever does: charging an
+/// unattributable article to a set would price it against parity that
+/// may not heal it.
+pub(super) fn par_race_recheck(
+    sets: &[SetTail],
+    eligible: &[usize],
+    removed: &[Arc<str>],
+    live_bad_now: &[u64],
+) -> RaceRecheck {
+    let mut r = RaceRecheck {
+        keep: Vec::new(),
+        rollback: Vec::new(),
+    };
+    for &si in eligible {
+        let Some(t) = sets.get(si) else {
+            continue;
+        };
+        let mine: Vec<Arc<str>> = removed
+            .iter()
+            .filter(|id| sole_set(sets, id) == Some(si))
+            .cloned()
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let exact: usize = mine
+            .iter()
+            .filter_map(|id| t.est.bytes_of.get(&**id))
+            .map(|&(_, b)| blocks_for(b, t.block))
+            .fold(0usize, usize::saturating_add);
+        let ceiling = exact
+            .saturating_add(live_bad_now.get(si).copied().unwrap_or(0) as usize)
+            .saturating_add(t.missing_blocks);
+        if t.covers(ceiling) {
+            r.keep.extend(mine);
+        } else {
+            r.rollback.push((si, mine, ceiling));
+        }
+    }
+    r
+}
+
+/// The abandonment accounting, and it is a contract rather than a
+/// bookkeeping detail: the cancelled articles will never get a pool
+/// outcome, so this arm settles the bar itself exactly as a sniff
+/// deferral does - `remaining` down, `abandoned` up - and hands back the
+/// bytes the caller credits to `fetch_done`.
+///
+/// Called for every id the tick abandons, INCLUDING one whose set failed
+/// its re-check and whose rollback then found the run winding down: the
+/// cancel is irreversible by then, so leaving it out would be a bar that
+/// never completes rather than a trade not taken.
+///
+/// The id belongs to exactly one set - `sole_set` is what let it into
+/// `want` - so the first map that knows it is the one that priced it.
+pub(super) fn par_race_charge(sets: &[SetTail], keep: &[Arc<str>], slots: &[Arc<FileSlot>]) -> u64 {
+    let mut freed = 0u64;
+    for id in keep {
+        if let Some(&(sidx, b)) = sets.iter().find_map(|t| t.est.bytes_of.get(&**id)) {
+            slots[sidx].remaining.fetch_sub(1, Ordering::AcqRel);
+            slots[sidx].abandoned.fetch_add(1, Ordering::Relaxed);
+            freed += b;
+        }
+    }
+    freed
+}
+
 /// §146 tail give-up: every `.par2` file in the job dir, up to three
 /// levels deep - the recovery volumes the MAIN pool decoded inline
 /// because they were never deferred, so the side prefetch never saw
@@ -925,13 +1159,25 @@ pub(super) struct CensusEntry {
 }
 
 impl CensusEntry {
-    /// Slices of `set_id` at exactly `block` bytes - the same question
+    /// Slices of `set_id` that can serve a `block`-byte block - the same
+    /// question
     /// [`recovery_slice_locators`](nzbkit::par2repair::recovery_slice_locators)
     /// answers, off the one read.
+    ///
+    /// "Can serve" and not "is exactly", and the predicate is
+    /// [`nzbkit::par2repair::slice_fits_block`] rather than a comparison
+    /// spelled here. This counter said `*l == block` until 31 Aug 2026
+    /// while the two SELECTION sites had already moved to `>= block`
+    /// (M4-56), so on a post whose writer padded its recovery packets the
+    /// tail give-up read every volume on disk as holding zero parity of
+    /// this set. The direction is the safe one - an UNDER-count keeps
+    /// fetching where an over-count fires the give-up on parity that is
+    /// not there - which is precisely why nothing reported it for a day.
+    /// Pinned by `workers::slice_len_tests`, beside the settle half.
     pub(super) fn count(&self, set_id: &[u8; 16], block: usize) -> usize {
         self.groups
             .iter()
-            .filter(|(id, l, _)| id == set_id && *l == block)
+            .filter(|(id, l, _)| id == set_id && nzbkit::par2repair::slice_fits_block(*l, block))
             .map(|(_, _, n)| *n)
             .sum()
     }
@@ -1032,7 +1278,20 @@ pub(super) fn census_sets(
     let claimed = verifier.slot_sets();
     let live_bad = verifier.live_bad_by_set();
     let blocks: Vec<usize> = sets.iter().map(|s| s.block_size.max(1) as usize).collect();
-    let missing = par_race_missing_blocks_by_set(&blocks, &claimed, slots, slot_file, nzb);
+    // The FileDesc names of each set, in `sets` order - what speaks for
+    // a slot the verifier has not claimed. Same normalization as
+    // `par_race_estimate`'s `set_names` and as settle's `union_set_names`.
+    let set_names: Vec<std::collections::HashSet<String>> = sets
+        .iter()
+        .map(|s| {
+            s.files
+                .iter()
+                .map(|f| nzbkit::disk::sanitize_out_name(&f.name).to_lowercase())
+                .collect()
+        })
+        .collect();
+    let missing =
+        par_race_missing_blocks_by_set(&blocks, &claimed, &set_names, slots, slot_file, nzb);
     // One snapshot of the prefetched list for the whole tick, so the
     // lock is taken once rather than once per set.
     let pre: std::collections::HashSet<PathBuf> = prefetched
@@ -1056,7 +1315,7 @@ pub(super) fn census_sets(
             let set_names: std::collections::HashSet<String> = set
                 .files
                 .iter()
-                .map(|f| nzbkit::disk::sanitize_filename(&f.name).to_lowercase())
+                .map(|f| nzbkit::disk::sanitize_out_name(&f.name).to_lowercase())
                 .collect();
             let est =
                 par_race_estimate(&set_names, &claimed, Some(si), block, slots, slot_file, nzb);
@@ -1108,6 +1367,12 @@ pub(super) fn spawn_tail_giveup(
     // margin is short, so the prefetch fetches toward exactly the
     // coverage that lets the give-up fire.
     tail_demand: &Arc<std::sync::atomic::AtomicUsize>,
+    // TRUE once the spec-prefetch ladder can never deliver another
+    // slice (its own two starvation exits set it; the caller sets it
+    // up front when no prefetch task exists at all). The arm below
+    // that reads it is what turns "walking the ladder instead" from a
+    // wait that can outlive the job into a bounded one.
+    ladder_over: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if std::env::var_os("NZBFAST_NO_TAIL_GIVEUP").is_some() {
         return None;
@@ -1122,6 +1387,7 @@ pub(super) fn spawn_tail_giveup(
     let nzb2 = nzb.clone();
     let dir = out_dir.to_path_buf();
     let demand = tail_demand.clone();
+    let ladder_over2 = ladder_over.clone();
     Some(tokio::spawn(async move {
         // Recovery volumes reach disk by TWO roads and the on-hand
         // census must count both: the M2c.5 side prefetch (the
@@ -1145,11 +1411,56 @@ pub(super) fn spawn_tail_giveup(
         // an operator watching a zero-throughput tail deserves the
         // numbers behind it rather than silence.
         let mut veto_said = false;
+        // Starvation tracker for the arm below: `(on_hand total when
+        // first seen starving, articles still owed then, when)`. Reset
+        // whenever the census closes, a normal claim fires, the ladder
+        // is still live, or EITHER figure moves - the grace window
+        // exists to ride out the census quiet gate (a just-landed
+        // volume is counted up to ~2 s late), so it restarts the moment
+        // anything changes.
+        //
+        // BOTH HALVES OF THAT WERE PROMISED HERE AND NEITHER WAS
+        // IMPLEMENTED (30 Aug 2026 sweep, the one critical finding).
+        // The two `continue`s below - a CLOSED census, and an empty set
+        // census - sit above the `else` that does the resetting, so the
+        // `Instant` survived them. What the code asked for was not
+        // "10 s of stillness" but "two census-OPEN samples 10 s apart
+        // with the same `on_hand`", with unlimited healthy delivery in
+        // between: the census opens on any tick where every pending
+        // article is a refusal-walker, which on a fill-provider (or
+        // retention-seeded) topology is a large fraction of ticks while
+        // the backup is serving perfectly well. So the arm could fire
+        // on the FIRST starving tick after a long healthy stretch and
+        // abandon every walker of every short set - payload an untried
+        // provider would still have served.
+        //
+        // Two changes, and the second is the one that carries the
+        // weight. `starved` is now cleared at the TOP of every tick and
+        // re-armed only by the starving branch itself, so any tick that
+        // does not reach that branch - for any reason, including
+        // `continue`s added later - restarts the clock by construction.
+        // And stillness is measured on DELIVERY (`remaining`, summed
+        // over the payload slots) as well as on `on_hand`, because
+        // `on_hand` only counts recovery slices: a job whose ladder is
+        // over but whose backup provider is still handing over payload
+        // has a frozen `on_hand` and a falling `remaining`, and it is
+        // exactly that job the old test called starved.
+        //
+        // This cannot regress the 30 Aug live incident the arm was
+        // written for: there the census is open on every tick at zero
+        // throughput, so neither figure moves and a continuous window
+        // still elapses.
+        let mut starved: Option<(usize, usize, Instant)> = None;
         loop {
             if stop.load(Ordering::Acquire) {
                 return; // network phase over - settle owns it now
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            // Every tick starts un-starved; only the arm below re-arms
+            // it. Placed HERE rather than on each early exit so a
+            // `continue` added later cannot silently carry a stale
+            // window past it - the defect this replaced.
+            let was_starved = starved.take();
             // The census gates everything: Some only when EVERY pending
             // article is a refusal-walker, which is exactly the state
             // the tail stall consists of. A single clean payload
@@ -1219,7 +1530,51 @@ pub(super) fn spawn_tail_giveup(
                 let want: usize = v.short.iter().map(|&(_, _, c)| c.saturating_mul(2)).sum();
                 demand.store(want, Ordering::Release);
             }
-            if v.claim.is_empty() {
+            // §146 starvation arm. "The ladder must finish" is only a
+            // plan while the ladder can still deliver: once the spec
+            // prefetch has RETURNED with the demand unmet (every
+            // declared recovery volume fetched, unfetchable, or the
+            // fetch died) and the census has been still for the whole
+            // grace window, a short set's 2x margin can never clear
+            // and the veto below stops being a wait and becomes the
+            // job's final state. Measured on the 30 Aug 2026 live
+            // incident: 301 recovery blocks in the whole post against
+            // a 67,602-block ceiling, 33,757 walkers held on the
+            // refusal ladder for hours at zero throughput. Abandoning
+            // here forfeits nothing - settle's repair ladder re-fetches
+            // any declared volume it still wants, the journal keeps
+            // every byte for a retry, and finish_job states the
+            // shortfall instead of the queue row saying nothing at all.
+            //
+            // The grace window rides out the census quiet gate (a
+            // just-landed volume counts up to ~2 s late) and demands a
+            // STILL on_hand, so a slice that is genuinely still
+            // arriving through the inline road restarts the clock.
+            const STARVED_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+            let mut forced: Vec<nzbkit::pool::Walker> = Vec::new();
+            if v.claim.is_empty() && !v.short.is_empty() && ladder_over2.load(Ordering::Acquire) {
+                let on_hand_total: usize = tails.iter().map(|t| t.on_hand).sum();
+                // What the wire has still to hand over. A payload
+                // article landing anywhere in the job moves this, which
+                // is the evidence `on_hand` cannot carry: recovery
+                // slices are the only thing it counts.
+                let owed: usize = slots2
+                    .iter()
+                    .map(|s| s.remaining.load(Ordering::Relaxed))
+                    .sum();
+                match was_starved {
+                    Some((seen, owed_then, since))
+                        if seen == on_hand_total && owed_then == owed =>
+                    {
+                        starved = Some((seen, owed_then, since));
+                        if since.elapsed() >= STARVED_GRACE {
+                            forced = starved_walkers(&walkers, &tails, &v.short);
+                        }
+                    }
+                    _ => starved = Some((on_hand_total, owed, Instant::now())),
+                }
+            }
+            if v.claim.is_empty() && forced.is_empty() {
                 if !veto_said {
                     veto_said = true;
                     let short: Vec<String> = v
@@ -1244,9 +1599,16 @@ pub(super) fn spawn_tail_giveup(
                 }
                 continue; // not covered (or not covered ENOUGH) - the ladder must finish
             }
-            let claimed = queue_ctl2.give_up_covered(&v.claim);
+            let starved_fired = !forced.is_empty();
+            let claimed =
+                queue_ctl2.give_up_covered(if starved_fired { &forced } else { &v.claim });
             if claimed.is_empty() {
                 continue;
+            }
+            if starved_fired {
+                // Spent: a fresh census (new walkers, a set that gains
+                // slices some other way) starts its own grace window.
+                starved = None;
             }
             let mut freed = 0u64;
             for id in &claimed {
@@ -1262,16 +1624,39 @@ pub(super) fn spawn_tail_giveup(
             // No outcome will ever arrive for these - settle the bar
             // here, exactly like a sniff deferral or the par-race.
             fetch_done2.fetch_add(freed, Ordering::Relaxed);
-            info!(
-                target: "repair",
-                "tail give-up: parity already covers {} of the article(s) still walking \
-                 the refusal ladder ({} recovery block(s) on hand across {} set(s), \
-                 {} walker(s) left uncovered) - stopped asking for them",
-                claimed.len(),
-                tails.iter().map(|t| t.on_hand).sum::<usize>(),
-                tails.len(),
-                v.uncovered,
-            );
+            if starved_fired {
+                let short: Vec<String> = v
+                    .short
+                    .iter()
+                    .map(|&(si, n, c)| {
+                        format!(
+                            "set {si}: {n} walker(s), needs {} block(s) on hand, has {}",
+                            c.saturating_mul(2),
+                            tails.get(si).map_or(0, |t| t.on_hand)
+                        )
+                    })
+                    .collect();
+                info!(
+                    target: "repair",
+                    "tail give-up: the recovery ladder is exhausted and no fetch can \
+                     close the 2x margin ({}) - abandoned {} walker(s) so the run can \
+                     settle and state the shortfall (bytes on disk and the journal are \
+                     kept for a retry)",
+                    short.join("; "),
+                    claimed.len(),
+                );
+            } else {
+                info!(
+                    target: "repair",
+                    "tail give-up: parity already covers {} of the article(s) still walking \
+                     the refusal ladder ({} recovery block(s) on hand across {} set(s), \
+                     {} walker(s) left uncovered) - stopped asking for them",
+                    claimed.len(),
+                    tails.iter().map(|t| t.on_hand).sum::<usize>(),
+                    tails.len(),
+                    v.uncovered,
+                );
+            }
         }
     }))
 }

@@ -59,7 +59,7 @@ fn background_io_restores_the_thread_policy() {
 /// what runs between "copied" and "the source may now be deleted".
 #[test]
 fn copy_verified_accepts_a_whole_copy() {
-    let dir = std::env::temp_dir().join(format!("copy-verified-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-copy-verified-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let from = dir.join("a.bin");
     let to = dir.join("b.bin");
@@ -76,7 +76,7 @@ fn copy_verified_accepts_a_whole_copy() {
 /// syscalls over two trees - undiagnosable as printed.
 #[test]
 fn mover_errors_name_the_operation_and_path() {
-    let dir = std::env::temp_dir().join(format!("copy-ctx-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-copy-ctx-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let from = dir.join("missing.bin");
     let to = dir.join("out.bin");
@@ -109,7 +109,7 @@ fn staged_delete_leaves_the_tree_synchronously() {
     // of the parked copy behind us. Under cfg(test) the trash global
     // defaults off, so the disposal is a direct delete rather than a
     // real Trash conversation.
-    let parent = std::env::temp_dir().join(format!("defer-trash-{}", std::process::id()));
+    let parent = std::env::temp_dir().join(format!("nzbfast-defer-trash-{}", std::process::id()));
     let job = parent.join("job");
     std::fs::create_dir_all(&job).unwrap();
     let f = job.join("junk.par2");
@@ -132,7 +132,8 @@ fn first_stage_drains_a_predecessors_leftovers() {
     // A crash between park and disposal strands files in the staging
     // folder. The first stage into that folder after a restart queues
     // whatever it finds, so leftovers cannot accumulate forever.
-    let parent = std::env::temp_dir().join(format!("defer-leftover-{}", std::process::id()));
+    let parent =
+        std::env::temp_dir().join(format!("nzbfast-defer-leftover-{}", std::process::id()));
     let job = parent.join("job");
     std::fs::create_dir_all(&job).unwrap();
     let staging = trash_staging_dir(&job).unwrap();
@@ -167,7 +168,7 @@ fn first_stage_drains_a_predecessors_leftovers() {
 #[test]
 fn the_drain_takes_only_what_this_module_staged() {
     let _steady = trash_globals_steady();
-    let parent = std::env::temp_dir().join(format!("defer-adopt-{}", std::process::id()));
+    let parent = std::env::temp_dir().join(format!("nzbfast-defer-adopt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&parent);
     let job = parent.join("job");
     std::fs::create_dir_all(&job).unwrap();
@@ -210,7 +211,7 @@ fn the_drain_takes_only_what_this_module_staged() {
 #[test]
 fn a_symlinked_staging_root_is_refused() {
     let _steady = trash_globals_steady();
-    let parent = std::env::temp_dir().join(format!("defer-link-{}", std::process::id()));
+    let parent = std::env::temp_dir().join(format!("nzbfast-defer-link-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&parent);
     let job = parent.join("job");
     let elsewhere = parent.join("elsewhere");
@@ -253,7 +254,7 @@ fn a_symlinked_staging_root_is_refused() {
 #[test]
 fn a_refused_disposal_is_retried_by_the_next_stage() {
     let _steady = trash_globals_steady();
-    let parent = std::env::temp_dir().join(format!("defer-refused-{}", std::process::id()));
+    let parent = std::env::temp_dir().join(format!("nzbfast-defer-refused-{}", std::process::id()));
     let job = parent.join("job");
     std::fs::create_dir_all(&job).unwrap();
     let staging = trash_staging_dir(&job).unwrap();
@@ -315,7 +316,7 @@ fn latched_swept_delete_stays_inline() {
     // `a_junk_delete_is_recoverable_and_the_opt_out_is_not` deletes
     // into the real Trash and fails if it reads the latch set.
     let _serial = one_trash_test_at_a_time();
-    let parent = std::env::temp_dir().join(format!("defer-latched-{}", std::process::id()));
+    let parent = std::env::temp_dir().join(format!("nzbfast-defer-latched-{}", std::process::id()));
     let job = parent.join("job");
     std::fs::create_dir_all(&job).unwrap();
     let f = job.join("junk.sfv");
@@ -345,7 +346,7 @@ fn latched_swept_delete_stays_inline() {
 #[test]
 fn a_refused_trash_leaves_the_files_alone() {
     let _serial = one_trash_test_at_a_time();
-    let dir = std::env::temp_dir().join(format!("trash-refused-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-trash-refused-{}", std::process::id()));
     let job = dir.join("Some.Release.2026");
     std::fs::create_dir_all(&job).unwrap();
     let f = dir.join("junk.par2");
@@ -395,7 +396,7 @@ fn a_refused_trash_leaves_the_files_alone() {
 #[test]
 fn a_path_that_is_already_gone_is_not_a_refusal() {
     let _serial = one_trash_test_at_a_time();
-    let dir = std::env::temp_dir().join(format!("trash-ghost-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-trash-ghost-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let ghost_file = dir.join("already-binned.nfo");
     let ghost_dir = dir.join("already-deleted-job");
@@ -450,7 +451,7 @@ fn a_prompt_trash_call_is_returned_unchanged() {
 #[test]
 fn losing_the_race_to_the_trash_is_not_a_failure() {
     let _serial = one_trash_test_at_a_time();
-    let dir = std::env::temp_dir().join(format!("trash-race-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nzbfast-trash-race-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let gone = dir.join("already-binned.nfo");
     // Never created: stands in for the file the abandoned call binned
@@ -1900,4 +1901,661 @@ fn a_locked_zip_is_detected_and_the_password_unpacks_it() {
             "{tag}: a delivered container must not keep asking for a password"
         );
     }
+}
+
+/// H2 (29 Aug 2026 sweep): a destination INSIDE the source is refused
+/// before anything is created or moved.
+///
+/// `move_completed = <download root>/<job>/done` computes a target of
+/// `<job>/done/<job>`. The rename to a descendant fails on every kernel,
+/// so the merge fallback ran: it created `done/`, then `read_dir`'d the
+/// job folder, found the directory it had just made, and walked into it -
+/// `done/J/done/J/...` until a path-length or I/O error stopped it, with
+/// real payload entries left in whichever level the walk was at. Nothing
+/// in the setter can refuse the CONFIG (the collision depends on the
+/// job's own relative path), so the question is asked per move.
+#[test]
+fn move_tree_refuses_a_destination_inside_its_own_source() {
+    let root = std::env::temp_dir().join(format!("nzbfast-mvnest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let src = root.join("downloads/J");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("payload.mkv"), b"v").unwrap();
+    std::fs::write(src.join("sub/second.mkv"), b"w").unwrap();
+
+    let dst = src.join("done/J");
+    let e = move_tree(&src, &dst).expect_err("a descendant destination must be refused");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+    assert!(
+        !src.join("done").exists(),
+        "the refusal must come before the destination is created - creating it \
+         is what puts the target inside the tree the merge then walks"
+    );
+    assert_eq!(std::fs::read(src.join("payload.mkv")).unwrap(), b"v");
+    assert_eq!(std::fs::read(src.join("sub/second.mkv")).unwrap(), b"w");
+
+    // The source itself is the same refusal: move_tree with dst == src
+    // merged a directory with itself and renamed every real file to
+    // "Episode (2).mkv" (see `relocate_completed`'s own note).
+    assert!(move_tree(&src, &src).is_err(), "src == dst must be refused");
+
+    // ...and an ordinary sibling move is untouched.
+    let ok = root.join("nas/J");
+    move_tree(&src, &ok).unwrap();
+    assert_eq!(std::fs::read(ok.join("payload.mkv")).unwrap(), b"v");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The symlinked-parent half of the same guard: a destination that only
+/// resolves inside the source THROUGH a link is still inside it, and a
+/// raw component compare answers about a path that is not the one being
+/// written.
+#[cfg(unix)]
+#[test]
+fn move_tree_refuses_a_destination_inside_its_source_through_a_symlink() {
+    let root = std::env::temp_dir().join(format!("nzbfast-mvlnest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let src = root.join("job");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("payload.mkv"), b"v").unwrap();
+    // `nas` looks like a sibling and resolves into the job folder.
+    std::os::unix::fs::symlink(&src, root.join("nas")).unwrap();
+
+    let e = move_tree(&src, &root.join("nas/done"))
+        .expect_err("a link into the source is still the source");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+    assert_eq!(std::fs::read(src.join("payload.mkv")).unwrap(), b"v");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Both copy arms used to reach their destination by a name they never
+/// bound: the paced one through `File::create`, which TRUNCATES through
+/// a symlink, and the unpaced one through `std::fs::copy`, which
+/// OVERWRITES through one. The leaf comes from the SOURCE tree, which is
+/// post-derived, so the name is the poster's to choose.
+///
+/// It bites: put `std::fs::File::create(to)` back in `copy_verified_paced`,
+/// or `std::fs::copy(from, to)` back in `copy_verified`, and the sentinel
+/// outside the destination is overwritten with the payload's bytes.
+#[cfg(unix)]
+#[test]
+fn a_copy_refuses_an_alias_at_its_destination() {
+    const SENTINEL: &[u8] = b"nothing a move does may touch this inode\n";
+    let root = std::env::temp_dir().join(format!("nzbfast-mvbind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let out = root.join("done");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let from = root.join("payload.mkv");
+    std::fs::write(&from, b"the payload").unwrap();
+
+    let noop: &PaceFn<'_> = &|_| {};
+    // Once per arm, and the pacing hook is what selects them: `None` is
+    // the `std::io::copy` path and `Some` the chunked loop, and they had
+    // one defect each.
+    for paced in [false, true] {
+        // A LIVE link, over a file that must not move.
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, SENTINEL).unwrap();
+        let to = out.join("payload.mkv");
+        std::os::unix::fs::symlink(&sentinel, &to).unwrap();
+        let e = if paced {
+            copy_verified_paced(&from, &to, Some(noop)).unwrap_err()
+        } else {
+            copy_verified(&from, &to).unwrap_err()
+        };
+        assert!(
+            e.to_string().contains("an alias is in the way"),
+            "paced={paced}: unexpected error: {e}"
+        );
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            SENTINEL,
+            "paced={paced}: the copy wrote through a live alias"
+        );
+        std::fs::remove_file(&to).unwrap();
+
+        // A DANGLING one. `Path::exists` answers false for this, so
+        // every check phrased as "is something already there?" misses it
+        // and the copy creates the file it points at.
+        let elsewhere = outside.join("elsewhere.bin");
+        std::os::unix::fs::symlink(&elsewhere, &to).unwrap();
+        assert!(if paced {
+            copy_verified_paced(&from, &to, Some(noop)).is_err()
+        } else {
+            copy_verified(&from, &to).is_err()
+        });
+        assert!(
+            !elsewhere.exists(),
+            "paced={paced}: the copy followed a dangling alias out of the destination"
+        );
+        std::fs::remove_file(&to).unwrap();
+    }
+
+    // And the PARENT swapped for a link, which is the other half of what
+    // `open_out_leaf` binds.
+    let deep = out.join("Season 01");
+    std::os::unix::fs::symlink(&outside, &deep).unwrap();
+    let e = copy_verified(&from, &deep.join("E01.mkv")).unwrap_err();
+    assert!(
+        e.to_string().contains("not a real directory"),
+        "unexpected error: {e}"
+    );
+    assert!(!outside.join("E01.mkv").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same refusal reached through the public door, which is how a
+/// cross-device move copies every byte it moves: `staged_move` fills a
+/// staging directory with `copy_tree_into_paced`, and that had no
+/// reservation of any kind - `dst.join(entry.file_name())` straight into
+/// the copy.
+#[cfg(unix)]
+#[test]
+fn copy_tree_refuses_an_alias_planted_at_a_payload_name() {
+    const SENTINEL: &[u8] = b"outside the tree being copied\n";
+    let root = std::env::temp_dir().join(format!("nzbfast-cptreebind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let src = root.join("job");
+    let dst = root.join("staging");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(src.join("E01.mkv"), b"episode").unwrap();
+    let sentinel = outside.join("sentinel.bin");
+    std::fs::write(&sentinel, SENTINEL).unwrap();
+    std::os::unix::fs::symlink(&sentinel, dst.join("E01.mkv")).unwrap();
+
+    assert!(copy_tree(&src, &dst).is_err());
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        SENTINEL,
+        "the tree copy wrote through an alias at the payload's own name"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The cost of that refusal, and the reason the doors resolve their root
+/// first: a user whose destination IS a symlink - a symlinked volume, a
+/// season kept on the other drive - must still get their download filed.
+/// `open_out_leaf` refuses a symlinked immediate PARENT, and for a flat
+/// name that parent is the destination directory itself, so without
+/// `resolve_out_root` at the door this arrangement would have started
+/// erroring instead of writing.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_destination_root_still_takes_the_payload() {
+    let root = std::env::temp_dir().join(format!("nzbfast-mvroot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let real = root.join("volume/Library/Season 01");
+    std::fs::create_dir_all(&real).unwrap();
+    let src = root.join("job");
+    std::fs::create_dir_all(src.join("extras")).unwrap();
+    std::fs::write(src.join("E01.mkv"), b"episode").unwrap();
+    std::fs::write(src.join("extras/behind.mkv"), b"extra").unwrap();
+
+    // The destination the caller names is a link to the real folder.
+    let linked = root.join("Season 01");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+    // The copy door, which is the one that actually reaches `open_dest`
+    // for every file: a merge into an occupied destination.
+    copy_tree(&src, &linked).unwrap();
+    assert_eq!(std::fs::read(real.join("E01.mkv")).unwrap(), b"episode");
+    assert_eq!(
+        std::fs::read(real.join("extras/behind.mkv")).unwrap(),
+        b"extra"
+    );
+
+    // And the move door, over the copies the line above left behind, so
+    // it takes the merge path rather than the one-rename fast path.
+    move_tree(&src, &linked).unwrap();
+    assert!(!src.exists(), "the source should have drained");
+    assert_eq!(std::fs::read(real.join("E01 (2).mkv")).unwrap(), b"episode");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// -- The two-symlink escape, and the 31 Aug 2026 ruling on both halves ---
+//
+// Both defects were MEASURED with a throwaway probe on this tree before
+// anything was changed. They were left open, deliberately and with the
+// measurement recorded, by
+// research/MOVETREE-BOUND-DESTINATION-2026-08-31.md; the fix and what
+// each door actually leaked are
+// research/MOVETREE-SYMLINK-ESCAPE-2026-08-31.md. Chained they were a
+// containment escape: job 1 planted a link in the library, job 2 filed
+// its payload through it, and `move_tree` returned `Ok(())` with the
+// episode sitting outside the destination entirely.
+//
+// Neither half is mechanical hardening - each is a decision about what a
+// user may arrange inside their OWN library - so both were settled as
+// product judgements rather than fixed in passing. The ruling: leave a
+// source link in place, and refuse a link standing at a destination
+// subdirectory.
+
+/// HALF ONE. A symlink in a finished job is left where it is, on the
+/// SAME filesystem as well as across devices.
+///
+/// The leave-it-in-place arm used to sit inside the `rename` FAILURE
+/// branch, so it only ever covered the cross-device case. On one
+/// filesystem the rename SUCCEEDS, so the link object was filed into the
+/// library still pointing outside it - which is what made the second half
+/// below reachable by an ordinary later job.
+#[cfg(unix)]
+#[test]
+fn a_symlink_in_the_job_is_never_published_into_the_library() {
+    let root = std::env::temp_dir().join(format!("nzbfast-mvsrclink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("someone-elses.txt"), b"not yours").unwrap();
+
+    let src = root.join("job");
+    let dst = root.join("library/My Show");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    // Occupy the destination so this takes the MERGE path and not the
+    // one-rename fast path, which is where the defect lived.
+    std::fs::write(dst.join("already-here.txt"), b"x").unwrap();
+    std::fs::write(src.join("E01.mkv"), b"episode").unwrap();
+    std::os::unix::fs::symlink(&outside, src.join("link")).unwrap();
+
+    move_tree(&src, &dst).unwrap();
+
+    // The payload still files.
+    assert_eq!(std::fs::read(dst.join("E01.mkv")).unwrap(), b"episode");
+    // The link does not, by any name the collision reservation would
+    // have picked for it.
+    assert!(
+        !dst.join("link").exists() && !is_symlink_t(&dst.join("link")),
+        "a symlink from the job was published into the library"
+    );
+    assert!(!is_symlink_t(&dst.join("link (2)")));
+    // It stays where the user put it, and the source folder therefore
+    // stays too - exactly what a cross-device move has always left.
+    assert!(
+        is_symlink_t(&src.join("link")),
+        "the link should have been left in place"
+    );
+    // Nothing outside the job was read, copied or deleted through it.
+    assert_eq!(
+        std::fs::read(outside.join("someone-elses.txt")).unwrap(),
+        b"not yours"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// HALF TWO, and the escape itself. A LIVE symlink at a destination
+/// SUBDIRECTORY is refused, naming the path, rather than filed through.
+///
+/// The recursion tested `!dst.exists()`, which FOLLOWS links: a live
+/// `Season 01 -> outside/` meant the fast rename was skipped, the merge's
+/// own `create_dir_all` followed the link, and every episode landed
+/// outside the library. Driven through all three doors that carry the
+/// shape, because they were three separate holes and a fix at one says
+/// nothing about the others.
+///
+/// WHAT EACH DOOR ACTUALLY LEAKED was measured rather than assumed, and
+/// the three are not equal. `move_tree` and `publish_staged` filed the
+/// PAYLOAD outside the destination and returned `Ok(())`. `copy_tree`
+/// did not: `open_dest`'s no-follow PARENT refusal, which landed with
+/// the bound-destination work on 31 Aug 2026, already stopped every byte
+/// - but only where there is a file to write. A subtree of DIRECTORIES
+/// reaches no leaf, so it sailed through `create_dir_all`, built the
+/// user's folder structure outside their library and reported success.
+/// Both shapes are driven below for that reason.
+#[cfg(unix)]
+#[test]
+fn a_merge_refuses_a_symlink_standing_at_a_destination_subdirectory() {
+    let root = std::env::temp_dir().join(format!("nzbfast-mvdstlink-{}", std::process::id()));
+
+    // THE COPY DOOR'S OWN ESCAPE, pinned deterministically, and FIRST in
+    // this test on purpose. In the shared loop below, the file in the
+    // source fails before the directory does, so the copy door is judged
+    // there by its MESSAGE and the escape assertion rests on `read_dir`
+    // order - which means a copy-door regression is caught, but not by
+    // the assertion that names what went wrong. This leg has no such
+    // ordering: a source of DIRECTORIES ONLY reaches no leaf, so
+    // `open_dest`'s no-follow parent refusal never fires and there is
+    // nothing else in the way: without [`bind_dst_dir`] this returns
+    // `Ok(())` having built the user's folders outside their library.
+    let base = root.join("copy-dirs-only");
+    let outside = base.join("outside");
+    let show = base.join("library/My Show");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(&show).unwrap();
+    std::os::unix::fs::symlink(&outside, show.join("Season 01")).unwrap();
+    let src = base.join("job");
+    std::fs::create_dir_all(src.join("Season 01/Extras/Deeper")).unwrap();
+    let e = copy_tree(&src, &show).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("refusing to file through the symlink"),
+        "copy/dirs-only: wrong refusal: {e}"
+    );
+    assert!(
+        !outside.join("Extras").exists(),
+        "copy/dirs-only: a folder was built OUTSIDE the destination"
+    );
+
+    for (leg, dangling) in [("live", false), ("dangling", true)] {
+        for door in ["move", "copy"] {
+            let base = root.join(format!("{leg}-{door}"));
+            let _ = std::fs::remove_dir_all(&base);
+            let outside = base.join("outside");
+            let show = base.join("library/My Show");
+            std::fs::create_dir_all(&show).unwrap();
+            if dangling {
+                std::os::unix::fs::symlink(base.join("gone"), show.join("Season 01")).unwrap();
+            } else {
+                std::fs::create_dir_all(&outside).unwrap();
+                std::os::unix::fs::symlink(&outside, show.join("Season 01")).unwrap();
+            }
+
+            let src = base.join("job");
+            // A file AND a directory-only branch beside it: the file is
+            // what the move door carried outside, and the bare directory
+            // is the shape that reaches no leaf, so it is all the copy
+            // door's own no-follow leaf refusal can never see.
+            std::fs::create_dir_all(src.join("Season 01/Extras/Deeper")).unwrap();
+            std::fs::write(src.join("Season 01/E01.mkv"), b"episode").unwrap();
+
+            let e = match door {
+                "move" => move_tree(&src, &show).unwrap_err(),
+                _ => copy_tree(&src, &show).unwrap_err(),
+            };
+            assert!(
+                e.to_string()
+                    .contains("refusing to file through the symlink"),
+                "{leg}/{door}: wrong refusal: {e}"
+            );
+            assert!(
+                e.to_string().contains("Season 01"),
+                "{leg}/{door}: the refusal must name the path: {e}"
+            );
+            assert!(
+                !outside.join("E01.mkv").exists(),
+                "{leg}/{door}: the payload was filed OUTSIDE the destination"
+            );
+            assert!(
+                !outside.join("Extras").exists(),
+                "{leg}/{door}: a folder was built OUTSIDE the destination"
+            );
+            // The source is untouched, so nothing is lost by refusing.
+            assert!(src.join("Season 01/E01.mkv").exists(), "{leg}/{door}");
+            // The user's link is left exactly as they arranged it.
+            assert!(is_symlink_t(&show.join("Season 01")), "{leg}/{door}");
+        }
+    }
+
+    // And the CROSS-DEVICE publish carries the identical shape, so it is
+    // driven directly: `staged_move` copies into a staging directory this
+    // process minted and `publish_staged` walks it into the destination.
+    let base = root.join("publish");
+    let outside = base.join("outside");
+    let show = base.join("library/My Show");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(&show).unwrap();
+    std::os::unix::fs::symlink(&outside, show.join("Season 01")).unwrap();
+    let staging = base.join("staging");
+    std::fs::create_dir_all(staging.join("Season 01")).unwrap();
+    std::fs::write(staging.join("Season 01/E01.mkv"), b"episode").unwrap();
+    let e = publish_staged(&staging, &show).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("refusing to file through the symlink"),
+        "publish_staged: wrong refusal: {e}"
+    );
+    assert!(!outside.join("E01.mkv").exists(), "publish_staged escaped");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `is_symlink` is private to `movetree`, and these three cases care
+/// about the LINK rather than what it points at.
+#[cfg(unix)]
+fn is_symlink_t(p: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+// -- F5: a job whose declared size is UNKNOWN ------------------------------
+//
+// `serve::daemon_enqueue::resolve_add_identity` hands `first_match` the
+// job's `Nzb::eager_bytes`, and that figure is 0 when the manifest
+// declared no `bytes=` attributes anywhere. `nzbkit::nzb`'s own
+// `<segment>` comment states the position on that shape outright - "0
+// posted bytes means unknown, not zero" - and this end of the pipe
+// cannot tell the two apart. The three tests below PIN what happens
+// today rather than assert that it is right: which answer a size-gated
+// rule should give when the size is unknown is the open product
+// question in the zero-declared-bytes handoff (claim
+// `nzb-zero-bytes-downstream`).
+
+/// Today's answer, both directions. A `min_size` rule DECLINES a job
+/// whose size is unknown and a `max_size` rule ACCEPTS one, and neither
+/// is a judgement about the job - both are `0` being read as a
+/// measurement.
+#[test]
+fn a_size_gated_rule_reads_an_unknown_size_as_zero() {
+    let mut floor = rule("The.Bear");
+    floor.min_size = 100_000_000;
+    floor.category = "tv".into();
+    assert!(
+        !floor.matches("The.Bear.S03E05.1080p.WEB-X", 0),
+        "a min_size rule declines the job, so it files under the default \
+         category with nothing saying the rule was never really judged"
+    );
+    assert!(
+        floor.matches("The.Bear.S03E05.1080p.WEB-X", 2_500_000_000),
+        "control: the same rule on a job that DID declare its bytes"
+    );
+
+    let mut ceiling = rule("sample");
+    ceiling.max_size = 500_000_000;
+    ceiling.category = "samples".into();
+    assert!(
+        ceiling.matches("Some.Release.sample", 0),
+        "a max_size rule waves the same unknown through - the silence \
+         points the other way and is no better informed"
+    );
+}
+
+/// The population the unknown reaches. Zero here is the common list
+/// (no size bounds anywhere), which is why `resolve_add_identity` logs
+/// conditionally rather than once per add.
+#[test]
+fn size_gated_counts_the_rules_the_unknown_reaches() {
+    let plain = rule("1080p");
+    let mut floor = rule("");
+    floor.min_size = 1;
+    let mut ceiling = rule("");
+    ceiling.max_size = 1;
+    let mut both = rule("");
+    both.min_size = 1;
+    both.max_size = 2;
+
+    assert_eq!(size_gated(&[]), 0, "an empty list asks no size question");
+    assert_eq!(size_gated(std::slice::from_ref(&plain)), 0);
+    assert_eq!(size_gated(&[plain, floor, ceiling, both]), 3);
+}
+
+/// What the fix is NOT. `Nzb::geometry_bytes` is the figure that already
+/// answers "how big could this post be" elsewhere
+/// (`repair::sidefetch::volume_prealloc_cap`), and substituting it here
+/// would be worse than the silence it replaces: it is a preallocation
+/// CEILING of declared articles times 16 MiB, and a real article is
+/// 768000 or 716800 bytes, so it runs 21.8x to 23.4x above the truth on
+/// an ordinary post. This test drives the arithmetic on real thresholds
+/// rather than asserting it in prose, because the next reader of F5 will
+/// reach for that function first.
+#[test]
+fn geometry_bytes_cannot_stand_in_for_an_unknown_size() {
+    const MAX_ARTICLE_BYTES: u64 = 16 << 20;
+    // A 190 MB post at a realistic 768000-byte article, and the
+    // geometry ceiling the same article count produces.
+    let real: u64 = 190_000_000;
+    let articles = real.div_ceil(768_000);
+    let geometry = articles * MAX_ARTICLE_BYTES;
+    assert!(
+        geometry > 4_000_000_000,
+        "sanity: {articles} articles reserve {geometry} bytes of ceiling"
+    );
+
+    let mut movies = rule("");
+    movies.min_size = 4_000_000_000;
+    assert!(
+        !movies.matches("Small.Release", real),
+        "the truth: a 190 MB post is not a film"
+    );
+    assert!(
+        movies.matches("Small.Release", geometry),
+        "the substitution: geometry calls it one, which is a MISROUTE \
+         where today's answer merely declines"
+    );
+
+    // The ceiling direction fails the same way. A 24 MB sample.
+    let small: u64 = 24_000_000;
+    let sgeom = small.div_ceil(768_000) * MAX_ARTICLE_BYTES;
+    let mut samples = rule("");
+    samples.max_size = 500_000_000;
+    assert!(samples.matches("Some.sample", small), "the truth");
+    assert!(
+        !samples.matches("Some.sample", sgeom),
+        "the substitution refuses a job that is well inside the bound"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Names AT the component cap, in the three `smart` doors that decorate
+// one. Every leaf below is a `sanitize_out_name` result, so for a long
+// posted name it is EXACTLY 255 bytes - capping is what produced it -
+// and anything composed onto it is a name no filesystem creates
+// (measured on APFS 31 Aug 2026: 255 creates, 256 is `ENAMETOOLONG`).
+// ---------------------------------------------------------------------
+
+/// The premise, asserted rather than assumed.
+fn a_name_at_the_cap(ext: &str) -> String {
+    let n = nzbkit::disk::sanitize_out_name(&format!("{}{ext}", "y".repeat(400)));
+    assert_eq!(n.len(), 255, "the premise moved");
+    n
+}
+
+fn cap_tmpdir(tag: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "nzbfast-namecap-{tag}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// The uncollide ladder must hand back a name the disk takes.
+///
+/// `reserve_free_name` CLAIMS each rung with `create_new`, and
+/// `ENAMETOOLONG` is not the `AlreadyExists` arm - it is the `Err(e)`
+/// arm, which returns. So the whole move failed on the FIRST collision
+/// of a longest-named payload, which is exactly the meeting this ladder
+/// exists to resolve.
+#[test]
+fn reserving_past_a_name_at_the_cap_still_yields_a_writable_name() {
+    let root = cap_tmpdir("reserve");
+    let name = a_name_at_the_cap(".mkv");
+    let wanted = root.join(&name);
+
+    let first = reserve_free_name(&wanted).expect("the plain name is free");
+    assert_eq!(first, wanted, "the first caller still gets the plain name");
+    let second = reserve_free_name(&wanted).expect("the ladder must not fail on the cap");
+    assert_ne!(second, first);
+    let leaf = second.file_name().unwrap().to_string_lossy();
+    assert!(leaf.len() <= 255, "{} bytes: {leaf}", leaf.len());
+    // `reserve_free_name` created it, which is the whole assertion.
+    assert!(second.is_file());
+
+    // Nothing that works today moves: inside the cap the rung is still
+    // the plain `format!`, byte for byte.
+    let plain = root.join("Episode.mkv");
+    reserve_free_name(&plain).unwrap();
+    assert_eq!(
+        reserve_free_name(&plain).unwrap(),
+        root.join("Episode (2).mkv")
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The whole-job move stages under a sibling of the DESTINATION, and
+/// that sibling's name decorates the destination's own leaf.
+///
+/// Worse than a niggle: `rename_reaches` renames a probe onto that very
+/// name to decide whether the pair is same-device, so an unwritable one
+/// reads as CROSS-device and the copying path it then takes fails on the
+/// identical name a moment later. A completed job whose folder was at
+/// the cap could not be moved to the completed folder at all.
+#[test]
+fn a_destination_named_at_the_cap_can_still_be_moved_into() {
+    let root = cap_tmpdir("movestage");
+    let src = root.join("src");
+    std::fs::create_dir_all(src.join("inner")).unwrap();
+    std::fs::write(src.join("episode.mkv"), b"payload").unwrap();
+    std::fs::write(src.join("inner/note.nfo"), b"note").unwrap();
+
+    // The destination EXISTS, which is what puts the move on the staging
+    // path rather than the plain same-directory rename.
+    let dst = root.join(a_name_at_the_cap(""));
+    std::fs::create_dir_all(&dst).unwrap();
+    std::fs::write(dst.join("already.txt"), b"kept").unwrap();
+
+    move_tree(&src, &dst).expect("a destination at the cap must still be movable into");
+
+    assert_eq!(std::fs::read(dst.join("episode.mkv")).unwrap(), b"payload");
+    assert_eq!(std::fs::read(dst.join("inner/note.nfo")).unwrap(), b"note");
+    assert_eq!(
+        std::fs::read(dst.join("already.txt")).unwrap(),
+        b"kept",
+        "the merge keeps what was there"
+    );
+    // No staging directory survives a successful move.
+    let strays: Vec<String> = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".moving."))
+        .collect();
+    assert!(strays.is_empty(), "staging left behind: {strays:?}");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The deferred-trash park prefixes `<pid>-<seq>-` onto the swept file's
+/// own name, so a payload at the cap could not be parked - it fell back
+/// to the inline Trash call, which is correct and is the §64 stall this
+/// module exists to keep off `finalize_completed`.
+///
+/// The parked name cannot be read back directly (the worker disposes of
+/// it behind us), so the drain is what asserts it: a FRESH staging root
+/// takes the first-touch path, which sends only entries `is_staged_entry`
+/// recognises - so a pruned staging directory says the parked name was
+/// both written and recognisable, which is the pair the cap has to keep.
+#[test]
+fn a_swept_file_named_at_the_cap_can_still_be_parked() {
+    let _steady = trash_globals_steady();
+    let root = cap_tmpdir("park");
+    let staging = root.join(".nzbfast-trash");
+    let name = a_name_at_the_cap(".par2");
+    let f = root.join(&name);
+    std::fs::write(&f, b"spent").unwrap();
+
+    deferred_trash::stage(&f, &staging).expect("a name at the cap must still park");
+    assert!(!f.exists(), "the rename must be synchronous");
+    deferred_trash::drained();
+    assert!(
+        !staging.exists(),
+        "the parked name must be one the drain recognises and disposes of"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }

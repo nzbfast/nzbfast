@@ -10,11 +10,9 @@
 use super::*;
 use serde_json::json;
 
-fn tdir(name: &str) -> std::path::PathBuf {
+fn tdir(name: &str) -> crate::testscratch::ScratchDir {
     let p = std::env::temp_dir().join(format!("nzbfast-hm-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&p);
-    std::fs::create_dir_all(&p).unwrap();
-    p
+    crate::testscratch::ScratchDir::attach(&p)
 }
 
 /// A 1.1.3-era chip: the label a since-fixed `res_label` produced, with

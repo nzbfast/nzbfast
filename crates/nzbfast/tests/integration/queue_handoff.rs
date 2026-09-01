@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::harness::serve;
-use nzbkit::mock::{Chaos, MockServer, make_file_articles};
+use nzbkit::mock::{Chaos, Hold, MockServer, make_file_articles};
 
 fn payload(n: usize, seed: u8) -> Vec<u8> {
     (0..n)
@@ -205,11 +205,6 @@ fn seq_of(events: &[serde_json::Value], kind: &str, after: u64) -> Option<u64> {
         .find(|seq| *seq >= after)
 }
 
-/// Dead air on job A's last article. Long enough that a serial daemon
-/// provably cannot ask for a B article before it ends, short enough to
-/// keep the test quick.
-const DEAD_AIR_MS: u64 = 5_000;
-
 #[tokio::test(flavor = "multi_thread")]
 async fn the_next_job_s_first_article_is_asked_while_the_previous_one_drains() {
     let dir = std::env::temp_dir().join(format!("nzbfast-handoff-{}", std::process::id()));
@@ -224,10 +219,13 @@ async fn the_next_job_s_first_article_is_asked_while_the_previous_one_drains() {
     // moment it is handed out, and every other connection then goes
     // idle with nothing to do but wait for it (or race it once).
     let slow_id = format!("<{}>", segs_a.last().unwrap().0);
+    // HELD, not delayed. See the note on the assertion below for why
+    // this test cannot use a wall clock at all.
+    let hold = Hold::on([slow_id.clone()]);
     let srv = MockServer::start(
         articles,
         Chaos {
-            slow_ttfb: HashMap::from([(slow_id.clone(), DEAD_AIR_MS)]),
+            hold: Some(hold.clone()),
             ..Chaos::default()
         },
     )
@@ -273,18 +271,47 @@ async fn the_next_job_s_first_article_is_asked_while_the_previous_one_drains() {
         add_nzb(port, "Handoff.A.2026", &xml_a);
         add_nzb(port, "Handoff.B.2026", &xml_b);
 
-        // Watch the request log: when was A's slow article first asked
-        // for, and when was the first B article asked for? BOTH stamps
-        // come off the mock's own arrival record and never off this
-        // thread's clock - see [`nzbkit::mock::BodyLog`], and the note
-        // in `with_the_handoff_off_the_queue_is_serial` for the CI
-        // failure that came of stamping when a POLLER noticed an entry.
-        // The loop below still polls, but only for the event to EXIST.
+        // Watch the request log: has a B article been asked for while
+        // A's last article is STILL OUTSTANDING? The stamps come off
+        // the mock's own arrival record and never off this thread's
+        // clock - see [`nzbkit::mock::BodyLog`], and the note in
+        // `with_the_handoff_off_the_queue_is_serial` for the CI failure
+        // that came of stamping when a POLLER noticed an entry.
+        //
+        // WHY THERE IS NO DURATION IN THIS ASSERTION, and why adding
+        // one back would undo the fix. It used to be `gap <
+        // DEAD_AIR_MS / 2` against a `slow_ttfb` article, i.e. "B was
+        // asked within 2.5 s of A's slow one". That is an UPPER bound
+        // on a wall clock, which is exactly the shape [`BodyLog`]'s own
+        // header says a starved mock or a starved daemon inflates - and
+        // it did: measured under 8x load on 30 Aug 2026, the gap was
+        // 2.71 s, 3.93 s and 7.58 s, drifting to the same order as the
+        // 5 s the test distinguishes AGAINST. At 7.58 s the wire cannot
+        // tell "the hand-over happened on a loaded box" from "there was
+        // no hand-over", because the timed article had been answered at
+        // 5 s and A had drained; the window the daemon was supposed to
+        // act inside had closed on its own. A bigger threshold does not
+        // fix that, it moves where the ambiguity starts - and every
+        // widening makes a genuinely serial queue likelier to pass.
+        //
+        // So the article is HELD instead ([`nzbkit::mock::Hold`]) and
+        // the window is closed by the line below rather than by a
+        // clock. What is asserted is the structural fact the duration
+        // was only ever a proxy for: B's first article was asked while
+        // A's last was unanswered, so B was started on A's idle
+        // connections. A serial queue cannot satisfy it AT ANY LOAD -
+        // it waits for a drain that cannot happen until this thread
+        // says so, and fails the liveness bound below instead.
+        //
+        // That asymmetry is the property to preserve: this bound's
+        // failure mode is a HANG (B never asked), never a false pass,
+        // so widening it is harmless where widening the old one was
+        // not. Do not put a duration back.
         let t0 = Instant::now();
-        let (b_id, b_at, slow_at) = loop {
+        let (b_id, slow_at) = loop {
             {
                 let log = body_log.lock().unwrap();
-                if let Some((b_id, b_at)) = log.first_matching(|id| id.starts_with("<hb-")) {
+                if let Some((b_id, _)) = log.first_matching(|id| id.starts_with("<hb-")) {
                     let slow_at = log.first_asked(&slow_id).unwrap_or_else(|| {
                         panic!(
                             "B ({b_id}) was asked for and A's slow article {slow_id} never \
@@ -292,31 +319,34 @@ async fn the_next_job_s_first_article_is_asked_while_the_previous_one_drains() {
                             log.timeline(t0)
                         )
                     });
-                    break (b_id, b_at, slow_at);
+                    break (b_id, slow_at);
                 }
             }
             assert!(
                 t0.elapsed() < Duration::from_secs(60),
-                "no B article was requested within 60 s.\nwire: {:?}\nqueue: {}",
+                "no B article was requested within 60 s while A's last article \
+                 ({slow_id}) was held unanswered - the hand-over did not happen, so \
+                 the queue is waiting for a drain that cannot come.\n\
+                 wire: {:?}\nqueue: {}",
                 body_log.lock().unwrap().timeline(t0),
                 queue_summary(port)
             );
             std::thread::sleep(Duration::from_millis(5));
         };
-        // The proof. A's slow article cannot be served before its dead
-        // air ends, so a daemon that waits for A's drain cannot ask for
-        // B before `slow_at + DEAD_AIR_MS`. Asking well inside that
-        // window means B started on A's idle connections.
-        let gap = b_at.saturating_duration_since(slow_at);
+        // The proof, read back off the gate itself rather than off a
+        // clock: the mock has provably not answered A's last article,
+        // and B's first is already on the wire.
         assert!(
-            gap < Duration::from_millis(DEAD_AIR_MS / 2),
-            "B's first article {b_id} was asked {gap:?} after A's slow one ({slow_id}) - the \
-             hand-over did not happen (a serial queue waits the full \
-             {DEAD_AIR_MS} ms of dead air).\n\
-             wire, as (id, offset from A's slow request): {:?}\nqueue: {}",
+            hold.is_holding(&slow_id),
+            "A's last article {slow_id} was answered before B's first ({b_id}) was \
+             asked, so this test proved nothing - only this thread can release the \
+             hold and it has not yet.\n\
+             wire, as (id, offset from A's slow request): {:?}",
             body_log.lock().unwrap().timeline(slow_at),
-            queue_summary(port)
         );
+        // A may finish now. Everything below is about the drain being
+        // correct, not about when it started.
+        hold.release();
 
         // Both complete and byte-identical. WHICH ONE FILES FIRST IS
         // NOT ASSERTED - see `finishing_seq` below for the ordering
@@ -441,7 +471,6 @@ async fn the_next_job_s_first_article_is_asked_while_the_previous_one_drains() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `NZBFAST_QUEUE_HANDOFF=0` is the strictly serial queue of before:
@@ -592,7 +621,6 @@ async fn with_the_handoff_off_the_queue_is_serial() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The slow-job watchdog keeps judging a predecessor that is DRAINING
@@ -756,7 +784,6 @@ async fn a_draining_predecessor_is_still_deferred_when_a_job_waits_behind_it() {
         std::fs::read(dir.join("complete/slowjob/slowjob.bin")).unwrap(),
         s_bytes
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------

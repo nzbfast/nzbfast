@@ -52,11 +52,13 @@ pub(crate) fn extract_local(dir: &std::path::Path, password: Option<&str>) -> Re
                 needed,
                 have,
                 adopted,
+                partial,
             }) => {
                 warn!(
                     target: "par2",
-                    "UNREPAIRABLE - need {needed} recovery block(s), have {have}{}",
-                    crate::repair::adopted_clause(adopted)
+                    "UNREPAIRABLE - need {needed} recovery block(s), have {have}{}{}",
+                    crate::repair::adopted_clause(adopted),
+                    nzbkit::par2repair::published_clause(&partial)
                 );
                 par2_ok = false;
             }
@@ -138,15 +140,71 @@ impl NestOutcome {
     }
 }
 
+/// The depth [`crate::get::tail`] enters this pass at, once the in-stream
+/// half has already run - as against the disk-only path
+/// ([`extract_local`]), which enters at 0.
+///
+/// ONE is right for the reason the name says: by the time the tail
+/// reaches the nested pass, one layer of the release is already
+/// unpacked - the downloaded volume set itself, by the in-stream chain
+/// or by the ladder arms above the call. It is also what arms this
+/// pass's nested-level PAR2 repair on its FIRST level, through the
+/// `depth > 0` gate in [`extract_nested_capped`]; depth 0 is the top
+/// level `extract_local` already repaired.
+///
+/// IT IS A LOWER BOUND ON THE LAYERS ALREADY SPENT AND NOT A COUNT OF
+/// THEM, which is a decision and not an omission. A job that DEMOTES
+/// mid-ladder spends several in-stream levels before this pass runs -
+/// the in-stream chain enables a child while `depth < cap`
+/// (`Extractor::ensure_child` in `nzbkit::extract`), so it unpacks `cap`
+/// layers and materializes the next - and this entry depth does not
+/// carry that history. The two counts therefore COMPOSE rather than
+/// share one budget: a demoted job traverses up to `cap` layers in
+/// stream plus `cap - TAIL_NESTED_ENTRY_DEPTH` on disk, which at the
+/// default cap of 5 is 9 layers against a setting that reads as 5. Same
+/// arithmetic one level up for a proven-store ladder, whose raise each
+/// site clamps at [`nzbkit::extract::NESTED_MAX_DEPTH_HARD_CEILING`]
+/// independently.
+///
+/// A SINGLE NUMBER CANNOT BE MADE CORRECT HERE, which is why threading
+/// the in-stream depth in was measured and refused rather than deferred
+/// as too costly. This pass is a flat walk of `dir`, and the in-stream
+/// chain writes EVERY depth's output into that one directory - so an
+/// archive the depth-1 child demoted and one the depth-4 child demoted
+/// arrive here indistinguishable, and a level that demotes only SOME of
+/// its inners leaves both at once. One entry depth has to serve every
+/// branch, and the two ways to pick it are both wrong: the deepest
+/// under-serves the shallow branch, which turns a release that unpacks
+/// today into one left materialized, and the shallowest is this
+/// constant. Per-file depth attribution is what a single budget would
+/// need, and it does not exist. Recorded in
+/// `research/NESTED-DEPTH-TWO-SITE-BUDGET-2026-08-31.md`; pinned by
+/// `nested_depth_tests::the_tail_entry_depth_costs_exactly_one_level`.
+///
+/// So the guard is TWO budgets by construction, both bounded, and that
+/// is the contract to keep: the cap is a decompression-bomb backstop
+/// and 2n - 1 layers of it is still a backstop. Do not "fix" a
+/// disagreement between this number and the documented cap by raising
+/// the entry depth - that is the under-serving direction, and it fails
+/// silently, as a release that stops unpacking one layer short.
+pub(crate) const TAIL_NESTED_ENTRY_DEPTH: usize = 1;
+
 /// Extract the archives in `dir`, then recurse into any archive that
 /// extraction just produced (a nested release: a RAR whose payload is one
 /// more RAR/7z, occasionally in a release subfolder). Returns `Produced`
 /// when there was nothing to extract (the data files ARE the payload) or
 /// every archive present was fully produced; otherwise the cause that
 /// stopped it. Bounded to [`nzbkit::extract::nested_depth_cap`]
-/// passes (the shared daemon `nested_max_depth` setting); at the cap the
-/// deepest layer is left materialized on disk and the job still succeeds -
-/// the design guarantee that a too-deep chain degrades, never fails.
+/// passes COUNTED FROM `depth` (the shared daemon `nested_max_depth`
+/// setting), plus one more level per layer PROVEN to store everything it
+/// holds - see [`layer_stores_everything`]; at the cap the deepest layer
+/// is left materialized on disk and the job still succeeds - the design
+/// guarantee that a too-deep chain degrades, never fails.
+///
+/// FROM `depth` IS THE WHOLE OF THE BOUND, and a job that DEMOTES gets
+/// this budget on top of the one the in-stream chain already spent
+/// rather than sharing it. Read [`TAIL_NESTED_ENTRY_DEPTH`] before
+/// treating this sentence as a statement about a whole job.
 ///
 /// The bool-shaped twin: [`extract_local`] and the tests read the
 /// outcome and nothing else. A caller that composes a user-facing job
@@ -184,6 +242,33 @@ pub(crate) fn extract_nested_why(
     depth: usize,
     why: &mut Option<String>,
 ) -> Result<NestOutcome> {
+    extract_nested_capped(
+        dir,
+        password,
+        depth,
+        nzbkit::extract::nested_depth_cap(),
+        why,
+    )
+}
+
+/// [`extract_nested_why`] carrying the effective depth cap DOWN the
+/// recursion instead of re-resolving it at every level.
+///
+/// It has to be carried, because the cap is no longer a constant of the
+/// job: a layer proven to store everything hands its children one more
+/// level than it had ([`nzbkit::extract::nested_cap_after_store_layer`]),
+/// so the number in force at depth 4 is a function of what the four
+/// layers above it turned out to be. Re-resolving the global at every
+/// level - which is what this site did until now - throws that history
+/// away, and is why a store ladder the in-stream half unpacks whole
+/// stopped short here on a resumed or disk-only job.
+fn extract_nested_capped(
+    dir: &std::path::Path,
+    password: Option<&str>,
+    depth: usize,
+    cap: usize,
+    why: &mut Option<String>,
+) -> Result<NestOutcome> {
     use nzbkit::extract::release_stem;
     // Nested-level PAR2 repair - the per-level twin of extract_local's
     // phase 1. A poster can pack [damaged inner volumes + the inner
@@ -201,6 +286,17 @@ pub(crate) fn extract_nested_why(
         nested_par2_repair(dir);
     }
     let before = snapshot_recursive(dir)?;
+    // The cap this level's CHILDREN get. Only COMPRESSING layers count
+    // against the nested depth cap - it is a decompression-bomb backstop,
+    // and a stored layer is the same bytes with a header on the front, so
+    // it cannot expand. Read BEFORE any arm runs: the arms delete the
+    // volumes they spend, so the evidence is gone by the time the
+    // recursion below needs it.
+    let child_cap = if layer_stores_everything(&before) {
+        nzbkit::extract::nested_cap_after_store_layer(cap)
+    } else {
+        cap
+    };
     // Volume-set stems present before this pass: a volume REBUILT during
     // extraction (.rev reconstruction, RR repair) lands in the diff as a
     // "new" file but belongs to the outer set - never descend into it.
@@ -219,9 +315,9 @@ pub(crate) fn extract_nested_why(
     // made an unrelated comic beside the set suppress recursion into a
     // genuinely nested extensionless RAR (Codex sweep 13 Aug U3). Same
     // exclusion its sibling censuses already apply.
-    let pre_obfuscated = before
-        .iter()
-        .any(|p| !looks_like_named_rar(p) && !nzbkit::extract::is_final_file(p) && rar_magic(p));
+    let pre_obfuscated = before.iter().any(|p| {
+        !looks_like_named_rar(p) && nzbkit::extract::archive_sniff_eligible(p) && rar_magic(p)
+    });
     let is_new_nested_archive = |p: &PathBuf| {
         if !is_extractable_archive(p) {
             return false;
@@ -465,8 +561,7 @@ pub(crate) fn extract_nested_why(
     } else {
         before.clone() // nothing extracted at this level: empty diff
     };
-    let cap = nzbkit::extract::nested_depth_cap();
-    if depth + 1 >= cap {
+    if depth + 1 >= child_cap {
         // Depth cap reached. Anything still packed here - an archive this
         // pass produced, or a pre-existing subfolder archive we would
         // otherwise descend into - is the deepest reached layer, already
@@ -489,10 +584,20 @@ pub(crate) fn extract_nested_why(
         if !leftover.is_empty() {
             leftover.sort();
             leftover.dedup();
+            // The remedy is only a remedy below the hard ceiling. A store
+            // ladder raises its own cap a level at a time and the raise is
+            // clamped there, so at the ceiling the setting is not what
+            // stopped this and telling the user to raise it is the wrong
+            // blame on a job that did not fail.
+            let remedy = if child_cap >= nzbkit::extract::NESTED_MAX_DEPTH_HARD_CEILING {
+                "this is the hard ceiling on nesting, not the nested_max_depth setting"
+            } else {
+                "raise the nested_max_depth setting to unpack further"
+            };
             warn!(
                 target: "extract",
-                "nested archives deeper than {cap} levels - deepest layer left \
-                 materialized on disk ({}); raise the nested_max_depth setting to unpack further",
+                "nested archives deeper than {child_cap} levels - deepest layer left \
+                 materialized on disk ({}); {remedy}",
                 leftover.join(", ")
             );
         }
@@ -548,7 +653,13 @@ pub(crate) fn extract_nested_why(
                     }
                 }
             }
-            ok = ok.and(extract_nested_why(&sub, password, depth + 1, why)?);
+            ok = ok.and(extract_nested_capped(
+                &sub,
+                password,
+                depth + 1,
+                child_cap,
+                why,
+            )?);
             if lift_nest_outputs(&sub, dir) {
                 let _ = std::fs::remove_dir_all(&sub);
             } else {
@@ -565,13 +676,77 @@ pub(crate) fn extract_nested_why(
         } else {
             // A fresh subdir holds only this pass's output - safe to recurse
             // in place (the outer volumes are elsewhere).
-            ok = ok.and(extract_nested_why(&idir, password, depth + 1, why)?);
+            ok = ok.and(extract_nested_capped(
+                &idir,
+                password,
+                depth + 1,
+                child_cap,
+                why,
+            )?);
         }
     }
     // The nested layer(s) this level held are now denested (or not, if a
     // deeper level failed): sweep the spent input archives on full success.
     sweep_spent_entry(ok.produced());
     Ok(ok)
+}
+
+/// Does every archive this level is about to unpack PROVE that it stores
+/// everything it holds?
+///
+/// The disk half of the store exemption, and the answer to the question
+/// `c0b1c788a` left open when it changed only the in-stream half: that
+/// site learns an entry's compression method from the RAR mapper as the
+/// articles arrive and latches it on the layer
+/// (`nzbkit::extract`'s `Inner::saw_store` / `saw_compressed`), while
+/// this one walks files that are already on disk and had no such
+/// evidence at all. The evidence IS cheaply available here - a header
+/// walk that seeks past each member's data area, which
+/// [`nzbkit::rar::volume_is_store_only`] performs - and it is read
+/// immediately before this same level extracts those same archives in
+/// full. Measured 31 Aug 2026 on this box: 0.22 ms for a 64 MiB store
+/// volume and 1.2 ms for a level holding one, so a hundred-volume set
+/// costs about 22 ms per level against an extraction that reads every
+/// byte of it. Short-circuiting on the first candidate that fails keeps
+/// a mixed level cheaper still.
+///
+/// POSITIVE EVIDENCE ONLY, exactly as in-stream, and `false` means
+/// UNKNOWN rather than "compressed": a zip, 7z or tar layer proves
+/// nothing about compression here (no method to read), an unreadable or
+/// signature-destroyed volume proves nothing, and a level with no
+/// archive at all proves nothing. Every one of those keeps the cap where
+/// it was. The failure mode of getting this backwards is a bomb guard
+/// that does not guard, so the conservative direction is the one that
+/// declines to raise.
+///
+/// EVERY candidate must prove it, not the first one: a level holding a
+/// store RAR set beside a compressing archive is a level that can
+/// expand, and it is the OTHER archive that would do the expanding. The
+/// in-stream latch says the same thing by being sticky in the compressed
+/// direction - one compressed entry makes the whole layer count.
+///
+/// The subtree, not just `dir`: `before` is the recursive snapshot, so a
+/// pre-existing subfolder archive this level is about to seed the
+/// recursion with is judged too. That is the conservative reading -
+/// including more files can only ever withhold the raise.
+fn layer_stores_everything(before: &std::collections::HashSet<PathBuf>) -> bool {
+    let mut saw = false;
+    for p in before {
+        // The same population the recursion itself treats as archives:
+        // by magic (any family), or by RAR name grammar, which catches a
+        // volume whose signature bytes were destroyed. The second is in
+        // scope deliberately - such a volume is exactly one this cannot
+        // read, and an unreadable archive must withhold the raise rather
+        // than be skipped past.
+        if !is_extractable_archive(p) && !looks_like_named_rar(p) {
+            continue;
+        }
+        if !nzbkit::rar::volume_is_store_only(p) {
+            return false;
+        }
+        saw = true;
+    }
+    saw
 }
 
 /// A nest scratch directory this call PROVABLY created.
@@ -645,9 +820,29 @@ pub(crate) fn lift_scratch_into(
         // is still an occupied name, and a rename onto it would replace the
         // link rather than reveal what it pointed at.
         let dest = if target.symlink_metadata().is_ok() {
+            // CAPPED on the composed name. `name` is an extracted
+            // member's own name, so it is a `sanitize_out_name` result
+            // and is routinely AT the 255-byte component cap - capping
+            // is what produced it - and a `{prefix}-{n}-` on the front
+            // is a name no filesystem creates. Note the loop EXITS on
+            // such a name rather than spinning, because
+            // `symlink_metadata` answers Err for a name too long to look
+            // up and that reads as free here; the `rename` below is what
+            // then fails, loudly, leaving the member stranded in the
+            // scratch directory.
+            //
+            // The composed name and not a stem reserve: nothing reads
+            // this name back, but the ladder's distinctness is the whole
+            // point of it, and `cap_component`'s hash tag is what keeps
+            // successive rungs apart once the tail it would otherwise
+            // rely on has been truncated away. Inside the cap it is the
+            // plain `format!` byte for byte.
             let mut n = 1usize;
             loop {
-                let cand = dir.join(format!("{prefix}-{n}-{}", name.to_string_lossy()));
+                let cand = dir.join(nzbkit::disk::sanitize_filename_capped(&format!(
+                    "{prefix}-{n}-{}",
+                    name.to_string_lossy()
+                )));
                 if cand.symlink_metadata().is_err() {
                     break cand;
                 }
@@ -1131,7 +1326,7 @@ pub(crate) fn extract_one_level_at(
     let stray = std::fs::read_dir(dir)?.flatten().find(|e| {
         let p = e.path();
         e.file_type().is_ok_and(|t| t.is_file())
-            && !nzbkit::extract::is_final_file(&p)
+            && nzbkit::extract::archive_sniff_eligible(&p)
             && (rar_magic(&p) || sevenz_magic(&p))
     });
     if let Some(e) = stray {
@@ -1236,12 +1431,14 @@ pub(crate) fn slot_is_uncovered_hole(
     covered: &std::collections::HashSet<String>,
 ) -> bool {
     let had_writer = path.is_some();
-    let path = path.unwrap_or_else(|| out_dir.join(nzbkit::disk::sanitize_filename(hint)));
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
+    let path = path.unwrap_or_else(|| {
+        nzbkit::disk::join_out_name(out_dir, &nzbkit::disk::sanitize_out_name(hint))
+    });
+    // The out_dir-RELATIVE name: `covered` is keyed by the FileDesc
+    // names' sanitized form, which for a tree-preserved member carries
+    // its directories - the bare file name would never match and a
+    // covered slot would read as an uncovered hole.
+    let name = nzbkit::disk::out_name_of(out_dir, &path).to_lowercase();
     if covered.contains(&name) {
         return false;
     }
@@ -1455,11 +1652,13 @@ pub(crate) fn nested_par2_repair(dir: &std::path::Path) {
                 needed,
                 have,
                 adopted,
+                partial,
             }) => {
                 warn!(
                     target: "par2",
-                    "nested set: UNREPAIRABLE - need {needed} recovery block(s), have {have}{}",
-                    crate::repair::adopted_clause(adopted)
+                    "nested set: UNREPAIRABLE - need {needed} recovery block(s), have {have}{}{}",
+                    crate::repair::adopted_clause(adopted),
+                    nzbkit::par2repair::published_clause(&partial)
                 )
             }
             Err(e) => warn!(target: "par2", "nested set: repair error - {e}"),
@@ -1525,7 +1724,7 @@ pub(crate) fn nested_archive_beside_leftovers(
                 // A payload file (`.cbr`/`.cb7`) is never a nested
                 // archive - counting one would spin up a nested pass
                 // with nothing to do.
-                let hit = if nzbkit::extract::is_final_file(&p) {
+                let hit = if !nzbkit::extract::archive_sniff_eligible(&p) {
                     false
                 } else if d == dir {
                     if looks_like_named_rar(&p) {
@@ -1622,9 +1821,20 @@ impl OuterHold {
                 // replacement is ours to prevent.
                 let dest = dir.join(name);
                 if dest.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+                    // CAPPED on the composed name, by the same door and
+                    // for the same reason as `lift_scratch_into`'s ladder
+                    // above, whose scheme this deliberately shares: the
+                    // occupant's name is a `sanitize_out_name` result and
+                    // is routinely at the 255-byte cap, so an
+                    // `extracted-1-` prefix is a name the `rename` below
+                    // cannot create - and the volume then stays in the
+                    // hold rather than being published.
                     let mut n = 1usize;
                     let aside = loop {
-                        let cand = dir.join(format!("extracted-{n}-{}", name.to_string_lossy()));
+                        let cand = dir.join(nzbkit::disk::sanitize_filename_capped(&format!(
+                            "extracted-{n}-{}",
+                            name.to_string_lossy()
+                        )));
                         if cand.symlink_metadata().is_err() {
                             break cand;
                         }
@@ -1687,7 +1897,6 @@ impl Drop for OuterHold {
     }
 }
 
-/// Is a normally-named RAR set present in `dir`?
 /// A `.rar` whose NAME says nothing about which set it belongs to, nor
 /// where in that set it sits: an obfuscated stem, a bare `.rar`, and no
 /// `.partNN` ordering.
@@ -1738,6 +1947,7 @@ pub(crate) fn rar_name_carries_no_set(path: &std::path::Path) -> bool {
     !ordered && !nzbkit::release::stem_is_a_name(head) && !old_style_sibling()
 }
 
+/// Is a normally-named RAR set present in `dir`?
 pub(crate) fn dir_has_named_rar(dir: &std::path::Path) -> Result<bool> {
     Ok(std::fs::read_dir(dir)?.flatten().any(|e| {
         let p = e.path();
@@ -1771,6 +1981,25 @@ pub(crate) fn dir_has_named_rar(dir: &std::path::Path) -> Result<bool> {
 /// need the same guard here, or a `.cbr`/`.cb7` an outer archive produced
 /// becomes a nested layer and then a spent intermediate - deleted.
 ///
+/// That guard is [`nzbkit::extract::archive_sniff_eligible`] since 31 Aug
+/// 2026 and was `is_final_file` before it, which is a WEAKER rule: it
+/// refuses the two container extensions that are deliverables and says
+/// nothing about a name that is not a container at all. So `Movie.mkv`,
+/// `disc.iso` and `Subs.srt` carrying RAR5 magic all answered true here
+/// (measured, 30 and 31 Aug 2026) - the identical hole matrix row M4-90
+/// closed in the in-stream sniff, one layer down, which is why the
+/// job-level outcome of that row did not change until this moved.
+///
+/// IT REACHES THE NESTED CASE TOO and that is the intended answer, not a
+/// side effect. An archive an outer unpack PRODUCED is judged by the same
+/// name rule as one that was posted, because the asymmetry is the same
+/// either way: a wrongly-declined file is whole and openable, a wrongly-
+/// unpacked one is gone and the job says Completed. It costs nothing real
+/// - "archives a pass genuinely produces carry their packed names", and
+/// none of `.rar`/`.rNN`/`.7z`/hash-named is a payload-content name, so
+/// the only shape this declines is a nested archive somebody named
+/// `Movie.mkv`.
+///
 /// Tar counts too, from TODO 163 item 6's disk half. The DESCENT
 /// consumer gains nothing by it either way - a tar's own output lands
 /// beside it and is found by the before/after diff whatever this
@@ -1785,7 +2014,7 @@ pub(crate) fn dir_has_named_rar(dir: &std::path::Path) -> Result<bool> {
 /// arm REFUSES never reaches the sweep either: the ladder records it as
 /// refused, which drops it before the stem count.
 pub(crate) fn is_extractable_archive(path: &std::path::Path) -> bool {
-    (!nzbkit::extract::is_final_file(path) && (rar_magic(path) || sevenz_magic(path)))
+    (nzbkit::extract::archive_sniff_eligible(path) && (rar_magic(path) || sevenz_magic(path)))
         || nzbkit::zip::is_container(path)
         || is_tar_container(path)
 }
@@ -1801,7 +2030,7 @@ pub(crate) fn nested_inner_kind(dir: &std::path::Path) -> Option<&'static str> {
     for e in std::fs::read_dir(dir).ok()?.flatten() {
         let p = e.path();
         if e.file_type().is_ok_and(|t| t.is_file())
-            && !nzbkit::extract::is_final_file(&p)
+            && nzbkit::extract::archive_sniff_eligible(&p)
             && (looks_like_named_rar(&p) || rar_magic(&p))
         {
             return Some(classify_rar_head(&p));
@@ -1872,8 +2101,10 @@ pub(crate) fn classify_rar_head(path: &std::path::Path) -> &'static str {
 mod published_names;
 
 /// GH #63: which of the post's two names a slot's file is written
-/// under. Carries `FileSlot::write_name` and `FileSlot::hint_beats`.
-mod slot_name;
+/// under. Carries `FileSlot::write_name` and `FileSlot::hint_beats`,
+/// and - M4-70 - `FileSlot::contested_yenc_name`, which re-decides that
+/// question at settle off what the ARTICLES declared.
+pub(crate) mod slot_name;
 pub(crate) use published_names::*;
 pub(crate) use slot_name::NAME_UNDECIDED;
 
@@ -2025,7 +2256,7 @@ pub(crate) fn verify_dir(dir: &std::path::Path) -> Result<bool> {
         .iter()
         .flat_map(|s| s.files.iter().map(move |f| (s, f)))
     {
-        let path = dir.join(nzbkit::disk::sanitize_filename(&f.name));
+        let path = nzbkit::disk::join_out_name(dir, &nzbkit::disk::sanitize_out_name(&f.name));
         // Streamed, never slurped: a set member is a payload file, so this
         // is the 30 GB mkv in an obfuscated post's output dir, and
         // `std::fs::read` here made its whole length resident at once
@@ -2175,6 +2406,16 @@ mod backfill_tests;
 #[cfg(test)]
 #[path = "unpack/split_set_sweep_tests.rs"]
 mod split_set_sweep_tests;
+
+#[cfg(test)]
+#[path = "unpack/nested_depth_tests.rs"]
+mod nested_depth_tests;
+
+/// The `<prefix>-<n>-<name>` collision ladders, on a member name already
+/// AT the component cap.
+#[cfg(test)]
+#[path = "unpack/lift_name_cap_tests.rs"]
+mod lift_name_cap_tests;
 
 /// GitHub issue #40: a named `.cbr` comic is a RAR container whose file
 /// IS the deliverable. The ladder used to sniff it into the obfuscated

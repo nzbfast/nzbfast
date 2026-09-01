@@ -623,10 +623,11 @@ impl Daemon {
 /// dozen variables this call site sets.
 const SAB_FILES_MAX_BYTES: usize = 64 << 10;
 
-/// How deep [`Daemon::sab_files`] descends. Our own extraction cannot
-/// nest at all (`sanitize_filename` maps the separators out of archive
-/// entry names), so this only ever bounds a tree something else built -
-/// and bounds the recursion with it, exactly as `prune_empty_dirs` does.
+/// How deep [`Daemon::sab_files`] descends. Our own extraction
+/// preserves provably safe member paths since the relpath-preserve
+/// ruling (`sanitize_out_name`, capped at 16 components), so this
+/// bounds those trees as well as ones something else built - and
+/// bounds the recursion with it, exactly as `prune_empty_dirs` does.
 const SAB_FILES_MAX_DEPTH: usize = 8;
 
 /// Every real file under `dir`, as a `/`-joined path relative to the

@@ -35,6 +35,7 @@
 //! flipped assertion with no history reads as though it was always so.
 
 use super::*;
+use crate::payloads;
 
 /// A post under construction: payload files split into articles, PAR2
 /// packets appended, damage applied by removing ids from the mock again.
@@ -115,28 +116,6 @@ impl Post {
         x.push_str("</nzb>\n");
         x
     }
-}
-
-/// A payload whose every PAR2 block is unique.
-///
-/// `super::payload` repeats every second 64 KiB block, and the repair
-/// engine's adoption scan then heals a "missing" block from the
-/// duplicate beside it - which silently turns a shape about recovery
-/// data into a shape about self-similarity. Same splitmix64 replacement
-/// `e2e_faults` uses, and for the same reason.
-fn unique_payload(n: usize, seed: u64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(n);
-    let mut s = seed;
-    while out.len() < n {
-        s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = s;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^= z >> 31;
-        out.extend_from_slice(&z.to_le_bytes());
-    }
-    out.truncate(n);
-    out
 }
 
 /// `par2 create` with the recovery BLOCK COUNT pinned, returning the
@@ -348,7 +327,7 @@ async fn a_dead_recovery_set_reaches_the_parked_offer_and_so_does_a_gone_post() 
     let base = std::env::temp_dir().join(format!("nzbfast-ladder-{}", std::process::id()));
     let _scratch = scratch::ScratchDir::attach(&base);
 
-    let data = unique_payload(BLOCKS * BS, 0x5eed_0305);
+    let data = payloads::unique_payload(BLOCKS * BS, 0x5eed_0305);
     let set = par2_set(
         &base.join("build"),
         &[("payload.bin", &data)],
@@ -386,7 +365,7 @@ async fn a_dead_recovery_set_reaches_the_parked_offer_and_so_does_a_gone_post() 
 
     // Shape G: nothing of the post is on any server, and it is old
     // enough that propagation does not explain it.
-    let gone = unique_payload(8 * BS, 0x60_0e);
+    let gone = payloads::unique_payload(8 * BS, 0x60_0e);
     let mut g = Post::new();
     g.add_dead("gone.bin", &gone, BS, "gpay", &mut articles);
 
@@ -516,7 +495,6 @@ async fn a_dead_recovery_set_reaches_the_parked_offer_and_so_does_a_gone_post() 
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// The AUTOMATIC rung fires on the identical recovery-set-dead shape: a
@@ -549,7 +527,7 @@ async fn the_automatic_promotion_rung_fires_on_the_recovery_set_dead_shape() {
     let base = std::env::temp_dir().join(format!("nzbfast-ladderp-{}", std::process::id()));
     let _scratch = scratch::ScratchDir::attach(&base);
 
-    let data = unique_payload(BLOCKS * BS, 0x5eed_0306);
+    let data = payloads::unique_payload(BLOCKS * BS, 0x5eed_0306);
     let set = par2_set(
         &base.join("build"),
         &[("payload.bin", &data)],
@@ -642,7 +620,7 @@ async fn the_automatic_promotion_rung_fires_on_the_recovery_set_dead_shape() {
         upload(port, &p_xml, "Ladder.Promote.S03E03.720p.nzb");
         upload(port, &s_xml, "Ladder.Promote.S03E03.1080p.nzb");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains("\"Duplicate\""), "the spare was not held: {q}");
+        assert!(any_held_behind_a_copy(&q), "the spare was not held: {q}");
         http(port, "/api?mode=resume&output=json", None);
 
         let prim = settled(port, "720p", 1200);
@@ -702,7 +680,6 @@ async fn the_automatic_promotion_rung_fires_on_the_recovery_set_dead_shape() {
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// **§293's own measurement plan, and TODO 305 item 2's answer to it:**
@@ -737,9 +714,9 @@ async fn a_promoted_replacement_does_not_refetch_what_the_predecessor_left_whole
     let base = std::env::temp_dir().join(format!("nzbfast-ladderd-{}", std::process::id()));
     let _scratch = scratch::ScratchDir::attach(&base);
 
-    let whole1 = unique_payload(12 * BS, 0x5eed_0401);
-    let whole2 = unique_payload(12 * BS, 0x5eed_0402);
-    let holed = unique_payload(16 * BS, 0x5eed_0403);
+    let whole1 = payloads::unique_payload(12 * BS, 0x5eed_0401);
+    let whole2 = payloads::unique_payload(12 * BS, 0x5eed_0402);
+    let holed = payloads::unique_payload(16 * BS, 0x5eed_0403);
     let set = par2_set(
         &base.join("build"),
         &[
@@ -850,7 +827,7 @@ async fn a_promoted_replacement_does_not_refetch_what_the_predecessor_left_whole
         upload(port, &p_xml, "Ladder.Donor.S04E01.720p.nzb");
         upload(port, &s_xml, "Ladder.Donor.S04E01.1080p.nzb");
         let q = http(port, "/api?mode=queue&output=json", None);
-        assert!(q.contains("\"Duplicate\""), "the spare was not held: {q}");
+        assert!(any_held_behind_a_copy(&q), "the spare was not held: {q}");
         http(port, "/api?mode=resume&output=json", None);
 
         let prim = settled(port, "720p", 1200);
@@ -908,5 +885,4 @@ async fn a_promoted_replacement_does_not_refetch_what_the_predecessor_left_whole
     })
     .await
     .unwrap();
-    let _ = std::fs::remove_dir_all(&base);
 }

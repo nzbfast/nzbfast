@@ -549,13 +549,17 @@ class MainActivity : ComponentActivity() {
                             // worse, something else.
                             canExport = connection?.mode == Mode.DEVICE && exportFolder != null,
                             onPlay = ::play,
-                            onPauseJob = { io { client?.pauseJob(it) } },
-                            onResumeJob = { io { client?.resumeJob(it) } },
+                            onPauseJob = { id -> mutate("pause that download") { client?.pauseJob(id) == true } },
+                            onResumeJob = { id -> mutate("resume that download") { client?.resumeJob(id) == true } },
                             onDeleteJob = { id, files ->
-                                io { client?.deleteJob(id, deleteFiles = files) }
+                                mutate("remove that download") {
+                                    client?.deleteJob(id, deleteFiles = files) == true
+                                }
                             },
                             onDeleteHistory = { id, files ->
-                                io { client?.deleteHistory(id, deleteFiles = files) }
+                                mutate("remove that entry") {
+                                    client?.deleteHistory(id, deleteFiles = files) == true
+                                }
                             },
                             onExport = ::exportJob,
                         )
@@ -658,6 +662,12 @@ class MainActivity : ComponentActivity() {
         Store.clear(this)
         connection = null
         snapshot = null
+        // The 90-sample throughput window is about ONE engine. Left
+        // behind, the next connection's samples appended to the previous
+        // one's and were charted against the new link's peak for about
+        // three minutes - iOS clears both together (`AppState`), and this
+        // side cleared only the snapshot.
+        speedHistory = emptyList()
         note = null
         screen = Screen.Connect
     }
@@ -782,6 +792,11 @@ class MainActivity : ComponentActivity() {
             } else {
                 Store.saveServer(this@MainActivity, base, key)
                 connection = Store.load(this@MainActivity)
+                // Adopting a DIFFERENT remote engine is a change of
+                // identity exactly as a disconnect is - same reason, and
+                // this arm needs it said again because it never goes
+                // through `disconnect`.
+                speedHistory = emptyList()
                 note = null
                 screen = Screen.Home
                 startPolling()
@@ -1056,7 +1071,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun togglePauseAll(paused: Boolean) {
-        io { if (paused) client?.resumeAll() else client?.pauseAll() }
+        val what = if (paused) "resume downloading" else "pause downloading"
+        mutate(what) { (if (paused) client?.resumeAll() else client?.pauseAll()) == true }
     }
 
     // ---- polling ----
@@ -1082,7 +1098,17 @@ class MainActivity : ComponentActivity() {
                         reached = true
                         snapshot = snap
                         speedHistory = (speedHistory + snap.speedBps / 1e6).takeLast(90)
-                        if (note?.startsWith("Could not reach") == true) note = null
+                        // A poll that reached the engine clears the
+                        // status line, whichever of the two put a
+                        // sentence there - the reach failure below, or a
+                        // refused mutation ([mutate]). A note nothing
+                        // clears is a stale sentence about a moment that
+                        // has passed.
+                        if (note?.startsWith("Could not reach") == true ||
+                            note?.startsWith("The server refused") == true
+                        ) {
+                            note = null
+                        }
                     } else if (reached && connection?.mode == Mode.DEVICE) {
                         // A call that stopped reaching the engine we proved.
                         // Both ways that happens say the same thing: a
@@ -1112,6 +1138,36 @@ class MainActivity : ComponentActivity() {
     private fun io(block: () -> Unit) {
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching(block)
+        }
+    }
+
+    /**
+     * A mutation whose REFUSAL the person can see.
+     *
+     * [io] is right for fire-and-forget work with nothing to report, and
+     * wrong for every queue/history/global write on Home: those return a
+     * meaningful Boolean (`NzbfastClient.pauseJob` and its siblings) and
+     * it was dropped on the floor along with any exception, so a pause
+     * the daemon refused, a delete against a stale api key and a global
+     * resume against an engine that had gone all looked exactly like
+     * success - the confirmation closed and nothing changed.
+     *
+     * `false` is a refusal and a throw is a transport/auth failure, and
+     * the two get different sentences because they send the reader
+     * somewhere different. Cleared by the poll loop's own note handling
+     * the moment it reaches the engine again.
+     */
+    private fun mutate(what: String, block: () -> Boolean) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val outcome = runCatching(block)
+            val problem = when {
+                outcome.isFailure -> "Could not reach the server."
+                outcome.getOrDefault(false) -> null
+                else -> "The server refused to $what."
+            }
+            if (problem != null) {
+                withContext(Dispatchers.Main) { note = problem }
+            }
         }
     }
 }

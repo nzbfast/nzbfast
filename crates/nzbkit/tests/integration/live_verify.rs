@@ -146,7 +146,6 @@ fn late_activation_settles_via_readback() {
         r.readback_blocks > 0,
         "pre-activation spans must go through read-back"
     );
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -176,7 +175,6 @@ fn missing_article_hole_flags_its_blocks() {
     let r = v.finish_slot(0, Some(&path)).unwrap();
     assert_eq!(bad_set(&r), reference_bad("beta.bin", &holed));
     assert!(!r.bad_blocks.is_empty());
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -197,7 +195,6 @@ fn obfuscated_name_matches_by_md5_16k() {
     let r = v.finish_slot(0, Some(&path)).unwrap();
     assert_eq!(r.par2_name.as_deref(), Some("beta.bin"));
     assert!(r.all_ok(), "bad: {:?}", r.bad_blocks);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -215,7 +212,6 @@ fn short_file_obfuscated_match() {
     let r = v.finish_slot(0, Some(&path)).unwrap();
     assert_eq!(r.par2_name.as_deref(), Some("alpha.bin"));
     assert!(r.all_ok(), "bad: {:?}", r.bad_blocks);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -327,7 +323,6 @@ fn fast_verify_settle_readback_still_uses_md5() {
         r.readback_blocks > 0,
         "skipped span must settle by read-back"
     );
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -384,7 +379,11 @@ fn crc_only_zero_extension_matches_hashing_the_padding() {
         let mut padded = bytes.to_vec();
         padded.resize(bs, 0);
         let check = BlockCheck {
-            md5: [0; 16], // unused by the CRC-only path
+            // Unused by the CRC-only path, but NOT all-zero: that
+            // exact value is `BlockCheck::UNPROVEN`, the placeholder
+            // `par2::fit_ifsc` fills a short IFSC's grid out with, and
+            // `crc_matches` refuses one whatever the CRC says.
+            md5: [1; 16],
             crc32: crc32fast::hash(&padded),
         };
         assert!(
@@ -503,7 +502,6 @@ fn fast_verify_mixed_disk_fragment_degrades_to_readback() {
         r.readback_blocks > 0,
         "the mixed-trust boundary block must settle by read-back"
     );
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// M32 perf: integrity delegation truth table. The article-CRC skip is

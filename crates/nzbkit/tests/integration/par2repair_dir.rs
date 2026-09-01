@@ -849,3 +849,136 @@ fn two_sets_claiming_one_name_keep_both_files() {
     );
     assert!(here.contains(&b), "set B's content never landed");
 }
+
+/// X-4 (31 Aug 2026): a set that adopts ONE member and rebuilds another
+/// from parity alone must say which is which.
+///
+/// `blocks_adopted`, `adopted_from` and `consumed_sources` are totals,
+/// so on this shape they all say "yes, this repair had bytes of its own
+/// to work from" - and that is true of `adopted.bin` and false of
+/// `parityonly.bin`. A caller gating on the totals credits the second
+/// with what the first earned; `nzbfast::get::latesets` was doing
+/// exactly that, and a foreign release's wholly-missing member was
+/// materialised into a download's output directory with no uniqueness
+/// test at all. `per_file` is the answer, and
+/// `RepairReport::file_had_bytes_on_disk` is the question.
+///
+/// Deliberately a THREE-file set: `untouched.bin` verifies clean and is
+/// neither patched nor created, which is what pins the census as a
+/// census (one entry per target, damaged or not) rather than a list of
+/// whatever the patch loop happened to walk.
+#[test]
+fn per_file_separates_an_adopted_member_from_a_parity_only_one() {
+    if !have_par2() {
+        eprintln!("skipping: par2 not installed");
+        return;
+    }
+    let t = TempDir::new("perfilecensus");
+    // Independent seeds through the xorshift generator above: distinct
+    // seeds share no window, so `parityonly.bin` is genuinely absent
+    // from the directory rather than reachable inside a sibling. A
+    // generator whose seeds are shifts of each other would let it be
+    // ADOPTED out of its neighbour and the probe would grade the
+    // fixture instead of the engine (chip queue X-2).
+    let adopted = payload(20_000, 7);
+    let parity_only = payload(12_000, 41);
+    let untouched = payload(9_000, 88);
+    std::fs::write(t.0.join("adopted.bin"), &adopted).unwrap();
+    std::fs::write(t.0.join("parityonly.bin"), &parity_only).unwrap();
+    std::fs::write(t.0.join("untouched.bin"), &untouched).unwrap();
+    par2_create(
+        &t.0,
+        &["adopted.bin", "parityonly.bin", "untouched.bin"],
+        &["-r60"],
+    );
+    // One member hides under a hash - present, adoptable, whole. The
+    // other is simply gone: nothing but the parity can bring it back.
+    std::fs::rename(t.0.join("adopted.bin"), t.0.join("5c1af0e9")).unwrap();
+    std::fs::remove_file(t.0.join("parityonly.bin")).unwrap();
+
+    let r = match repair_dir(&t.0).expect("repair runs") {
+        RepairStatus::Repaired(r) => r,
+        other => panic!("expected Repaired, got {other:?}"),
+    };
+    assert_eq!(
+        read(&t.0, "adopted.bin"),
+        adopted,
+        "adopted.bin not restored"
+    );
+    assert_eq!(
+        read(&t.0, "parityonly.bin"),
+        parity_only,
+        "parityonly.bin not rebuilt"
+    );
+    // The totals cannot tell these two apart - which is the defect.
+    assert!(r.blocks_adopted > 0 && r.blocks_rebuilt > 0, "{r:?}");
+
+    let by = |n: &str| {
+        r.per_file
+            .iter()
+            .find(|f| f.name == n)
+            .unwrap_or_else(|| panic!("no census entry for {n}: {:?}", r.per_file))
+    };
+    assert_eq!(
+        r.per_file.len(),
+        3,
+        "one entry per target: {:?}",
+        r.per_file
+    );
+    assert!(
+        by("adopted.bin").blocks_adopted > 0 && by("adopted.bin").blocks_rebuilt == 0,
+        "a whole file present under another name is pure adoption: {:?}",
+        r.per_file
+    );
+    assert!(
+        by("parityonly.bin").blocks_rebuilt > 0 && by("parityonly.bin").blocks_adopted == 0,
+        "the wholly absent member had no bytes anywhere - every block is \
+         Reed-Solomon: {:?}",
+        r.per_file
+    );
+    assert_eq!(
+        (
+            by("untouched.bin").blocks_rebuilt,
+            by("untouched.bin").blocks_adopted
+        ),
+        (0, 0),
+        "an intact target owes nothing to either: {:?}",
+        r.per_file
+    );
+    // The totals are the census summed, so a slice attributed to nobody
+    // would show here rather than silently under-reporting adoption -
+    // which is the direction that would DELETE a caller's rebuild.
+    assert_eq!(
+        r.per_file.iter().map(|f| f.blocks_adopted).sum::<usize>(),
+        r.blocks_adopted,
+        "census does not account for every adopted block: {:?}",
+        r.per_file
+    );
+    assert_eq!(
+        r.per_file.iter().map(|f| f.blocks_rebuilt).sum::<usize>(),
+        r.blocks_rebuilt,
+        "census does not account for every rebuilt block: {:?}",
+        r.per_file
+    );
+
+    // And the question a caller actually asks.
+    let mut created = r.files_created.clone();
+    created.sort();
+    assert_eq!(created, vec!["adopted.bin", "parityonly.bin"]);
+    assert!(
+        r.file_had_bytes_on_disk("adopted.bin"),
+        "the hash-named copy IS bytes of its own"
+    );
+    assert!(
+        !r.file_had_bytes_on_disk("parityonly.bin"),
+        "a sibling's donor is not this member's evidence"
+    );
+    assert!(
+        r.file_had_bytes_on_disk("untouched.bin"),
+        "a file that was never created was on disk all along"
+    );
+    assert!(
+        r.file_had_bytes_on_disk("nothing.this.repair.mentions"),
+        "an unknown name fails CLOSED - the ungated answer"
+    );
+}

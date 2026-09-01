@@ -290,6 +290,14 @@ impl CryptoState {
         let plain_end = (at + full as u64).min(self.unp);
         if plain_end > at {
             let n = (plain_end - at) as usize;
+            // NEVER `write_article_at` here, and not by oversight. This
+            // is an IN-PLACE TRANSFORM: the range being written already
+            // holds this file's CIPHERTEXT, which the article-delivery
+            // door would read back, find different from the plaintext
+            // about to replace it, and latch as a self-contradicting
+            // post - failing every encrypted download. The same is true
+            // of the repair path, which patches rebuilt blocks over the
+            // damaged ones; both keep the plain door on purpose.
             w.write_at(at, &buf[..n])?;
             if self.track_plain {
                 if overwrite_crc {
@@ -1310,11 +1318,20 @@ impl Extractor {
         // C1). The counter stays as the belt - it is what covers
         // resume, where bytes from a prior run sit under an output the
         // latch never saw.
-        let out_name = w.path.file_name().map(|k| k.to_string_lossy());
-        if out_name
-            .as_deref()
-            .is_some_and(|k| inner.ciphertext_files.contains(k))
-        {
+        //
+        // THE KEY IS THE out_dir-RELATIVE NAME on both maps, never the
+        // bare file name (read-only sweep finding 4, 31 Aug 2026). The
+        // stamp site in `routing.rs` writes that spelling, and
+        // `seed_resumed_routes` inserts the JOURNAL's names, which are
+        // `sanitize_out_name`'s tree form - so a basename lookup here
+        // missed every encrypted member carrying a directory after a
+        // resume, and collapsed two members sharing a basename in
+        // different directories onto one another's route. Same fix, same
+        // reasoning and the same one accepted spelling as
+        // `crypto_state_for`'s `crypto_files` lookup below, which the
+        // 30 Aug sweep moved and which carries the argument in full.
+        let out_name = out_name_of(&inner.out_dir, &w.path);
+        if inner.ciphertext_files.contains(out_name.as_str()) {
             return false;
         }
         // A resumed plaintext-once output: the decision was made by the
@@ -1326,9 +1343,7 @@ impl Extractor {
         // the `E` fact names and the password still has to prove
         // against it, or the stream would be keyed differently from the
         // bytes the restore re-encrypted.
-        let resumed = out_name
-            .as_deref()
-            .and_then(|k| inner.resumed_plaintext.get(k).copied());
+        let resumed = inner.resumed_plaintext.get(out_name.as_str()).copied();
         if w.written() > 0 && resumed.is_none() {
             return false;
         }
@@ -1496,11 +1511,25 @@ impl Extractor {
     ) -> Option<Arc<CryptoState>> {
         // Borrowed lookup first: the state exists for every span after
         // the first, and owning the key cost a String per encrypted span.
-        let key = w.path.file_name()?.to_string_lossy();
-        if let Some(cs) = inner.crypto_files.get(key.as_ref()) {
+        //
+        // KEYED ON THE out_dir-RELATIVE NAME, never the bare file name
+        // (30 Aug 2026 sweep). Two things broke while this keyed on
+        // `file_name()`. Its own reader in `crypto_decrypt.rs` looks the
+        // state up by `out` - the tree-preserving `sanitize_out_name`
+        // form - so after the relpath-preserve ruling every encrypted
+        // member carrying a directory MISSED here, was recorded as
+        // having no plaintext-once state, and demoted its whole group to
+        // the disk path. And two encrypted members sharing a basename in
+        // different directories ("A/x.mkv", "B/x.mkv") collapsed onto ONE
+        // CryptoState, so the second file decrypted under the first's
+        // salt and IV. The journal already keys these by
+        // `sanitize_out_name` (`journal.rs`'s E/K/P records), so the
+        // out_dir-relative form is what the whole rest of the chain
+        // agrees on.
+        let key = out_name_of(&inner.out_dir, &w.path);
+        if let Some(cs) = inner.crypto_files.get(key.as_str()) {
             return Some(cs.clone());
         }
-        let key = key.into_owned();
         let name = Self::entry_name(inner, slot, ei);
         // The head piece (split_before == false) of this file - it may
         // live in another volume's mapper within the same group. Found by
@@ -1569,10 +1598,13 @@ impl Extractor {
     }
 
     /// Read-side lookup: the in-stream decrypt state behind a writer,
-    /// if that output is plaintext-once.
+    /// if that output is plaintext-once. Keyed the same way
+    /// [`CryptoState::crypto_for`] writes it - out_dir-relative, so a
+    /// tree-preserved member resolves and two members sharing a basename
+    /// do not collide.
     pub(super) fn crypto_of(inner: &Inner, w: &FileWriter) -> Option<Arc<CryptoState>> {
-        let key = w.path.file_name()?.to_string_lossy();
-        inner.crypto_files.get(key.as_ref()).cloned()
+        let key = out_name_of(&inner.out_dir, &w.path);
+        inner.crypto_files.get(key.as_str()).cloned()
     }
 }
 

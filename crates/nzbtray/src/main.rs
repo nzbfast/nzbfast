@@ -35,6 +35,8 @@ fn main() {
 #[cfg(any(windows, test))]
 mod probe_body;
 
+#[cfg(test)]
+mod testscratch;
 #[cfg(windows)]
 mod app {
     use serde_json::Value;
@@ -1472,6 +1474,28 @@ mod app {
         refresh_tip(hwnd, true);
     }
 
+    /// Point an already-borrowed App back at a live listener instead of
+    /// spawning: the engine survived, only the tray's belief died. The
+    /// dead child (if any) was already reaped by the watchdog's
+    /// `try_wait`; `probe` re-recorded the identity proof on the
+    /// attachable verdict that got us here.
+    fn reattach(app: &mut App, hwnd: HWND, port: u16) {
+        app.child = None;
+        app.child_dead = false;
+        // Attached again - not ours to manage until a restart WE perform.
+        app.owner = false;
+        app.watch.restarted();
+        app.probe_now = false;
+        app.probed_at = Instant::now();
+        app.port = port;
+        save_port(&app.data_dir, port);
+        balloon(
+            hwnd,
+            "nzbfast",
+            "The download engine is still running - reconnected to it.",
+        );
+    }
+
     /// Start a replacement engine after the current one died - but ask
     /// `ensure_daemon`'s first question first: an engine any of this data
     /// dir's files still name is re-attached to (or, Silent on the
@@ -1495,28 +1519,6 @@ mod app {
     /// generation and has to prove itself again before this tray will
     /// hand it the API key. The readiness probe in the child watcher
     /// re-establishes it exactly as `ensure_daemon` does.
-    /// Point an already-borrowed App back at a live listener instead of
-    /// spawning: the engine survived, only the tray's belief died. The
-    /// dead child (if any) was already reaped by the watchdog's
-    /// `try_wait`; `probe` re-recorded the identity proof on the
-    /// attachable verdict that got us here.
-    fn reattach(app: &mut App, hwnd: HWND, port: u16) {
-        app.child = None;
-        app.child_dead = false;
-        // Attached again - not ours to manage until a restart WE perform.
-        app.owner = false;
-        app.watch.restarted();
-        app.probe_now = false;
-        app.probed_at = Instant::now();
-        app.port = port;
-        save_port(&app.data_dir, port);
-        balloon(
-            hwnd,
-            "nzbfast",
-            "The download engine is still running - reconnected to it.",
-        );
-    }
-
     fn restart_daemon(hwnd: HWND) {
         APP.with(|a| {
             let mut a = a.borrow_mut();

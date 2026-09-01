@@ -1138,6 +1138,88 @@ impl Index {
             keys,
         })
     }
+
+    /// The cached artwork for a batch of title keys - what a release
+    /// ROW needs to show the poster its title already has.
+    ///
+    /// The grid asks `browse_cards`, which joins `titles` per card and
+    /// gets `poster`/`checked` for free. A release list has no such
+    /// join: `browse()` and `search()` both answer `releases` rows, and
+    /// the title behind a row is only a string (`releases.title_key`,
+    /// written at ingest from `categories::classify(..).key`, the same
+    /// string `titles.key` holds). So this is the one extra question a
+    /// list has to ask, and it is a PRIMARY KEY seek per key rather
+    /// than a join over the page.
+    ///
+    /// `hide_adult` is NOT a convenience - it is the whole reason this
+    /// takes a flag instead of being a plain lookup. The grid's adult
+    /// filter drops the ROW (`BrowseQuery::hide_adult`), so art on a
+    /// row that survived it leaks nothing. The dashboard's Browse card
+    /// runs `search()`, which has never had an adult filter of any
+    /// kind, and putting a picture on one of those rows WOULD leak past
+    /// a gate the same install applies to the wall - a name is not a
+    /// poster. So the caller passes the setting, the art is withheld,
+    /// and the row falls back to the text it renders today. The test is
+    /// [`ADULT_GENRE_MATCH_SQL`], the same literal the grid filters on,
+    /// so the two cannot say different things about one title.
+    ///
+    /// Keys with no `titles` row, or with an empty `poster`, are simply
+    /// absent from the map: a caller's `get()` miss IS "no art", and
+    /// there is nothing else it could mean.
+    pub fn title_art(
+        &self,
+        keys: &[String],
+        hide_adult: bool,
+    ) -> rusqlite::Result<std::collections::HashMap<String, TitleArt>> {
+        let keys: Vec<&String> = {
+            // One key is asked once however many rows wear it - a page
+            // of a title's own releases is 200 rows and one key.
+            let mut seen = std::collections::HashSet::new();
+            keys.iter()
+                .filter(|k| !k.is_empty() && seen.insert(k.as_str()))
+                .collect()
+        };
+        if keys.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let holes = std::iter::repeat_n("?", keys.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let adult = if hide_adult {
+            format!(" AND NOT {ADULT_GENRE_MATCH_SQL}")
+        } else {
+            String::new()
+        };
+        let sql = format!(
+            "SELECT t.key, t.poster, t.checked FROM titles t
+              WHERE t.key IN ({holes}) AND t.poster <> ''{adult}"
+        );
+        let args: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| *k as &dyn rusqlite::ToSql).collect();
+        let mut stmt = self.db.prepare_cached(&sql)?;
+        let rows = stmt.query_map(args.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                TitleArt {
+                    poster: r.get(1)?,
+                    checked: r.get(2)?,
+                },
+            ))
+        })?;
+        rows.collect()
+    }
+}
+
+/// One title's cached artwork, for a release row that wants to show it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TitleArt {
+    /// Art-cache filename (`wall::art_name` output), never empty - a
+    /// title with no poster is left out of the map entirely.
+    pub poster: String,
+    /// When enrichment last wrote it. The cache-busting `?v=` a client
+    /// puts on the URL, so a replaced poster is not served from the
+    /// browser's copy of the old one.
+    pub checked: i64,
 }
 
 #[cfg(test)]
@@ -2048,6 +2130,75 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].grp, "alt.binaries.good");
+        teardown(&dir, ix);
+    }
+
+    /// `title_art` answers a release LIST the question a card grid gets
+    /// for free, and its adult flag is the whole reason it takes one.
+    ///
+    /// Three properties, and the third is the one with a leak behind
+    /// it: a title with a poster answers with it, a title without one
+    /// is simply absent (so a caller's `get()` miss is unambiguous),
+    /// and an adult title's art is withheld under `hide_adult` even
+    /// though the ROW itself is on a path with no adult filter at all.
+    /// That last is what stops the dashboard's Browse results - which
+    /// run `search()`, which has never filtered adult anything - from
+    /// putting a picture where this install only ever showed a name.
+    #[test]
+    fn title_art_answers_by_key_and_withholds_adult_art() {
+        let dir = std::env::temp_dir().join(format!("nzbfast-index-art-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ix = Index::open(&dir.join("index.db")).unwrap();
+        for (key, genres, poster) in [
+            ("m:plain film:2001", "Drama", "m_plain_film_2001.jpg"),
+            ("m:adult film:2002", "Adult", "m_adult_film_2002.jpg"),
+            // Enriched, and enrichment found no artwork. Not the same
+            // state as "no titles row", and both must read as no art.
+            ("m:artless film:2003", "Drama", ""),
+        ] {
+            ix.title_seed(key, "movie", "T", 2001).unwrap();
+            ix.db
+                .execute(
+                    "UPDATE titles SET genres=?2, poster=?3, checked=77 WHERE key=?1",
+                    rusqlite::params![key, genres, poster],
+                )
+                .unwrap();
+        }
+        let ask = |hide_adult: bool| -> Vec<String> {
+            let mut got: Vec<String> = ix
+                .title_art(
+                    &[
+                        "m:plain film:2001".into(),
+                        "m:adult film:2002".into(),
+                        "m:artless film:2003".into(),
+                        // Never enriched at all, and the empty key a
+                        // junk release wears - neither is a lookup.
+                        "m:never seen:2004".into(),
+                        String::new(),
+                    ],
+                    hide_adult,
+                )
+                .unwrap()
+                .into_keys()
+                .collect();
+            got.sort();
+            got
+        };
+        assert_eq!(ask(false), ["m:adult film:2002", "m:plain film:2001"]);
+        assert_eq!(ask(true), ["m:plain film:2001"]);
+        // The cache-busting stamp rides along, or a replaced poster is
+        // served out of the browser's copy of the one it replaced.
+        let one = ix
+            .title_art(&["m:plain film:2001".into()], true)
+            .unwrap()
+            .remove("m:plain film:2001")
+            .expect("the plain title has art");
+        assert_eq!(one.poster, "m_plain_film_2001.jpg");
+        assert_eq!(one.checked, 77);
+        // An empty ask is an empty answer and never a query.
+        assert!(ix.title_art(&[], false).unwrap().is_empty());
+        assert!(ix.title_art(&[String::new()], false).unwrap().is_empty());
         teardown(&dir, ix);
     }
 }

@@ -172,6 +172,19 @@ const ACT={
 // what a `data-snd` typo should sound like: still an acknowledgment.
 function actSnd(kind){
   if(!sndOn) return;
+  // A NEW GESTURE REPLACES THE PENDING ONE. The queue below exists to
+  // carry ONE press across `AudioContext.resume()`, which is what its
+  // own comment says and what `SND_Q_MAX`/`SND_Q_STALE_MS` were sized
+  // for - but it only ever APPENDED, so two presses inside the same
+  // suspended window both flushed and the answer to the second began
+  // with the first one's recipe (a delete fall in front of a pause).
+  // Cleared here rather than in `queueNote`, because a recipe is one to
+  // three notes and they must all survive; the boundary is the gesture.
+  // The armed flag and its pending `resume()` are deliberately left
+  // alone: that promise is what flushes whatever is queued when it
+  // settles, and re-arming behind it is the wedge `.then(flush, flush)`
+  // exists to prevent.
+  sndQ=[];
   // Three preferences, not one: the press family, warnings, errors. An
   // unknown kind is the plain blip, which is what a `data-snd` typo
   // should sound like - still an acknowledgment, never silence.

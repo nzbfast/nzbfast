@@ -138,13 +138,35 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
    in the same order on both pages, with the current one marked. Before
    this, getting back to the dashboard was a differently-worded link in a
    different place depending on which screen you were on. */
-.bar .pill{font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:99px;
+.bar .pill{font-size:12px;border-radius:99px;
   padding:4px 11px;text-decoration:none;white-space:nowrap;
   transition:color .12s,border-color .12s,background .12s}
-.bar .pill:hover{color:var(--fg);border-color:color-mix(in srgb,var(--fg) 28%,transparent)}
-.bar .pill.on{color:var(--fg);border-color:var(--acc);
-  background:color-mix(in srgb,var(--acc) 14%,transparent)}
 .bar .pill:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
+/* The bar takes the accent, exactly as the dashboard's header does - the
+   two rows are meant to be the same component, and half of one going
+   coloured would have been the worse answer to "the main buttons on top
+   lack personality ... colorize them like the cards, background and
+   text" (r/usenet 31 Aug 2026). Before this the bar was outlines: --dim
+   text on --line borders over nothing, so a chosen accent reached
+   nothing but the focus ring and the marked pill's hairline.
+   Tokens composed in web/ui-tokens.html from --acc, --surface, --fg and
+   --line, so this holds in all five theme states and under a user's own
+   Cards/Text colours; the fill is anchored to --surface and the text to
+   --fg, so the accent tints and can never invert a pair.
+   The search field and the View popover's own controls stay out: a text
+   field wants a neutral ground to type on, and #viewMenu is moved onto
+   <body> at load (see the backdrop-filter note below), so it is not in
+   this bar at run time and has a ground of its own.
+   The selected tab moves from --surface-2 to the same 28% fill the
+   marked nav pill uses: it was the weakest "you are here" mark on the
+   page and is now the same one, said the same way. */
+.bar .pill,.bar .chip,.bar select,.bar .tabs{
+  background:var(--ctl-bg);border:1px solid var(--ctl-line);color:var(--ctl-fg)}
+.bar .tabs button{color:var(--ctl-fg)}
+.bar .pill:hover,.bar .chip:hover,.bar select:hover,.bar .tabs button:hover{
+  background:var(--ctl-bg-hi);border-color:var(--ctl-line-hi);color:var(--fg)}
+.bar .pill.on,.bar .chip.vpbtn.on,.bar .tabs button.on{
+  background:var(--ctl-bg-on);border-color:var(--acc);color:var(--fg)}
 
 /* §Stage4 View popover. The bar held 29 controls across three visual
    idioms (segmented tabs, chips, pills) and, being sticky, took 40% of an
@@ -152,7 +174,10 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
    sort stay out here; layout and filters moved in here. */
 .viewpop{position:relative;display:flex;align-items:center}
 .vpbtn{display:inline-flex;align-items:center;gap:5px}
-.vpbtn.on{color:var(--fg);border-color:var(--acc);background:color-mix(in srgb,var(--acc) 14%,transparent)}
+/* Its on-state is the bar's own `.on` ramp above (`.bar .chip.vpbtn.on`)
+   rather than a rule here: #viewPop never leaves the bar - only the
+   MENU is moved onto <body> - so one place decides what "switched on"
+   looks like across the pills, the tabs and this button. */
 /* A count of what is switched on in there. Without it, "Matched only"
    (on by default) silently hides cards from behind a closed panel. */
 .vpbtn .vpn{display:inline-grid;place-items:center;min-width:16px;height:16px;padding:0 4px;
@@ -301,6 +326,24 @@ select{background:var(--surface);color:var(--fg);border:1px solid var(--line);
 #selbar{display:flex;align-items:center;gap:8px}
 .lwrap{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:12px}
 #ltable td.name{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Poster thumbnail on a release/title row (Reddit, u/Zimmster2020: the
+   grid had posters and the table did not). It rides INSIDE the name
+   cell rather than in a ninth column, and that is deliberate: external
+   indexer rows, spot rows and the colspan notes all share this table
+   and none of them has art, so a real column would be an empty gutter
+   on most of the page and a colspan edit in six renderers. The name
+   cell is `white-space:nowrap` with an ellipsis, so the image is
+   floated out of the text flow - inline-block would be measured as
+   part of the line and push the ellipsis in by its own width.
+   Sized in `em` so it tracks the density presets instead of fighting
+   them, and the row grows only when art is actually shown. */
+#ltable .rowart{float:inline-start;width:2.05em;height:3.075em;margin-inline-end:8px;
+  border-radius:3px;object-fit:cover;background:var(--surface-2);
+  box-shadow:0 1px 4px rgba(0,0,0,.45)}
+#ltable tr.grp .rowart{width:2.7em;height:4.05em}
+/* A broken or evicted image must not leave a grey block sitting where
+   the poster was - `alt=""` on a failed <img> still occupies its box. */
+#ltable .rowart.gone{display:none}
 #ltable .stem{color:var(--fg);font-weight:550}
 #ltable tr:hover td{background:var(--surface-2)}
 #ltable th.sortable{cursor:pointer;user-select:none;white-space:nowrap}
@@ -798,6 +841,9 @@ body.nosearch #sortwrap,body.nosearch #more{display:none!important}
   <label class="mtog listonly" style="display:none" data-i18n-title="wall.onlycomplete.title"
     title="Only releases with every part present on the provider">
     <input type="checkbox" id="onlyComplete" checked> <span data-i18n="wall.onlycomplete">Complete only</span></label>
+  <label class="mtog listonly" style="display:none" data-i18n-title="wall.rowart.title"
+    title="Show a poster thumbnail on each row, where the index has one">
+    <input type="checkbox" id="rowArt"> <span data-i18n="wall.rowart">Posters</span></label>
   <label class="mtog" data-i18n-title="wall.matched.title" title="Hide cards with no artwork and no metadata - the unenriched junk">
     <input type="checkbox" id="matchedOnly"> <span data-i18n="wall.matched">Matched only</span></label>
   <button class="chip" id="unmChip" style="display:none"
@@ -2009,6 +2055,28 @@ let view, density, zoomPx;
   }
   zoomPx = +localStorage.nzbfastWallZoom2||0;
 }
+// Poster thumbnails on the table rows. Default ON: the wall IS the
+// poster surface, and the Releases table showing the same titles as
+// bare text is what the request was about. Off is one click and it
+// sticks, so nobody is stuck with a density they did not choose.
+// The key is deliberately NOT wall-scoped: the dashboard's Browse
+// results carry the same toggle and read the same preference, because
+// "show me posters in release lists" is one wish and not two. Each
+// page owns a visible control for it, so neither is changed behind the
+// user's back - but a page already open does not repaint when the
+// other one flips it, exactly like `nzbfastLocale`.
+let rowArt = localStorage.nzbfastRowArt !== 'off';
+// The <img> for a row, or '' - which is also what every row gets when
+// the toggle is off, so flipping it is a repaint of the rows already
+// held rather than a refetch. `art` is a URL the daemon only hands out
+// when the file is really in its cache; `onerror` covers the window
+// between that check and this fetch (art eviction runs on a timer).
+// alt="" on purpose: the title is spelled out in the very next
+// element, so a name here would be read twice.
+function artImg(a){
+  return a ? `<img class="rowart" loading="lazy" decoding="async" alt=""
+    src="${esc(a)}" onerror="this.classList.add('gone')">` : '';
+}
 // lrows keeps the page currently on screen so a late i18n catalogue can
 // repaint the rows locally; null = nothing rendered yet.
 let lpage=0, ltotal=0, lseq=0, lrows=null;
@@ -2342,7 +2410,7 @@ function grpRow(c){
     <td class="selcol"><button class="exp" data-i18n-skip aria-expanded="${open}"
       title="${esc(t('wall.exp.title',"Show this title's releases"))}"
       aria-label="${esc(t('wall.exp.title',"Show this title's releases"))}">${open?'▾':'▸'}</button></td>
-    <td class="name"><input type="checkbox" class="gsel" data-gsel="${esc(c.key)}"${
+    <td class="name">${rowArt?artImg(c.poster):''}<input type="checkbox" class="gsel" data-gsel="${esc(c.key)}"${
       grpSelState(c)?' checked':''}
       title="${esc(t('wall.gsel.title',"Select this title's releases"))}"
       aria-label="${esc(t('wall.gsel.title',"Select this title's releases"))}"
@@ -2687,12 +2755,16 @@ function actCell(r){
   </td>`;
 }
 // One per-release row; sub=true renders it nested under a title row.
+// `sub` = a release nested under its title row in grouped mode. Those
+// rows deliberately show NO poster: the title row directly above them
+// is already showing it, and repeating one image down forty rows of one
+// title reads as a rendering fault rather than as information.
 function relRow(r,sub){
   return `<tr data-key="${esc(r.key)}"${sub?' class="sub"':''}>
     <td class="selcol"><input type="checkbox" data-sel="${r.id}"${lsel.has(r.id)?' checked':''}
       aria-label="${esc(t('wall.sel.row','Select this release'))}"></td>
     <td class="name" title="${esc(r.rescued?t('wall.rot.tip','Obfuscated post (decoded name shown); raw: {raw}',{raw:r.name}):r.name)}">
-      ${r.have?`<span class="hv" title="${esc(t('wall.have','In your library'))}">✓</span> `:''}<span class="stem">${esc(r.rescued?rotName(r):r.name)}</span>
+      ${rowArt&&!sub?artImg(r.art):''}${r.have?`<span class="hv" title="${esc(t('wall.have','In your library'))}">✓</span> `:''}<span class="stem">${esc(r.rescued?rotName(r):r.name)}</span>
       ${nameBadges(r)}</td>
     <td>${catChip(r)}${relTags(r)}</td>
     <td class="mono dim">${age(r.first_posted)}</td>
@@ -2886,6 +2958,37 @@ function pageFoot(){
   const r=document.getElementById('lrange').textContent.trim();
   sayResult(ltotal ? [c,r].filter(Boolean).join(' · ') : t('wall.nomatch','No matches.'));
 }
+// External rows honour the active sort too (Reddit feedback: "sorting
+// by size only works for your indexer"). They stay BELOW the local rows
+// rather than interleaving: the local half is paged server-side, so a
+// merged order could only be true on page one, and the notes rows
+// divide the two kinds of evidence. Sorted by the same column and
+// direction the headers show, client-side - the indexer API has no sort
+// of its own. Columns nothing external carries (files, completeness)
+// leave the arrival order alone. The sort is STABLE and deterministic
+// so a repaint with the same rows keeps every group's index, which is
+// what xexp keys the open source-groups by; within a group the source
+// order is the priority contest's and is deliberately untouched.
+function extSorted(){
+  const s=document.getElementById('lsort').value;
+  const key=
+    s==='name' ? x=>(x.title||'').toLowerCase() :
+    s==='kind' ? x=>(x.kind||'').toLowerCase() :
+    s==='size' ? x=>x.size||0 :
+    // Both date sorts read the one date an external result has. The
+    // key is negated age so "bigger = newer" matches the local sorts'
+    // polarity; an unknown age sorts last either way.
+    (s==='posted'||s==='seen') ? x=>x.age_days==null?null:-x.age_days :
+    null;
+  if(!key || extRows.length<2) return extRows;
+  const dir=curDesc()?-1:1;
+  return extRows.map((x,i)=>[key(x),i,x]).sort((a,b)=>{
+    if(a[0]==null||b[0]==null)
+      return a[0]==null&&b[0]==null ? a[1]-b[1] : (a[0]==null?1:-1);
+    const c=a[0]<b[0]?-1:a[0]>b[0]?1:0;
+    return c ? c*dir : a[1]-b[1];
+  }).map(e=>e[2]);
+}
 function renderList(rows){
   const body=document.getElementById('lbody');
   // A re-render pulls the rows out from under the pointer - never leave
@@ -2903,7 +3006,7 @@ function renderList(rows){
     const msg=n.hint?esc(n.hint):(n.indexer?esc(n.indexer)+': ':'')+esc(n.skipped||n.error||'');
     html+=`<tr><td colspan="8" class="dim">${msg}</td></tr>`;
   }
-  html+=extRows.map(extRow).join('');
+  html+=extSorted().map(extRow).join('');
   html+=spotRows.map(spotRow).join('');
   body.innerHTML=html||emptyRowHtml();
   markSortHeads();
@@ -3020,8 +3123,13 @@ document.getElementById('selQueue').addEventListener('click',async e=>{
       }catch(err){ fail++; }
     }
   } finally { btn.disabled=false; }
+  // `fail>0 && ok===0` and not `fail>0`: a MIXED result is informational
+  // - the copy already names both counts - and only a wholly refused
+  // press is a refusal. Without the second argument an all-fail bulk
+  // queue read "0 releases queued · 12 failed" in the ordinary tier with
+  // no refuse sound, which is the shape of a click that worked.
   toast(tn('wall.sel.queued',ok,'{n} release queued','{n} releases queued')
-    +(fail?' · '+tn('wall.sel.fail',fail,'{n} failed','{n} failed'):''));
+    +(fail?' · '+tn('wall.sel.fail',fail,'{n} failed','{n} failed'):''), fail>0&&ok===0);
   lsel.clear();
   document.querySelectorAll('#lbody [data-sel]').forEach(c=>{ c.checked=false; });
   updateSelBar();
@@ -3505,8 +3613,10 @@ async function sessGrabAll(btn){
       }catch(err){ fail++; }
     }
   } finally { btn.disabled=false; }
+  // Same rule as `selQueue` above, and it has to be spelled out twice
+  // because these are two aggregators over one endpoint.
   toast(tn('wall.sel.queued',ok,'{n} release queued','{n} releases queued')
-    +(fail?' · '+tn('wall.sel.fail',fail,'{n} failed','{n} failed'):''));
+    +(fail?' · '+tn('wall.sel.fail',fail,'{n} failed','{n} failed'):''), fail>0&&ok===0);
 }
 
 // The card to come back to when a person page was opened from one.
@@ -4217,6 +4327,20 @@ document.getElementById('onlyComplete').addEventListener('change', ()=>{
   // part of the current view, so a filter change invalidates that cache.
   relCache.clear(); viewBadge(); lpage=0; browseFetch();
 });
+// Poster thumbnails. A REPAINT and never a refetch: `art` rides on the
+// rows already held, so flipping this asks the daemon nothing and does
+// not lose the page the user is on (which `lpage=0; browseFetch()`
+// would). Expanded title rows repaint out of relCache the same way.
+{
+  const ra=document.getElementById('rowArt');
+  ra.checked=rowArt;
+  ra.addEventListener('change', ()=>{
+    rowArt=ra.checked;
+    localStorage.nzbfastRowArt=rowArt?'on':'off';
+    if(grpOn() && lgroups) renderGroups();
+    else if(lrows) renderList(lrows);
+  });
+}
 // M35: search scope (this index / indexers / both) persists per browser.
 {
   const sc=document.getElementById('scope');

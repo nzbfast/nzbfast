@@ -199,6 +199,43 @@ pub(super) enum Layer {
     /// Detail is the HOST, exactly as `Provider`'s is, so the page can
     /// compose the sentence and the remedy can land on that server.
     Knee,
+    /// TODO 318: ONE server holds this post and the PROVIDER has it at
+    /// a stated connection cap - so the post is completable and the
+    /// thing in the way is that server's ceiling, not the post.
+    ///
+    /// It is a refinement of [`Layer::Missing`] and sits in front of
+    /// it, because that verdict reads the fleet-wide miss rate and the
+    /// fleet-wide rate is an AVERAGE over servers that do not all hold
+    /// the same spool. Measured on a live three-provider install,
+    /// 29 Aug 2026: giganews 98% missing, usenet.farm 47%, vipernews
+    /// 0.1% - 85.1% in aggregate, two backbones agreeing, so the
+    /// surface said `missing`/`gone`,
+    /// which means "waiting will not help, abandon it". The post was
+    /// 99.9% present on vipernews, which was pinned at its account's
+    /// own ceiling (`502 connection limit (40) reached`) and holding
+    /// 1-7 sessions. Every word of the published verdict was false
+    /// about the operative constraint, and the pool had already logged
+    /// the true one - "any article only this server carries is waiting
+    /// on it" - where nothing carried it here.
+    ///
+    /// It is deliberately NOT [`Layer::Provider`], which is the layer
+    /// this evidence lands in once the sole-source part is dropped, and
+    /// the difference is the reader's move. `Provider` says a host is
+    /// the limit, which invites switching away from it; here the
+    /// capped host is the ONLY one that has the content, so switching
+    /// away finishes nothing. The remedy is that server's connection
+    /// allowance - a second slot on the account, or fewer sockets spent
+    /// elsewhere on it - and the sentence has to say which server and
+    /// what it said.
+    ///
+    /// Nor is it [`Layer::Fleet`] or [`Layer::Knee`] next door: both of
+    /// those are OUR OWN number holding the fleet down and are fixed on
+    /// this page. This is the PROVIDER's number, heard from the
+    /// provider, and no setting here lifts it.
+    ///
+    /// Detail is the HOST, as `Provider`'s and `Knee`'s are, so the
+    /// page composes the sentence and the remedy lands on that server.
+    SoleCap,
     /// Neither: most of what the run is asking for is not on the
     /// servers. The wire time goes on requests that return nothing,
     /// and no layer of the stack is at fault. See `MISSING_BAR`.
@@ -223,6 +260,7 @@ impl Layer {
             Layer::Provider => "provider",
             Layer::Fleet => "fleet",
             Layer::Knee => "knee",
+            Layer::SoleCap => "solecap",
             Layer::Missing => "missing",
             Layer::Unknown => "unknown",
         }
@@ -243,6 +281,7 @@ impl Layer {
             Layer::Provider,
             Layer::Fleet,
             Layer::Knee,
+            Layer::SoleCap,
             Layer::Missing,
         ]
         .into_iter()
@@ -271,6 +310,38 @@ pub(super) struct ServerTick {
     /// behind pipeline-mates on purpose) and a fleet running deep
     /// pipelines has a big one while behaving perfectly.
     pub art_ms: u64,
+    /// TODO 318: unix ms of the FIRST capacity refusal this host gave
+    /// us this run, 0 while it has never capped us
+    /// ([`nzbkit::pool::ServerLive::capped_since`]).
+    ///
+    /// This is the STATED-cap gate and nothing else may stand in for
+    /// it. `connected < budget` is satisfied by every idle provider,
+    /// and inferring a cap from it is the mistake `granted_hi`'s own
+    /// doc records. It is also self-retiring - the pool clears it the
+    /// moment the fleet holds more sessions than the recorded ceiling
+    /// (`retire_cap_if_exceeded`) - so a live non-zero value means the
+    /// cap has been heard AND has not since been disproven, which is
+    /// the whole of what a verdict here needs to assert.
+    pub capped_since: u64,
+    /// The most sessions this provider was serving US at the instant it
+    /// refused another one ([`nzbkit::pool::ServerLive::granted_hi`]).
+    pub granted_hi: usize,
+    /// What we were ASKING for at that instant
+    /// ([`nzbkit::pool::ServerLive::capped_at`]).
+    ///
+    /// Both are high-waters of the same measurement, and the PAIR is
+    /// what says a cap is binding rather than merely heard: the pool's
+    /// response to a cap is to yield slots, so the live `budget` falls
+    /// toward the granted count and `connected < budget` stops being
+    /// true exactly when the cap is most binding. `capped_at >
+    /// granted_hi` does not decay that way.
+    pub capped_at: usize,
+    /// The server's own sentence about the cap, verbatim and possibly
+    /// empty - `ServerLive::refusal`'s line while that refusal stands,
+    /// else a `capacity` outage's detail. Carried for display only: no
+    /// verdict reads it, because it is provider prose and every claim
+    /// this surface makes has to stay translatable.
+    pub cap_said: String,
 }
 
 /// Everything one second of observation carries into the core.
@@ -407,6 +478,29 @@ impl KneeEvidence {
         self.takes = k.map_or(0, |k| k.takes);
         self.age_secs = k.map_or(0, |k| k.age_secs);
     }
+}
+
+/// TODO 318: the working behind a [`Layer::SoleCap`] verdict.
+///
+/// No two-clock split, unlike [`FleetEvidence`] and [`KneeEvidence`]:
+/// see [`Core::sole_capped`], which computes this fresh every time it
+/// is asked.
+#[derive(Clone)]
+struct SoleEvidence {
+    /// The server that HAS the post - the one the reader is being sent
+    /// to. Full, never trimmed for display: the panel's remedy button
+    /// hands it to `landOnServer`, which matches the server list by
+    /// exact host.
+    host: String,
+    /// That server's OWN miss rate, 0-100. The number that refutes the
+    /// fleet-wide one.
+    missing_pct: f64,
+    /// The most sessions it was serving us when it refused another.
+    granted_hi: usize,
+    /// What we were asking for at that moment.
+    capped_at: usize,
+    /// Its own words, verbatim, possibly empty.
+    said: String,
 }
 
 /// Whether OUR OWN fleet cap is what is holding this second, and the
@@ -602,6 +696,13 @@ struct ServerState {
     tried: u64,
     missing: u64,
     art_ms: u64,
+    // TODO 318: the provider's own connection ceiling, as
+    // `ServerTick`'s doc describes it. Levels, not counters, so they
+    // are stored rather than differenced.
+    capped_since: u64,
+    granted_hi: usize,
+    capped_at: usize,
+    cap_said: String,
 }
 
 /// A verdict change, for the per-job timeline.
@@ -717,6 +818,10 @@ impl Core {
             st.tried = s.tried;
             st.missing = s.missing;
             st.art_ms = s.art_ms;
+            st.capped_since = s.capped_since;
+            st.granted_hi = s.granted_hi;
+            st.capped_at = s.capped_at;
+            st.cap_said = s.cap_said.clone();
             fleet_bytes += st.d_bytes;
             fleet_blocked += st.d_blocked;
             fleet_connected += s.connected;
@@ -860,6 +965,20 @@ impl Core {
         // convict a host for a shortfall the post caused, and ahead of
         // `shaped_host`, whose comparison is between rates the misses
         // are themselves holding down.
+        //
+        // TODO 318: and before reading that fleet-wide rate, ask
+        // whether the misses are EVERYWHERE. The rate is an average
+        // over servers that do not all hold the same spool, so a post
+        // one provider has in full and two others have lost averages
+        // out to a post that reads as gone - which is the opposite of
+        // the truth and invites the reader to delete a completable job.
+        // `sole_capped` is the narrow case where that average is not
+        // only wrong but has a named, actionable cause; it asserts
+        // nothing unless a single server holds the post AND its
+        // provider has stated a cap on it.
+        if let Some(e) = self.sole_capped() {
+            return (Layer::SoleCap, e.host);
+        }
         if let Some(rate) = self.fleet_missing()
             && rate >= MISSING_BAR
         {
@@ -961,6 +1080,25 @@ impl Core {
         if age < YOUNG_MAX_SECS {
             return "young".into();
         }
+        // TODO 318: a qualified server whose own miss rate is under the
+        // bar HAS this post, and "waiting will not help" is then false
+        // however many other backbones have lost it - the fleet-wide
+        // rate that opened this case is an average, and the two
+        // backbones corroborating each other are corroborating a fact
+        // about THEMSELVES. This is the third refutation the asymmetric
+        // bar above asks for, and it is the one that was missing on
+        // the live install above: 98% and 47% agreed, and the third server
+        // had 99.9% of the post. Falling back to the plain statement of
+        // fact is not a hedge - "much of this post is missing" is
+        // exactly what is known once "gone" is off the table.
+        //
+        // The YOUNG arm above is deliberately left alone: one backbone
+        // holding a post the others have not received yet IS
+        // propagation, so a holder corroborates that claim rather than
+        // refuting it.
+        if self.best_missing().is_some_and(|(_, r)| r < MISSING_BAR) {
+            return String::new();
+        }
         match self.missing_backbones() >= GONE_MIN_BACKBONES {
             true => "gone".into(),
             // Old, but only one upstream has said so. That is a fact
@@ -999,6 +1137,97 @@ impl Core {
                 tried >= BACKBONE_MIN_TRIED && missing as f64 / tried as f64 >= MISSING_BAR
             })
             .count()
+    }
+
+    /// TODO 318: the server with the LOWEST miss rate of its own, and
+    /// that rate.
+    ///
+    /// [`Core::fleet_missing`] above is an AVERAGE over servers that do
+    /// not all hold the same spool, and averaging is the whole of what
+    /// went wrong on the live install [`Layer::SoleCap`] records: 98%,
+    /// 47% and 0.1% average to 85.1%, and 85.1% reads as a post nobody
+    /// has. This answers the different question the reader actually
+    /// needs - is this post COMPLETABLE anywhere - and it is the number
+    /// the "waiting will not help" claim next door has to survive.
+    ///
+    /// Qualified by [`BACKBONE_MIN_TRIED`], which is the bar this file
+    /// already uses for "this server has an opinion of its own": a fill
+    /// server that saw six requests and missed none of them is not
+    /// evidence that it holds the post, and without the bar it would be
+    /// the best server on every run. Ties break on the host name so the
+    /// answer is stable across ticks - a HashMap iteration order that
+    /// picked a different one of two identical servers each second
+    /// would flap the verdict's detail without changing the evidence.
+    fn best_missing(&self) -> Option<(&String, f64)> {
+        self.servers
+            .iter()
+            .filter(|(_, s)| s.tried >= BACKBONE_MIN_TRIED)
+            .map(|(h, s)| (h, s.missing as f64 / s.tried as f64))
+            .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(b.0)))
+    }
+
+    /// TODO 318: is ONE server holding this post while the PROVIDER
+    /// caps it, and the numbers if so. See [`Layer::SoleCap`] for the
+    /// incident and for why this is not the layer either side of it.
+    ///
+    /// Four conditions, none of them optional:
+    ///
+    /// * **somebody has it** - a qualified server's own miss rate is
+    ///   under [`MISSING_BAR`]. Under the same bar the fleet-wide rate
+    ///   is read against, deliberately: this file already says that
+    ///   above it the POST is the shortfall, so under it the post is
+    ///   not, and a fourth opinion about how many holes are too many
+    ///   would be a number nobody could defend against the other three.
+    /// * **it is the ONLY one** - every other qualified server is at or
+    ///   above that bar. Two holders and a cap on one of them binds
+    ///   nothing, because the other carries what the capped one cannot;
+    ///   the claim being made here rests entirely on there being no
+    ///   second source.
+    /// * **there IS another server to be short of it** - at least one
+    ///   other qualified server. On a single-provider install "only
+    ///   this server has it" is true of every post ever downloaded and
+    ///   says nothing, and the honest verdict there is the plain
+    ///   provider one.
+    /// * **the provider stated a cap and it is binding** -
+    ///   `capped_since` is live (a real capacity refusal, not yet
+    ///   disproven by the pool's own retirement) AND it granted fewer
+    ///   than were asked for. See [`ServerTick::capped_since`] and
+    ///   [`ServerTick::capped_at`] for why neither half stands alone,
+    ///   and in particular why `connected < budget` is NOT the test:
+    ///   the pool yields slots to match a cap, so that comparison goes
+    ///   false exactly when the cap is most binding.
+    ///
+    /// Computed fresh rather than banked the way [`FleetEvidence`] and
+    /// [`KneeEvidence`] are, because every input is either cumulative
+    /// (the article census) or sticky (the cap gauges) - there is no
+    /// per-tick measurement here to go blank on a quiet second, so the
+    /// two-clock split those two need would buy nothing.
+    fn sole_capped(&self) -> Option<SoleEvidence> {
+        let (host, rate) = self.best_missing()?;
+        if rate >= MISSING_BAR {
+            return None;
+        }
+        let mut others = 0usize;
+        for (h, s) in &self.servers {
+            if h == host || s.tried < BACKBONE_MIN_TRIED {
+                continue;
+            }
+            if (s.missing as f64 / s.tried as f64) < MISSING_BAR {
+                return None;
+            }
+            others += 1;
+        }
+        if others == 0 {
+            return None;
+        }
+        let s = self.servers.get(host)?;
+        (s.capped_since > 0 && s.capped_at > s.granted_hi).then(|| SoleEvidence {
+            host: host.clone(),
+            missing_pct: rate * 100.0,
+            granted_hi: s.granted_hi,
+            capped_at: s.capped_at,
+            said: s.cap_said.clone(),
+        })
     }
 
     /// A host refusing outright, or persistently capped under its
@@ -1276,6 +1505,40 @@ pub(super) fn feed(
                     tried: s.articles_tried.load(Ordering::Relaxed),
                     missing: s.articles_missing.load(Ordering::Relaxed),
                     art_ms: s.srv_art_ms.load(Ordering::Relaxed),
+                    // TODO 318: the provider's own connection ceiling.
+                    // The LIVE gauges only, never `Daemon::capped_hosts`
+                    // alongside them the way the Providers card's
+                    // `cap_payload` merges the two: that store is
+                    // session memory that outlives the pool which
+                    // measured it, and this module's rule is that a
+                    // verdict is asserted only from evidence a window of
+                    // THIS run agrees on. A card describing a provider
+                    // can afford last hour's ceiling; a sentence about
+                    // why this download is slow cannot.
+                    capped_since: s.capped_since.load(Ordering::Relaxed),
+                    granted_hi: s.granted_hi.load(Ordering::Relaxed),
+                    capped_at: s.capped_at.load(Ordering::Relaxed),
+                    // Its own words: the standing refusal's line while
+                    // one stands (a capacity refusal is noted whether or
+                    // not the account is also serving), else a capacity
+                    // outage's detail. `down_reason` alone would be
+                    // silent for exactly the host this verdict is about
+                    // - the outage gauge is guarded on holding NO
+                    // sessions, and a server granting 1 of 40 is capped
+                    // and not down.
+                    cap_said: s
+                        .refusal
+                        .lock()
+                        .ok()
+                        .and_then(|r| r.as_ref().filter(|r| !r.permanent).map(|r| r.line.clone()))
+                        .or_else(|| {
+                            s.down_reason.lock().ok().and_then(|d| {
+                                d.as_ref()
+                                    .filter(|d| d.kind == "capacity")
+                                    .map(|d| d.detail.clone())
+                            })
+                        })
+                        .unwrap_or_default(),
                 })
                 .collect()
         })
@@ -1470,6 +1733,11 @@ impl WhySlow {
                 })
                 .collect()
         };
+        // TODO 318, both computed before the literal because `json!`
+        // is a macro and a `let` inside one reads badly; `best` borrows
+        // `c`, so it must outlive the literal too.
+        let best = c.best_missing();
+        let sole = c.sole_capped();
         let timeline: Vec<Value> = c
             .timeline
             .iter()
@@ -1515,6 +1783,51 @@ impl WhySlow {
             "post_unix": c.last_post_unix,
             "missing_pct": (c.fleet_missing().unwrap_or(0.0) * 1000.0).round() / 10.0,
             "missing_backbones": c.missing_backbones(),
+            // TODO 318: and the BEST single server's own miss rate,
+            // which is the number that says whether the post is
+            // completable at all. Shipped beside the fleet-wide one
+            // rather than instead of it, because they answer different
+            // questions and the reader needs both: 85.1% of the
+            // requests came back empty AND one provider has 99.9% of
+            // it. `missing_best_host` is empty when no server has been
+            // asked enough to have an opinion (`BACKBONE_MIN_TRIED`),
+            // which is what the page gates on - a percentage with no
+            // host is 0.0 and would read as "some server has all of
+            // it".
+            "missing_best_host": best.map(|(h, _)| h.as_str()).unwrap_or(""),
+            "missing_best_pct": best.map_or(0.0, |(_, r)| (r * 1000.0).round() / 10.0),
+            // ...and the DECISION that pair licenses, made here rather
+            // than on the page: that server's own miss rate is under
+            // the bar, so this post is completable there. The bar is
+            // `MISSING_BAR` and it lives in one place - the page cannot
+            // be handed a percentage and asked to decide what counts as
+            // "most of it", which is how a fourth opinion about how
+            // many holes are too many gets born. It is the same
+            // decision `missing_case` makes when it declines to say
+            // `gone`, shipped so the panel can say WHY it declined.
+            "missing_completable": best.is_some_and(|(_, r)| r < MISSING_BAR),
+            // TODO 318: the receipts behind a `solecap` verdict - which
+            // server has the post, how little of it that server is
+            // missing, what its provider granted against what was
+            // asked, and the provider's own words. Always shipped, like
+            // the three blocks above, so the panel can show the working
+            // whichever arm is talking.
+            //
+            // `sole_host` EMPTIES the moment the conditions stop
+            // holding, while the verdict - majority-held over the
+            // window - can still read `solecap` for a few more seconds.
+            // That is deliberate and is `knee_host`'s contract exactly:
+            // the page gates its remedy button on this field rather
+            // than on the layer, because offering to open a server's
+            // settings over a cap that has just been lifted is worse
+            // than offering nothing, while the SENTENCE still names the
+            // host either way because it reads `detail`, which travels
+            // with the held verdict.
+            "sole_host": sole.as_ref().map(|e| e.host.as_str()).unwrap_or(""),
+            "sole_missing_pct": sole.as_ref().map_or(0.0, |e| (e.missing_pct * 10.0).round() / 10.0),
+            "sole_granted": sole.as_ref().map_or(0, |e| e.granted_hi),
+            "sole_asked": sole.as_ref().map_or(0, |e| e.capped_at),
+            "sole_said": sole.as_ref().map(|e| e.said.as_str()).unwrap_or(""),
             // TODO 312 item 3: the receipts behind a `fleet` verdict -
             // the cap in force, what the accounts would have allowed,
             // the per-socket carry that was measured and the fleet that

@@ -59,8 +59,11 @@ fn run(fx: &Fixture, srv: &MockServer, password: Option<&str>) -> (String, bool)
         cmd.arg("--password").arg(pw);
     }
     let res = cmd.output().expect("run nzbfast");
+    // stdout/stderr are separate pipes with no shared clock - label the
+    // seam so a bare join can't be misread as one chronology. Copy the
+    // comment along with the string.
     let log = format!(
-        "{}{}",
+        "{}\n----- stderr (a SEPARATE stream: not in sequence with stdout above) -----\n{}",
         String::from_utf8_lossy(&res.stdout),
         String::from_utf8_lossy(&res.stderr)
     );

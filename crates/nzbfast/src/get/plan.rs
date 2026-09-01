@@ -54,7 +54,21 @@ pub(super) fn build_fetch_plan(
     // journal-completed article, because the situation is the same one:
     // the bytes are on disk and the settle pass verifies them.
     donated: &[bool],
+    // M4-70 across a crash (`nzbkit::journal::ResumeState::name_votes`):
+    // what an EARLIER run's articles declared each slot's file was
+    // called, for the slots whose articles disagreed. Empty on a fresh
+    // add and on every ordinary resume. By SLOT index, the same
+    // numbering the journal's `S`/`R` records already use and the same
+    // stability they already rest on.
+    resume_votes: &HashMap<usize, Vec<(String, u32)>>,
 ) -> FetchPlan {
+    // N6-07 F3: posted names for the WHOLE list at once, because a bare
+    // numeric split tail past part 99 (`sunset.100`) is spelled exactly
+    // like a bitrate and only the SET can tell them apart. Naming SOME
+    // of a split set is worse than naming none of it - the disk joiner
+    // then joins the contiguous prefix and deletes it - so this is
+    // computed once here and every slot below is named from it.
+    let posted_names = nzbkit::nzb::set_resolved_hints(&nzb.files);
     // Which DATA files this run will decline to fetch. Computed over the
     // whole file list up front because the answer is comparative: a
     // sample is only a sample beside something bigger, so no single file
@@ -65,12 +79,10 @@ pub(super) fn build_fetch_plan(
         let data: Vec<(String, u64)> = nzb
             .files
             .iter()
-            .map(|f| {
+            .enumerate()
+            .map(|(fi, f)| {
                 if f.kind() == FileKind::Data {
-                    (
-                        f.filename_hint_lenient().unwrap_or_default().to_string(),
-                        f.bytes(),
-                    )
+                    (posted_names[fi].unwrap_or_default().to_string(), f.bytes())
                 } else {
                     (String::new(), 0)
                 }
@@ -158,7 +170,7 @@ pub(super) fn build_fetch_plan(
         // still usually writes the real filename in the subject, and
         // `file{idx:03}` is what discarding it costs - every downstream
         // namer (PAR2 FileDesc aside) then has nothing to work from.
-        let posted_name = f.filename_hint_lenient();
+        let posted_name = posted_names[fi];
         slots.push(Arc::new(FileSlot {
             hint: posted_name
                 .map(str::to_string)
@@ -168,9 +180,17 @@ pub(super) fn build_fetch_plan(
             // placeholder above is indistinguishable from a real name
             // once it is in the string.
             hint_is_posted_name: posted_name.is_some_and(nzbkit::release::stem_is_a_name),
+            // Seeded from run 1 where there is one: rebuilt EMPTY, a
+            // resumed contested slot reads as "every article agreed" and
+            // the settle-time re-decision never runs, so the decoy name
+            // run 1 latched stands. See `NameVotes::resumed`.
+            yenc_votes: crate::unpack::slot_name::NameVotes::resumed(
+                resume_votes.get(&idx).map_or(&[][..], Vec::as_slice),
+            ),
             name_choice: std::sync::atomic::AtomicU8::new(crate::unpack::NAME_UNDECIDED),
             is_par2_main,
             sample_skipped,
+            par2_name_demoted: Default::default(),
             par2_sniffed: std::sync::atomic::AtomicBool::new(resume_sniffed),
             // A parser-dropped segment (empty or wire-unsafe message-id)
             // is one this slot can never fetch: it counts toward the
@@ -404,7 +424,25 @@ pub(super) fn build_fetch_plan(
         if let Some(&last) = data_slots.last() {
             let (arts, total) = &slot_arts[last];
             for (off, id) in arts.iter().rev() {
-                if off + 8_000_000 <= *total {
+                // N6-11: the SUBTRACTION, not `off + 8_000_000`. These
+                // offsets are `enc_cum`, a saturating running sum of
+                // poster-declared `<segment bytes>`, so an NZB that
+                // declares `bytes="18446744073709551615"` puts
+                // `u64::MAX` in this tuple entirely legally - and the
+                // plain addition panicked in debug and wrapped in
+                // release, where a wrapped sum near zero compares below
+                // `total` and breaks the tail burst on its first
+                // article.
+                //
+                // `saturating_add` would fix the panic and keep the
+                // wrong ANSWER: at `off = total - 4_000_000` it
+                // saturates to `total` and breaks on an article that is
+                // squarely inside the 8 MB tail. `total - off` is exact
+                // instead, and cannot underflow: every entry in `arts`
+                // is the offset BEFORE its own segment's bytes are
+                // added, so `total` is an upper bound on all of them by
+                // construction.
+                if total.saturating_sub(*off) >= 8_000_000 {
                     break;
                 }
                 burst.insert(&**id);
@@ -802,6 +840,25 @@ pub(super) fn build_intake(
             restored.dropped_crypto
         );
     }
+    // X5-02's own line, and a THIRD cause rather than a wordier version
+    // of the first: these bytes are exactly where the record says, at
+    // exactly the recorded length, and they are not what arrived. The
+    // ordinary reason is a crash between a slot's preallocation and its
+    // write - the file is full-length and holed - and the other is a
+    // journal written before this check existed, which carries no
+    // commitment to check against. Neither is a question about the
+    // user's filesystem, which is what the first line sends them
+    // looking at.
+    if restored.dropped_unauthenticated.0 > 0 {
+        warn!(
+            target: "resume",
+            "{} article(s) ({:.1} MB) recorded on disk could not be proven to hold the bytes \
+             that arrived - a partial write, or a journal from a build that recorded no \
+             checksum - so they are fetched from the wire again",
+            restored.dropped_unauthenticated.0,
+            restored.dropped_unauthenticated.1 as f64 / 1e6
+        );
+    }
     // Computed while `completed` is still whole - `get()` drops it as soon
     // as the fetch plan is built.
     let resuming = !completed.is_empty();
@@ -966,6 +1023,17 @@ fn resume_map_admitted(
     // deliberately keeps reading the RAW cap, so every job this gate
     // admitted before TODO 309(a) is still admitted on the same terms;
     // only the new volume arm spends the remainder.
+    //
+    // IT IS A SNAPSHOT, and the run it admits is judged against a LIVE
+    // `HoldsBudget::cap()` instead - the same seats, read at a later
+    // instant. Measured 31 Aug 2026
+    // (`research/RESUME-SEATABLE-DRIFT-2026-08-31.md`): over seven
+    // two-job daemon runs the two differed by +0.0 to +1.2 MB, because
+    // the hand-over fires only once the predecessor has stopped asking
+    // for articles. `HoldsLedger::live_bytes`'s own doc carries the
+    // whole finding, including the one class of exception that note
+    // could not stage - bytes fed into the predecessor's extractor at
+    // its TAIL, which overlaps this job's download by design.
     let seatable = nzbkit::extract::process_ledger()
         .map_or(cap, |l| cap.saturating_sub(l.live_bytes() as u64));
     let route = crate::streamhub::ResumeRoute {
@@ -1021,6 +1089,26 @@ fn resume_map_admitted(
 /// lost (0.98) and one step above the lowest that won (1.17), and the
 /// rows at 1.17 and 1.56 are why it is not 4: they win, so 2 is already
 /// conservative rather than merely safe.
+///
+/// **THE MARGIN IS NOT HEADROOM UNDER THE CAP, and that sentence above
+/// reads like an invitation to lower it, so read this one first.** A job
+/// admitted at this margin spends the WHOLE holds budget: measured
+/// 31 Aug 2026 (`research/RESUME-KNEE-HOLDS-CAP-2026-08-31.md`) off the
+/// `holds peak` column of the very legs the table above prices, the peak
+/// lands EXACTLY on the cap - 512 of 512 MB at margin 2.00, 1000 of
+/// 1000 MB twice at 3.91 - whenever the cap sits below what the run
+/// would naturally hold, which at 256 MB volumes is the 1266 MB the
+/// unbudgeted arm reached. Independently on the e2e harness at 8.0 MB
+/// volumes: 4 legs of 8 at exactly the 17 MB cap, all 8 one-pass, none
+/// demoted. So the run has no slack for a smaller margin to eat into.
+/// What the margin buys instead is room for the drop-behind trim
+/// (`Chase::queue_trim_spill` in `crates/nzbkit/src/extract/chase.rs`) to
+/// work in: it frees the CONSUMED PREFIX of the volume being read, so
+/// under one volume there is nothing to free and the breach forfeits.
+/// That last clause is a reading of the code beside the numbers and not
+/// a measured mechanism - it does not explain why 0.50 and 0.25 win 3 of
+/// 3 while 0.98 loses 2 of 3 - and the margin does not depend on it
+/// being right, only on staying clear of the whole region.
 const RESUME_MAP_VOLUME_MARGIN: u64 = 2;
 
 /// TODO 94 A's admission rule, as a pure function so the decision is
@@ -1149,6 +1237,26 @@ mod tests {
         resume_vols: &HashMap<usize, PathBuf>,
         skip_samples: bool,
     ) -> FetchPlan {
+        plan_resumed(
+            n,
+            completed,
+            bootstrap_vol,
+            resume_vols,
+            skip_samples,
+            &HashMap::new(),
+        )
+    }
+
+    /// `plan_with` plus M4-70's cross-run name tally, the one input a
+    /// resumed slot cannot rebuild for itself.
+    fn plan_resumed(
+        n: &Arc<Nzb>,
+        completed: &HashSet<String>,
+        bootstrap_vol: Option<usize>,
+        resume_vols: &HashMap<usize, PathBuf>,
+        skip_samples: bool,
+        resume_votes: &HashMap<usize, Vec<(String, u32)>>,
+    ) -> FetchPlan {
         build_fetch_plan(
             n,
             &None,
@@ -1158,7 +1266,189 @@ mod tests {
             resume_vols,
             skip_samples,
             &[],
+            resume_votes,
         )
+    }
+
+    /// M4-70 across a crash: a resumed slot has to be built with the
+    /// tally an earlier run recorded for it, not with an empty one.
+    ///
+    /// This is where the defect lived. Every slot took
+    /// `yenc_votes: Default::default()`, and a resume never refetches
+    /// what run 1 placed - so a file whose articles had disagreed came
+    /// back with no disagreement on record, `contested_yenc_name`
+    /// answered "every article agreed", and the settle-time re-decision
+    /// never ran. The decoy name run 1's first article latched stayed on
+    /// disk, and smart filing and every *arr saw it.
+    ///
+    /// The seed is keyed by SLOT, the same numbering the journal's
+    /// `S`/`R` records use and the same stability they already rest on -
+    /// so this asserts the mapping too, by seeding only slot 1.
+    #[test]
+    fn a_resumed_plan_carries_the_name_votes_run_one_recorded() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='[1/2] - "Movie.one.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">one@t</segment></segments>
+ </file>
+ <file subject='[2/2] - "Movie.two.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">two@t</segment></segments>
+ </file>
+</nzb>"#);
+        let votes: HashMap<usize, Vec<(String, u32)>> = [(
+            1,
+            vec![("x.dat".to_string(), 1), ("Movie.two.mkv".to_string(), 3)],
+        )]
+        .into_iter()
+        .collect();
+        let p = plan_resumed(&n, &HashSet::new(), None, &HashMap::new(), false, &votes);
+        let c = p.slots[1]
+            .contested_yenc_name()
+            .expect("slot 1 was handed a disagreement");
+        assert_eq!(c.winner, "Movie.two.mkv");
+        assert_eq!((c.winner_votes, c.total_votes), (3, 4));
+        assert!(
+            p.slots[0].contested_yenc_name().is_none(),
+            "slot 0 was seeded with nothing and must read as agreeing"
+        );
+    }
+
+    /// N6-04/N6-05: the fetch plan is where a misclassification stops
+    /// being a label and becomes a MISSING FILE.
+    ///
+    /// `build_fetch_plan` skips a non-bootstrap `Par2Volume` outright
+    /// (the `continue` above), so a payload classified as a recovery
+    /// volume gets no slot, no articles, and no entry in any later
+    /// count - the job completes green having never asked for it. A
+    /// payload classified as `Par2Main` fares only slightly better: it
+    /// gets a recovery capture and is excluded from normal payload
+    /// verification.
+    ///
+    /// Both directions used to be one decoy quote away. The oracle here
+    /// is SLOT MEMBERSHIP and the scheduled article ids, not `FileKind`
+    /// - a classification test can pass while the plan still loses the
+    /// file.
+    #[test]
+    fn a_decoy_quote_cannot_cost_the_payload_its_slot() {
+        // Row 1: a PAR2-looking label in front of the real payload.
+        // Row 2: the same pair in the other order.
+        // Row 3: the `Par2Main` direction, which excludes rather than
+        //        skips - it must still be a data slot.
+        // Row 4: a quoted name that merely CONTAINS `.par2` (N6-05).
+        // Row 5: the same with a volume suffix, which is the direction
+        //        that loses the file entirely.
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='[1/5] - "label.vol000+50.par2" - "Movie.one.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">one@t</segment></segments>
+ </file>
+ <file subject='[2/5] - "Movie.two.mkv" - "label.vol000+50.par2" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">two@t</segment></segments>
+ </file>
+ <file subject='[3/5] - "label.par2" - "Movie.three.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">three@t</segment></segments>
+ </file>
+ <file subject='[4/5] - "ordinary.par2 notes.txt" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">four@t</segment></segments>
+ </file>
+ <file subject='[5/5] - "extras.vol-10.par2 sample.mkv" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">five@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan(&n, &HashSet::new(), None, &HashMap::new());
+        assert_eq!(p.slots.len(), 5, "every declared file owns a slot");
+        assert_eq!(p.slot_file, vec![0, 1, 2, 3, 4]);
+        assert!(
+            p.slots.iter().all(|s| !s.is_par2_main),
+            "no ambiguous subject may claim the recovery index"
+        );
+        // Ids reach the plan bracketed, the way they go on the wire.
+        let scheduled: std::collections::HashSet<&str> =
+            p.ids.iter().map(|a| a.id.as_ref()).collect();
+        for id in ["<one@t>", "<two@t>", "<three@t>", "<four@t>", "<five@t>"] {
+            assert!(scheduled.contains(id), "{id} was never scheduled");
+        }
+        assert_eq!(p.ids.len(), 5, "and nothing else was");
+        assert_eq!(
+            p.slots.iter().map(|s| s.total_segments).sum::<usize>(),
+            5,
+            "totals count what the manifest declared"
+        );
+    }
+
+    /// N6-04's control arm: a real recovery set must STILL be deferred.
+    ///
+    /// The fix answers `Data` when quoted candidates disagree, and the
+    /// cheap way to make that arm pass is to answer `Data` more often
+    /// than it should - which would fetch every recovery volume of every
+    /// post eagerly (7.5 GB on one 42 GiB post, the regression
+    /// `par2_vol_suffix` carries its own note about). An undotted decoy
+    /// is a LABEL, not a candidate, so a decoy-first volume post keeps
+    /// its slot-free deferral.
+    #[test]
+    fn a_real_recovery_set_is_still_deferred() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='[1/3] - "S01E01" - "Show.part01.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">data@t</segment></segments>
+ </file>
+ <file subject='[2/3] - "S01E01" - "Show.par2" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">main@t</segment></segments>
+ </file>
+ <file subject='[3/3] - "S01E01" - "Show.vol000+50.par2" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">vol@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan(&n, &HashSet::new(), None, &HashMap::new());
+        assert_eq!(p.slots.len(), 2, "the recovery volume takes no slot");
+        assert_eq!(p.slot_file, vec![0, 1]);
+        assert!(p.slots[1].is_par2_main);
+        let scheduled: std::collections::HashSet<&str> =
+            p.ids.iter().map(|a| a.id.as_ref()).collect();
+        assert!(scheduled.contains("<data@t>"));
+        assert!(scheduled.contains("<main@t>"));
+        assert!(
+            !scheduled.contains("<vol@t>"),
+            "a volume is fetched only to repair"
+        );
+    }
+
+    /// N6-01: a self-closing `<file/>` reaches the plan as a slot that
+    /// OWES a segment, so the job can never finish green without it.
+    ///
+    /// This is the seam the whole row is about: the parser change is
+    /// only worth something if `total_segments` counts the declaration
+    /// and no article is invented to satisfy it.
+    #[test]
+    fn a_self_closing_file_owes_a_segment_it_can_never_fetch() {
+        let n = nzb(r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"missing.rar"'/>
+ <file subject='"good.rar" yEnc (1/1)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments><segment bytes="100" number="1">good@t</segment></segments>
+ </file>
+</nzb>"#);
+        let p = plan(&n, &HashSet::new(), None, &HashMap::new());
+        assert_eq!(p.slots.len(), 2, "the declared file must own a slot");
+        assert_eq!(p.slots[0].hint, "missing.rar");
+        assert_eq!(p.slots[0].total_segments, 1);
+        assert_eq!(
+            p.ids.len(),
+            1,
+            "and exactly one article is fetchable - the healthy file's"
+        );
+        assert_eq!(p.ids[0].id.as_ref(), "<good@t>");
     }
 
     /// GH #63: the plan decides, once, whether the SUBJECT gave this
@@ -1242,6 +1532,7 @@ mod tests {
             &HashMap::new(),
             false,
             &[],
+            &HashMap::new(),
         );
         assert_eq!(
             hub.post_unix.load(Ordering::Relaxed),
@@ -1279,6 +1570,7 @@ mod tests {
             &HashMap::new(),
             false,
             &[],
+            &HashMap::new(),
         );
         assert_eq!(hub.post_unix.load(Ordering::Relaxed), 0);
     }
@@ -1297,6 +1589,7 @@ mod tests {
             &HashMap::new(),
             false,
             donated,
+            &HashMap::new(),
         )
     }
 
@@ -1491,6 +1784,112 @@ mod tests {
         }
         xml.push_str("</nzb>\n");
         xml
+    }
+
+    /// N6-11, the parser/front-door addendum's arithmetic row.
+    ///
+    /// The seek-ladder offsets in `slot_arts` are a SATURATING running
+    /// sum of poster-declared `<segment bytes>`, so an NZB declaring
+    /// `bytes="18446744073709551615"` legally puts `u64::MAX` in them -
+    /// and the tail-burst comparison was a plain `off + 8_000_000`.
+    ///
+    /// The fixture is built to separate THREE spellings, because two of
+    /// them are wrong in different ways and only one assertion tells
+    /// them apart. The last data slot's ladder is
+    /// `[0, MAX-4_000_000, MAX]` with a total of `MAX`, so:
+    ///
+    ///  * `off + 8_000_000` overflows on the first article the reverse
+    ///    walk touches - a panic here (debug) and, optimized, a wrapped
+    ///    sum near zero that compares below `total` and breaks the
+    ///    burst on its first step, gathering nothing;
+    ///  * `off.saturating_add(8_000_000)` fixes the panic and keeps the
+    ///    wrong ANSWER - it saturates to `total` at both of the two
+    ///    articles that are genuinely inside the 8 MB tail, so the
+    ///    burst is empty in both profiles and nothing ever says so;
+    ///  * `total - off` is exact, cannot underflow (every `arts` entry
+    ///    is the offset BEFORE its own segment's bytes are added, so
+    ///    `total` bounds them all by construction), and gathers exactly
+    ///    the two.
+    ///
+    /// The assertion is on the resulting REQUEST ORDER, which is what
+    /// the burst exists to change, so it is meaningful in both profiles.
+    /// Optimized half: `cargo test -p nzbfast --release --bin nzbfast
+    /// extreme_declared_bytes`.
+    #[test]
+    fn extreme_declared_bytes_do_not_overflow_the_seek_ladder() {
+        // `big.part002.rar` sorts last, so it is the tail-burst slot.
+        let xml = r#"<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+ <file subject='"big.part001.rar" yEnc (1/2)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="18446744073709551615" number="1">a1@t</segment>
+   <segment bytes="18446744073709551615" number="2">a2@t</segment>
+  </segments>
+ </file>
+ <file subject='"big.part002.rar" yEnc (1/3)' date="1700000000">
+  <groups><group>alt.binaries.test</group></groups>
+  <segments>
+   <segment bytes="18446744073705551615" number="1">b1@t</segment>
+   <segment bytes="4000000" number="2">b2@t</segment>
+   <segment bytes="18446744073709551615" number="3">b3@t</segment>
+  </segments>
+ </file>
+</nzb>"#;
+        let n = nzb(xml);
+        assert_eq!(n.total_bytes(), u64::MAX, "the declared total saturates");
+        // Hub-attached, because the M11 head+tail burst - the site the
+        // overflow is in - only runs on a hub-attached (daemon) plan.
+        let hub = Some(Arc::new(crate::streamhub::StreamHub::default()));
+        let p = build_fetch_plan(
+            &n,
+            &hub,
+            &HashSet::new(),
+            false,
+            None,
+            &HashMap::new(),
+            false,
+            &[],
+            &HashMap::new(),
+        );
+
+        // The ladder is the shape the reasoning above depends on.
+        let last = p
+            .slot_arts
+            .iter()
+            .position(|(a, _)| a.iter().any(|(_, id)| &**id == "<b1@t>"))
+            .expect("part002 has a ladder");
+        let (arts, total) = &p.slot_arts[last];
+        assert_eq!(*total, u64::MAX);
+        assert_eq!(
+            arts.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+            vec![0, u64::MAX - 4_000_000, u64::MAX]
+        );
+        // Every offset stays inside its own slot's total - the
+        // invariant the fixed comparison rests on, and one a wrap
+        // breaks.
+        for (arts, total) in &p.slot_arts {
+            for (off, id) in arts {
+                assert!(off <= total, "offset {off} past total {total} for {id}");
+            }
+        }
+
+        // The whole request order, because the burst is a REORDERING
+        // and only the order shows it. `a1`/`b1` are each file's first
+        // article and ride the head queue ahead of all data; then the
+        // last data file's two tail articles, hoisted; then the rest.
+        //
+        // Both wrong spellings collapse the burst to empty and give
+        // `[a1, b1, a2, b2, b3]` instead - the plain add by wrapping
+        // (or panicking before it gets here), `saturating_add` by
+        // saturating to `total` at both tail articles.
+        let order: Vec<&str> = p.ids.iter().map(|r| &*r.id).collect();
+        assert_eq!(
+            order,
+            vec!["<a1@t>", "<b1@t>", "<b2@t>", "<b3@t>", "<a2@t>"],
+            "the 8 MB tail of the last data file must be bursted ahead of \
+             the earlier file's body, and nothing else with it"
+        );
     }
 
     #[test]
@@ -1991,15 +2390,23 @@ mod tests {
         assert_eq!(levels(&servers), vec![("a.example", 0), ("b.example", 1)]);
     }
 
-    /// CRC steering (fleet.rs) keys on a same-LEVEL peer, so demotion can
-    /// switch it off. The measured 4-of-6 and 5-of-6 splits both leave a
-    /// pair somewhere, but a two-primary config demoted 1 of 2 leaves each
-    /// server alone on its level - and turning the steer off there is
-    /// correct, because the lone peer's pickup gate would not let it take
-    /// the article anyway.
+    /// Demotion can leave a server ALONE on its level, and that is what
+    /// the CRC steer's peer question turns on: a deeper server's pickup
+    /// gate demands the shallower one's 430 bit, so a primary + fill
+    /// pair can never steer to each other.
+    ///
+    /// This used to assert `fleet::has_steer_peer`, a config-time
+    /// predicate that gated `crc_steer` on the same rule. That predicate
+    /// is gone (31 Aug 2026): the seam re-asks the DELIVERER when it has
+    /// no peer, so a peerless fleet wants the seam ON, and the peer
+    /// question is now asked live and per article by
+    /// `Shared::other_can_take_with`, which reads aliveness and the
+    /// article's own refusal evidence as well as the level. What is left
+    /// to pin here is the input that question reads: which levels this
+    /// demotion actually produces.
     #[test]
     fn demotion_can_leave_a_server_alone_on_its_level() {
-        // 4 of 6 gone: still a pair on each level, steer stays on.
+        // 4 of 6 gone: a pair survives on each level.
         let mut six = vec![
             srv("a.example", 0),
             srv("b.example", 0),
@@ -2010,10 +2417,14 @@ mod tests {
         ];
         let gone: Vec<String> = six[..4].iter().map(|s| s.host.clone()).collect();
         demote_predicted_gone(&mut six, &gone, "hdtv", 20);
-        assert!(crate::get::fleet::has_steer_peer(&six));
+        assert_eq!(
+            six.iter().filter(|s| s.level == 0).count(),
+            2,
+            "the two survivors keep level 0 together"
+        );
 
         // 5 of 6 gone: the survivor is alone on level 0, but the five
-        // demoted share level 1, so an elsewhere still exists.
+        // demoted share level 1, so a same-level peer still exists.
         let mut five = vec![
             srv("a.example", 0),
             srv("b.example", 0),
@@ -2024,14 +2435,14 @@ mod tests {
         ];
         let gone: Vec<String> = five[..5].iter().map(|s| s.host.clone()).collect();
         demote_predicted_gone(&mut five, &gone, "hdtv", 20);
-        assert!(crate::get::fleet::has_steer_peer(&five));
+        assert_eq!(five.iter().filter(|s| s.level == 0).count(), 1);
+        assert_eq!(five.iter().filter(|s| s.level == 1).count(), 5);
 
-        // Two primaries, one demoted: nobody has a same-level peer.
+        // Two primaries, one demoted: nobody has a same-level peer left,
+        // and the survivor is the one that must now re-ask itself.
         let mut pair = vec![srv("a.example", 0), srv("b.example", 0)];
-        assert!(crate::get::fleet::has_steer_peer(&pair));
         demote_predicted_gone(&mut pair, &["a.example".to_string()], "hdtv", 20);
         assert_eq!(levels(&pair), vec![("a.example", 1), ("b.example", 0)]);
-        assert!(!crate::get::fleet::has_steer_peer(&pair));
     }
 
     /// TODO 94 A's original rule, unchanged: the whole restored set under
@@ -2117,12 +2528,10 @@ mod tests {
         assert!(!resume_map_admits(2_000, u64::MAX, 1_000, 1_000));
     }
 
-    fn route_scratch(name: &str) -> PathBuf {
+    fn route_scratch(name: &str) -> crate::testscratch::ScratchDir {
         let dir =
             std::env::temp_dir().join(format!("nzbfast-resroute-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        crate::testscratch::ScratchDir::attach(&dir)
     }
 
     /// The resume state a rerun would read: `n` placed articles of `len`
@@ -2149,6 +2558,12 @@ mod tests {
                         i as u64 * len,
                         len,
                     )],
+                    // No payload on disk behind these records, so there is
+                    // no honest X5-02 commitment to record. Nothing here
+                    // runs a restore - these helpers weigh `placement_bytes`
+                    // - so `None` costs the assertions nothing and is the
+                    // truthful value.
+                    None,
                 );
             }
             j.flush();

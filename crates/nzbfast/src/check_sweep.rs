@@ -126,7 +126,7 @@ pub(super) fn sweep_plan(
                                 if cross_set_par2 {
                                     return by_bytes;
                                 }
-                                match vol_count_from_name(f.filename_hint().unwrap_or(&f.subject)) {
+                                match vol_count_from_name(f.classify().name()) {
                                     Some(n) => by_bytes.min(n as u64),
                                     None => by_bytes,
                                 }

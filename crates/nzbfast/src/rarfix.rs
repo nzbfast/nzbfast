@@ -1149,10 +1149,44 @@ pub(crate) fn rr_repair_volume(path: &std::path::Path, password: Option<&str>) -
     // `create_new` means we hold a name nobody else has, and refuses to
     // follow an existing symlink; the cleanup below can then only ever
     // delete a file this invocation made.
+    //
+    // And the STEM is held back rather than the composed name capped.
+    // `path` is a volume this job downloaded, so its leaf is a
+    // `sanitize_out_name` result and is routinely AT the 255-byte
+    // component cap - capping is what produced it. `with_extension`
+    // REPLACES, so it only grows when the new extension is longer than
+    // the old, which `.rar` -> `.rrtmp0` always is: 255 becomes 258 and
+    // no filesystem creates it, so a volume at the cap could not be
+    // repaired from its own recovery record at all. This name is nobody's
+    // identity key (created with `create_new`, renamed away, removed by
+    // `cleanup`), so what matters is that it stays RECOGNISABLE as an RR
+    // temp - the tests find one by `contains("rrtmp")` - which capping
+    // the composed name would truncate away.
+    //
+    // ONE closure spells the decoration and the reserve is that same
+    // closure over an empty stem, so the two cannot drift; the reserve
+    // takes the WIDEST counter this loop can reach, since
+    // `cap_shared_stem` reserves its longest tail rather than a sum.
+    // Spelled as `{stem}.rrtmp{n}` on the file NAME and not as
+    // `with_extension`, which is the same string - `with_extension`
+    // replaces everything after `file_stem` with `.` plus its argument -
+    // but with the stem in hand to shorten.
+    // `to_string_lossy` where `with_extension` was lossless, and the
+    // same stated limit as `smart::deferred_trash::stage`: a volume whose
+    // name is not valid UTF-8 gets a temp carrying U+FFFD. It costs
+    // nothing - the temp is renamed OVER `path`, which is untouched, and
+    // a volume this job downloaded is named through a sanitiser that
+    // takes `&str`.
+    let decorate = |stem: &str, n: usize| format!("{stem}.rrtmp{n}");
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "volume".into());
+    let stem = nzbkit::disk::cap_shared_stem(&stem, [decorate("", 1023).as_str()]);
     let (tmp, tmp_file) = {
         let mut made = None;
         for n in 0..1024 {
-            let candidate = path.with_extension(format!("rrtmp{n}"));
+            let candidate = path.with_file_name(decorate(&stem, n));
             match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -1596,6 +1630,44 @@ fn zip_pass(
     // both to the pool, which is precisely the race above. Probe the
     // volume rather than guessing from the build target, the way
     // `par2repair`'s path identity already does.
+    //
+    // DELIBERATELY `to_lowercase` AND NOT `nzbkit::disk::case_fold_key`,
+    // which is the stronger fold M4-44 put at every other identity-key
+    // site in the tree on 31 Aug 2026. This is the one site where the two
+    // directions do not price the same, and the difference is the drop
+    // below: every other site resolves a collision by RENAMING, so an
+    // over-fold there costs a `001-` prefix and both files still land.
+    // Here it costs a FILE - `seen` keeps the last index per key and
+    // `files.retain` throws the rest away - so a fold that merges two
+    // entries the volume would have kept apart silently fails to extract
+    // one of them.
+    //
+    // MEASURED 31 Aug 2026, on both filesystems, which is what settles
+    // it. On APFS `case_fold_key` over-folds NOTHING - zero over-folds
+    // across all 62,084 BMP codepoints legal in a filename, scored
+    // against the volume's OWN partition - so on a Mac it would be safe
+    // here. On real NTFS it is not, and the gap is total rather than
+    // marginal: every pair APFS files as one object and lowercasing
+    // misses is TWO files on NTFS. Probed on the fleet's Windows box by
+    // creating both names and counting what landed - `STRASSE` beside
+    // `straße`, `ßx` beside `ssx`, `ﬁle` beside `file`, `ſample` beside
+    // `sample`, `odoς` beside `odoσ`: two files every time. NTFS folds
+    // simple 1:1 case mappings (`Σ`/`σ`, ASCII) and nothing else - not
+    // even the Kelvin sign, which IS a 1:1 mapping in Unicode.
+    //
+    // So on Windows this fold would merge names the volume keeps apart,
+    // and merging here DROPS one. That is a measured loss traded for a
+    // rarer bug, which is the wrong direction whatever the fold.
+    //
+    // So the under-fold this leaves open is real and is KNOWN, not
+    // overlooked: two zip entries that the volume files as one object
+    // still both reach the pool and race. Closing it is not a fold swap.
+    // It needs this guard to stop DROPPING - resolve a collision by
+    // serializing the same-key entries, or by disambiguating the path -
+    // after which an over-fold costs only wasted work and the stronger
+    // fold becomes safe to take here too. That changes what a
+    // legitimately duplicate-named archive extracts, which is a product
+    // decision somebody has to make on purpose.
     let fold = nzbkit::disk::case_insensitive_dir(out);
     let ident = |p: &std::path::Path| -> PathBuf {
         if fold {
@@ -1869,6 +1941,11 @@ impl<W: std::io::Write> std::io::Write for BombGuardWriter<W> {
 
 /// Join an archive-entry name onto `dir`, rejecting traversal: absolute
 /// paths, drive/UNC prefixes, and `..` components all return None.
+///
+/// `None` means HOSTILE here and nothing else, which is why the length
+/// rules below answer with a name instead: every caller turns `None`
+/// into an aborted extraction, so anything this refuses takes the whole
+/// archive with it.
 pub(crate) fn sanitized_entry_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
     sanitized_entry_path_for(dir, name, cfg!(windows))
 }
@@ -1883,7 +1960,11 @@ pub(crate) fn sanitized_entry_path_for(
 ) -> Option<PathBuf> {
     use std::path::Component;
     // RAR4-era archives store Windows-style separators; normalize so the
-    // name splits into components on every platform.
+    // name splits into components on every platform. The ORIGINAL is
+    // kept because the flat fallback at the foot of this function has
+    // to be byte-identical to the in-stream side's, which is handed the
+    // name as posted.
+    let original = name;
     let name = name.replace('\\', "/");
     let entry = std::path::Path::new(name.trim_start_matches('/'));
     let mut target = dir.to_path_buf();
@@ -1897,7 +1978,26 @@ pub(crate) fn sanitized_entry_path_for(
                 // buffer when the pushed piece has a prefix, dropping the
                 // staging dir entirely. Sanitize every component (which maps
                 // ':' on Windows) so no entry name can escape.
-                let part = nzbkit::disk::sanitize_filename_for(&part.to_string_lossy(), windows);
+                //
+                // CAPPED, and the cap belongs HERE rather than at any of the
+                // writers. This function's result is not only the path the
+                // entry is written to, it IS the filesystem-identity key the
+                // module compares on - `extract_one_zip`'s duplicate-target
+                // dedup, and `resumeout::plan`'s "did the chase publish
+                // exactly here" test. Capping at a writer would shorten one
+                // end of that comparison and not the other, which splits the
+                // key: two members that resolve to one path would stop being
+                // seen as one and race on the pool, each verifying only its
+                // own CRC over interleaved bytes. Both ends are this one
+                // value, so they cannot part. Nothing that works today
+                // changes either - an entry with a component over 255 bytes
+                // is `ENAMETOOLONG` at `create_dir_all` or `File::create`
+                // today, so every name this shortens is one the write
+                // refused outright. It also spells an overlong FLAT member
+                // exactly as `sanitize_out_name` does, so a resume that
+                // falls back to byte zero today now matches.
+                let part =
+                    nzbkit::disk::sanitize_filename_capped_for(&part.to_string_lossy(), windows);
                 target.push(part);
                 pushed = true;
             }
@@ -1906,7 +2006,55 @@ pub(crate) fn sanitized_entry_path_for(
         }
     }
     // Belt and braces: nothing above may leave `dir`.
-    (pushed && target.starts_with(dir)).then_some(target)
+    if !(pushed && target.starts_with(dir)) {
+        return None;
+    }
+    // THE WHOLE-NAME BUDGET, and it answers with a NAME rather than
+    // with `None`. Capping per component above bounds each piece and
+    // says nothing about their sum: an entry carrying MANY legal
+    // components joins to a path past the filesystem's own ceiling,
+    // and there is no per-component shortening that fixes that. What
+    // it cost while this was missing was measured on 31 Aug 2026 - an
+    // entry of 8 components of 200 bytes took `extract_one_zip` down
+    // with `ENAMETOOLONG` at `create_dir_all`, before a single byte of
+    // the archive was written, so an ordinary sibling member in the
+    // same zip was not extracted either. One awkward entry, and the
+    // user gets nothing.
+    //
+    // Refusing here would have bought exactly that same outcome by a
+    // shorter route (`None` -> the caller bails), so the answer is the
+    // FLAT capped form - the identical fallback
+    // `nzbkit::disk::sanitize_out_name_for` takes for its own
+    // whole-name cap, through the identical function, so the two
+    // sanitizers spell an over-budget member the same way and
+    // `resumeout::plan` matches instead of falling back to byte zero.
+    // The archive still extracts; one member lands beside its tree
+    // rather than inside it.
+    //
+    // ROOT-INDEPENDENT, deliberately, and that is the constraint that
+    // rules out the obvious alternative of shortening components until
+    // the joined path fits. This value is the filesystem-IDENTITY key
+    // the module compares on (see the cap note above), and it is
+    // computed under TWO different roots in one job - the staging dir
+    // here, the publish dir in `resumeout::plan` - so a budget spent
+    // against the root would have the two ends disagree about whether
+    // to shorten and split the key. The measurement says a root-aware
+    // budget could not be exact anyway: the kernel's ceiling applies
+    // to the RESOLVED path, so an ancestor symlink moves it (8 bytes
+    // through `/tmp` on this fleet's Macs) and no caller can compute
+    // the real number from the string it holds.
+    // `starts_with` above already proved the strip cannot fail; a
+    // refactor that breaks that is a containment failure, so it takes
+    // the hostile answer rather than the over-budget one. Borrowed,
+    // not allocated: every component came back from
+    // `sanitize_filename_capped_for` as a `String`.
+    let rel = target.strip_prefix(dir).ok()?.to_string_lossy();
+    if !nzbkit::disk::relpath_within_total(&rel) {
+        return Some(dir.join(nzbkit::disk::sanitize_filename_capped_for(
+            original, windows,
+        )));
+    }
+    Some(target)
 }
 
 /// Post-repair: run the store-mode extraction over repaired volume files

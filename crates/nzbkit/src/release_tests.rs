@@ -1544,3 +1544,85 @@ fn release_names_are_told_from_human_titles() {
     // the poster actually gave.
     assert!(!looks_like_release_name("The Movie 2019"));
 }
+
+/// M4-48: a YEAR or SEQUEL NUMBER run onto the title is not a hash.
+///
+/// The single-token rule that calls a 10+ character alphanumeric with a
+/// digit in it a blob ("n1iY94U6fTpMVY9GPD") fires on the perfectly
+/// honest subjects a poster writes without separators - "Inception2010",
+/// "Terminator2", "Godzilla1998". That verdict is load-bearing twice
+/// over: `stem_is_a_name` is what `get::plan` turns into
+/// `hint_is_posted_name`, and `get::settle::filedesc_name_is_better`
+/// reads that flag to decide whether the PAR2 FileDesc name may replace
+/// the name the post already gave. Call the honest subject a blob and
+/// GH #63's keep-the-honest-subject rule never arms, so the good file is
+/// renamed TO the FileDesc hash - a wrong name on a real file, sitting
+/// on disk where the user cannot find it.
+///
+/// "Terminator2" is the pin that matters: eleven characters, one digit,
+/// no separator. A fix that merely raises the length threshold passes
+/// the twelve-character "Godzilla1998" and still fails this one.
+#[test]
+fn a_year_or_sequel_run_onto_a_title_is_not_a_hash() {
+    for s in [
+        "Terminator2",   // 11 chars, ONE digit - the threshold-proof pin
+        "Inception2010", // year run onto the title
+        "Avatar2009",
+        "Godzilla1998",
+        "Terminator2.mkv", // as it actually reaches `stem_is_a_name`
+        "Oceans11",
+        "Apollo13",
+        "Blade Runner 2049", // the separated form, already fine - control
+    ] {
+        assert!(!looks_obfuscated(bare_stem(s)), "honest subject: {s}");
+        assert!(stem_is_a_name(s), "honest subject is a name: {s}");
+    }
+}
+
+/// The other half of M4-48: stripping the tail must not hand a blob a
+/// name. The head is judged by the SAME function, so every rule that
+/// already caught a digit-free blob still catches it with a year or a
+/// sequel number on the end - and a digit run that is neither a year nor
+/// a sequel number is not stripped at all.
+#[test]
+fn a_numeric_tail_never_launders_a_blob() {
+    for s in [
+        // Three digits is neither a year nor a sequel number: no strip,
+        // and these two are the shapes `obfuscated_hash_shapes_are_caught`
+        // has pinned since the rule was written.
+        "ABCDEFGHIJK123",
+        "abcdefghijkl123",
+        // The head still carries digits, so it was never a word plus a
+        // number in the first place.
+        "a1b2c3d4e5f6g7h8i9j0k1l2",
+        "ZO01uZT4YhQAGrDQLC3U1",
+        "c1bceab2fac4d74f47b0a0e18311ec5c53",
+        "w17vwqfb7antoeed8",
+        // Heads the alphabetic rules catch in their own right: scattered
+        // internal capitals, a long single-case run, and a hex word.
+        "MQHeRbSCIoPs2010",
+        "abcdefghijklmnopqrstuvwx99",
+        "deadbeef2010",
+        // Nothing but digits has no head to keep.
+        "2010",
+        "141444",
+    ] {
+        assert!(looks_obfuscated(s), "should still be obfuscated: {s}");
+    }
+    // The property the strip actually asserts: a year or sequel tail
+    // carries NO evidence either way, so the verdict on a stem is the
+    // verdict on the same stem without it. Consistency, not a new
+    // threshold - including where the answer is "blob".
+    for (head, tailed) in [
+        ("Terminator", "Terminator2"),
+        ("Inception", "Inception2010"),
+        ("MQHeRbSCIoPs", "MQHeRbSCIoPs2010"),
+        ("abcdefghijklmnopqrstuvwx", "abcdefghijklmnopqrstuvwx99"),
+    ] {
+        assert_eq!(
+            looks_obfuscated(head),
+            looks_obfuscated(tailed),
+            "a year/sequel tail changed the verdict: {head} vs {tailed}"
+        );
+    }
+}
