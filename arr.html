@@ -100,13 +100,24 @@
         <tr><td>Sonarr</td><td><code>tv</code></td><td><code>&lt;completed&gt;/tv/&lt;release name&gt;</code></td></tr>
         <tr><td>Radarr</td><td><code>movies</code></td><td><code>&lt;completed&gt;/movies/&lt;release name&gt;</code></td></tr>
         <tr><td>Lidarr</td><td><code>music</code></td><td><code>&lt;completed&gt;/music/&lt;release name&gt;</code></td></tr>
-        <tr><td>Readarr</td><td><code>books</code></td><td><code>&lt;completed&gt;/books/&lt;release name&gt;</code></td></tr>
+        <tr><td>Whisparr v2</td><td><code>tv</code></td><td><code>&lt;completed&gt;/tv/&lt;release name&gt;</code></td></tr>
+        <tr><td>Whisparr v3</td><td><code>whisparr</code></td><td><code>&lt;completed&gt;/whisparr/&lt;release name&gt;</code></td></tr>
+        <tr><td>Readarr</td><td><code>Readarr</code></td><td><code>&lt;completed&gt;/Readarr/&lt;release name&gt;</code></td></tr>
         <tr><td>anything else</td><td>your own name</td><td><code>&lt;completed&gt;/&lt;name&gt;/&lt;release name&gt;</code></td></tr>
       </tbody>
     </table></div>
-    <p class="lead-guide">You do not have to create these first. A category the daemon has not seen
-    is accepted and its folder made on the spot, and the *arr's own category dropdown is filled from
-    whatever nzbfast reports.</p>
+    <p class="lead-guide">You do not have to make the folders first. A category the daemon has not
+    seen is accepted and its folder made on the spot, and the *arr's own category dropdown is filled
+    from whatever nzbfast reports.</p>
+    <div class="callout"><b>The Test button is the exception, and it is the first thing you press.</b>
+    An *arr checks its category against the list nzbfast reports <i>before</i> there is any job to
+    create it, so a category nzbfast has never heard of fails with "Category does not exist". Four
+    are built in: <code>tv</code>, <code>movies</code>, <code>music</code> and <code>books</code>. Two
+    clients ship a default that is not one of them, so out of the box they need one line changed:
+    <b>Whisparr v3</b> (its default is <code>whisparr</code>) and <b>Readarr</b> (its default is
+    <code>Readarr</code>, with the capital). Either point that client at <code>music</code> or
+    <code>books</code>, or add its name in nzbfast under <b>Settings → Categories</b>. Both work; the
+    Test passes immediately afterwards.</div>
     <div class="callout"><b>The folder name is not always the release name.</b> When nzbfast
     recognises a film it may file it under a tidied name instead. That is safe for the *arrs, which
     match a finished download by its job id and read the real path back from nzbfast rather than
@@ -184,19 +195,27 @@
   <div class="wrap">
     <h2>What has actually been tested</h2>
     <p class="lead-guide">Every release is certified against real, unmodified clients rather than
-    against a reading of their documentation. The current round, 28 August 2026, ran stock containers
-    with no patches on either side:</p>
+    against a reading of their documentation. The rounds of 28 and 31 August 2026 ran stock
+    clients with no patches on either side, carrying a real, playable video and a real album the
+    whole way, so the clients marked <b>media import</b> below were watched reading the file and
+    filing it in their own library. The last of them posted that video the way most real posts
+    arrive, as a multi-volume RAR set that has to be unpacked before there is a media file to
+    import at all:</p>
     <div class="tbl"><table>
       <thead><tr><th>Client</th><th>Version</th><th>Covered</th></tr></thead>
       <tbody>
-        <tr><td>Sonarr</td><td>4.0.19</td><td>Test dialog, grab, queue, completed pickup, categories, failed download and blocklist, both the SABnzbd and NZBGet routes</td></tr>
-        <tr><td>Radarr</td><td>6.3.0</td><td>Test dialog, grab, queue, completed pickup, categories</td></tr>
+        <tr><td>Sonarr</td><td>4.0.19</td><td>Test dialog, grab, queue, completed pickup, <b>media import</b> (including from a multi-volume RAR post, and from one whose damaged volumes were repaired from PAR2 before unpacking), categories, failed download and blocklist, both the SABnzbd and NZBGet routes</td></tr>
+        <tr><td>Radarr</td><td>6.3.0</td><td>Test dialog, grab, queue, completed pickup, <b>media import</b> (including a download it did not grab itself, one whose post carried PAR2, and multi-volume RAR posts whose file name inside the archive is obfuscated), categories</td></tr>
         <tr><td>Prowlarr</td><td>2.5.2</td><td>Indexer test, search, NZB fetch, indexer sync into Sonarr</td></tr>
+        <tr><td>Lidarr</td><td>3.1.0</td><td>Test dialog, grab, queue, completed pickup, <b>media import</b> of a full 12-track album, categories, failed download and blocklist</td></tr>
+        <tr><td>Whisparr</td><td>2.2.0 and 3.4.0</td><td>Test dialog, queue, completed pickup, categories</td></tr>
+        <tr><td>Readarr</td><td>0.4.18</td><td>Test dialog, queue, completed pickup, categories</td></tr>
       </tbody>
     </table></div>
     <p class="lead-guide">Including the whole loop end to end: Sonarr searching automatically, through
     Prowlarr, against nzbfast's own indexer, grabbing the result through nzbfast as its download
-    client, and filing it under the right category.</p>
+    client, and filing it under the right category. Every file that reached a library was checked
+    byte for byte against the file that was posted.</p>
   </div>
 </section>
 
@@ -204,6 +223,9 @@
   <div class="wrap">
     <h2>If something is not right</h2>
     <ul class="plain">
+      <li><b>Test says "Category does not exist"</b>: the category in the client is not one nzbfast
+      offers. Whisparr v3 and Readarr both ship a default that is not built in. Change it in the
+      client, or add that name under <b>Settings → Categories</b> in nzbfast.</li>
       <li><b>Test says "API Key Incorrect"</b>: the key reached us and did not match. Copy it again
       from Settings → Security, whole, with no surrounding space.</li>
       <li><b>Test says "API Key Required"</b>: no key arrived at all. The field is empty, or a proxy
