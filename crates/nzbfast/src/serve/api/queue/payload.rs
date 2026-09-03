@@ -900,6 +900,7 @@ pub(super) fn m_history(
                     to_remove.iter().map(|(_, dir, _, _)| dir.clone()).collect();
                 crate::serve::earlyfile::early_unlink(&early_gone);
                 for (name, dir, filed, tail) in to_remove {
+                    d.hub.release_handles_for_dir(&dir);
                     let outcome = remove_job_files(&dir, &name, filed, &tail);
                     if let FilesGone::Kept(why) = outcome {
                         kept.push((name, dir, why));

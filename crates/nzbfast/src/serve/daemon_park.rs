@@ -456,6 +456,7 @@ impl Daemon {
             // The request answered long ago, so a refusal here has no
             // response left to ride back on - same as park's deferred
             // removal, and the notice is how it reaches the user.
+            d.hub.release_handles_for_dir(&dir);
             if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
                 // No NZB to offer: the delete handler removed this job's
                 // spool copy when it took the row out of the queue, long
@@ -811,6 +812,7 @@ impl Daemon {
             // request answered - so a refusal here has no response
             // left to ride back on, and the notice is the only way it
             // reaches them at all.
+            self.hub.release_handles_for_dir(&out_dir);
             if let FilesGone::Kept(why) = remove_job_files(&out_dir, &stem, filed, &tail) {
                 // ...and the spool copy becomes the notice's offer to
                 // run it again - but ONLY where `gone_nzb` already
@@ -2100,6 +2102,7 @@ impl CustodyBatch {
         crate::serve::earlyfile::early_unlink(&self.early_gone);
         let mut kept: Vec<(String, std::path::PathBuf, String)> = Vec::new();
         for (name, dir, filed, tail) in self.doomed {
+            d.hub.release_handles_for_dir(&dir);
             if let FilesGone::Kept(why) = remove_job_files(&dir, &name, filed, &tail) {
                 kept.push((name, dir, why));
             }

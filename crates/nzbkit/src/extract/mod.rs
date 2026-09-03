@@ -1035,6 +1035,14 @@ impl Extractor {
         Self::with_resume(out_dir, n_slots, enabled, false)
     }
 
+    /// The directory this extractor writes into. A delete-with-files
+    /// asks it whether a still-installed post-completion streaming
+    /// handle is the one pinning the directory it is about to remove
+    /// (see `StreamHub::release_handles_for_dir`).
+    pub fn out_dir(&self) -> &Path {
+        &self.out_dir
+    }
+
     /// §94 A: can this slot's arriving bytes be PLACED rather than
     /// held? True once the slot has classified and, if it mapped, every
     /// parsed entry of it has a resolved base offset - which for a

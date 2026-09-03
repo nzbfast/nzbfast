@@ -770,6 +770,41 @@ impl StreamHub {
         }
     }
 
+    /// Drop the post-completion streaming handles whose extractor writes
+    /// into `dir`, so a delete-with-files can actually remove it.
+    ///
+    /// The extractor is deliberately left installed after a job
+    /// completes (post-completion streaming), and the runner clears it
+    /// only when the NEXT job starts - which on an idle daemon is never.
+    /// Until then the extractor graph holds the job's output files OPEN
+    /// (every FileWriter keeps its handle), and on NFS an open handle
+    /// turns unlink into a `.nfs*` silly-rename and the directory
+    /// removal into EBUSY. Every delete arm therefore calls this before
+    /// `remove_job_files`: deleting a job's files and streaming them are
+    /// mutually exclusive intents, so severing the stream for THAT job
+    /// is the request, not a casualty. Matched by directory - the one
+    /// identity the delete arms and the extractor share - so the active
+    /// job's handles go only when it is the active job being deleted.
+    ///
+    /// The seek handle goes first: SeekCtl holds a strong extractor
+    /// reference of its own (see the runner's job-transition clearing),
+    /// so clearing only the extractor slot would leave the graph pinned
+    /// through it.
+    pub fn release_handles_for_dir(&self, dir: &std::path::Path) {
+        {
+            let mut g = self.seek.lock_ok();
+            if g.as_ref().is_some_and(|s| s.extractor.out_dir() == dir) {
+                *g = None;
+            }
+        }
+        {
+            let mut g = self.extractor.lock_ok();
+            if g.as_ref().is_some_and(|(_, ex)| ex.out_dir() == dir) {
+                *g = None;
+            }
+        }
+    }
+
     /// TODO 274: the ACTIVE run's per-file table, when it belongs to
     /// `owner` - same ownership rule as [`Self::extractor_for`], and the
     /// same single-lock owner-check-and-clone, so a job transition can
@@ -1332,5 +1367,32 @@ mod resume_route_tests {
         // minted off a plain counter, so `...nzbfast1` is a strict
         // prefix of `...nzbfast10` through `19` and of `...100` up.
         assert_eq!(h.resume_route_for("SABnzbd_nzo_nzbfast10"), None);
+    }
+
+    #[test]
+    fn a_delete_releases_only_the_directory_it_is_deleting() {
+        let h = StreamHub::default();
+        let dir = std::path::Path::new("/data/usenet/complete/movies/A");
+        let other = std::path::Path::new("/data/usenet/complete/movies/B");
+        let ex = Arc::new(nzbkit::extract::Extractor::new(dir, 1, false));
+        *h.extractor.lock_ok() = Some(("SABnzbd_nzo_nzbfast1".into(), ex));
+
+        // Deleting a DIFFERENT job's directory leaves post-completion
+        // streaming for this one alone.
+        h.release_handles_for_dir(other);
+        assert!(
+            h.extractor.lock_ok().is_some(),
+            "an unrelated delete must not sever the stream"
+        );
+
+        // Deleting THIS job's directory drops the hub's handle: the
+        // extractor graph - and every output file it holds open - now
+        // dies with the last streaming clone instead of living until
+        // the next job happens to start.
+        h.release_handles_for_dir(dir);
+        assert!(
+            h.extractor.lock_ok().is_none(),
+            "the deleted directory's handles must go"
+        );
     }
 }
