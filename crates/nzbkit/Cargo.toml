@@ -76,7 +76,7 @@ chacha20poly1305 = "0.11"
 # FF1 (NIST SP 800-38G) needs arbitrary-precision Feistel halves: a
 # radix-253 control line is a ~hundred-digit number. Already in the
 # lockfile transitively (0.4.8), so this adds an edge, not a crate.
-num-bigint = "0.4"
+num-bigint = "0.5"
 # Nested one-pass phase 2: the chasing decompressor drives the vendored
 # RAR engine's streaming reader over still-arriving inner volumes.
 rars = { path = "../../vendor/rars" }
