@@ -138,7 +138,7 @@ md-5 = { version = "0.10", features = ["asm"] }
 # only: the aarch64-windows target has no aws-lc-sys prebuilt path here
 # and keeps the portable md-5, as it already did.
 [target.'cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))'.dependencies]
-aws-lc-sys = { version = "0.44.0", default-features = false, features = ["all-bindings"] }
+aws-lc-sys = { version = "0.45.0", default-features = false, features = ["all-bindings"] }
 
 # There is deliberately NO matching aarch64 `asm` entry for sha2 beside
 # the md-5 one above, and re-adding one is not possible: sha2 0.11 has
