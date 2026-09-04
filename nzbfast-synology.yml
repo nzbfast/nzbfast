@@ -45,6 +45,22 @@ services:
       # https://nzbfast.github.io/nzbfast/synology.html
       - ./downloads:/downloads      # finished files
       - ./watch:/watch              # drop an .nzb here to auto-download
+    # Hardening. Nothing to set and nothing to read: these three blocks take
+    # away powers the container has by default and does not use. The five
+    # capabilities are added back by name because the container needs exactly
+    # those to hand your folders to your own DSM user - it starts as root for
+    # that one job and drops to your uid before the downloader itself runs.
+    # Drop them all with nothing added back and the container will not start.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
     # Nothing below is needed for a normal install.
     #
     # environment:
